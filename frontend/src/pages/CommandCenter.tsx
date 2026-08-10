@@ -972,11 +972,33 @@ function RocketView({
     }
   }
 
-  async function doIgnore(productNumber: string) {
+  /** 「연결 안 함」으로 정한다 — **사유를 받는다**.
+   *
+   *  ★왜 사유를 묻나(2026-08-10): 2026-06-17 일괄 매핑이 «후보를 못 찾은» 22건을 이 상태로
+   *    찍었고, 사유가 `no suggestion or low score`뿐이라 나중에 «사람의 결정»과 «매칭 실패»를
+   *    가릴 수 없었다. 그 사이 두 엔진은 그것을 **원가 0원 = 전액 이익**으로 셌다.
+   *    백엔드도 사유 없으면 422로 거부한다 — 여기서 먼저 물어 왕복을 아낀다.
+   *  ★제외해도 **원가가 0이 되는 게 아니다**(그 해석은 없앴다). 손익에서는 「모름」이라
+   *    그 상품은 계산에서 빠진다 — 버튼 옆 설명이 그렇게 말한다. */
+  async function doExclude(productNumber: string) {
     setMapMsg(null);
+    const reason = window.prompt(
+      `${productNumber}을(를) 「연결 안 함」으로 정합니다.\n` +
+      "· 작업 목록에서 사라지고 다시 제안하지 않습니다\n" +
+      "· 손익에서는 「원가 모름」으로 다뤄져 계산에서 빠집니다(원가 0원이 아닙니다)\n\n" +
+      "사유를 적어 주세요 (나중에 이 결정이 맞았는지 볼 근거가 됩니다):",
+    );
+    if (reason === null) return;                    // 취소
+    if (!reason.trim()) {
+      setMapMsg("❌ 사유가 필요합니다 — 사유 없는 제외는 나중에 «결정»과 «매칭 실패»를 가를 수 없습니다");
+      return;
+    }
     try {
-      await upsertRocketCostMap({ product_number: productNumber, status: "ignored" });
-      setMapMsg(`⏭ ${productNumber} 제외(ignored) 처리`);
+      await upsertRocketCostMap({
+        product_number: productNumber, status: "excluded",
+        match_method: "manual", note: reason.trim(),
+      });
+      setMapMsg(`⏭ ${productNumber} 「연결 안 함」 처리 — 사유: ${reason.trim()}`);
       loadCostMap();
     } catch (e: any) {
       setMapMsg("❌ 제외 실패: " + (e?.message || ""));
@@ -1075,7 +1097,9 @@ function RocketView({
                 <span>미매핑 금액: <b>{won(cov.unmapped_order_amount)}</b></span>
                 <span>미수집 PO: <b>{num(cov.pos_without_detail_count)}건</b></span>
                 <span>확정 SKU: <b>{num(cov.confirmed_sku_count)}</b></span>
-                <span>제외(ignored): <b>{num(cov.ignored_sku_count)}</b></span>
+                <span title="연결 안 하기로 정한 SKU. 원가는 「모름」이라 커버리지에 들어가지 않습니다.">
+                  연결 안 함(미해결): <b>{num(cov.excluded_sku_count)}</b>
+                </span>
                 <span>미매핑 SKU: <b>{num(cov.unmapped_sku_count)}</b></span>
               </div>
               {covPct !== null && covPct < 100 && (
@@ -1329,10 +1353,11 @@ function RocketView({
                                   </button>
                                 ))}
                                 <button
-                                  onClick={() => doIgnore(item.product_number)}
+                                  onClick={() => doExclude(item.product_number)}
                                   className="px-1.5 py-0.5 text-xs bg-gray-100 text-gray-500 border border-gray-200 rounded hover:bg-gray-200"
+                                  title="연결 안 함 + 재제안 방지. 손익에서는 「원가 모름」으로 다뤄집니다(원가 0원이 아닙니다). 사유를 적어야 합니다."
                                 >
-                                  제외
+                                  연결 안 함
                                 </button>
                               </div>
                             </td>

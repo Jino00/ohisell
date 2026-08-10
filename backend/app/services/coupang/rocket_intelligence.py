@@ -330,9 +330,15 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
         if g["name"] is None and pname:
             g["name"] = pname
         unit, src = _resolve_unit_cost(sku, sellc, {sku: (status, cost_price)})
-        if src is not None:
+        # ★게이트는 **`unit`**이지 `src`가 아니다(2026-08-10). `excluded`는 «출처는 알지만
+        #   단가는 모른다»라 src가 있고 unit이 None이다 — 종전 `if src is not None:`은
+        #   그 조합에서 None을 곱해 터졌다(테스트가 잡았다).
+        if unit is not None:
             g["cost"] += unit * int(qty or 0)
             g["has_cost"] = True
+            g["cost_source"] = src
+        elif src is not None:
+            # 원가는 못 붙이지만 **왜 못 붙는지**는 남긴다 — 「제외됨」과 「매핑 없음」은 할 일이 다르다.
             g["cost_source"] = src
 
     # ── ③ 라벨: 발주상세 이름이 없으면 광고 XLSX 상품명으로 폴백 ──
@@ -385,7 +391,7 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
             "revenue": g["revenue"],
             "order_qty": g["qty"],
             "cost": g["cost"] if g["has_cost"] else None,
-            "cost_source": g["cost_source"],     # sellc | auto_map | ignored | None (D-19)
+            "cost_source": g["cost_source"],     # sellc | auto_map | excluded | None (D-19)
             "net_profit": net,
             "profit_basis": basis,
         })
@@ -496,7 +502,12 @@ def _agg_rocket_drift(db: Session, dfrom: date, dto: date,
 #     남긴다** — 같은 이름으로 저장해 구분을 잃은 것이 이번 사고의 구조적 원인이었다.
 COST_SRC_SELLC = "sellc"        # product_channel_mapping(옵션ID↔SKU코드 정확일치) — 정본
 COST_SRC_AUTO = "auto_map"      # rocket_product_cost_map confirmed — 이름 유사도 추정(폴백)
-COST_SRC_IGNORED = "ignored"    # 원가 0으로 결정된 제외(샘플/증정)
+# ★★`excluded`는 **원가가 0인 게 아니라 모르는 것**이다(2026-08-10, 마이그 e4c7a1b8d206).
+#   종전 이름은 `ignored`였고 여기서 단가 0을 돌려주며 `resolved_amount`에까지 더했다 —
+#   그래서 2026-06-17 배치가 «후보를 못 찾아» 그 값으로 찍은 22건이 **원가 0원 = 전액 이익**이
+#   됐고 커버리지까지 부풀었다(90일 발주 실측: 발주 8,146,140원 / 진짜 원가 3,311,826원).
+#   이제 이 출처는 **단가 None**을 뜻하고 «미해결» 쪽에 선다 — 크기는 계속 따로 보인다.
+COST_SRC_EXCLUDED = "excluded"  # 연결 안 하기로 한 것 → 원가 **미상**(0이 아니다)
 
 
 def _sellc_cost_by_product_number(db: Session) -> dict[str, Decimal]:
@@ -539,11 +550,18 @@ def _sellc_cost_by_product_number(db: Session) -> dict[str, Decimal]:
 
 
 def _resolve_unit_cost(product_number: str, sellc: dict, auto: dict) -> tuple[Decimal | None, str | None]:
-    """단가 해석: sellc → 자동매핑 → ignored(0) → 미상(None).
+    """단가 해석: sellc → 자동매핑 → excluded(**단가 없음**) → 미상(None).
 
     auto: {product_number: (status, cost_price|None)}. 반환 (단가, 출처). 미상이면 (None, None).
-    ★ignored를 sellc보다 뒤에 두는 이유: ignored 22건도 위 6분 배치 산물이라(created_at 동일)
-      사람의 제외 결정이라는 보장이 없다. 사실(sellc)이 있으면 그것이 이긴다.
+    ★excluded를 sellc보다 뒤에 두는 이유: 사실(sellc 등록원가)이 있으면 그것이 이긴다.
+      제외는 «연결을 안 한다»는 뜻이지 «원가가 없다»는 사실 주장이 아니다.
+    ★excluded일 때 **단가는 None이되 출처는 남긴다** — 「모른다」의 이유를 화면이 «매핑이 아예
+      없다»와 «사람이 제외했다»로 가를 수 있어야 한다. 둘 다 미해결이지만 할 일이 다르다.
+
+    ★★**호출부 계약**: `src is not None`을 «단가가 있다»로 읽으면 안 된다.
+      2026-08-10 이전에는 둘이 항상 같이 있었고(제외=0원), 그래서 한 호출부가 `if src is not
+      None:` 뒤에서 곧바로 곱셈을 했다 — 이 함수가 `(None, "excluded")`를 낼 수 있게 되자
+      그 자리가 TypeError로 터졌다. **금액을 쓰려면 `unit`을, 이유를 쓰려면 `src`를 본다.**
     """
     c = sellc.get(product_number)
     if c is not None:
@@ -551,8 +569,8 @@ def _resolve_unit_cost(product_number: str, sellc: dict, auto: dict) -> tuple[De
     st, cp = auto.get(product_number, (None, None))
     if st == "confirmed" and cp is not None:
         return _f(cp), COST_SRC_AUTO
-    if st == "ignored":
-        return _Z, COST_SRC_IGNORED
+    if st == "excluded":
+        return None, COST_SRC_EXCLUDED
     return None, None
 
 
@@ -566,10 +584,11 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
     """발주일 KST 윈도우 PO들의 발주상세 per-SKU 원가 = Σ(order_qty × product_master.cost_price[매핑]).
 
     조인(원칙18-8): 발주상세 라인(CoupangRocketPurchaseOrderItem) → RocketProductCostMap(상품번호→internal_sku)
-      → ProductMaster.cost_price. status='confirmed'+master 존재만 원가 가산. 'ignored'=원가 0(결정된 제외).
-      매핑 없음/마스터 없음 = 미해결(원가 미상) → cost 누락 투명화.
+      → ProductMaster.cost_price. status='confirmed'+master 존재만 원가 가산.
+      'excluded'(연결 제외)·매핑 없음·마스터 없음 = **전부 미해결**(원가 미상) → cost 누락 투명화.
+      ★2026-08-10 이전에는 'excluded'(옛 'ignored')를 원가 0·해결됨으로 셌다 — 그 해석은 없앴다.
     ★커버리지(원칙22): 매핑 안 됐거나 발주상세 미수집 PO는 원가가 빠져 net_profit 과대. 두 누락을 함께 노출:
-      - resolved_amount = confirmed+ignored 라인 발주금액(원가 결정된 매출분)
+      - resolved_amount = **confirmed 라인만**(원가가 실제로 붙은 매출분). excluded는 안 든다.
       - coverage_pct = resolved_amount / window_order_amount(PO그레인 총 발주, 미수집 PO까지 분모)
       - pos_without_detail_count = 윈도우 PO 중 발주상세 미수집 수.
     window_order_amount/window_po_count: 매출 SA 출력 주입(중복질의 회피, 원칙18-8). 미주입 시 자체 질의(독립 호출 가능).
@@ -621,9 +640,9 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
 
     cost = _Z
     confirmed_amt = _Z
-    ignored_amt = _Z
+    excluded_amt = _Z
     unmapped_amt = _Z
-    confirmed_sku = ignored_sku = unmapped_sku = 0
+    confirmed_sku = excluded_sku = unmapped_sku = 0
     # 출처별 분해 — 신뢰 등급이 다른 값을 한 숫자로 뭉치면 이번 사고가 반복된다(D-19).
     cost_by_source: dict[str, Decimal] = {COST_SRC_SELLC: _Z, COST_SRC_AUTO: _Z}
     amount_by_source: dict[str, Decimal] = {COST_SRC_SELLC: _Z, COST_SRC_AUTO: _Z}
@@ -638,9 +657,11 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
             confirmed_sku += 1
             cost_by_source[src] += unit * int(qty or 0)
             amount_by_source[src] += line_amt
-        elif src == COST_SRC_IGNORED:
-            ignored_amt += line_amt  # 원가 0(결정된 제외) — 해결됨
-            ignored_sku += 1
+        elif src == COST_SRC_EXCLUDED:
+            # ★**미해결**이다(0원이 아니다). 크기는 따로 세어 화면이 「사람이 제외한 몫」을
+            #   「아직 매핑 안 된 몫」과 구분해 볼 수 있게 하되, resolved에는 넣지 않는다.
+            excluded_amt += line_amt
+            excluded_sku += 1
         else:
             # 매핑 없음, 또는 confirmed인데 master 사라짐(원가 미상) → 미해결.
             if status == "confirmed":
@@ -648,21 +669,24 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
             unmapped_amt += line_amt
             unmapped_sku += 1
 
-    resolved_amt = confirmed_amt + ignored_amt
-    detail_amt = confirmed_amt + ignored_amt + unmapped_amt
-    has_cost = (confirmed_sku + ignored_sku) > 0  # 원가 기준 1건이라도 결정됨(=S4 대비 전환)
+    # ★resolved는 **원가가 실제로 붙은 것만**이다. excluded를 더하면 «모르는 돈»이
+    #   «해결된 돈»으로 둔갑해 커버리지가 부풀고, 그게 정확히 옛 결함이었다.
+    resolved_amt = confirmed_amt
+    detail_amt = confirmed_amt + excluded_amt + unmapped_amt
+    has_cost = confirmed_sku > 0  # 원가가 실제로 붙은 라인이 하나라도 있는가
     return {
         "cost": cost,                                          # ★net_profit 차감 원가(confirmed만)
         "has_cost": has_cost,
         "coverage_pct": _ratio4(resolved_amt, window_order_amount),  # 원가 결정 매출분/총발주(미수집 PO 분모 포함)
-        "resolved_order_amount": resolved_amt,                 # confirmed+ignored 라인 발주금액
+        "resolved_order_amount": resolved_amt,                 # ★confirmed 라인만(excluded 제외)
         "confirmed_order_amount": confirmed_amt,
-        "ignored_order_amount": ignored_amt,
+        # ★이름이 바뀌었다(ignored_→excluded_)**뜻도 바뀌었다**: 해결분이 아니라 **미해결분**이다.
+        "excluded_order_amount": excluded_amt,
         "unmapped_order_amount": unmapped_amt,                 # 발주상세 있으나 매핑 없는 매출분
         "detail_order_amount": detail_amt,                     # 발주상세 수집된 라인 합(미수집 PO 제외)
         "window_order_amount": window_order_amount,            # 분모(PO그레인 총 발주)
         "confirmed_sku_count": confirmed_sku,
-        "ignored_sku_count": ignored_sku,
+        "excluded_sku_count": excluded_sku,
         "unmapped_sku_count": unmapped_sku,
         "pos_with_detail_count": len(pos_with_detail),
         "pos_without_detail_count": max(0, window_po_count - len(pos_with_detail)),  # 발주상세 미수집 PO
@@ -672,7 +696,8 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
         "note": (
             "원가 = Σ(발주상세 order_qty × 단가). 단가 출처 우선순위(D-19): "
             "①sellc(product_channel_mapping — 쿠팡 externalVendorSku와 internal_sku 정확일치) "
-            "②rocket_product_cost_map confirmed(**이름 유사도 자동 추정** — 폴백) ③ignored=원가0. "
+            "②rocket_product_cost_map confirmed(**이름 유사도 자동 추정** — 폴백). "
+            "★excluded(연결 제외)는 **원가 0이 아니라 미상**이라 resolved에 안 든다(2026-08-10). "
             "미매핑/미수집은 원가 누락 → coverage_pct로 투명화(원칙22). 커버리지<100%면 순이익 과대 가능. "
             "cost_by_source로 추정분이 얼마인지 항상 드러낸다."
         ),

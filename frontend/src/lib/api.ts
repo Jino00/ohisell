@@ -1024,8 +1024,11 @@ export interface RocketCostCoverage {
   coverage_pct: number;               // resolved / window_total (0~1)
   detail_order_amount: string;        // 발주상세 수집된 금액
   unmapped_order_amount: string;      // 발주상세 있으나 매핑 無 금액
+  excluded_order_amount: string;      // 「연결 안 함」으로 정한 금액 — **미해결분**(원가 0이 아니다)
   confirmed_sku_count: number;
-  ignored_sku_count: number;
+  /** ★「연결 안 함」으로 정한 SKU 수. **해결분이 아니라 미해결분**이다(2026-08-10 전환) —
+   *  `coverage_pct`·`resolved_order_amount`에 들어가지 않는다. */
+  excluded_sku_count: number;
   unmapped_sku_count: number;
   pos_with_detail_count: number;
   pos_without_detail_count: number;   // 발주상세 미수집 PO 수
@@ -1092,7 +1095,9 @@ export interface RocketSkuPnlItem {
   order_qty: number;
   cost: string | null;
   // 원가 출처(D-19). sellc=등록원가(쿠팡 SKU코드 정확일치, 정본) / auto_map=이름 유사도 자동매핑(추정)
-  cost_source?: "sellc" | "auto_map" | "ignored" | null;
+  /** ★`excluded`는 **원가 0이 아니라 미상**이다(2026-08-10). 종전 `ignored`가 원가 0을
+   *  뜻해 매칭 실패분이 전액 이익으로 잡혔다 — 그 해석은 없앴다. */
+  cost_source?: "sellc" | "auto_map" | "excluded" | null;
   net_profit: string | null;
   profit_basis: string;
 }
@@ -1847,7 +1852,7 @@ export interface RocketUnmappedItem {
 export interface RocketMappingItem {
   product_number: string;
   internal_sku: string;
-  status: "confirmed" | "ignored";
+  status: "confirmed" | "excluded";
   match_method: string;
   product_name: string | null;
   barcode: string | null;
@@ -1872,7 +1877,7 @@ export function fetchRocketCostMap(): Promise<RocketMappingItem[]> {
 export function upsertRocketCostMap(body: {
   product_number: string;
   internal_sku?: string;
-  status?: "confirmed" | "ignored";
+  status?: "confirmed" | "excluded";
   match_method?: string;
   note?: string;
 }): Promise<RocketMappingItem> {

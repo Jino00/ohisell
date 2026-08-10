@@ -450,8 +450,8 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
 # ── 3단 — 「날짜×옵션」 원자 목록 ─────────────────────────────────────────
 #   원가 다리의 상태. ★배지 판정이 **status를 먼저** 보는 이유가 여기 있다:
 #   prod 실측(2026-08-07 `SELECT status, match_method, COUNT(*) … GROUP BY 1,2`)은
-#     confirmed·manual 73 / confirmed·suggested 172 / ignored·manual 22
-#   — 즉 «원가 제외 결정»(ignored) 행에도 match_method='manual'이 붙어 있다. match_method만
+#     confirmed·manual 73 / confirmed·suggested 172 / ignored·manual 22   ← 2026-08-07 시점
+#   — 즉 «원가 제외 결정»(옛 ignored) 행에도 match_method='manual'이 붙어 있다. match_method만
 #   보고 배지를 정하면 그 22건이 «수기 확인»으로 둔갑한다.
 _COST_SRC_SQL = "SELECT product_number, status, match_method FROM rocket_product_cost_map"
 
@@ -517,7 +517,7 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
             source = mm if mm in _KNOWN_MATCH_METHODS else "unknown"
         elif st is None:
             source = "no_link"
-        elif st[0] == "ignored":
+        elif st[0] == "excluded":
             source = "excluded"
         else:
             source = "no_cost"

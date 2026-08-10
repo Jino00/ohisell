@@ -2053,7 +2053,13 @@ class RocketProductCostMap(Base):
       이 테이블은 product_number ↔ internal_sku 연결만 — cost_price는 product_master가 정본(회계 일관성, D-13).
     status:
       'confirmed' = internal_sku 채워짐 → 원가 산정 대상.
-      'ignored'   = internal_sku 비움(원가 제외: 샘플/증정/원가 없음). 미매핑 목록에서 제외(재제안 방지).
+      'excluded'  = internal_sku 비움. **연결 안 함 · 재제안 방지 · 손익에서는 「모름」.**
+        ★★뜻이 **하나**다(2026-08-10, 마이그 e4c7a1b8d206). 옛 이름 `ignored`는 세 모듈에서
+          서로 다르게 읽혔다 — 두 곳은 «원가 0원·해결됨», 한 곳은 «원가 미상». 그래서
+          2026-06-17 일괄 매핑이 «후보를 못 찾은» 22건을 그 값으로 찍자 두 엔진이 **원가 0원 =
+          전액 이익**으로 셌다(90일 발주 실측 진짜 원가 3,311,826원). 「원가 0원」 해석은 없앴다.
+        ★`excluded`는 **사람만** 쓴다 — 사유(note) 필수, 자동 매핑(match_method=suggested) 거부.
+          「이 물건은 정말 원가가 0이다」는 원가 0원을 **등록**할 일이지 이 상태가 대신할 일이 아니다.
     읽기전용 원칙 외(이 테이블은 사용자 확정 입력) — 단 종합조망 net_profit은 S4.5c에서만 결합(S4.5b는 매핑만).
     """
 
@@ -2062,7 +2068,7 @@ class RocketProductCostMap(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False, index=True)  # ★브리지 키
     internal_sku: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)  # → product_master.internal_sku
-    status: Mapped[str] = mapped_column(String(12), nullable=False, default="confirmed")  # confirmed | ignored
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="confirmed")  # confirmed | excluded
     match_method: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # manual | suggested
     barcode: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 발주상세 캐시(라벨/감사)
     product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # 발주상세 캐시(라벨/감사)

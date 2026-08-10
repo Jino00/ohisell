@@ -543,7 +543,7 @@ def test_ignored_skus_are_not_put_on_the_worklist(db):
     _sale(db, "B", "S2", 5, "300000")
     _price(db, "S2", "20000", 2)
     db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
-                  "VALUES ('S2', 'OHI-SAMPLE', 'ignored')"))
+                  "VALUES ('S2', 'OHI-SAMPLE', 'excluded')"))
     db.commit()
     u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
     assert u["skus"] == 2                       # 둘 다 원가는 없다
@@ -640,7 +640,7 @@ def test_uncosted_reason_separates_missing_link_from_missing_cost(db):
     _sale(db, "C", "S3", 10, "300000")
     _price(db, "S3", "10000", 3)
     db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
-                  "VALUES ('S3', 'OHI-SAMPLE', 'ignored')"))
+                  "VALUES ('S3', 'OHI-SAMPLE', 'excluded')"))
     db.commit()
     u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
     assert u["link_missing_skus"] == 1
@@ -944,7 +944,7 @@ def test_excluded_skus_are_listed_by_name_for_review(db):
     _price(db, "S2", "20000", 2)
     _sale(db, "B", "S2", 5, "300000")      # 제외 결정됨
     db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
-                  "VALUES ('S2', 'OHI-SAMPLE', 'ignored')"))
+                  "VALUES ('S2', 'OHI-SAMPLE', 'excluded')"))
     db.commit()
     u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
     assert [t["sku_id"] for t in u["top"]] == ["S1"]              # 작업 목록엔 안 섞인다
@@ -1136,7 +1136,7 @@ def test_excluded_row_carries_the_recorded_reason(db):
     _price(db, "S1", "12000", 1)
     db.execute(_t("INSERT INTO rocket_product_cost_map "
                   "(product_number, internal_sku, status, note) "
-                  "VALUES ('S1', NULL, 'ignored', 'no suggestion or low score')"))
+                  "VALUES ('S1', NULL, 'excluded', 'no suggestion or low score')"))
     db.commit()
     u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
     assert u["excluded_skus"] == 1
@@ -1153,7 +1153,7 @@ def test_excluded_row_without_note_says_so(db):
     _sale(db, "A", "S1", 3, "54900")
     _price(db, "S1", "12000", 1)
     db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, status) "
-                  "VALUES ('S1', 'ignored')"))
+                  "VALUES ('S1', 'excluded')"))
     db.commit()
     row = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]["excluded_top"][0]
     assert row["excluded_note"] is None

@@ -675,11 +675,55 @@ def test_upsert_mapping_confirmed_requires_sku(db):
 def test_upsert_mapping_ignored_excludes_from_unmapped(db):
     _seed_masters(db)
     sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
-    out = cmap.upsert_mapping(db, "63408012", status="ignored", note="샘플")
-    assert out["status"] == "ignored"
+    out = cmap.upsert_mapping(db, "63408012", status="excluded", note="샘플")
+    assert out["status"] == "excluded"
     assert out["internal_sku"] is None  # 원가 제외
     res = cmap.list_unmapped(db, suggest=False)
     assert "63408012" not in {it["product_number"] for it in res["items"]}  # 재제안 방지
+
+
+# ═══ 「제외」는 사람만 쓴다 (2026-08-10) ═══
+#
+# 왜: 2026-06-17 일괄 매핑이 «후보를 못 찾은» 22건을 제외로 찍었고, 두 엔진이 그것을
+#   **원가 0원 = 전액 이익**으로 셌다(90일 발주 실측 진짜 원가 3,311,826원). prod 사유 전수를
+#   봐도 **사람이 제외를 결정한 흔적은 한 건도 없었다** — 그 상태를 만든 건 오직 배치였다.
+#   그래서 값의 뜻을 하나로 못 박는 것만으로는 부족하고, **자동이 그 값을 못 쓰게** 막는다.
+
+
+def test_excluded_requires_a_reason(db):
+    """★사유 없는 제외는 거부한다 — 나중에 «결정»과 «매칭 실패»를 가를 수 없어서다."""
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    with pytest.raises(ValueError, match="사유"):
+        cmap.upsert_mapping(db, "63408012", status="excluded")
+    with pytest.raises(ValueError, match="사유"):
+        cmap.upsert_mapping(db, "63408012", status="excluded", note="   ")  # 공백은 사유가 아니다
+
+
+def test_excluded_rejects_automatic_match_methods(db):
+    """★자동 매핑에는 제외 권한을 주지 않는다 — 이번 사고를 만든 경로 자체를 막는다."""
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    for mm in ("suggested", "auto", "SUGGESTED"):
+        with pytest.raises(ValueError, match="자동"):
+            cmap.upsert_mapping(db, "63408012", status="excluded",
+                                match_method=mm, note="no suggestion or low score")
+
+
+def test_confirmed_is_unaffected_by_the_excluded_guards(db):
+    """가드가 정상 경로까지 막으면 그건 기능을 죽인 것이다 — confirmed는 사유 없이도 된다."""
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    out = cmap.upsert_mapping(db, "63408012", internal_sku="OHI-0001",
+                              status="confirmed", match_method="suggested")
+    assert out["status"] == "confirmed" and out["internal_sku"] == "OHI-0001"
+
+
+def test_legacy_ignored_is_no_longer_accepted(db):
+    """옛 값은 더 이상 쓸 수 없다 — 마이그레이션이 데이터를 옮겼고 입구도 닫는다."""
+    _seed_masters(db)
+    with pytest.raises(ValueError):
+        cmap.upsert_mapping(db, "63408012", status="ignored", note="샘플")
 
 
 def test_upsert_mapping_invalid_status(db):

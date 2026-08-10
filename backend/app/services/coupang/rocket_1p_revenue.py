@@ -360,14 +360,16 @@ def compute_rocket_1p_revenue(
         st = cost_map_state.get(str(sku)) if sku is not None else None
         if st is None:
             return "no_link"          # 다리 자체가 없다 — 원가를 넣어도 안 붙는다
-        if st[0] == "ignored":
-            return "excluded"         # 이미 "제외"로 결정 — 시키면 안 된다
+        if st[0] == "excluded":
+            # 「연결 안 함」으로 **사람이** 정한 것(사유 필수·자동 매핑 금지). 시키면 안 된다.
+            # ★손익에서는 「모름」이다 — 원가 0원이 아니다(2026-08-10 통일).
+            return "excluded"
         return "no_cost"              # 다리는 있는데 그 내부 SKU에 원가가 없다
 
     def _excluded_note(sku: str | None) -> str | None:
-        """`ignored`로 찍힐 때 남은 사유 문자열. **없으면 None**(모름이지 «사유 없음»이 아니다).
+        """`excluded`로 찍힐 때 남은 사유 문자열. **없으면 None**(모름이지 «사유 없음»이 아니다).
 
-        ★왜 싣나(2026-08-09, Jino 실사고): 화면이 `ignored`를 통째로 «샘플·증정으로 이미
+        ★왜 싣나(2026-08-09, Jino 실사고): 화면이 옛 `ignored`를 통째로 «샘플·증정으로 이미
           결정한 것»이라 말하고 "그냥 두세요"로 안내했는데, prod 22건이 **전부**
           `note='no suggestion or low score'`였다 — 즉 «결정»이 아니라 **이름 유사도 매칭이
           실패한 것**을 같은 칸에 넣어 둔 것이다(ref 47 §2가 같은 결론을 이미 적었다).
@@ -804,7 +806,7 @@ def compute_rocket_1p_revenue(
             "our_revenue": str(sum((u["our_revenue"] for u in uncosted_rows
                                     if u["our_revenue_known"]), ZERO)),
             "our_revenue_partial": any(not u["our_revenue_known"] for u in uncosted_rows),
-            # 원가 등록으로 해소되는 것만 센다. `ignored`는 이미 "제외"로 결정된 SKU라 빼면
+            # 원가 등록으로 해소되는 것만 센다. `excluded`는 이미 "제외"로 결정된 SKU라 빼면
             # 안 되는 게 아니라 **넣으면 안 된다**(재제안 방지가 그 상태의 존재 이유다).
             "actionable_skus": len(actionable),
             # ★할 일별로 센다. 「원가 등록」 하나로 뭉뚱그리면 사용자가 헛일을 한다 —

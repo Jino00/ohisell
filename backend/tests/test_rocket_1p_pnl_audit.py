@@ -702,7 +702,7 @@ def test_atoms_badges_split_the_three_ways_cost_fails_to_attach(db):
     _price(db, "S3", "40000", 3)
     db.execute(_t("INSERT INTO rocket_product_cost_map "
                   "(product_number, internal_sku, status, match_method) "
-                  "VALUES ('S3', NULL, 'ignored', 'manual')"))
+                  "VALUES ('S3', NULL, 'excluded', 'manual')"))
     db.commit()
     by_opt = {a["option_id"]: a for a in _atoms(db, D, D)["atoms"]}
     assert by_opt["A"]["cost_source"] == "no_link"
@@ -1142,7 +1142,7 @@ def test_atoms_totals_say_how_much_money_sits_outside_the_net_sum(db):
     _price(db, "S3", "40000", 3)
     db.execute(_t("INSERT INTO rocket_product_cost_map "
                   "(product_number, internal_sku, status, match_method) "
-                  "VALUES ('S3', NULL, 'ignored', 'manual')"))
+                  "VALUES ('S3', NULL, 'excluded', 'manual')"))
     _sale(db, "U", "S8", 2, "200000")             # 우리 매출조차 모르는 행(발주 없음)
     db.commit()
     t = _atoms(db, D, D)["totals"]
