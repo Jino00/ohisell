@@ -306,8 +306,19 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
         nb_share = (Decimal(sum(1 for r in recent if r["nbaesong"])) / Decimal(len(recent))
                     if recent else Decimal("0"))
         shipping = SHIPPING_COST_NORMAL + (SHIPPING_COST_NBAESONG - SHIPPING_COST_NORMAL) * nb_share
-        # 수취: 주문당 평균(COALESCE(shipping_cost,0) — 무료배송 주문은 0으로 평균에 포함).
-        collected = (sum((r["collected"] for r in wide), Decimal("0")) / Decimal(n)) if n else Decimal("0")
+        # 수취: **지불과 같은 표본**(최근 10건)에서 뽑는다 — D-NAO-168, 2026-08-10.
+        # ★종전엔 넓은 창(120일)이었다. 그러면 순배송원가 = 지불(최신) − 수취(과거)라
+        #   두 항의 시점이 어긋나 **차액이 구조적으로 과대**해진다. 라이브 실측:
+        #   N배송 100% 상품의 최근 10건이 전부 `3,000원 수취`인데 120일 평균은 595원이라
+        #   순배송원가가 377원이어야 할 자리에 **2,782원(7배)**이 들어갔다. 원인은
+        #   N배송이 2026-07-22 시작이라 120일 창의 대부분이 «무료였던 과거»라는 것.
+        # ★오차가 한 방향이라는 게 핵심이다 — 물류비 과대 → 공헌이익 과소 → **BEP 과대** →
+        #   벌 수 있는 광고를 끈다. 계정 매출가중 BEP 실측 1.836 → 1.710.
+        # ★D-NAO-100이 판매가·혼합비를 최근 N건으로 옮길 때 수취만 남겨진 것이다. 수취도
+        #   배송정책이 바뀌면 통째로 갈리는 **레짐 변수**이지 표본 민감 항목이 아니다.
+        #   (평균 수량은 넓은 창 유지 — 그건 레짐이 아니라 진짜 표본 민감 항목이다.)
+        collected = (sum((r["collected"] for r in recent), Decimal("0")) / Decimal(len(recent))
+                     if recent else Decimal("0"))
         net_ship = max(Decimal("0"), shipping - collected)  # ★보수 클램프(배송마진 이익 미인정)
         logistics = (net_ship / avg_qty).quantize(Decimal("0.01"), ROUND_HALF_UP)
         out[pid] = {"avg_qty": avg_qty, "shipping": shipping, "collected": collected,
