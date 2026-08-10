@@ -57,7 +57,7 @@ def _upsert_row(
             account_key=account_key, sale_date=sale_date, vendor_item_id=vendor_item_id,
         )
         db.add(row)
-    pass  # mutated
+    row.registration_type = registration_type
     row.gmv = gmv
     row.units_sold = units_sold
     row.total_orders = total_orders
