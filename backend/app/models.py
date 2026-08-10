@@ -926,7 +926,7 @@ class CoupangVendorSummaryDaily(Base):
 
 
 class CoupangVendorItemSalesDaily(Base):
-    """쿠팡 Wing 판매분석 «일자×옵션» 정본 매출 축 (D-CPP-35, 2026-08-10).
+    """쿠팡 Wing 판매분석 «일자×옵션» 정본 매출 축 (D-CPP-36, 2026-08-10).
 
     소스: m-wing.coupang.com /tenants/rfm-ss/api/business-insight/vi-detail-search
       (2026-08-10 라이브 정찰). 요약축(CoupangVendorSummaryDaily)과 **같은 세션·같은 회차**에

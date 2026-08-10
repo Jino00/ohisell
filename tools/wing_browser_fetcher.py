@@ -212,7 +212,7 @@ def _vs_payload(cfg: dict, window: tuple | None = None) -> dict:
     }
 
 
-# ── 옵션(vendorItem)축 — 판매분석 «일자×옵션» (D-CPP-35, 2026-08-10 라이브 정찰) ──────
+# ── 옵션(vendorItem)축 — 판매분석 «일자×옵션» (D-CPP-36, 2026-08-10 라이브 정찰) ──────
 # 요약축과 **같은 origin·같은 세션·같은 _POST_JSON_JS**를 쓴다. 새 fetch를 쓰면 Akamai 센서가
 #   `TypeError: Failed to fetch`로 막는다(정찰 중 실측 — XSRF 헤더가 없으면 통과 못 한다).
 VI_DETAIL_PATH = "/tenants/rfm-ss/api/business-insight/vi-detail-search"
@@ -1139,7 +1139,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
     res = None
     older_bodies: list[str] = []   # 과거 청크들(자가치유 창) — 최신 청크 성공 후에만 채워진다
-    vi_rows: list[dict] = []       # 옵션축(D-CPP-35) — 요약축 성공 후 같은 세션에서 채워진다
+    vi_rows: list[dict] = []       # 옵션축(D-CPP-36) — 요약축 성공 후 같은 세션에서 채워진다
     # 창은 실행 시작 시점에 한 번만 계산한다 — 실행 중 KST 자정을 넘겨도 청크가 하루 밀려
     # 겹치거나(중복) 새 어제가 빠지지(누락) 않게.
     windows = _vs_windows(cfg)
@@ -1174,7 +1174,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                 # 최신 청크가 살아있을 때만 과거 청크를 이어 받는다(자가치유 — 버튼 공백 메우기).
                 if _is_success(res):
                     older_bodies = _fetch_older_windows(page, cfg, windows[1:])
-                    # 옵션축(D-CPP-35)을 **같은 페이지·같은 회차**에서 이어 받는다.
+                    # 옵션축(D-CPP-36)을 **같은 페이지·같은 회차**에서 이어 받는다.
                     # ★같은 세션에서 받아야 보존식(Σ옵션 == 요약)이 같은 시점을 비교한다. 별도
                     #   회차로 나누면 그 사이 쿠팡 lastRefresh가 돌아 두 축이 다른 순간을 담는다.
                     # ★요약축 push를 막지 않는다 — 예외를 여기서 삼킨다(옵션축은 요약축의

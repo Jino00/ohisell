@@ -1,4 +1,4 @@
-# test_wing_vi_detail.py — 페처 «옵션축»(vi-detail-search) 수집·파싱·push 가드 (D-CPP-35).
+# test_wing_vi_detail.py — 페처 «옵션축»(vi-detail-search) 수집·파싱·push 가드 (D-CPP-36).
 #
 # ## 존재 이유 (적대 리뷰 2026-08-10)
 #

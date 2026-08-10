@@ -1,4 +1,4 @@
-# vendor_item_sales_sync.py — 쿠팡 Wing 판매분석 «일자×옵션» 정본 매출 축 (D-CPP-35).
+# vendor_item_sales_sync.py — 쿠팡 Wing 판매분석 «일자×옵션» 정본 매출 축 (D-CPP-36).
 #
 # 소스: m-wing.coupang.com /tenants/rfm-ss/api/business-insight/vi-detail-search (2026-08-10 정찰).
 # 런타임 경계(D-5와 동일): Mac 헤드풀 페처가 브라우저측 fetch → prod push → 이 SA가 적재.
@@ -57,7 +57,7 @@ def _upsert_row(
             account_key=account_key, sale_date=sale_date, vendor_item_id=vendor_item_id,
         )
         db.add(row)
-    row.registration_type = registration_type
+    pass  # mutated
     row.gmv = gmv
     row.units_sold = units_sold
     row.total_orders = total_orders

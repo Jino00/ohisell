@@ -58,7 +58,7 @@ WATCHDOG_JOBS: tuple[str, ...] = (
     "sync_coupang_rg_orders",
     "sync_coupang_coupons",
     "sync_coupang_cs",
-    # 판매분석 갱신 요청 트리거(D-CPP-35). ★이 잡이 죽으면 데이터 나이 감시가 «정체»로 울리기까지
+    # 판매분석 갱신 요청 트리거(D-CPP-36). ★이 잡이 죽으면 데이터 나이 감시가 «정체»로 울리기까지
     #   최소 3일이 걸린다 — 원인(요청이 안 걸림)을 바로 보려면 잡 자체도 감시해야 한다.
     #   첫 주기는 never_succeeded 유예에 걸려 조용하다(등록 직후 헛알림 없음).
     "request_wing_vendor_summary_daily",
@@ -76,7 +76,7 @@ _ERR_SUMMARY_MAX = 200
 # max_age_days=14 근거: RG 정산은 주별(월~일) + ~2일 랙으로 인식된다 → 정상이면 최신 계정 row의
 # recognition_date_to가 9~16일 이내에 들어온다. 14일 = 한 주를 통째로 놓친 것 + 여유(헛알림 방지).
 #
-# ★`source`는 2026-08-10(D-CPP-35)에 추가됐다. 그전엔 아래 조회가 **RG 정산 테이블 한 곳에
+# ★`source`는 2026-08-10(D-CPP-36)에 추가됐다. 그전엔 아래 조회가 **RG 정산 테이블 한 곳에
 #   하드코딩**돼 있어서, 규칙을 늘릴 수단이 아예 없었다. 그 결과 쿠팡 Wing 판매분석(3P 정본
 #   매출 축)이 **13일 동안 멈췄는데 `healthy: true`**였고 `refresh-status`도 `green`이었다
 #   (07-26까지만 적재 → 08-10 발견). 「감시선이 셋 있다」는 말이 「이 파이프라인을 본다」는
@@ -88,7 +88,7 @@ DATA_FRESHNESS_RULES: tuple[dict, ...] = (
     {"source": "rg_settlement", "name": "rg_settlement_account_rows",
      "account_key": "COUPANG_WING2", "max_age_days": 14.0,
      "impact": "RG 정산비용(오하이테크)이 net_profit에서 누락 중"},
-    # ── 쿠팡 Wing 판매분석 (D-CPP-35, 2026-08-10 신설) ──
+    # ── 쿠팡 Wing 판매분석 (D-CPP-36, 2026-08-10 신설) ──
     # max_age_days=3.0 근거: 두 축 모두 «닫힌 과거일»만 받으므로 수집 직후에도 최신 날짜는
     #   어제다(age ≈ 1.2일). 일일 트리거(request_wing_vendor_summary_daily, 05:20 KST)가
     #   정상이면 age는 다음 회차 직전에 최대 ~2.25일에 이른다. 3.0이면 **한 회차를 통째로
@@ -285,7 +285,7 @@ def build_health(
     # (2026-08-03 ENOSPC 사고: 디스크 포화가 서버를 3시간 40분 마비시켜 자동수집 12개 유실).
     disk_low = evaluate_disk_space(list(disk_snapshots))
 
-    # 판매분석 보존식 어긋남 — 나이가 아니라 **값**을 본다(D-CPP-35).
+    # 판매분석 보존식 어긋남 — 나이가 아니라 **값**을 본다(D-CPP-36).
     # 신선도 감시와 종류가 다르다: 옵션축이 제때 와도 요약축과 합이 안 맞으면 그건 두 축이
     # 서로 다른 것을 세고 있다는 뜻이고, 그 상태로 옵션별 손익을 쓰면 조용히 틀린다.
     # `summary_only`(옵션 수집이 아직 안 온 날)는 여기서 healthy를 깨지 않는다 — 그건 «없음»이고
@@ -332,7 +332,7 @@ def build_health(
 
 
 def _latest_for_rule(db, rule: dict):
-    """규칙 하나의 «최신 데이터 시각»을 그 규칙이 가리키는 소스에서 읽는다(I/O, D-CPP-35).
+    """규칙 하나의 «최신 데이터 시각»을 그 규칙이 가리키는 소스에서 읽는다(I/O, D-CPP-36).
 
     ★`source` 분기가 없던 시절엔 이 조회가 RG 정산 테이블에 하드코딩돼 있었다 → 규칙을 늘릴
       수단이 없어 판매분석이 13일 정체를 조용히 통과했다. 새 파이프라인을 감시에 넣는 비용이
@@ -504,7 +504,7 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 원가 정본 대조 실패 — cost_drift 감시만 생략(헬스 API는 유지)")
         cost_drift = None
 
-    # 판매분석 보존식 — Σ옵션 GMV == 요약축 GMV (D-CPP-35).
+    # 판매분석 보존식 — Σ옵션 GMV == 요약축 GMV (D-CPP-36).
     # ★try/except: 위 셋(데이터 나이·디스크·원가)과 같은 이유 — 이 조회가 실패해도 헬스 API
     #   전체를 죽이면 안 된다(워치독 침묵 = 이 계열 사고가 막으려는 바로 그 실패).
     vendor_item_conservation: dict | None = None

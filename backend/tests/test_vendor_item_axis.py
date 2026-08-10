@@ -1,4 +1,4 @@
-# test_vendor_item_axis.py — 쿠팡 판매분석 «일자×옵션» 정본 매출 축 (D-CPP-35).
+# test_vendor_item_axis.py — 쿠팡 판매분석 «일자×옵션» 정본 매출 축 (D-CPP-36).
 #
 # ## 이 파일이 지키는 것
 #

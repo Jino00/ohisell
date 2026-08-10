@@ -1152,7 +1152,7 @@ def sync_coupang_settlement_job():
 
 
 def request_wing_vendor_summary_daily_job():
-    """쿠팡 Wing 판매분석 갱신을 **매일 자동으로 요청**한다 (D-CPP-35, 05:20 KST).
+    """쿠팡 Wing 판매분석 갱신을 **매일 자동으로 요청**한다 (D-CPP-36, 05:20 KST).
 
     ★왜 이 잡이 필요한가 (2026-08-10 발견): 판매분석 페처는 2026-07-27부터 «순수 버튼-only»다.
       그런데 **WING2(오하이테크)는 UI가 요청을 만들지 않는다** — 즉 사람이 누를 버튼조차 없었다.
@@ -1642,7 +1642,7 @@ def _ensure_default_states(db):
         ("sync_coupang_rg_inventory", "40 5 * * *"),
         ("sync_coupang_returns", "45 5 * * *"),
         ("sync_coupang_settlement", "50 5 * * *"),
-        # 판매분석 갱신 요청(D-CPP-35) — 쿠팡 수집대(05:30~) 앞에 걸어 그날 손익 전에 정본이 들어오게.
+        # 판매분석 갱신 요청(D-CPP-36) — 쿠팡 수집대(05:30~) 앞에 걸어 그날 손익 전에 정본이 들어오게.
         ("request_wing_vendor_summary_daily", "20 5 * * *"),
         ("sync_coupang_rg_orders", "0 */2 * * *"),
         ("sync_coupang_coupons", "0 6 * * *"),

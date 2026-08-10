@@ -2205,7 +2205,7 @@ def ingest_wing_vendor_item_sales(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Wing 페처 → 쿠팡 판매분석 «일자×옵션» 정본 매출 인제스트 (D-CPP-35).
+    """Wing 페처 → 쿠팡 판매분석 «일자×옵션» 정본 매출 인제스트 (D-CPP-36).
 
     요약축(`/wing/vendor-summary/ingest`)과 **같은 회차·같은 브라우저 세션**에서 push된다 —
     그래야 보존식(Σ옵션 == 요약)이 같은 시점을 비교한다.

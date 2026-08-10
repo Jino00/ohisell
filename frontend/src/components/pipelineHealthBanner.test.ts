@@ -190,7 +190,7 @@ describe("buildPipelineHealthBanner", () => {
     expect(banner!.summary).toContain("auto_sync_orders");
   });
 
-  // ── 판매분석 보존식 (D-CPP-35) ────────────────────────────────────────
+  // ── 판매분석 보존식 (D-CPP-36) ────────────────────────────────────────
   // ★백엔드 판정과 **같은 커밋에** 이 분기가 있어야 한다. disk_low가 판정에만 있고 표시가
   //   없어 배너가 통째로 숨었던 것이 바로 이 실패다(교훈 #223).
   const conservation = (

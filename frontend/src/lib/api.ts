@@ -615,7 +615,7 @@ export interface SchedulerHealthDiskLow {
   impact: string; // 돈/운영 영향 한글 라벨 (그대로 노출)
   reason?: string;
 }
-// vendor_item_conservation: 쿠팡 판매분석 두 축의 보존식(D-CPP-35). Σ옵션 GMV == 요약축 GMV.
+// vendor_item_conservation: 쿠팡 판매분석 두 축의 보존식(D-CPP-36). Σ옵션 GMV == 요약축 GMV.
 //   ★신선도(data_stale)와 종류가 다르다 — 저쪽은 «언제 것인가», 이쪽은 «합이 맞는가»다.
 //     제때 와도 합이 안 맞으면 두 축이 서로 다른 것을 세고 있다는 뜻이고, 그 상태로 옵션별
 //     손익을 쓰면 조용히 틀린다. 대조 자체를 못 했으면 백엔드가 **null**을 준다.

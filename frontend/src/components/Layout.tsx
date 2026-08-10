@@ -83,7 +83,7 @@ export function buildPipelineHealthBanner(
     parts.push(`디스크 여유 부족 ${d.used_percent.toFixed(1)}% — ${d.impact}`);
   }
 
-  // 6) 판매분석 보존식 어긋남 — Σ옵션 GMV ≠ 요약축 GMV (D-CPP-35).
+  // 6) 판매분석 보존식 어긋남 — Σ옵션 GMV ≠ 요약축 GMV (D-CPP-36).
   //    ★cost_drift와 같은 종류다: 파이프라인은 살아 있는데 «값»이 틀렸다. 화면이 비지 않으니
   //      아무 데도 안 뜬다 — 그래서 백엔드 판정과 **같은 커밋에** 이 분기를 넣는다
   //      (disk_low가 판정에만 있고 표시가 없어 통째로 숨었던 것이 바로 이 실패다).
