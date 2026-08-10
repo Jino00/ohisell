@@ -20,6 +20,7 @@ import { runStreamsRefresh, describeOutcome, specsForKeys } from "../lib/streamR
 //  - COUPANG_ADS1 쿠키 항목은 제외(쿠팡 광고비 배너가 전담) → 제외 후 0개면 null.
 //  - disabled 버킷은 정상(의도적 비활성)이므로 문제로 세지 않음.
 //  - scheduler_running===false는 최우선 표기.
+//  - cost_drift(원가 정본 어긋남)는 count>0일 때만 — null/0이면 아무 말도 안 한다.
 // 반환: summary=" · "로 이은 한 줄(배너 truncate용), detail=줄바꿈 목록(title 호버용).
 export function buildPipelineHealthBanner(
   health: SchedulerHealth,
@@ -53,7 +54,25 @@ export function buildPipelineHealthBanner(
     parts.push(`${d.impact}${days}`);
   }
 
-  // 4) 잡 문제 (disabled 제외 — 정상)
+  // 4) 원가 정본 드리프트 — `product_master.cost_price`가 «원가표 정본 + 알려진 버퍼»
+  //    ★다른 항목과 종류가 다르다: 나머지는 «파이프라인이 멈췄다», 이건 «값이 틀렸다».
+  //      멈춤은 화면이 비어서 티가 나지만 이건 **아무 데도 안 뜬다** — 2026-08-10까지
+  //      177건이 그렇게 남아 이익을 과소 계상시켰다(전 채널 90일 1,012,405원).
+  //    ★건수만 쓰고 «판정 불가»는 안 쓴다 — 배너는 한 줄이라 셋을 다 넣으면 오히려
+  //      드리프트가 묻힌다. 셋 다 보려면 API 응답(cost_drift)이나 CLI를 본다.
+  if (health.cost_drift && health.cost_drift.count > 0) {
+    const d = health.cost_drift;
+    // 버퍼 라벨을 많은 순으로 붙인다 — 어느 계열이 되돌아왔는지가 원인 추정의 첫 단서다.
+    const which = Object.entries(d.by_buffer)
+      .map(([label, n]) => `${label} ${n}건`)
+      .join(", ");
+    parts.push(
+      `원가가 정본과 다름 ${d.count}건${which ? ` (${which})` : ""}` +
+        " — 옛 매핑 엑셀 업로드 의심",
+    );
+  }
+
+  // 5) 잡 문제 (disabled 제외 — 정상)
   const jobNames: string[] = [
     ...(health.failed ?? []).map((j) => j.job_name),
     ...(health.stale ?? []).map((j) => j.job_name),

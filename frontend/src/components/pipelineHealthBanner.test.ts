@@ -105,4 +105,56 @@ describe("buildPipelineHealthBanner", () => {
     );
     expect(banner!.summary).toBe("RG 정산 데이터 없음");
   });
+
+  // ═══ 원가 정본 드리프트 (2026-08-10 배선, ref 54 §7-6) ═══
+  //
+  // ★왜 여기까지 테스트하나: 이 배너가 **유일한 상시 표면**이다. 원가 버퍼는 에러를 안 내고
+  //   화면을 비우지도 않는다 — 배너 문구가 사라지면 감지 수단이 통째로 없어진다.
+  //   종전 상태가 정확히 그거였다(«검사기는 있는데 아무도 안 부른다», 177건 방치).
+
+  const drift = (over: Partial<NonNullable<SchedulerHealth["cost_drift"]>> = {}) => ({
+    count: 177,
+    by_buffer: { 폰: 141, "도어락·플립": 18, 폴드: 18 },
+    sample: [
+      { internal_sku: "OHI-0688", product_name: "지문방지 필름", cost_price: 2616, truth: 2350.7 },
+    ],
+    ok: 313,
+    undetermined: 459,
+    source: "MD_원가 계산_Jino_260807.xlsx (sha 7ed336b4c55ea71b)",
+    ...over,
+  });
+
+  it("드리프트가 있으면 건수 + 버퍼 계열 + 원인 단서를 낸다", () => {
+    const banner = buildPipelineHealthBanner(makeHealth({ cost_drift: drift() }));
+    expect(banner!.summary).toContain("원가가 정본과 다름 177건");
+    // ★어느 계열이 되돌아왔는지가 원인 추정의 첫 단서다 — 건수만 있으면 어디를 볼지 모른다.
+    expect(banner!.summary).toContain("폰 141건");
+    // ★사람이 다음에 할 일을 적는다. 「드리프트」만 쓰면 무슨 조치를 해야 할지 알 수 없다.
+    expect(banner!.summary).toContain("옛 매핑 엑셀");
+  });
+
+  it("★count=0이면 아무 말도 안 한다 — 0건을 경고로 띄우면 배너가 상시 켜져 무시된다", () => {
+    expect(
+      buildPipelineHealthBanner(makeHealth({ cost_drift: drift({ count: 0, by_buffer: {} }) })),
+    ).toBeNull();
+  });
+
+  it("★cost_drift가 null/undefined면 침묵 — 구백엔드에서도 배너가 깨지지 않는다", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ cost_drift: null }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({ cost_drift: undefined }))).toBeNull();
+  });
+
+  it("★«판정 불가 459건»을 배너에 섞지 않는다 — 한 줄에서 드리프트가 묻힌다", () => {
+    const banner = buildPipelineHealthBanner(makeHealth({ cost_drift: drift() }));
+    expect(banner!.summary).not.toContain("459");
+    expect(banner!.summary).not.toContain("313");
+  });
+
+  it("다른 문제와 함께 있으면 둘 다 나온다(드리프트가 잡 실패를 가리지 않는다)", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({ cost_drift: drift({ count: 5 }), missing_jobs: ["auto_sync_orders"] }),
+    );
+    expect(banner!.summary).toContain("원가가 정본과 다름 5건");
+    expect(banner!.summary).toContain("auto_sync_orders");
+  });
 });

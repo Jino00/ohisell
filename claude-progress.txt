@@ -11,7 +11,7 @@
   · **링크 층**: ①replace 4건 교체(렌즈↔액정 3·폰↔태블릿 1) ②공통원가 84건은 원가표가 답
     ③맥세이프 7+도어락 1 교체 ④no_bridge 76건은 작업목록. 감사 재실행 replace 4→0 · agree 83→100
   · **재발 방지**: `scripts/audit_cost_buffer.py`(읽기전용·드리프트 시 exit 1) + 정본 스냅샷을
-    repo에(`docs/references/data/cost_truth_20260807.json`, 69항목, 출처 sha 박음).
+    repo에(`backend/app/data/cost_truth_20260807.json`, 69항목, 출처 sha 박음).
     실증: 고치기 전 백업 177건 exit 1 / 지금 prod 0건 exit 0
   · ★★**내가 낸 사고**: Jino의 「같은 제품이다」를 「가격도 그쪽」으로 읽어 71건을 반대로 바꿨다가
     원복. 그건 제품 동일성 답이었고 가격 답이 아니었다 — **정본을 보기 전에 움직였다**(교훈 #204)

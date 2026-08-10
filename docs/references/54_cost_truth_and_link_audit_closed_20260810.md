@@ -2,7 +2,7 @@
 
 > 트랙: 쿠팡 손익 정합 · **D-CPP-30** · 선행 D-CPP-27(ref 52 링크 감사)·D-CPP-25(값/링크 층 분리)
 > 산출물: `scripts/audit_cost_buffer.py`(읽기 전용 검사기) · `backend/tests/test_cost_buffer_audit.py`(19건) ·
-> `docs/references/data/cost_truth_20260807.json`(정본 스냅샷 69항목) · 이 문서
+> `backend/app/data/cost_truth_20260807.json`(정본 스냅샷 69항목) · 이 문서
 > ⚠️ 이 세션은 **prod 데이터를 바꿨다**(코드 아님). 변경 목록과 되돌리는 법은 §6에 있다.
 
 ## 0. 한 줄 결론
@@ -161,8 +161,8 @@ done < /home/ubuntu/ohisell/backups/costbuffer_before_20260810_122857.csv
 5. **정본 파서를 섹션별 원가 열로 넓히기** — 지금은 D열만 본다. 케이스·오타오는 I·C·E열이라
    판정 불가 459건 중 **최소 75건이 대조 가능한데도 「모름」**이다(§2). 넓히면 100원 컷오프도
    필요 없어진다(컷오프는 D열에 CNY/USD 단가가 섞여 생긴 것이다).
-6. **검사기를 크론·CI에 배선** — `exit 1`을 낼 줄 알지만 **아무도 안 부른다.** 재발 방지의
-   실효는 배선 후에 생긴다.
+6. ~~**검사기를 크론·CI에 배선**~~ — ✅ **2026-08-10 종결(§9)**. 크론이 아니라 **앱 안**으로
+   넣었다. 이유는 §9에.
 
 ## 8. 재발 방지 — `scripts/audit_cost_buffer.py`
 
@@ -192,3 +192,52 @@ python3 scripts/audit_cost_buffer.py --db /home/ubuntu/ohisell/backend/ohisell.d
 ★그리고 내 1라운드 변이 실행에 **거짓 KILL**이 있었다 — `mode=ro` 문자열만 바꾸니 `uri=True`가
 남아 연결 자체가 깨져서 «죽었다»고 나온 것이지 읽기 전용이 지켜져서가 아니었다.
 변이는 **의도한 결함 하나만** 주입해야 한다(교훈 #207).
+
+## 9. ★배선 — 검사기를 «부르는 사람»을 만들었다 (2026-08-10 오후, §7-6 종결)
+
+§8의 검사기는 완성된 채로 **아무도 안 불렀다.** 그 상태는 검사기가 없는 것과 관측상 같다.
+
+### 크론이 아니라 앱 안에 넣은 이유
+
+prod 크론을 실측했더니(2026-08-10) 기존 ohisell 잡 셋 중 **둘이 출력을 `/dev/null`로 버리고**
+있었다(`run_mop_activation.sh`·`run_mop_keyword.sh`). 나머지 하나는 로그 파일에 append한다.
+즉 크론 + 로그는 **「아무도 안 부른다」를 「아무도 안 읽는다」로 옮길 뿐**이다.
+게다가 prod엔 **git 체크아웃도 `docs/` 디렉터리도 없어서**(실측) 스크립트와 스냅샷을 그 경로로
+배포할 수단 자체가 없었다.
+
+그래서 판정을 **요청 시점 계산**으로 옮겼다:
+
+```
+product_master → compute_scheduler_health → build_health
+              → GET /api/scheduler/health (`cost_drift`) → 전역 파이프라인 헬스 배너
+```
+
+이러면 «검사가 언제 돌았나 / 결과가 낡았나»라는 질문이 **아예 없어진다.** 크론 결과 파일은
+그 자체가 낡을 수 있고, 낡은 것과 «이상 없음»은 또 같은 모양이다(교훈 #123의 재판).
+
+### 구성
+
+| 파일 | 역할 |
+|---|---|
+| `backend/app/services/cost_truth_audit.py` | **순수 판정 SA** — `load_truth`/`classify`/`summarize_drift`. DB·SQLAlchemy 미임포트 |
+| `backend/app/data/cost_truth_20260807.json` | 정본 스냅샷(**이사함** — `docs/`는 prod에 없어 배포 불가였다) |
+| `scheduler_health.py` | I/O 경계에서 `product_master` 조회 → 판정 → `cost_drift` 주입. **fail-soft**(실패해도 헬스 API는 산다) |
+| `Layout.tsx` `buildPipelineHealthBanner` | 배너 문구. `count>0`일 때만 — 0건은 아무 말도 안 한다 |
+| `scripts/audit_cost_buffer.py` | CLI 유지. 이제 위 순수 SA를 **임포트**한다(사본 두 벌 금지) |
+
+★**산술은 한 벌**이다. 사본을 두면 한쪽만 고쳐져 «감시자가 감시 대상보다 낡는» 형태가 된다.
+
+### 알고 감수한 것
+
+- **드리프트 0건과 «스냅샷이 없어 판정 못 함»이 응답상 같다**(둘 다 `cost_drift: null`).
+  fail-soft가 헬스 API 전체를 살리는 대가다. 로그가 유일한 구분자다.
+- **원가 0원은 드리프트가 아니다.** 이 스키마에서 `cost_price`는 `nullable=False, default=0`이라
+  «원가 미입력»이 0원으로 들어온다 → `undetermined`로 센다. 0원을 드리프트에 합치면 배너가
+  상시 켜져 **진짜 복귀를 가린다.** 원가 미입력은 별개 문제다.
+- **배너는 한 줄이라 건수 + 버퍼 계열만** 쓴다. 세 갈래 전부를 보려면 API 응답이나 CLI를 본다.
+
+### 검증
+
+- 배선 테스트 신설(`backend/tests/test_cost_drift_wiring.py`) — 순수층 2 + 실 DB 배선 4
+- 배너 테스트 5건 추가(0건 침묵 · null 하위호환 · 판정불가 미혼입 · 타 항목과 공존)
+- 라이브 합격기준은 §10
