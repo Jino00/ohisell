@@ -170,6 +170,7 @@ def build_health(
     cookies: Iterable[Any] = (),
     data_snapshots: Iterable[dict] = (),
     disk_snapshots: Iterable[dict] = (),
+    cost_drift: dict | None = None,
 ) -> dict:
     """워치독 판정 코어(순수: DB/스케줄러 미접촉 — 인자로 받은 스냅샷만 사용).
 
@@ -179,7 +180,13 @@ def build_health(
             (.account_key/.status/.last_success_at) — fail-soft 잡의 쿠키 만료를 직접 감시.
             data_snapshots: 데이터 나이 스냅샷 dict 목록(name/account_key/latest/max_age_days/
             impact) — 잡·쿠키 보고와 무관하게 '최신 데이터가 며칠 전인가'를 직접 본다(기본 () 하위호환).
+            cost_drift: 원가 정본 드리프트 요약 dict 또는 None(기본 None 하위호환).
             반환 dict는 그대로 API 응답이 된다.
+
+    ★cost_drift는 다른 넷과 **종류가 다르다**: 잡·쿠키·데이터나이·디스크는 «파이프라인이
+      살아 있나»를 보지만 이건 «흘러온 값이 맞나»를 본다. 그런데 표면은 하나가 낫다 —
+      2026-08-10까지 원가 버퍼 177건은 아무 배너에도 안 뜬 채 이익을 과소 계상시켰고,
+      «검사기는 있는데 아무도 안 부른다»가 그 상태의 이름이었다(ref 54 §7-6).
     """
     by_name = {getattr(s, "job_name", None): s for s in states}
 
@@ -261,6 +268,9 @@ def build_health(
         and not cookies_stale
         and not data_stale
         and not disk_low
+        # ★드리프트가 있으면 healthy=False다. 「값이 틀렸다」도 파이프라인 고장으로 센다 —
+        #   조용히 이익이 줄어드는 쪽이 잡 하나 죽는 것보다 늦게 발견된다(177건 × 여러 달).
+        and not cost_drift
     )
 
     return {
@@ -274,6 +284,9 @@ def build_health(
         "cookies_stale": cookies_stale,
         "data_stale": data_stale,
         "disk_low": disk_low,
+        # 드리프트가 없으면 None(키는 항상 있다 — 없는 키와 0건을 프론트가 구분 못 하면
+        # «판정 안 함»이 «이상 없음»으로 읽힌다).
+        "cost_drift": cost_drift,
         "as_of": now.isoformat(),
     }
 
@@ -357,7 +370,39 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 디스크 조회 실패 — disk_low 감시만 생략(헬스 API는 유지)")
         disk_snapshots = []
 
+    # 원가 정본 드리프트 — `product_master.cost_price`가 «정본 + 알려진 버퍼»인가.
+    # ★2026-08-10 이전엔 이 판정이 CLI(`scripts/audit_cost_buffer.py`)에만 있어 **아무도
+    #   안 불렀다.** 옛 매핑 엑셀을 올리면 177건이 조용히 되돌아오고 이익만 줄어든다
+    #   — 에러가 안 나므로 다른 어떤 감시에도 안 걸린다(ref 54 §7-6).
+    # ★try/except: 위 둘과 같은 이유. 스냅샷 파일이 없거나 스키마가 달라도 헬스 API 전체를
+    #   죽이면 안 된다. 실패 시 이 감시만 생략한다(= None = 배너 침묵).
+    #   ⚠️그래서 «스냅샷이 없어서 못 봤다»와 «봤는데 0건»이 겉으로 같다 — 로그로만 갈린다.
+    cost_drift: dict | None = None
+    try:
+        from app.models import ProductMaster
+        from app.services import cost_truth_audit as _cta
+
+        truth = _cta.load_truth()
+        rows = (
+            db.query(
+                ProductMaster.internal_sku, ProductMaster.product_name, ProductMaster.cost_price
+            )
+            # ★이 필터는 지금 **도달 불가**다 — `cost_price`가 모델·prod DDL 둘 다 NOT NULL이고
+            #   prod NULL 행은 0건이다(2026-08-10 실측). 그래서 «지워도 테스트가 안 죽는다»
+            #   (적대 리뷰 변이 M04). 그럼에도 남기는 이유: nullable로 바뀌는 날
+            #   `float(None)`이 터지고 아래 fail-soft가 그걸 삼켜 **감시가 조용히 꺼진다.**
+            #   전제가 바뀌면 test_cost_price_is_not_nullable_so_the_null_filter_is_a_dormant_guard
+            #   가 울린다 — 도달 불가 코드를 «검증했다»고 말하지 않기 위한 짝이다.
+            .filter(ProductMaster.cost_price.isnot(None))
+            .all()
+        )
+        cost_drift = _cta.summarize_drift(_cta.classify_rows(rows, truth), truth)
+    except Exception:
+        log.exception("[워치독] 원가 정본 대조 실패 — cost_drift 감시만 생략(헬스 API는 유지)")
+        cost_drift = None
+
     return build_health(
         WATCHDOG_JOBS, states, registered, running, now,
         cookies=cookies, data_snapshots=data_snapshots, disk_snapshots=disk_snapshots,
+        cost_drift=cost_drift,
     )

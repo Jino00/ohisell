@@ -586,6 +586,31 @@ export interface SchedulerHealthDataStale {
   impact: string;          // 돈 영향 한글 라벨 (그대로 노출)
   reason?: string;
 }
+// cost_drift: 원가 정본 드리프트(2026-08-10 배선). `product_master.cost_price`가
+//   «원가표 정본 + 알려진 버퍼»인 건수. 드리프트가 없으면 백엔드가 **null**을 준다.
+//   ★다른 항목과 종류가 다르다 — 나머지는 «파이프라인이 살아 있나», 이건 «값이 맞나»다.
+//     옛 매핑 엑셀을 올리면 177건이 조용히 되돌아오고 이익만 줄어든다(에러가 안 난다).
+export interface SchedulerHealthCostDrift {
+  count: number;                        // 버퍼가 얹힌 건수
+  by_buffer: Record<string, number>;    // {버퍼라벨: 건수} — 많은 순
+  sample: { internal_sku: string; product_name: string | null; cost_price: number; truth: number }[];
+  ok: number;                           // 정본과 일치
+  undetermined: number;                 // ★«정상»에 합치지 않는다 — 합치면 드리프트가 묻힌다
+  source: string;                       // 어느 원가표로 판정했나 (파일명 + sha)
+}
+// disk_low: 디스크 여유 감시. ★백엔드는 2026-08-03 ENOSPC 사고 후 이걸 내내 주고 있었는데
+//   **프론트에 타입도 배너 분기도 없었다** — healthy=false를 만들면서 화면은 조용했다
+//   (2026-08-10 prod 실측: 93.8%로 unhealthy인데 배너 0건). 그래서 타입부터 세운다.
+export interface SchedulerHealthDiskLow {
+  path: string;
+  state: string; // low
+  used_percent: number;
+  warn_percent: number;
+  free_bytes: number;
+  total_bytes: number;
+  impact: string; // 돈/운영 영향 한글 라벨 (그대로 노출)
+  reason?: string;
+}
 export interface SchedulerHealth {
   healthy: boolean;
   scheduler_running: boolean;
@@ -596,6 +621,8 @@ export interface SchedulerHealth {
   disabled: SchedulerHealthJob[]; // 정상(의도적 비활성) — 문제로 세지 않음
   cookies_stale: SchedulerHealthCookieStale[];
   data_stale?: SchedulerHealthDataStale[]; // 구백엔드 안전을 위해 optional
+  disk_low?: SchedulerHealthDiskLow[];          // 구백엔드 안전을 위해 optional
+  cost_drift?: SchedulerHealthCostDrift | null; // 구백엔드 안전을 위해 optional · 정상이면 null
   as_of: string;
 }
 

@@ -20,7 +20,9 @@ import tempfile
 import pytest
 
 _SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "audit_cost_buffer.py"
-_TRUTH = pathlib.Path(__file__).resolve().parents[2] / "docs/references/data/cost_truth_20260807.json"
+# ★스냅샷은 `backend/app/data/`에 산다 — prod에 git 체크아웃도 docs/도 없어서(2026-08-10 실측)
+#   docs 경로에 두면 **배포가 불가능**했고, 그래서 앱이 이 판정을 못 했다.
+_TRUTH = pathlib.Path(__file__).resolve().parents[1] / "app/data/cost_truth_20260807.json"
 
 
 def _load_module():
