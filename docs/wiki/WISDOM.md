@@ -15,6 +15,7 @@
 | [[unknown-must-not-read-as-zero]] | `discriminator` | 「모름」을 「0」으로 읽으면 **항상 이익을 부풀리는 방향**이라 조용하다 |
 | [[prove-the-guard-catches-this-input]] | `test` | 가드는 **사고 입력**과 **정상 입력 전수** 양쪽으로 돌린다 — 전자는 «잡는가», 후자는 «안 깨뜨리는가» |
 | [[write-to-the-binding-layer]] | `discriminator` | 쓰기 전에 **실효 레이어를 데이터에서 판별**한다. API 200 ≠ 옥션 반영 |
+| [[read-external-values-before-writing]] | `tool` | 외부가 정하는 값(번호·해시·ID)은 **먼저 읽고 그 다음 쓴다**. pre-commit §3이 중복 번호를 거부 |
 
 ## 패턴 (미처분 = 지식 부채, `enforcement: none`) ⚠️ **1건**
 
@@ -22,11 +23,10 @@
 |---|---|---|
 | [[claimed-vs-wired-is-the-default-state]] | 「기록된 지식 중 코드가 안 읽는 것」 대조가 절차에 없음 | 주간 감사 §3 (이번에 신설) |
 
-## 승격 대상 (처분은 됐으나 약함) ⚠️ **1건**
+## 승격 대상 (처분은 됐으나 약함) — **없음**
 
 | 패턴 | 현재 | 왜 승격인가 |
 |---|---|---|
-| [[read-external-values-before-writing]] | `principle` | **4회 재발.** principle은 최후수단인데 재발했으므로 [[text-rules-fail-build-tools]]의 승격 의무 발동 → 번호 예약 / 중복 번호 거부 훅 |
 
 > ★부채(`none`)와 승격 대상(`principle` 재발)은 **다른 상태다.** 섞어 세면 지표가 부풀고,
 > 그건 이 위키가 경계하는 바로 그 실패다([[green-does-not-mean-verified]]의 거울상).

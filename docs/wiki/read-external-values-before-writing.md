@@ -1,8 +1,8 @@
 ---
 pattern: 외부가 정하는 값은 먼저 읽고, 그 다음 쓴다
 sources: [교훈 #201, 교훈 #195, 교훈 #196, D-NAO-163 P1-1, scripts/next_ids.sh]
-enforcement: principle
-enforcement_target: (승격 후보) next_ids.sh가 번호를 파일에 직접 예약하게 하거나, 커밋 훅이 중복 번호를 거부
+enforcement: tool
+enforcement_target: .githooks/pre-commit §3 — origin/main에 이미 있는 D-NAO·교훈 번호를 새로 쓰면 커밋 거부(2026-08-10 승격)
 recurrence_tags: [rule-decay, write-path]
 ---
 
@@ -39,3 +39,34 @@ recurrence_tags: [rule-decay, write-path]
 ## 감사 질문
 
 이번 주 커밋에서, 외부가 정한 값(번호·규약명·시각 규약)을 **읽은 증거 없이** 쓴 자리가 있는가?
+
+
+## 승격 ✅ (2026-08-10, 교훈 #210 직후)
+
+`principle` → **`tool`**. 지혜층 자신의 규칙(「같은 태그 2회 재발 = 도구 승격 의무」)이
+**4회 재발**을 지목했고, 그대로 집행했다.
+
+**집행 지점**: `.githooks/pre-commit` §3 — 이 커밋이 **새로 추가하는** D-NAO·교훈 번호가
+`origin/main`에 이미 있으면 **거부**한다.
+
+★**왜 «보여주기»가 아니라 «거부»인가**: 이 훅의 §2(새 파일 목록)는 보여주기만 하는데,
+번호 충돌은 성격이 다르다 — **revert로 못 되돌린다.** 병합 뒤에 발견하면 번호·참조를
+전수로 고쳐야 하고 **커밋 메시지의 옛 번호는 영원히 못 고친다.** 이 repo는 그 수리를
+이미 4번 했다.
+
+★**`next_ids.sh`가 있는데도 계속 났다.** 도구가 아니라 **부르는 순서**가 문제였다
+(교훈 #201: 계산과 쓰기를 한 호출에 묶어 답이 오기 전에 답을 지어냈다).
+그래서 «계산 시점»이 아니라 **«쓰는 시점»**에 걸었다 — 순서를 안 지켜도 걸린다.
+
+### 검증 (양방향 — [[prove-the-guard-catches-this-input]])
+| 시나리오 | 기대 | 결과 |
+|---|---|---|
+| origin/main에 있는 교훈 #209 재사용 | 거부 | ✅ |
+| 새 번호 교훈 #211 | 통과 | ✅ |
+| origin/main에 있는 D-NAO-166 재사용 | 거부 | ✅ |
+| `D-NAO-166 구현 완료`(후속, 괄호 없음) | 통과 | ✅ 오탐 0 |
+| 워크트리에서의 커밋 | 무관여 | ✅ §0가 즉시 통과 |
+
+⚠️ **`.githooks/` 수정만으로는 안 걸린다** — 훅은 `.git/ohisell-hooks/`로 **복사**되므로
+`scripts/install_hooks.sh`를 다시 돌려야 한다. 2026-08-10에 이걸 몰라 「가드를 넣었다」고
+착각할 뻔했고, 양방향 테스트가 잡았다([[green-does-not-mean-verified]]).

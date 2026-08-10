@@ -10,7 +10,14 @@
 #
 # 사용: scripts/wisdom_audit.sh            (오늘 날짜로 생성)
 #       scripts/wisdom_audit.sh --stdout   (파일 안 쓰고 화면에만)
-set -euo pipefail
+set -uo pipefail
+# ★`-e`를 일부러 빼 둔다(2026-08-10, 교훈 #209 — 같은 결함을 **세 번** 고친 뒤 내린 결론).
+#   이 스크립트는 «리포트»다. 여기서 grep·루프의 «못 찾음»은 거의 전부 **정상 결과**다 —
+#   결번 0건 / 미처분 교훈 0건 / 부채 0건 / 승격 대상 0건 전부 «좋은 상태»인데,
+#   `-e` + `pipefail` 아래서는 그때만 스크립트가 죽어 **빈 출력 + exit 1**이 된다.
+#   그 화면은 「이상 없음」과 「실행 안 됨」이 구별되지 않는 가장 나쁜 실패 모양이다.
+#   `|| true`를 지점마다 붙이는 방식은 **세 번 다 빠뜨렸다** — 새 섹션을 추가할 때마다
+#   다시 빠뜨릴 것이므로, 구조로 바꾼다. 대신 실제 치명 오류는 아래 명시적 검사로 잡는다.
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WIKI="$REPO/docs/wiki"
@@ -19,7 +26,10 @@ TODAY="$(TZ=Asia/Seoul date +%Y%m%d)"
 TODAY_H="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')"
 OUT="$REPO/docs/references/wisdom_audit_${TODAY}.md"
 
-[ -d "$WIKI" ] || { echo "위키 폴더 없음: $WIKI" >&2; exit 1; }
+[ -d "$WIKI" ] || { echo "❌ 위키 폴더 없음: $WIKI" >&2; exit 1; }
+[ -r "$LESSONS" ] || { echo "❌ 교훈 원장을 읽을 수 없다: $LESSONS" >&2; exit 1; }
+# ★리포트가 «완주했다»를 스스로 증명하게 한다 — 중간에 죽으면 이 줄이 안 찍힌다.
+trap 'echo; echo "— 감사 리포트 끝 (정상 완주) —"' EXIT
 
 emit() {
   echo "# 주간 지혜 감사 — $TODAY_H"
