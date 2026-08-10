@@ -387,6 +387,12 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
             db.query(
                 ProductMaster.internal_sku, ProductMaster.product_name, ProductMaster.cost_price
             )
+            # ★이 필터는 지금 **도달 불가**다 — `cost_price`가 모델·prod DDL 둘 다 NOT NULL이고
+            #   prod NULL 행은 0건이다(2026-08-10 실측). 그래서 «지워도 테스트가 안 죽는다»
+            #   (적대 리뷰 변이 M04). 그럼에도 남기는 이유: nullable로 바뀌는 날
+            #   `float(None)`이 터지고 아래 fail-soft가 그걸 삼켜 **감시가 조용히 꺼진다.**
+            #   전제가 바뀌면 test_cost_price_is_not_nullable_so_the_null_filter_is_a_dormant_guard
+            #   가 울린다 — 도달 불가 코드를 «검증했다»고 말하지 않기 위한 짝이다.
             .filter(ProductMaster.cost_price.isnot(None))
             .all()
         )

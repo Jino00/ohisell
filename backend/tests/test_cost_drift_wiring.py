@@ -20,6 +20,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import ProductMaster
@@ -35,7 +36,14 @@ _UNDETERMINED_VALUE = Decimal("3500")  # OHI-TGLASS-IP17PRO의 실제 값 — �
 
 @pytest.fixture
 def db():
-    engine = create_engine("sqlite:///:memory:")
+    # ★StaticPool + check_same_thread=False가 **필수**다: TestClient는 라우트를 다른 스레드에서
+    #   돌리는데, 기본 풀이면 그 스레드가 **새 연결 = 빈 인메모리 DB**를 열어 «no such table»이
+    #   난다(실제로 당했다). 같은 연결을 공유해야 픽스처가 심은 행이 라우트에서 보인다.
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
     yield session
@@ -128,6 +136,49 @@ def test_compute_health_is_silent_when_master_matches_truth(db):
     assert h["cost_drift"] is None
 
 
+def test_drift_count_is_actually_counted_not_hardcoded(db):
+    """★건수가 **세어진** 값인지 본다 (적대 리뷰 P2 / 변이 M19 생존).
+
+    종전엔 드리프트 행을 **1건만** 시드하고 `count == 1`을 단언했다 — 그러면 `count`를
+    상수 1로 바꿔도 통과한다. 계열이 섞인 여러 건을 넣어 «세는 일»이 실제로 일어나는지 본다.
+    """
+    _seed(db, [
+        ("OHI-0001", "폰 버퍼 A", _BUFFERED_VALUE),          # 2350.7 + 265.3
+        ("OHI-0002", "폰 버퍼 B", _BUFFERED_VALUE),
+        ("OHI-0003", "폴드 버퍼", Decimal("6186")),           # 6089.6 + 96.4
+        ("OHI-0004", "정상", _TRUTH_VALUE),
+    ])
+    d = compute_scheduler_health(db, _FakeScheduler(), NOW)["cost_drift"]
+    assert d["count"] == 3
+    # ★버퍼별로도 나뉘어야 한다 — 뭉뚱그리면 «어느 계열이 되돌아왔나»를 못 본다.
+    assert d["by_buffer"] == {"폰": 2, "폴드": 1}
+    # 많은 순 정렬(배너가 앞부터 읽는다)
+    assert list(d["by_buffer"]) == ["폰", "폴드"]
+    assert d["ok"] == 1
+
+
+def test_cost_price_is_not_nullable_so_the_null_filter_is_a_dormant_guard():
+    """★`.filter(cost_price.isnot(None))`는 지금 **도달 불가**다 — 그 사실을 못 박는다.
+
+    적대 리뷰가 변이 M04(필터 제거)가 살아남았다고 지적했다. 원인을 실측했더니
+    «테스트가 부족»한 게 아니라 **그 상태를 만들 수 없다**였다:
+      · 모델: `cost_price` `nullable=False`
+      · prod 실제 DDL(2026-08-10 확인): `cost_price NUMERIC(12, 2) NOT NULL`
+      · prod NULL 행: **0건**
+    NULL을 못 넣으니 «NULL이면 어떻게 되나»를 검증할 방법이 없다.
+
+    그래서 필터를 **지우지 않고 남긴다** — 미래에 nullable로 바꾸면 `float(None)`이 터지고,
+    fail-soft가 그 예외를 삼켜 **감시가 통째로 조용히 꺼진다**(그게 이 프로젝트가 반복해
+    당한 형태다). 대신 이 테스트가 **전제가 바뀌는 순간** 울린다 — nullable로 바꾸는 사람이
+    여기서 멈춰 위 문장을 읽게 된다. 도달 불가 코드를 «테스트했다»고 말하지 않기 위한 장치다.
+    """
+    assert ProductMaster.__table__.c.cost_price.nullable is False, (
+        "cost_price가 nullable이 됐다 — 이제 NULL 행이 가능하므로 "
+        "scheduler_health의 isnot(None) 필터가 실제 방어선이 된다. "
+        "그 경로를 검증하는 테스트를 여기에 추가할 것."
+    )
+
+
 def test_zero_cost_is_undetermined_not_drift(db):
     """★원가 «없음»은 이 스키마에서 NULL이 아니라 **0원**이다(cost_price nullable=False, default=0).
 
@@ -141,6 +192,62 @@ def test_zero_cost_is_undetermined_not_drift(db):
     assert h["cost_drift"]["count"] == 1
     assert h["cost_drift"]["undetermined"] == 1
     assert h["cost_drift"]["sample"][0]["internal_sku"] == "OHI-0001"
+
+
+# ═══ HTTP 경계 — ★적대 리뷰 P1-1이 산 자리 ═══
+#
+# ★★2026-08-10 1R 실사고: 위 테스트들이 **전부 통과하는데 화면엔 아무것도 안 떴다.**
+#   라우터가 `response_model=SchedulerHealthOut`인데 그 스키마에 `cost_drift`가 없어서
+#   **FastAPI가 응답에서 조용히 지웠다.** 서비스층 dict엔 있고 HTTP body엔 없다.
+#   즉 «검사기는 있는데 아무도 안 부른다»를 고치면서 «판정은 하는데 아무도 못 본다»를
+#   새로 만들었다. 위 테스트가 하나도 안 죽었다 — dict까지만 보고 경계를 안 넘었기 때문이다.
+#   교훈 #208(«도구의 값어치는 경계층에 있는데 순수 함수만 촘촘히 물린다»)을 이 파일이
+#   스스로 재현했다. 그래서 여기부터는 **응답 body**를 본다.
+
+
+def _client(db):
+    """실제 라우터를 태운 TestClient. get_db를 이 테스트 세션으로 갈아끼운다."""
+    from fastapi.testclient import TestClient
+
+    from app.database import get_db
+    from app.main import app
+
+    app.dependency_overrides[get_db] = lambda: db
+    return TestClient(app)
+
+
+def test_health_route_actually_returns_cost_drift(db):
+    """★스키마가 지우지 않는가 — dict가 아니라 **HTTP body**에 있는지 본다.
+
+    이 단언이 P1-1을 잡는다. `SchedulerHealthOut`에서 `cost_drift`를 빼면 여기서 죽는다.
+    """
+    _seed(db, [("OHI-0001", "지문방지 필름 3매", _BUFFERED_VALUE)])
+    try:
+        r = _client(db).get("/api/scheduler/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert "cost_drift" in body, "response_model이 cost_drift를 지웠다 — 화면까지 안 간다"
+        assert body["cost_drift"] is not None
+        assert body["cost_drift"]["count"] == 1
+        assert body["cost_drift"]["by_buffer"] == {"폰": 1}
+        # ★건수만 넘기면 안 된다 — 배너가 «어느 계열이 되돌아왔나»를 쓴다.
+        assert body["cost_drift"]["sample"][0]["internal_sku"] == "OHI-0001"
+    finally:
+        from app.main import app
+        app.dependency_overrides.clear()
+
+
+def test_health_route_keeps_the_key_when_clean(db):
+    """★깨끗해도 **키는 남는다** — 키 없음과 null을 프론트가 구분 못 하면 «판정 안 함»이
+    «이상 없음»으로 읽힌다(교훈 #123). 응답 계약으로 못 박는다."""
+    _seed(db, [("OHI-0002", "지문방지 필름 3매", _TRUTH_VALUE)])
+    try:
+        body = _client(db).get("/api/scheduler/health").json()
+        assert "cost_drift" in body
+        assert body["cost_drift"] is None
+    finally:
+        from app.main import app
+        app.dependency_overrides.clear()
 
 
 def test_cost_drift_failure_does_not_kill_the_health_api(db, monkeypatch):

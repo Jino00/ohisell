@@ -598,6 +598,19 @@ export interface SchedulerHealthCostDrift {
   undetermined: number;                 // ★«정상»에 합치지 않는다 — 합치면 드리프트가 묻힌다
   source: string;                       // 어느 원가표로 판정했나 (파일명 + sha)
 }
+// disk_low: 디스크 여유 감시. ★백엔드는 2026-08-03 ENOSPC 사고 후 이걸 내내 주고 있었는데
+//   **프론트에 타입도 배너 분기도 없었다** — healthy=false를 만들면서 화면은 조용했다
+//   (2026-08-10 prod 실측: 93.8%로 unhealthy인데 배너 0건). 그래서 타입부터 세운다.
+export interface SchedulerHealthDiskLow {
+  path: string;
+  state: string; // low
+  used_percent: number;
+  warn_percent: number;
+  free_bytes: number;
+  total_bytes: number;
+  impact: string; // 돈/운영 영향 한글 라벨 (그대로 노출)
+  reason?: string;
+}
 export interface SchedulerHealth {
   healthy: boolean;
   scheduler_running: boolean;
@@ -608,6 +621,7 @@ export interface SchedulerHealth {
   disabled: SchedulerHealthJob[]; // 정상(의도적 비활성) — 문제로 세지 않음
   cookies_stale: SchedulerHealthCookieStale[];
   data_stale?: SchedulerHealthDataStale[]; // 구백엔드 안전을 위해 optional
+  disk_low?: SchedulerHealthDiskLow[];          // 구백엔드 안전을 위해 optional
   cost_drift?: SchedulerHealthCostDrift | null; // 구백엔드 안전을 위해 optional · 정상이면 null
   as_of: string;
 }

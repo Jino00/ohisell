@@ -150,6 +150,38 @@ describe("buildPipelineHealthBanner", () => {
     expect(banner!.summary).not.toContain("313");
   });
 
+  // ═══ 디스크 여유 (2026-08-10 Jino 승인 후 추가) ═══
+  //
+  // ★★이 분기는 **없었다.** 백엔드는 `disk_low`로 healthy=false를 만드는데 배너 빌더에
+  //   분기가 없어 parts가 비고 → null → **배너가 통째로 숨었다.**
+  //   2026-08-10 prod 실측이 정확히 그 상태였다: 사용률 93.8%(여유 5.9GB)로 unhealthy인데
+  //   화면은 조용. 2026-08-03 ENOSPC 사고(서버 3시간 40분 마비·자동수집 12개 유실)를 막으려고
+  //   만든 «유일한 사전 신호»가 화면까지 이어지지 않은 채 있었다.
+
+  const disk = (over: Record<string, unknown> = {}) => ({
+    path: "/home/ubuntu/ohisell/backend",
+    state: "low",
+    used_percent: 93.83,
+    warn_percent: 85,
+    free_bytes: 6387777536,
+    total_bytes: 103865303040,
+    impact: "디스크 포화 시 전 수집 잡이 조용히 멈춘다(2026-08-03 ENOSPC 사고)",
+    ...over,
+  });
+
+  it("★disk_low만 있어도 배너가 뜬다 — 종전엔 통째로 숨었다", () => {
+    const banner = buildPipelineHealthBanner(makeHealth({ disk_low: [disk()] }));
+    expect(banner).not.toBeNull();
+    expect(banner!.summary).toContain("디스크 여유 부족 93.8%");
+    // ★백엔드 impact 라벨을 그대로 노출한다 — 판정도 문구도 백엔드가 정본이다.
+    expect(banner!.summary).toContain("전 수집 잡이 조용히 멈춘다");
+  });
+
+  it("disk_low가 비었으면 침묵", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ disk_low: [] }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({ disk_low: undefined }))).toBeNull();
+  });
+
   it("다른 문제와 함께 있으면 둘 다 나온다(드리프트가 잡 실패를 가리지 않는다)", () => {
     const banner = buildPipelineHealthBanner(
       makeHealth({ cost_drift: drift({ count: 5 }), missing_jobs: ["auto_sync_orders"] }),

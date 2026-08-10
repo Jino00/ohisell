@@ -72,7 +72,18 @@ export function buildPipelineHealthBanner(
     );
   }
 
-  // 5) 잡 문제 (disabled 제외 — 정상)
+  // 5) 디스크 여유 — ★2026-08-10까지 **분기가 아예 없었다**(Jino 승인 후 추가).
+  //    백엔드는 `disk_low`로 healthy=false를 만드는데 여기에 분기가 없어서, 디스크만
+  //    문제인 상태에선 parts가 비어 배너가 **통째로 숨었다**. 실제로 그 상태였다 —
+  //    2026-08-10 prod 실측: 사용률 93.8%(여유 5.9GB)로 healthy=false인데 화면은 조용했다.
+  //    ★2026-08-03 ENOSPC 사고(디스크 포화로 서버 3시간 40분 마비, 자동수집 12개 유실)를
+  //      막으려고 만든 «유일한 사전 신호»가 화면까지 이어지지 않은 채 있었다.
+  //    ★백엔드가 준 impact 라벨을 그대로 쓴다(판정도 문구도 백엔드가 정본).
+  for (const d of health.disk_low ?? []) {
+    parts.push(`디스크 여유 부족 ${d.used_percent.toFixed(1)}% — ${d.impact}`);
+  }
+
+  // 6) 잡 문제 (disabled 제외 — 정상)
   const jobNames: string[] = [
     ...(health.failed ?? []).map((j) => j.job_name),
     ...(health.stale ?? []).map((j) => j.job_name),
