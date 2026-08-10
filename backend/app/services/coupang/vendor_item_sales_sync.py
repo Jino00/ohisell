@@ -87,8 +87,16 @@ def ingest_vendor_item_sales(db: Session, account_key: str, rows: list[dict]) ->
 
     ★멱등이다(upsert). 백필·재조회를 반복해도 중복 행이 GMV를 부풀리지 않는다 —
       돈 축이 오염되면 보존식이 조용히 통과하면서 손익만 틀린다.
+
+    ★★«배치 안»의 중복도 먼저 접는다(적대 리뷰 P1-1, 2026-08-10). 앱 세션은 `autoflush=False`라
+      (`database.py`) 같은 배치에서 `db.add()`한 행이 뒤 행의 `query().first()`에 **안 보인다** →
+      두 번째 행이 새로 INSERT되고 commit에서 UNIQUE 위반 → **HTTP 500 + 그 회차 전량 롤백**.
+      호출 간 멱등만 지키고 배치 내 멱등을 안 지키면, 페이지네이션 경계 중복(대상이
+      `sortBy=GMV DESC`의 준실시간 회전 데이터다) 한 번에 그날 수집이 통째로 날아간다.
+      리뷰가 재현했다: 서버가 pageNumber를 무시하는 경우 3페이지 → 유니크 3개에 행 9개.
+      마지막 값이 이긴다 — 뒤에 온 것이 더 확정된 값이라는 upsert 정책과 같은 방향이다.
     """
-    n = 0
+    deduped: dict[tuple[str, str], dict] = {}
     for r in rows:
         rt = str(r.get("registration_type") or "")
         if rt not in _TYPES:
@@ -96,6 +104,16 @@ def ingest_vendor_item_sales(db: Session, account_key: str, rows: list[dict]) ->
         vid = str(r.get("vendor_item_id") or "").strip()
         if not vid:
             continue  # 옵션ID 없는 행은 조인축이 없어 쓸 수 없다
+        day = r["date"]
+        key = (day.isoformat() if hasattr(day, "isoformat") else str(day), vid)
+        if key in deduped:
+            log.info("배치 내 중복 접기: %s %s (마지막 값 채택)", key[0], vid)
+        deduped[key] = {**r, "registration_type": rt, "vendor_item_id": vid}
+
+    n = 0
+    for r in deduped.values():
+        rt = r["registration_type"]
+        vid = r["vendor_item_id"]
         _upsert_row(
             db,
             account_key=account_key,
@@ -112,8 +130,11 @@ def ingest_vendor_item_sales(db: Session, account_key: str, rows: list[dict]) ->
         )
         n += 1
     db.commit()
-    log.info("vendor-item-sales ingest: account=%s rows=%d", account_key, n)
-    return {"account_key": account_key, "ingested": n}
+    # `ingested`는 **실제 upsert한 유니크 행 수**다(시도한 행 수가 아니다) — 로그로 중복·누락을
+    # 추정하려면 두 숫자가 달라야 한다(적대 리뷰 P2-8).
+    log.info("vendor-item-sales ingest: account=%s received=%d upserted=%d",
+             account_key, len(rows), n)
+    return {"account_key": account_key, "received": len(rows), "ingested": n}
 
 
 # ════════════════════════════════════════════════

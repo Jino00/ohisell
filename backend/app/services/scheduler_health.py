@@ -378,9 +378,18 @@ def _latest_for_rule(db, rule: dict):
     raise ValueError(f"알 수 없는 data freshness source: {source!r}")
 
 
-# 보존식 대조 창 — 옵션축 신선도 임계(3일)보다 넉넉히 잡아 «어제 하루»만 보고 지나치지 않게 한다.
-# 14일이면 한 회차 실패로 생긴 구멍이 다음 회차에 메워지는지까지 같은 창 안에서 보인다.
-CONSERVATION_WINDOW_DAYS = 14
+# 보존식 대조 창 — ★**페처의 옵션축 수집창과 같아야 한다**(`_VI_DEFAULT_DAYS = 7`).
+#
+# 적대 리뷰 P1-3(2026-08-10)이 잡은 것: 종전 14일은 수집창 7일보다 넓어서, 8~14일 전 구간의
+# 불일치를 **어떤 회차도 고칠 수 없었다**. 페처는 최근 7일만 다시 받고 요약축은 45일을 매 회차
+# «확정치로 교체»하므로, 9일 전 요약축 값이 갱신되면 옵션축은 영원히 따라가지 못한다.
+# 그 결과가 «healthy=false + 「옵션별 3P 손익을 신뢰할 수 없음」 배너가 최대 7~14일 켜져 있고
+# 운영자가 할 수 있는 조치는 없다» — 내가 WING1을 제외한 근거(영구 빨강 = 알림 피로가 이
+# 감시선 계열이 실제로 죽는 방식)에 정면으로 걸린다.
+#
+# ★검사창을 넓히려면 **페처 `vi_days`를 같이 넓혀야 한다.** 서버는 Mac config를 볼 수 없으므로
+#   이 상수가 그 계약의 유일한 기록이다. 한쪽만 늘리면 위 실패가 그대로 돌아온다.
+CONSERVATION_WINDOW_DAYS = 7
 # 보존식을 볼 계정 — 옵션축을 수집하는 계정만. WING1은 옵션축 자체가 없으므로 대조 대상이 아니다
 # (넣으면 `summary_only`가 매일 쌓여 노이즈가 된다).
 CONSERVATION_ACCOUNTS: tuple[str, ...] = ("COUPANG_WING2",)
@@ -420,20 +429,26 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
     # ★try/except(적대적 리뷰 P2): 이 쿼리는 이번에 추가된 유일한 새 raise 경로 — 실패해도 헬스
     #   API 전체(잡·쿠키 감시)를 죽이면 안 된다(워치독 침묵 = 이 스프린트가 막으려는 바로 그 실패).
     #   실패 시 데이터 감시만 구버전 동작으로 강등(로그만 남김).
+    # ★try/except가 **규칙 안**에 있다(적대 리뷰 P1-2). 루프 전체를 감싸면 규칙 하나의 실패가
+    #   나머지 전부를 지우고(`data_snapshots = []`) 그게 «이상 없음»과 구별되지 않는다 —
+    #   이 PR이 감시 대상 테이블을 1개→3개로 늘렸으므로 그 위험이 세 배가 됐다.
+    #   실패한 규칙은 `error`를 실어 보내 evaluator가 `check_failed`로 표면화한다.
     data_snapshots: list[dict] = []
-    try:
-        for rule in DATA_FRESHNESS_RULES:
-            latest = _latest_for_rule(db, rule)
-            data_snapshots.append({
-                "name": rule["name"],
-                "account_key": rule["account_key"],
-                "latest": latest,
-                "max_age_days": rule["max_age_days"],
-                "impact": rule["impact"],
-            })
-    except Exception:
-        log.exception("[워치독] 데이터 나이 쿼리 실패 — data_stale 감시만 생략(헬스 API는 유지)")
-        data_snapshots = []
+    for rule in DATA_FRESHNESS_RULES:
+        snap = {
+            "name": rule["name"],
+            "account_key": rule["account_key"],
+            "latest": None,
+            "max_age_days": rule["max_age_days"],
+            "impact": rule["impact"],
+        }
+        try:
+            snap["latest"] = _latest_for_rule(db, rule)
+        except Exception as e:  # noqa: BLE001 — 규칙 하나가 나머지 감시를 죽이지 않는다
+            log.exception("[워치독] 데이터 나이 조회 실패(%s/%s) — 이 규칙만 check_failed",
+                          rule["name"], rule["account_key"])
+            snap["error"] = f"{type(e).__name__}: {e}"
+        data_snapshots.append(snap)
 
     # 디스크 여유 — DB가 사는 파일시스템을 본다(백업·WAL·로그가 전부 여기서 경쟁한다).
     # ★try/except: 데이터 나이 쿼리와 같은 이유 — 이 조회가 실패해도 헬스 API 전체를 죽이면 안 된다

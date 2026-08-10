@@ -2248,8 +2248,11 @@ def ingest_wing_vendor_item_sales(
             total_orders = int(r.get("total_orders") or 0)
         except (TypeError, ValueError, OverflowError):  # OverflowError: json은 Infinity를 허용한다
             raise HTTPException(status_code=400, detail="gmv/units_sold/total_orders는 정수여야 함")
-        if abs(gmv) > _VI_GMV_ABS_MAX or abs(units_sold) > _VI_UNITS_ABS_MAX:
-            raise HTTPException(status_code=400, detail="gmv/units_sold 값이 비정상 범위")
+        # total_orders도 같은 상한을 받는다(적대 리뷰 P2-7) — 셋 다 같은 소스의 수량축인데
+        # 둘만 막으면 한 필드로 파싱 깨짐이 통과한다.
+        if (abs(gmv) > _VI_GMV_ABS_MAX or abs(units_sold) > _VI_UNITS_ABS_MAX
+                or abs(total_orders) > _VI_UNITS_ABS_MAX):
+            raise HTTPException(status_code=400, detail="gmv/units_sold/total_orders 값이 비정상 범위")
         rows.append({
             "date": sale_date,
             "vendor_item_id": vendor_item_id,

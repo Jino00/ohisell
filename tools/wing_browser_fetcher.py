@@ -224,6 +224,12 @@ _VI_PAGE_SIZE = 50
 #   놓쳐도 다음 회차가 겹쳐 덮으므로 구멍이 안 남는다(요약축의 45일 자가치유와 같은 원리를
 #   좁은 창으로 얻는다). 백필이 필요하면 config `vi_days`를 한 번 늘려 돌린다.
 _VI_DEFAULT_DAYS = 7
+# ★`vi_days`를 늘리려면 서버의 `CONSERVATION_WINDOW_DAYS`(scheduler_health.py)도 같이 늘려야
+#   한다. 검사창이 수집창보다 넓으면 «아무도 다시 받지 않는 구간»에 보존식을 단언하게 되고,
+#   그 불일치는 어떤 회차도 고칠 수 없다 → 수리 경로 없는 영구 빨강(적대 리뷰 P1-3).
+# 하루당 페이지 상한 — 실측은 3페이지(146옵션/50)다. 응답이 거대한 totalPages를 줘도
+#   여기서 멈춘다(봇 감지 하에서 요청 폭주가 계정을 잃는 길이다).
+_VI_MAX_PAGES = 20
 # 페이지 사이 지연(ms) — 요약축 과거창(500ms)과 같은 계열. 일자 사이엔 더 길게 둔다.
 _VI_PAGE_DELAY_MS = 700
 _VI_DAY_DELAY_MS = 1200
@@ -276,6 +282,9 @@ def _parse_vi_page(body: str, day: date) -> tuple[list[dict], int] | None:
         total_pages = int(pag.get("totalPages") or 1)
     except (TypeError, ValueError):
         total_pages = 1
+    # ★상한(적대 리뷰 P2-3): 응답이 totalPages=5000을 주면 하루에 5000요청을 그대로 순회해
+    #   「조회만, 천천히」를 정면으로 위반한다(실측 추정 58분/1일치). 실제 규모는 3페이지다.
+    total_pages = min(max(total_pages, 1), _VI_MAX_PAGES)
     rows: list[dict] = []
     for it in data.get("vendorItems") or []:
         if not isinstance(it, dict):
@@ -286,19 +295,30 @@ def _parse_vi_page(body: str, day: date) -> tuple[list[dict], int] | None:
         rt = d.get("registrationType")
         if vid is None or rt not in ("NORMAL", "RFM"):
             continue  # 조인축·등록유형이 없으면 쓸 수 없다(스키마 방어)
+        # ★행 단위 방어(적대 리뷰 P2-4): 쿠팡이 `totalGmv: "34,300"`처럼 타입을 바꾸면 종전엔
+        #   ValueError가 `_fetch_vi_detail` 밖으로 나가 **그 회차에 이미 모은 날짜까지 전부**
+        #   폐기됐다. 한 행의 형태 변화가 여러 날의 수집을 죽이면 안 된다.
+        try:
+            gmv = int(round(float(m.get("totalGmv") or 0)))
+            units = int(round(float(m.get("totalUnitsSold") or 0)))
+            orders = int(round(float(m.get("totalOrders") or 0)))
+        except (TypeError, ValueError):
+            log.warning("옵션 지표 파싱 실패 %s vid=%s — 이 행만 건너뜀(응답 형태 변경 의심)",
+                        day, vid)
+            continue
         rows.append({
             "date": day.isoformat(),
             "vendor_item_id": str(vid),
             "registration_type": rt,
-            "gmv": int(round(float(m.get("totalGmv") or 0))),
-            "units_sold": int(round(float(m.get("totalUnitsSold") or 0))),
-            "total_orders": int(round(float(m.get("totalOrders") or 0))),
+            "gmv": gmv,
+            "units_sold": units,
+            "total_orders": orders,
             "item_name": d.get("itemName"),
             "product_id": (str(d["productId"]) if d.get("productId") is not None else None),
             # 원본 보존 — UV/PV/검색량은 이번 범위가 아니지만 재조회가 봇 감지 때문에 비싸다.
             "raw_metrics": m if isinstance(m, dict) else None,
         })
-    return rows, max(total_pages, 1)
+    return rows, total_pages
 
 
 def _fetch_vi_detail(page, cfg: dict) -> list[dict]:

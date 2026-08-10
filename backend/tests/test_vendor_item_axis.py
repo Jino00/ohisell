@@ -44,7 +44,11 @@ def db():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+    # ★★`autoflush=False`가 **필수**다(적대 리뷰 P1-1): prod의 `SessionLocal`이 그 설정이고
+    #   (`database.py`), 기본값 True로 테스트하면 «같은 배치에서 add한 행이 뒤 행의 query에
+    #   안 보인다»는 prod 고유의 의미론이 테스트에서 사라진다. 그 차이 때문에 배치 내 중복이
+    #   prod에서만 UNIQUE 위반(HTTP 500 + 회차 전량 롤백)으로 터졌고 테스트는 전부 초록이었다.
+    session = sessionmaker(bind=engine, autoflush=False)()
     yield session
     session.close()
 
@@ -92,6 +96,36 @@ def test_ingest_is_idempotent_so_backfill_does_not_inflate_gmv(db):
     got = db.query(CoupangVendorItemSalesDaily).all()
     assert len(got) == 1, "upsert가 아니라 append다 — 백필이 GMV를 부풀린다"
     assert got[0].gmv == 132300
+
+
+def test_duplicate_keys_inside_one_batch_do_not_blow_up(db):
+    """★★같은 배치에 같은 키가 두 번 와도 죽지 않는다 (적대 리뷰 P1-1 회귀).
+
+    앱 세션은 `autoflush=False`라 먼저 add한 행이 뒤 행의 `query().first()`에 안 보인다 →
+    종전엔 commit에서 UNIQUE 위반 → **HTTP 500 + 그 회차 옵션축 전량 롤백**.
+    실제 도달 경로: 페이지네이션 경계 중복(대상이 `sortBy=GMV DESC`의 준실시간 회전 데이터)
+    또는 서버가 pageNumber를 무시하는 경우. 마지막 값이 이긴다.
+    """
+    res = vis.ingest_vendor_item_sales(db, ACC, [
+        _row("2026-08-05", "111", 10000, 1),
+        _row("2026-08-05", "222", 20000, 1),
+        _row("2026-08-05", "111", 18900, 2),   # 경계 중복
+    ])
+    assert res["ingested"] == 2, "유니크 키 수를 세야 한다"
+    assert res["received"] == 3, "받은 행 수도 따로 보고해야 중복을 로그로 안다"
+    rows = {r.vendor_item_id: r for r in db.query(CoupangVendorItemSalesDaily).all()}
+    assert set(rows) == {"111", "222"}
+    assert (rows["111"].gmv, rows["111"].units_sold) == (18900, 2), "마지막 값이 이겨야 한다"
+
+
+def test_duplicate_across_days_is_not_a_duplicate(db):
+    """★날짜가 다르면 다른 행이다 — dedupe가 날짜를 무시하면 하루치가 통째로 사라진다."""
+    res = vis.ingest_vendor_item_sales(db, ACC, [
+        _row("2026-08-05", "111", 10000, 1),
+        _row("2026-08-06", "111", 20000, 2),
+    ])
+    assert res["ingested"] == 2
+    assert db.query(CoupangVendorItemSalesDaily).count() == 2
 
 
 def test_ingest_replaces_with_the_newer_confirmed_value(db):
@@ -379,6 +413,73 @@ def test_ingest_route_rejects_unknown_account(db):
         app.dependency_overrides.clear()
 
 
+def test_ingest_route_rejects_absurd_amounts(db):
+    """★방어 상한이 실제로 막는지 (변이 M7 생존 → 추가).
+
+    json은 `Infinity`를 허용하고 응답 형태가 바뀌면 거대값이 올 수 있다. 그게 그대로 적재되면
+    보존식이 터지고 원인은 «수집 실패»로 오진된다. gmv·units·orders **셋 다** 막아야 한다
+    (둘만 막으면 한 필드로 통과한다).
+    """
+    import os
+
+    token = os.environ.get("AD_INGEST_TOKEN") or "test-token"
+    os.environ["AD_INGEST_TOKEN"] = token
+    base = {"date": "2026-08-05", "vendor_item_id": "1",
+            "registration_type": "NORMAL", "gmv": 1, "units_sold": 1, "total_orders": 1}
+    try:
+        client = _client(db)
+        for field, bad in (("gmv", 10 ** 12), ("units_sold", 10 ** 7), ("total_orders", 10 ** 7)):
+            r = client.post(
+                "/api/coupang/ops/wing/vendor-item-sales/ingest",
+                headers={"X-Ingest-Token": token},
+                json={"account_key": ACC, "rows": [{**base, field: bad}]},
+            )
+            assert r.status_code == 400, f"{field}={bad}이 통과했다"
+        assert db.query(CoupangVendorItemSalesDaily).count() == 0
+    finally:
+        from app.main import app
+        app.dependency_overrides.clear()
+
+
+def test_ingest_route_rejects_an_oversized_batch(db):
+    """★배치 상한 (변이 M10 생존 → 추가). 실측 규모는 «하루 최대 146옵션 × 수십 일»이다."""
+    import os
+
+    from app.routers.coupang_ops import _VI_MAX_ROWS
+
+    token = os.environ.get("AD_INGEST_TOKEN") or "test-token"
+    os.environ["AD_INGEST_TOKEN"] = token
+    row = {"date": "2026-08-05", "registration_type": "NORMAL",
+           "gmv": 1, "units_sold": 1, "total_orders": 1}
+    try:
+        r = _client(db).post(
+            "/api/coupang/ops/wing/vendor-item-sales/ingest",
+            headers={"X-Ingest-Token": token},
+            json={"account_key": ACC,
+                  "rows": [{**row, "vendor_item_id": str(i)} for i in range(_VI_MAX_ROWS + 1)]},
+        )
+        assert r.status_code == 400
+    finally:
+        from app.main import app
+        app.dependency_overrides.clear()
+
+
+def test_conservation_accounts_excludes_wing1(db):
+    """★보존식 대상에서 WING1 제외는 **의도** (변이 M9 생존 → 추가).
+
+    WING1은 옵션축을 수집하지 않으므로 넣으면 `summary_only`가 매일 쌓여 노이즈가 된다.
+    (신선도 규칙에서 WING1을 뺀 것과 같은 이유 — 영구 빨강이 이 감시선을 죽인다.)
+    """
+    from app.services.scheduler_health import CONSERVATION_ACCOUNTS
+
+    assert CONSERVATION_ACCOUNTS == ("COUPANG_WING2",)
+
+    # 라이브 재현: WING1 요약축만 있어도 헬스가 그걸 근거로 아무 말도 하지 않는다.
+    _seed_summary(db, "2026-08-09", 59400, account="COUPANG_WING1")
+    c = compute_scheduler_health(db, _FakeScheduler(), NOW)["vendor_item_conservation"]
+    assert c["summary_only"] == [], "WING1 요약축이 보존식 노이즈로 들어왔다"
+
+
 def test_conservation_failure_does_not_kill_the_health_api(db, monkeypatch):
     """★대조가 깨져도 헬스 API 전체를 죽이면 안 된다 — 워치독 침묵이 더 나쁘다.
 
@@ -472,6 +573,85 @@ def test_never_collected_option_axis_is_no_data_not_silence(db):
     h = compute_scheduler_health(db, _FakeScheduler(), NOW)
     verdict = next(d for d in h["data_stale"] if d["name"] == "wing_vendor_item_sales")
     assert verdict["state"] == "no_data"
+
+
+def test_one_broken_rule_does_not_silence_the_other_rules(db, monkeypatch):
+    """★★규칙 하나가 깨져도 나머지 감시는 산다 (적대 리뷰 P1-2 회귀).
+
+    종전엔 try/except가 **for 루프 전체**를 감싸 `data_snapshots = []`로 리셋했다 →
+    새 테이블이 없는 상태(마이그 전 코드 배포)에서 **RG 정산 감시까지 함께 침묵**했고,
+    `data_stale: []`는 «이상 없음»과 구별되지 않았다.
+    13일 침묵을 막으려는 변경이 같은 실패 모드를 새 트리거로 되살린 셈이었다.
+    """
+    import app.services.scheduler_health as sh
+
+    real = sh._latest_for_rule
+
+    def selective_boom(session, rule):
+        if rule.get("source") == "vendor_item_sales":
+            raise RuntimeError("no such table: coupang_vendor_item_sales_daily")
+        return real(session, rule)
+
+    monkeypatch.setattr(sh, "_latest_for_rule", selective_boom)
+    h = compute_scheduler_health(db, _FakeScheduler(), NOW)
+    by_name = {d["name"]: d for d in h["data_stale"]}
+
+    # 깨진 규칙은 «확인 못 했다»로 남는다 — 침묵도 거짓 정상도 아니다.
+    assert by_name["wing_vendor_item_sales"]["state"] == "check_failed"
+    assert "no such table" in by_name["wing_vendor_item_sales"]["reason"]
+    # ★나머지 규칙은 그대로 판정된다(이게 P1-2의 핵심).
+    assert "rg_settlement_account_rows" in by_name, "RG 정산 감시가 함께 사라졌다"
+    assert by_name["wing_vendor_summary"]["state"] == "no_data"
+
+
+def test_check_failed_also_breaks_healthy_and_carries_an_impact_label(db, monkeypatch):
+    """★«확인 못 했다»도 healthy를 깬다 — 그래야 배너에 뜬다.
+
+    `data_stale`에 실어 보내는 이유가 이것이다: healthy 판정과 배너 렌더가 이미 그 리스트를
+    쓰므로 새 필드를 만들 필요가 없다(새 필드를 만들고 표시 분기를 빼먹는 것이 이 리포의
+    반복 실패다 — 교훈 #223).
+    """
+    from app.services.scheduler_watchdog import evaluate_data_freshness
+
+    verdicts = evaluate_data_freshness([{
+        "name": "wing_vendor_item_sales", "account_key": ACC,
+        "latest": None, "max_age_days": 3.0, "impact": "옵션별 3P 매출이 낡은 값으로 구른다",
+        "error": "OperationalError: no such table",
+    }], NOW)
+    assert len(verdicts) == 1
+    assert verdicts[0]["state"] == "check_failed"
+    assert verdicts[0]["impact"], "impact가 비면 배너에 «무엇이 문제인지»가 안 뜬다"
+    # healthy 스위치: data_stale이 비어 있지 않으면 unhealthy(기존 규약 재확인)
+    assert build_health([], [], set(), True, NOW, data_snapshots=[{
+        "name": "x", "account_key": ACC, "latest": None, "max_age_days": 3.0,
+        "impact": "i", "error": "boom",
+    }])["healthy"] is False
+
+
+def test_daily_trigger_job_requests_only_its_own_account(db, monkeypatch):
+    """★★새 잡이 **자기 계정만** 요청한다 (적대 리뷰 M6 — 큐 도난 함정).
+
+    갱신 요청 큐는 계정 차원이다. WING1을 요청하면 오픽스 데몬이 그걸 집어 가고 WING2는
+    영원히 안 받는다 — 즉 13일 정체가 그대로 재발한다. 리뷰에서 이 계정을 WING1로 바꾼
+    변이가 테스트 0건이라 생존했다.
+    """
+    import app.services.scheduler_service as ss
+    from app.services.coupang import vendor_summary_sync
+
+    asked: list[str] = []
+    monkeypatch.setattr(vendor_summary_sync, "request_refresh",
+                        lambda _db, account_key: asked.append(account_key) or {"ok": True})
+    monkeypatch.setattr(ss, "_get_own_db_session", lambda: db)
+
+    ss.request_wing_vendor_summary_daily_job()
+    assert asked == ["COUPANG_WING2"], f"요청 계정이 틀렸다: {asked}"
+
+
+def test_daily_trigger_job_is_watched_so_its_death_is_not_silent():
+    """★트리거 잡이 죽으면 신선도가 울리기까지 3일이 걸린다 — 잡 자체도 감시 목록에 있어야 한다."""
+    from app.services.scheduler_health import WATCHDOG_JOBS
+
+    assert "request_wing_vendor_summary_daily" in WATCHDOG_JOBS
 
 
 def test_wing1_is_deliberately_excluded_from_sales_analysis_freshness():
