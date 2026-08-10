@@ -40,6 +40,30 @@ class WriteValidationError(Exception):
     """쓰기 전 사전 검증 실패(빈 입력, WEB_SITE 아닌 광고그룹, 중복 키워드 등)."""
 
 
+class GroupBidDeadError(WriteValidationError):
+    """그룹 입찰이 **옥션에서 실효가 아닌** 그룹에 그룹입찰 PUT을 시도 (B-4, D-NAO-166·170).
+
+    ★이 예외는 «관측을 실어 나른다»는 점에서 다른 검증 실패와 다르다. 거부하는 그 순간
+    가드는 이미 정답(라이브 소재 목록 = 어느 소재가 실효 레버인가)을 손에 쥐고 있는데,
+    D-NAO-166은 그걸 **버렸다.** 그래서 라우터(DB 파생)와 가드(라이브)가 갈라진 그룹은
+    **회차마다 같은 거부를 반복**했다 — 재라우팅 기계가 없어서가 아니라(라우터가 이미
+    그 기계다) 라우터의 **입력을 고치는 손**이 없어서다.
+    `ads`를 실어 보내면 상위(harness)가 그 관측을 `naver_adgroup_product`에 되돌려 쓰고,
+    **다음 회차에 기존 라우터가 스스로 소재로 절체**한다(새 경로를 만들지 않는다).
+
+    Attributes:
+        adgroup_id: 거부된 광고그룹 id.
+        ads: `naver_sa_ad_fetcher.get_ads` 형식의 라이브 소재 목록(추가 API 콜 0 — 가드가
+            판별에 이미 쓴 응답 그대로). 조회 실패 경로는 애초에 거부하지 않으므로(fail-open)
+            이 예외에 실리는 목록은 항상 «적극적으로 입증된» 관측이다.
+    """
+
+    def __init__(self, message: str, *, adgroup_id: str, ads: list[dict]) -> None:
+        super().__init__(message)
+        self.adgroup_id = adgroup_id
+        self.ads = ads
+
+
 class WriteResult:
     """쓰기 1건의 실행 전/후 실측값 + 쓰기 응답을 담는 결과 객체 (ref 27 §8-2 계약).
 
@@ -610,11 +634,15 @@ def _reject_if_group_bid_is_dead(ncc_adgroup_id: str) -> None:
     if any(f is not False for f in flags):
         return  # true가 하나라도 있거나 불명이 섞임 — 그룹 입찰이 실효일 수 있다
 
-    raise WriteValidationError(
+    # ★D-NAO-170: 거부하면서 **관측을 실어 보낸다**(추가 API 콜 0 — 위 `ads` 그대로).
+    #   상위가 이걸 DB에 되돌려 쓰면 다음 회차에 라우터가 스스로 소재로 절체한다.
+    raise GroupBidDeadError(
         f"update_adgroup_bid: adgroup {ncc_adgroup_id}의 쇼핑 소재 {len(flags)}개가 "
         "**전부** useGroupBidAmt=false — 그룹 입찰은 옥션에서 실효가 아니다"
         "(PUT은 200을 받고 재조회도 새 값을 주지만 CPC는 안 바뀐다). "
-        "실효 레버는 소재이므로 update_ad_bid를 쓸 것 (B-4, D-NAO-164·교훈 #202)"
+        "실효 레버는 소재이므로 update_ad_bid를 쓸 것 (B-4, D-NAO-164·교훈 #202)",
+        adgroup_id=ncc_adgroup_id,
+        ads=ads,
     )
 
 

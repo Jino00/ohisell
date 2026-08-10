@@ -233,6 +233,12 @@ EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
 #   쓰기 실패에 대해 "사람이 네이버 콘솔로 실제 반영 여부를 확인"하라고 못 박고 있다.
 GUARD_BLOCK_MARKER = "[실행 불가]"
 WRITE_FAILURE_MARKER = "[실행 실패]"
+# ★D-NAO-170(B-4): 「그룹입찰이 죽은 그룹에 그룹입찰을 쓰려 했다」 전용 마커.
+# 일반 실패와 **분리해서 셀 수 있어야** 한다 — 이 실패는 버그가 아니라 «라우터의 입력 데이터가
+# 낡았다»는 신호이고, 회차마다 반복되면 아래 write-back(수리 루프) 자체가 고장 난 것이다.
+# 상시 신선도 표면이 없으면 그 고장은 조용히 늙는다(파이프 정체 교훈과 같은 모양) →
+# 주간 지혜 감사가 이 마커의 건수를 센다.
+LEVER_MISMATCH_MARKER = "[LEVER_MISMATCH]"
 
 # entity_sync가 기록하는 "외부가 바꿨다" 감지 행(D-NAO-40 상태 / D-NAO-47 입찰 /
 # D-NAO-50 키워드 인벤토리 add·remove 밸브). 커맨드 센터의 actor=external 필터가 이 집합을 쓴다.
@@ -1439,6 +1445,82 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
     return log_entry
 
 
+def _writeback_live_ad_observation(
+    db: Session, *, adgroup_id: str, ads: list[dict], campaign_id: str, now: datetime,
+) -> int:
+    """D-NAO-170(B-4 나머지 절반): 「그룹입찰 死」 거부에 실려 온 라이브 관측을
+    `naver_adgroup_product`에 되돌려 쓴다. 반환 = 갱신·삽입된 행 수.
+
+    ══ 이게 «재라우팅»인 이유 ══
+    재라우팅 기계는 이미 있다 — `auto_operator`의 `source='ad'` 분기가 그것이고, 그 판정은
+    이 테이블에서 파생된다(`effective_bid._derive`). 없던 것은 **라우터의 입력을 고치는 손**
+    이다. 라이브(가드)와 DB(라우터)가 갈라지면 라우터는 계속 그룹으로 보내고 가드는 계속
+    거부해서, 그 그룹의 입찰이 회차마다 같은 자리에서 얼어붙는다. 관측을 되돌려 쓰면
+    **다음 회차에 기존 경로가 스스로 소재로 절체**한다 — 새 쓰기 경로를 만들지 않는다
+    (harness는 초크포인트이지 판정자가 아니다: 여기서 스텝을 재산정하지 않는다).
+
+    ══ fail-**open**(best-effort) ══
+    실패해도 삼키고 0을 반환한다. 이건 안전장치가 아니라 **수리 가속기**이고, 실패의 대가는
+    「다음 정규 sync까지 절체가 늦어짐」이지 돈이 아니다. 반대로 여기서 예외를 올리면
+    **거부를 기록하는 경로 자체가 깨진다** — 그건 확실한 손해다.
+
+    ══ 왜 update-only가 아니라 upsert인가(설계 검토와 갈린 지점) ══
+    "행이 없으면 건너뛴다"로 두면 **가장 나쁜 경우가 안 고쳐진다**: 소재 행이 아예 없는 그룹은
+    `_derive`가 group 폴백을 주므로(유효 소재데이터 0건) 라우터가 영원히 그룹으로 보내고,
+    영원히 거부당한다. 2026-07월 사고(03. 아이폰_강화유리, 9일간 그룹입찰 79건 무접촉)가
+    정확히 그 모양이었다. `get_ads`가 `mall_product_id`를 포함해 **유니크 키를 전부 주므로**
+    삽입에 추정이 필요 없고, 정규 sync가 다음 회차에 같은 값을 덮어써도 무해하다(멱등).
+    """
+    try:
+        rows = [a for a in ads if a.get("ad_id") and a.get("mall_product_id")]
+        if not rows:
+            log.warning(
+                "naver_execution_harness: D-NAO-170 write-back 대상 없음 adgroup=%s "
+                "(라이브 응답에 ad_id/mall_product_id 부재) — 정규 sync 대기",
+                adgroup_id,
+            )
+            return 0
+        existing = {
+            r.mall_product_id: r
+            for r in db.query(NaverAdgroupProduct)
+                       .filter(NaverAdgroupProduct.adgroup_id == adgroup_id).all()
+        }
+        touched = 0
+        for a in rows:
+            mall_pid = str(a["mall_product_id"])
+            row = existing.get(mall_pid)
+            if row is None:
+                row = NaverAdgroupProduct(adgroup_id=adgroup_id, mall_product_id=mall_pid)
+                db.add(row)
+                existing[mall_pid] = row
+            row.campaign_id = campaign_id
+            row.product_name = (a.get("product_name") or row.product_name or "")[:300]
+            row.ad_id = a.get("ad_id")
+            row.ad_bid_amt = a.get("ad_bid_amt")
+            row.use_group_bid_amt = a.get("use_group_bid_amt")
+            row.ad_user_lock = a.get("ad_user_lock")
+            # ad_edit_tm/ad_apply_tm은 **건드리지 않는다** — 그 둘은 외부 변경 탐지(D-NAO-127)의
+            # 앵커라, 탐지를 안 거친 경로에서 전진시키면 «우리가 안 본 외부 변경»을 본 것으로
+            # 만들어 버린다. 여기서 고치려는 것은 «실효 레이어 판별»뿐이다.
+            row.synced_at = now  # 신선도 — 이 관측이 언제 것인지가 stale 판별의 유일 근거
+            touched += 1
+        db.commit()
+        log.info(
+            "naver_execution_harness: D-NAO-170 write-back 완료 adgroup=%s 소재 %d건 — "
+            "다음 회차 라우터가 소재 레버로 절체한다",
+            adgroup_id, touched,
+        )
+        return touched
+    except Exception as e:  # noqa: BLE001 — best-effort(§fail-open): 수리 실패가 거부 기록을 깨면 안 된다
+        db.rollback()
+        log.warning(
+            "naver_execution_harness: D-NAO-170 write-back 실패 adgroup=%s (%s) — "
+            "거부는 유지되고 절체는 정규 sync까지 지연된다",
+            adgroup_id, e,
+        )
+        return 0
+
+
 def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
     """입찰가 실쓰기 1건 (X1b T4, D-NAO-16 3단계 + X1b-S bid 확장, SHOPPING 대칭 + S3
     D-NAO-43 성장 확장). bid_up/bid_down/growth_bid_up 공용 — target_bid 컬럼(X1b T3,
@@ -1816,17 +1898,27 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         result = writer_fn(proposal.target_id, proposal.target_bid, **writer_kwargs)
     except Exception as exc:  # WriteValidationError/WriteError/WriteVerificationError + requests 계열
         proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
+        # ★D-NAO-170: 「그룹입찰 死」 거부는 단순 실패가 아니라 **데이터 수리 신호**다.
+        #   마커로 분리해 세고(위 LEVER_MISMATCH_MARKER), 아래에서 관측을 DB에 되돌려 쓴다.
+        lever_mismatch = isinstance(exc, naver_sa_writer.GroupBidDeadError)
+        mismatch_tag = f" {LEVER_MISMATCH_MARKER}" if lever_mismatch else ""
         fail_entry = NaverChangeLog(
             entity_type=proposal.target_type, entity_id=proposal.target_id,
             campaign_id=proposal.campaign_id, action="update_bid",
             rationale=(
-                f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
+                f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER}{mismatch_tag} "
+                f"{type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
             dry_run=False, outcome="failed", changed_at=now, executed_at=now,
         )
         db.add(fail_entry)
         db.commit()
+        if lever_mismatch:
+            _writeback_live_ad_observation(
+                db, adgroup_id=exc.adgroup_id, ads=exc.ads,
+                campaign_id=proposal.campaign_id, now=now,
+            )
         log.error(
             "naver_execution_harness: 실쓰기 실패 proposal_id=%s target_type=%s target=%s "
             "target_bid=%s — %s: %s",

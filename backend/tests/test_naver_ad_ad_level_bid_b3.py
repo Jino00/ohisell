@@ -455,6 +455,27 @@ TODAY = date(2026, 7, 20)
 NOW = datetime(2026, 7, 20, 8, 50, 0)
 
 
+@pytest.fixture(autouse=True)
+def _stub_live_ads(db):
+    """★D-NAO-171: auto_operator가 집행 대상을 **라이브 `get_ads` 1콜**로 잡는다(종전엔 max 소재
+    하나를 `get_ad_bid`로 재조회). 이 픽스처는 그 라이브 응답을 **DB 시드와 같은 값**으로 스텁한다.
+
+    왜 DB에서 파생하나: 값을 테스트마다 두 번(시드 + 스텁) 적으면 둘이 갈라졌을 때 테스트가
+    조용히 무의미해진다. 라이브와 DB가 **일부러** 어긋나는 상황(D-NAO-170의 시험 대상)은
+    개별 테스트에서 `patch.object(auto_operator, "get_ads", ...)`로 덮어써 명시한다.
+    """
+    def _fake_get_ads(adgroup_id):
+        rows = (db.query(NaverAdgroupProduct)
+                  .filter(NaverAdgroupProduct.adgroup_id == adgroup_id).all())
+        return [{
+            "ad_id": r.ad_id, "ad_bid_amt": r.ad_bid_amt,
+            "use_group_bid_amt": r.use_group_bid_amt,
+            "ad_user_lock": bool(r.ad_user_lock),
+        } for r in rows]
+    with patch.object(auto_operator, "get_ads", side_effect=_fake_get_ads):
+        yield
+
+
 def _ad(db, adgroup_id, mall_product_id, *, ad_id, ad_bid_amt, use_group, user_lock=False,
         campaign_id=CAMP):
     db.add(NaverAdgroupProduct(
@@ -1978,3 +1999,136 @@ def test_external_check_constants_match_guardrail():
 
     assert (guardrail_gate._EXT_CHECK_OURS, guardrail_gate._EXT_CHECK_EXTERNAL) == \
         (harness._EXT_OURS, harness._EXT_TOUCHED)
+
+
+# ══ D-NAO-171(B-3): 그룹 판정 → 활성 false 소재 **전부** 집행 ═══════════════════
+# 왜 이 블록이 필요한가: 종전 테스트는 전부 «그룹당 소재 1개»라 max-only와 전-소재 집행이
+# **구분되지 않았다**. 즉 팬아웃을 안 해도 전건 통과한다 — 통과하는데 아무것도 안 지키는
+# 테스트(교훈 #181)의 정확한 사례라, 아래를 라이브 실측(2026-08-10: 소재 2~10개 + 입찰가
+# 제각각인 46그룹)에 맞춰 새로 쓴다.
+
+def _seed_multi_ad_group(db, *, bids=(800, 500)):
+    """입찰가가 서로 다른 소재 N개짜리 미연결 그룹(실측 46그룹의 축소판)."""
+    _seed_hourly_shopping(db)
+    for i, b in enumerate(bids):
+        _ad(db, "grp-hot", f"p{i}", ad_id=f"nad-{i}", ad_bid_amt=b, use_group=False)
+    db.commit()
+
+
+def test_group_down_steps_every_active_ad_and_preserves_ratio(db):
+    """★핵심: 그룹 DOWN 판정 1건 → 소재 **전부**가 각자 기준 −15%로 내려간다.
+
+    max만 내리면 차순위가 새 max가 되어 그룹 실효는 소재 간 갭만큼만 내려간다(종전 결함).
+    승수 스텝이라 소재 간 **비율이 보존**되는 것도 같이 못박는다 — 상품별 차등은 우리가 만든
+    구조가 아니므로 평탄화하면 안 된다.
+    """
+    _seed_multi_ad_group(db, bids=(800, 500))
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert mock_exec.call_count == 2, "소재 2개 전부 집행돼야 한다(max-only면 1)"
+    assert result["ad_fanout_groups"] == 1
+    assert result["ad_writes_reserved"] == 2
+    saved = {p.target_id: p.target_bid
+             for p in db.query(NaverProposal).filter(NaverProposal.target_type == "ad").all()}
+    # 10원 반올림 규약은 방향마다 보수 쪽이다(_clamp_step: down=올림 · up=내림)
+    #  → 800×0.85=680 · 500×0.85=425→**430**(올림).
+    assert saved == {"nad-0": 680, "nad-1": 430}, "각자 기준 −15%(800→680 · 500→430)"
+    # 비율 보존: 800/500 = 1.600 → 680/430 = 1.581 (10원 반올림 오차 내)
+    assert abs((680 / 430) - (800 / 500)) < 0.03
+
+
+def test_group_up_steps_every_active_ad(db):
+    """상향도 대칭이다 — 하향만 전 소재면 「브레이크만 자동」이라 D-NAO-59에서 표류한다."""
+    _seed_multi_ad_group(db, bids=(800, 500))
+    with patch.object(auto_operator, "_judge_hourly", return_value={"direction": "up", "reason": "저순위"}), \
+         patch.object(auto_operator, "_learned_optimal_skip", return_value=(False, "학습밴드 미도달")), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert mock_exec.call_count == 2
+    saved = {p.target_id: (p.proposal_type, p.target_bid)
+             for p in db.query(NaverProposal).filter(NaverProposal.target_type == "ad").all()}
+    # ★타입은 반드시 bid_up — 소재는 rank-step 면제 타입(bid_up_servo/bid_up_rank)을 달면 안 된다
+    # up은 10원 **내림**: 800×1.15=920 · 500×1.15=575→**570**
+    assert saved == {"nad-0": ("bid_up", 920), "nad-1": ("bid_up", 570)}
+
+
+def test_fanout_excludes_group_bid_ads_and_paused_ads(db):
+    """집행 대상은 **활성 ∧ useGroupBidAmt가 명시적 False**인 소재뿐이다.
+
+    ①정지 소재(userLock)는 서빙하지 않는다 ②useGroupBidAmt=True는 그룹입찰이 실효라 개별
+    bidAmt 수정이 무의미하고 writer가 어차피 fail-closed로 거부한다 ③None(파싱 실패·부재)은
+    「모름」이지 False가 아니다 — 모름을 False로 읽으면 §0 강제 전환 금지를 우회하게 된다.
+    """
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p0", ad_id="nad-0", ad_bid_amt=800, use_group=False)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=700, use_group=False, user_lock=True)
+    _ad(db, "grp-hot", "p2", ad_id="nad-2", ad_bid_amt=600, use_group=True)
+    _ad(db, "grp-hot", "p3", ad_id="nad-3", ad_bid_amt=500, use_group=None)
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert mock_exec.call_count == 1
+    saved = [p.target_id for p in db.query(NaverProposal).filter(NaverProposal.target_type == "ad").all()]
+    assert saved == ["nad-0"]
+
+
+def test_group_decision_consumes_one_decision_slot_not_n(db):
+    """★결정 캡과 쓰기 캡은 층이 다르다 — 소재 N개짜리 그룹도 «결정» 캡은 한 자리만 쓴다.
+
+    이게 없으면 5소재 그룹 하나가 결정 캡(5)을 통째로 소진해, 캡의 의미가 조용히
+    «그룹 5개»에서 «그룹 1개»로 줄어든다(캡이 지키려던 것은 «되돌릴 시간»이고, 틀리는
+    단위는 판정이지 소재가 아니다).
+    """
+    _seed_multi_ad_group(db, bids=(800, 700, 600))
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute"):
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert result["ad_auto_exec_reserved"] == 1, "그룹 1건 = 결정 1자리"
+    assert result["ad_writes_reserved"] == 3, "쓰기는 소재마다 센다"
+    assert result["ad_auto_exec_capped"] == 0
+
+
+def test_write_cap_degrades_excess_ads_to_confirm_pending(db):
+    """쓰기 상한 초과분은 **드롭이 아니라** Confirm 대기로 강등된다(조용한 드롭 금지)."""
+    n = auto_operator._MAX_AD_WRITES_PER_LANE + 2
+    _seed_multi_ad_group(db, bids=tuple(800 - 10 * i for i in range(n)))
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert mock_exec.call_count == auto_operator._MAX_AD_WRITES_PER_LANE
+    assert result["ad_writes_capped"] == n - auto_operator._MAX_AD_WRITES_PER_LANE
+    assert db.query(NaverProposal).filter(NaverProposal.status == "pending").count() == \
+        n - auto_operator._MAX_AD_WRITES_PER_LANE
+
+
+def test_group_step_all_ads_switch_reverts_to_max_only(db):
+    """되돌림 스위치 — `_GROUP_STEP_ALL_ADS=False`면 D-NAO-171 이전(max 소재 1개)으로 복귀한다.
+
+    사고 났을 때 상수 한 줄로 원복된다는 믿음이 이 스위치의 존재 이유다(`_ad_auto_exec`의
+    킬스위치 규율과 동형) — 도달 가능성과 무관하게 성립해야 한다.
+    """
+    _seed_multi_ad_group(db, bids=(800, 500))
+    with patch.object(auto_operator, "_GROUP_STEP_ALL_ADS", False), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert mock_exec.call_count == 1
+    assert result["ad_fanout_groups"] == 0
+    saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
+    assert (saved.target_id, saved.target_bid) == ("nad-0", 680)  # max 소재만
+
+
+def test_single_ad_group_behaviour_is_unchanged(db):
+    """소재 1개 그룹(실측 207그룹 중 156개 = 75%)은 종전과 **완전히 같다** — N=1 퇴화 사례."""
+    _seed_multi_ad_group(db, bids=(800,))
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert mock_exec.call_count == 1
+    assert result["ad_fanout_groups"] == 0          # 팬아웃으로 세지 않는다
+    assert result["ad_auto_exec_reserved"] == 1
+    saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
+    assert (saved.target_id, saved.target_bid) == ("nad-0", 680)
