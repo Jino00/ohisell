@@ -68,15 +68,18 @@ class ParamSpec:
 
 # ★default는 guardrail_gate 상수를 **참조**한다(복사 금지) — 상수가 바뀌면 여기도 따라온다.
 SPECS: dict[str, ParamSpec] = {
-    "max_change_pct": ParamSpec(
-        "max_change_pct", guardrail_gate._MAX_CHANGE_PCT, "decimal",
-        Decimal("0.05"), guardrail_gate._EXPLORATION_MAX_CHANGE_PCT,
-        "한 회차 스텝",
-        "±15%. ★이건 「가드」가 아니라 «스텝 정책»이다 — 더 크게 가려는 걸 자르는 게 아니라 "
-        "한 회차 이동폭의 정의다(2026-07 차단 기록에 0건). 상한은 이미 코드에 있던 탐색 스텝 "
-        "30%로 잡아 새 영역을 열지 않는다.",
-        "tighten_down",
-    ),
+    # ★`max_change_pct`(±15% 스텝)는 **일부러 뺐다** — 적대 리뷰 P1-1(2026-08-10).
+    #   ±15%는 게이트 전용이 아니라 스텝 «생성기» 7곳이 자기들끼리 재현한다:
+    #   `proposal_writer._step_down_bid`(:175) · `_ad_step_bid`(:188) · bid_up step_cap(:309) ·
+    #   `proposal_pipeline._build_expansion_bid_up` · `auto_operator._fire_vitality_revive` ·
+    #   `_check_bid_up_conditions`(:612) — 전부 `_MAX_CHANGE_PCT`를 직접 import한다.
+    #   `_clamp_step` 한 곳만 파라미터를 보게 하고 DB로 값을 내리면 나머지 생성기의 제안이
+    #   게이트에서 전건 「변경폭 초과」로 죽고, 그것도 **`failed` 영구 종결**(재승인만 재시도)이라
+    #   다음 회차에 저절로 회복되지 않는다. 하필 `_step_down_bid`가 **손실 하향** 산식이라
+    #   **조이려고 값을 내리면 조이는 레버가 가장 먼저 죽는다.**
+    #   ★아래 셋만 남긴 이유가 이것이다 — 전부 **게이트 전용**이라 생성기 중복이 없다.
+    #   되살리려면 **생성기 전수를 먼저 배선**하고 정합 테스트를 `_clamp_step` 하나가 아니라
+    #   생성기 전수로 확장할 것(P2가 스텝을 건드리므로 그때가 그 자리다).
     "cooldown_hours": ParamSpec(
         "cooldown_hours", guardrail_gate._COOLDOWN_HOURS, "int", 1, 24,
         "같은 유닛 쿨다운",
@@ -114,6 +117,12 @@ def _coerce(spec: ParamSpec, raw: Any) -> Any | None:
                 return None
             val = int(raw)
     except (TypeError, ValueError, ArithmeticError, InvalidOperation):
+        return None
+    # NaN은 비교 자체가 InvalidOperation을 던진다 — 범위 검사보다 먼저 걸러낸다(적대 리뷰 P2-1).
+    # `get_params`는 harness 핫패스에 있고 「설정 한 줄이 광고 집행 경로를 죽이면 안 된다」가
+    # 이 층의 계약이다. UI 가드로 도달 불가여도 계약은 도달 가능성과 무관하게 성립해야 한다.
+    if spec.kind == "decimal" and not val.is_finite():
+        log.error("guardrail_params: %s=%r는 유한한 수가 아니다 — 코드 상수로 폴백", spec.key, raw)
         return None
     if val < spec.lo or val > spec.hi:
         log.error(

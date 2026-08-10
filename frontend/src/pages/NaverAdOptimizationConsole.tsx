@@ -47,6 +47,8 @@ function daysAgo(n: number): string {
 // (0.15·2.0) 사람이 즉시 「이게 뭔가」를 못 읽는다 — 키가 4개뿐이라 일반화보다 이게 정직하다.
 function fmtGuardrailValue(p: NaverGuardrailParam): string {
   switch (p.key) {
+    // max_change_pct는 현재 SPECS에 없다(적대 리뷰 P1-1로 제외) — P2가 스텝을
+    // 건드릴 때 되살아나므로 분기는 남겨 둔다. 지금은 도달하지 않는다.
     case "max_change_pct":
       return `±${(p.value * 100).toFixed(0)}%`;
     case "max_auto_up_multiple":
@@ -932,7 +934,7 @@ export default function NaverAdOptimizationConsole() {
                         value={guardrailEdits[p.key] ?? String(p.value)}
                         disabled={guardrailSaving}
                         onChange={(ev) => updateGuardrailEdit(p.key, ev.target.value)}
-                        title={`API 단위 그대로 입력(예: max_change_pct는 0.15 = ±15%)`}
+                        title={`API 단위 그대로 입력(예: max_auto_up_multiple은 2.0 = 2.0배)`}
                         className="w-24 border border-gray-200 rounded px-1.5 py-1 text-xs disabled:opacity-50"
                       />
                     </td>

@@ -46,7 +46,6 @@ def _kv(db, payload: str):
 def test_no_row_falls_back_to_code_constants(db):
     """KV 행이 없으면 코드 상수 그대로 — **배포 직후 행위 변화 0**이 P1의 계약이다."""
     p = guardrail_params.get_params(db)
-    assert p["max_change_pct"] == guardrail_gate._MAX_CHANGE_PCT
     assert p["cooldown_hours"] == guardrail_gate._COOLDOWN_HOURS
     assert p["max_daily_auto_bid_downs"] == guardrail_gate._MAX_DAILY_AUTO_BID_DOWNS
     assert p["max_auto_up_multiple"] == guardrail_gate._MAX_AUTO_UP_MULTIPLE
@@ -64,16 +63,15 @@ def test_partial_failure_only_drops_that_key(db):
     전부 되돌리면 「부분 실패가 전체 롤백」이 되어 오히려 예측이 어렵다 — 사람은 자기가 고친
     두 값 중 하나만 틀렸는데 둘 다 사라진 이유를 못 찾는다.
     """
-    _kv(db, '{"cooldown_hours": 4, "max_change_pct": "말이 안 되는 값"}')
+    _kv(db, '{"cooldown_hours": 4, "max_auto_up_multiple": "말이 안 되는 값"}')
     p = guardrail_params.get_params(db)
-    assert p["cooldown_hours"] == 4                                    # 살아남고
-    assert p["max_change_pct"] == guardrail_gate._MAX_CHANGE_PCT       # 이건 폴백
+    assert p["cooldown_hours"] == 4                                                  # 살아남고
+    assert p["max_auto_up_multiple"] == guardrail_gate._MAX_AUTO_UP_MULTIPLE         # 이건 폴백
 
 
 @pytest.mark.parametrize("payload", [
-    '{"max_change_pct": "0.9"}',            # 상한(0.30) 초과 — 폭주
-    '{"max_change_pct": "0.01"}',           # 하한(0.05) 미만 — 사실상 정지
     '{"cooldown_hours": 0}',                # 진동 방어 해제
+    '{"cooldown_hours": 999}',              # 사실상 정지
     '{"max_daily_auto_bid_downs": 99}',     # 하루에 바닥까지
     '{"max_auto_up_multiple": "10"}',       # 누적 상향 브레이크 해제
 ])
@@ -115,7 +113,8 @@ def test_describe_reports_source_and_rejection(db):
     assert rows["max_auto_up_multiple"]["source"] == "code"
     assert rows["max_auto_up_multiple"]["rejected"] is True
     # 손대지 않은 것은 code이고 rejected도 아니다(셋을 섞어 세면 지표가 부푼다)
-    assert (rows["max_change_pct"]["source"], rows["max_change_pct"]["rejected"]) == ("code", False)
+    assert (rows["max_daily_auto_bid_downs"]["source"],
+            rows["max_daily_auto_bid_downs"]["rejected"]) == ("code", False)
 
 
 def test_describe_marks_unparseable_value_as_code_not_db(db):
@@ -125,11 +124,11 @@ def test_describe_marks_unparseable_value_as_code_not_db(db):
     뜨면, 화면은 「DB 값으로 돌고 있다」고 말하는데 실제로는 코드 상수가 돌고 있다 —
     이 화면이 막으려던 바로 그 착시다(«기록됐다 ≠ 코드가 읽는다»).
     """
-    _kv(db, '{"max_change_pct": "말이 안 되는 값"}')
-    row = {r["key"]: r for r in guardrail_params.describe(db)}["max_change_pct"]
+    _kv(db, '{"max_auto_up_multiple": "말이 안 되는 값"}')
+    row = {r["key"]: r for r in guardrail_params.describe(db)}["max_auto_up_multiple"]
     assert row["source"] == "code"
     assert row["rejected"] is True
-    assert row["value"] == float(guardrail_gate._MAX_CHANGE_PCT)
+    assert row["value"] == float(guardrail_gate._MAX_AUTO_UP_MULTIPLE)
 
 
 def test_describe_carries_the_why(db):
@@ -158,6 +157,39 @@ def test_gate_without_params_key_behaves_as_before(db):
     assert guardrail_gate._check_cooldown_and_cap(ctx, NOW, "bid_up") is not None
 
 
+def test_max_change_pct_is_deliberately_not_tunable(db):
+    """★적대 리뷰 P1-1의 못 — `max_change_pct`를 SPECS에 **다시 넣으면 이 테스트가 죽는다.**
+
+    ±15%는 게이트 전용이 아니라 스텝 «생성기» 7곳이 자기들끼리 재현한다(`proposal_writer`
+    _step_down_bid/_ad_step_bid/step_cap · `proposal_pipeline` 확장 bid_up ·
+    `auto_operator` 소생 UP/`_check_bid_up_conditions`). `_clamp_step` 하나만 파라미터를 보게 하고
+    DB로 값을 내리면 나머지 생성기의 제안이 게이트에서 전건 「변경폭 초과」로 죽고, 그것도
+    **`failed` 영구 종결**이라 다음 회차에 회복되지 않는다. 하필 `_step_down_bid`가 **손실 하향**
+    산식이라 **조이려고 값을 내리면 조이는 레버가 가장 먼저 죽는다.**
+    되살리려면 생성기 전수를 먼저 배선하고 정합 테스트를 전수로 확장할 것.
+    """
+    assert "max_change_pct" not in guardrail_params.SPECS
+    _kv(db, '{"max_change_pct": "0.10"}')
+    # DB에 넣어도 무시된다 — 알 수 없는 키는 get_params가 보지 않는다
+    assert "max_change_pct" not in guardrail_params.get_params(db)
+
+
+def test_remaining_params_are_gate_only(db):
+    """남긴 셋은 **게이트 전용**이라 생성기 중복이 없다 — 그게 이 셋만 남긴 이유다.
+
+    생성기가 이 값들을 자기들끼리 재현하기 시작하면 P1-1과 같은 구멍이 생긴다.
+    """
+    import subprocess
+    for key, const in (("cooldown_hours", "_COOLDOWN_HOURS"),
+                       ("max_daily_auto_bid_downs", "_MAX_DAILY_AUTO_BID_DOWNS"),
+                       ("max_auto_up_multiple", "_MAX_AUTO_UP_MULTIPLE")):
+        r = subprocess.run(
+            ["grep", "-rl", f"guardrail_gate import.*{const}", "app/services/naver_ad/"],
+            capture_output=True, text=True)
+        assert not r.stdout.strip(), (
+            f"{const}({key})를 직접 import하는 모듈이 생겼다 — 파라미터가 갈라진다: {r.stdout}")
+
+
 def test_step_and_gate_agree_on_the_same_pct(db):
     """★★조용한 전면 정지 방지 — 레인이 만드는 스텝이 게이트를 **통과해야 한다.**
 
@@ -183,3 +215,135 @@ def test_clamp_step_default_is_unchanged(db):
     """인자를 안 주면 종전과 완전히 같다 — 기존 호출부 보호."""
     assert auto_operator._clamp_step(1000, "down") == auto_operator._clamp_step(
         1000, "down", guardrail_gate._MAX_CHANGE_PCT)
+
+
+# ══ 적대 리뷰가 살려낸 변이를 닫는다 (2026-08-10) ═══════════════════════════════
+# 리뷰어가 12종을 주입해 **7종이 살아남았다.** 공통 형태: 「읽는 쪽(게이트) 절반과 쓰는 쪽
+# (PUT·배너)이 통째로 무방비」. 초록인 테스트가 지키던 것은 사실상 `_coerce`의 폴백 규칙과
+# `cooldown_hours` 한 키의 왕복뿐이었다 — 이 리포의 시그니처 실패(claimed↔wired)의 정확한 형태다.
+
+def test_every_param_actually_wins_over_code_constant(db):
+    """★M-H: 「DB 값이 이긴다」가 **키마다** 성립하는가.
+
+    종전엔 `cooldown_hours` 하나로만 단언해서, 나머지 셋을 코드 상수로 되돌려도 초록이었다.
+    """
+    _kv(db, '{"cooldown_hours": 5, "max_daily_auto_bid_downs": 6, "max_auto_up_multiple": "2.5"}')
+    p = guardrail_params.get_params(db)
+    assert p["cooldown_hours"] == 5
+    assert p["max_daily_auto_bid_downs"] == 6
+    assert p["max_auto_up_multiple"] == Decimal("2.5")
+    assert {r["key"]: r["source"] for r in guardrail_params.describe(db)} == {
+        k: "db" for k in guardrail_params.SPECS
+    }
+
+
+def test_gate_daily_down_cap_reads_param(db):
+    """★M-L: 자동 하향 일일 상한이 파라미터를 본다(배선만 있고 못이 없었다).
+
+    P2의 조이기 자동화가 정확히 이 값을 3→5로 올린다 — 여기가 안 먹으면 P2가 무의미해진다.
+    """
+    base = {"changes_today_count": 0, "auto_exec": True, "auto_bid_down_today": 4}
+    assert guardrail_gate._check_cooldown_and_cap(
+        {**base, "guardrail_params": {"max_daily_auto_bid_downs": 3}}, NOW, "bid_down") is not None
+    assert guardrail_gate._check_cooldown_and_cap(
+        {**base, "guardrail_params": {"max_daily_auto_bid_downs": 5}}, NOW, "bid_down") is None
+
+
+def test_gate_cumulative_up_cap_reads_param(db):
+    """★M-K: 자동 상향 누적 상한이 파라미터를 본다.
+
+    이 브레이크는 codex 3R이 「기준점이 옛 고가에 머물러 자동화가 되돌려 올림」 구멍을 잡은
+    자리이고, 2026-08-10 적대 리뷰 P1도 정확히 이걸 무력화하는 결함이었다. 배선이 죽어 있으면
+    설정 화면은 「2.0배」라고 말하는데 실제로는 아무 값이나 통과한다.
+    """
+    ctx = {"current_bid": 1000, "campaign_type": "SHOPPING", "auto_exec": True,
+           "auto_up_base_bid": 1000, "roas_corrected": 9.0, "target_roas": 1.0}
+    # 1000의 2.0배=2000까지 → 1100은 통과
+    assert guardrail_gate._check_bid(
+        {"proposal_type": "bid_up", "target_bid": 1100},
+        {**ctx, "guardrail_params": {"max_auto_up_multiple": Decimal("2.0")}}, "bid_up") is None
+    # 상한을 1.0배로 조이면 같은 1100이 막힌다
+    reason = guardrail_gate._check_bid(
+        {"proposal_type": "bid_up", "target_bid": 1100},
+        {**ctx, "guardrail_params": {"max_auto_up_multiple": Decimal("1.0")}}, "bid_up")
+    assert reason is not None and "누적 상한" in reason
+
+
+# ══ PUT·현황판 라우터 — 리뷰어가 「테스트 0건」이라 한 곳 (M-D/M-E/M-F/M-G) ══════
+def _client(db):
+    """실제 라우터를 태운 TestClient(test_cost_drift_wiring._client와 같은 관례)."""
+    from fastapi.testclient import TestClient
+
+    from app.database import get_db
+    from app.main import app
+
+    app.dependency_overrides[get_db] = lambda: db
+    return TestClient(app)
+
+
+def _cleanup(db):
+    from app.main import app
+    app.dependency_overrides.clear()
+
+
+def test_put_rejects_unknown_key(db):
+    """★M-D: 모르는 키를 조용히 저장하면 «설정한 줄 알았는데 아무 일도 안 일어나는» 상태가 된다."""
+    try:
+        r = _client(db).put("/api/naver/ad/settings/guardrail-params", json={"없는키": 1})
+        assert r.status_code == 400
+        assert "없는키" in r.text
+    finally:
+        _cleanup(db)
+
+
+def test_put_rejects_out_of_range_with_reason(db):
+    """★M-G: 범위 밖은 **400 + 이유**로 거부한다.
+
+    저장해 놓고 조용히 폴백시키면 화면엔 코드 상수가 뜨는데 사람은 자기가 바꾼 줄 안다.
+    """
+    try:
+        r = _client(db).put("/api/naver/ad/settings/guardrail-params",
+                            json={"max_auto_up_multiple": 99})
+        assert r.status_code == 400
+        assert "범위" in r.text
+        # 거부됐으면 저장도 안 돼야 한다
+        assert guardrail_params.get_params(db)["max_auto_up_multiple"] == \
+            guardrail_gate._MAX_AUTO_UP_MULTIPLE
+    finally:
+        _cleanup(db)
+
+
+def test_put_records_change_log_for_visibility(db):
+    """★M-E: 사후 가시성 — 봉투가 바뀌면 감사 이력이 남아야 한다(§1 「자동의 전제는 가시성」).
+
+    ★`changed_at`↔`executed_at`은 B-1 가드(D-NAO-169)가 30분 초과 어긋남을 **예외로 거부**하므로
+    이 단언은 그 가드와도 정합해야 한다.
+    """
+    from app.models import NaverChangeLog
+    try:
+        r = _client(db).put("/api/naver/ad/settings/guardrail-params", json={"cooldown_hours": 4})
+        assert r.status_code == 200
+        rows = db.query(NaverChangeLog).filter(
+            NaverChangeLog.action == "update_guardrail_params").all()
+        assert len(rows) == 1
+        assert "4" in (rows[0].after_value or "")
+        assert abs((rows[0].changed_at - rows[0].executed_at).total_seconds()) < 60
+    finally:
+        _cleanup(db)
+
+
+def test_get_reports_retro_freshness(db):
+    """★M-F: 소급채점 신선도가 응답 **body**에 실제로 실리는가.
+
+    2026-07 실측에서 차단 3,863건 중 2,138건(55%)이 「소급채점 stale」이었는데 **상설 표면이
+    없어 조용히 늙었다.** 채점 데이터가 하나도 없으면 stale로 읽혀야 한다(「모름」을 「정상」으로
+    읽으면 이 배너의 존재 이유가 사라진다).
+    """
+    try:
+        body = _client(db).get("/api/naver/ad/settings/guardrail-params").json()
+        assert {"params", "from_db_enabled", "retro_freshness"} <= set(body)
+        assert body["retro_freshness"]["stale"] is True     # 채점 행 0건 → 「모름」은 stale
+        assert body["retro_freshness"]["latest_asof"] is None
+        assert len(body["params"]) == len(guardrail_params.SPECS)
+    finally:
+        _cleanup(db)

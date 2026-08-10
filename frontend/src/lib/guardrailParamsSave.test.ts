@@ -18,14 +18,14 @@ describe("buildGuardrailSaveBody", () => {
   it("★안 건드린 db 값을 함께 보내 전체 치환에 쓸려 사라지지 않게 한다", () => {
     const params = [
       row("cooldown_hours", 4, "db"),          // 이미 설정돼 있고 이번엔 안 건드림
-      row("max_change_pct", 0.15, "code"),     // 사람이 지금 고침
+      row("max_auto_up_multiple", 2.0, "code"), // 사람이 지금 고침
     ];
-    const res = buildGuardrailSaveBody(params, { max_change_pct: "0.2" }, { max_change_pct: true });
-    expect(res).toEqual({ ok: true, body: { cooldown_hours: 4, max_change_pct: 0.2 } });
+    const res = buildGuardrailSaveBody(params, { max_auto_up_multiple: "2.5" }, { max_auto_up_multiple: true });
+    expect(res).toEqual({ ok: true, body: { cooldown_hours: 4, max_auto_up_multiple: 2.5 } });
   });
 
   it("코드 기본값(안 건드린 것)은 보내지 않는다 — 설정하지 않은 것을 설정한 것으로 만들지 않는다", () => {
-    const params = [row("cooldown_hours", 2, "code"), row("max_change_pct", 0.15, "code")];
+    const params = [row("cooldown_hours", 2, "code"), row("max_auto_up_multiple", 2.0, "code")];
     const res = buildGuardrailSaveBody(params, {}, {});
     expect(res).toEqual({ ok: true, body: {} });
   });
