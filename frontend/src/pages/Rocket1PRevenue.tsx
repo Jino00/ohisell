@@ -285,6 +285,17 @@ export default function Rocket1PRevenue() {
               const blocked = p.blocked;
               const partial = p.basis === "costed_subset";
               const noSales = Number(p.ad_no_sales);
+              /* ★광고 원장의 나머지 두 통. 예전 판은 이 둘을 화면에 **한 번도 안 그렸다** —
+                 구멍1(원가 미상 옵션분)은 어느 줄에도 없었고, 구멍2(팔린 옵션의 판매 없는
+                 날)는 근거 화면 A7이 fail로만 고발하고 있었다. 안 보이는 돈은 없는 돈이 된다. */
+              const noSalesDays = Number(p.ad_no_sales_days);
+              const adUncosted = Number(p.ad_uncosted);
+              /* ★«손익 밖에 남은 돈»은 `ad_unattributed`와 **다르다**: included면 뒤 두 통이
+                 이미 순이익에서 빠졌으므로 남은 것은 구멍1뿐이다. 두 값을 같이 쓰면 각주가
+                 사다리를 부정한다(적대 리뷰 P1-2). 술어는 사다리 부호와 같은 것을 쓴다. */
+              const outsidePnl = p.ad_no_sales_included
+                ? adUncosted
+                : adUncosted + noSalesDays + noSales;
               return (
                 <>
                   {blocked ? (
@@ -315,8 +326,30 @@ export default function Rocket1PRevenue() {
                         <PnlLine label="광고비" value={won(p.ad_spend)} sign="minus"
                           sub={partial
                             ? "옵션 그레인(Billboard) · 위 부분집합 옵션분만"
-                            : "옵션 그레인(Billboard)"} />
-                        {/* ★그 창에 판매행이 없는 옵션의 광고비. 예전 판은 이 돈을 손익에
+                            : "옵션 그레인(Billboard) · 아래 두 통 포함"} />
+                        {/* ★★구멍1 — 팔렸는데 손익에 못 들어간 옵션의 광고비. 예전 판에서
+                            이 돈은 **화면 어느 줄에도 없었다**(라이브 08-08 33,750원 = 계정
+                            총액의 4.2%). 아래 각주가 "차이의 대부분은 부분집합 제한"이라는
+                            말로 대신하고 있었는데, 말은 금액이 아니다. */}
+                        {adUncosted > 0 && (
+                          <PnlLine
+                            label="광고비 (원가 미상 옵션) — 위 손익에 미포함"
+                            value={won(p.ad_uncosted)}
+                            sub="이 옵션들은 매출도 손익에 안 들어갔습니다 — 비용만 빼면 이익이 거꾸로 위조됩니다. 아래 목록을 해소하면 위 줄로 옮겨갑니다" />
+                        )}
+                        {/* ★★구멍2 — 팔린 옵션이 «안 팔린 날»에 쓴 광고비. 원자는 판매행에서만
+                            나오고 ad_no_sales는 옵션 단위로 판정해서, 판정 그레인이 다른 그
+                            사이로 새던 돈이다(창 07-31~08-06 435,916원). 하루 창에선 0이다. */}
+                        {noSalesDays > 0 && (
+                          <PnlLine
+                            label={p.ad_no_sales_included
+                              ? "광고비 (팔린 옵션의 판매 없는 날)"
+                              : "광고비 (팔린 옵션의 판매 없는 날) — 위 손익에 미포함"}
+                            value={won(p.ad_no_sales_days)}
+                            sign={p.ad_no_sales_included ? "minus" : undefined}
+                            sub="그 옵션은 기간 안에 팔렸지만 광고를 쓴 그 날엔 판매행이 없습니다 — 귀속할 원자가 없는 돈입니다" />
+                        )}
+                        {/* ★구멍3 — 그 창에 판매행이 없는 옵션의 광고비. 예전 판은 이 돈을 손익에
                             한 번도 넣지 않으면서 화면에 보여주지도 않았다 — 라이브 282,794원이
                             통째로 사라졌고, basis='full'에서는 부호까지 뒤집혔다(적대 리뷰 P1). */}
                         {noSales > 0 && (
@@ -385,9 +418,10 @@ export default function Rocket1PRevenue() {
                             SellC에 원가를 등록하면 됩니다.{" "}</>
                         )}
                         {p.uncosted.excluded_skus > 0 && (
-                          <>이와 별개로 <b>「원가 제외」로 이미 결정된 SKU {p.uncosted.excluded_skus}개</b>가
-                            팔렸습니다(샘플·증정 등) — 위 목록에서 뺐고, 그래서 커버리지 100%는 위
-                            조치만으로는 달성되지 않습니다. <b>아래에 따로 적었습니다.</b>{" "}</>
+                          <>이와 별개로 <b>「원가 제외」로 찍힌 SKU {p.uncosted.excluded_skus}개</b>가
+                            팔렸습니다 — 위 목록에서 뺐고, 그래서 커버리지 100%는 위 조치만으로는
+                            달성되지 않습니다. <b>그중 일부는 «결정»이 아니라 자동 매핑 실패일 수
+                            있습니다</b> — 아래에 기록된 사유와 함께 따로 적었습니다.{" "}</>
                         )}
                         {blocked?.code === "promo_burden_unknown" && (
                           <><b>다만 지금 손익이 막힌 이유는 원가가 아니라 프로모션 제안서</b>입니다 —
@@ -458,13 +492,22 @@ export default function Rocket1PRevenue() {
                   {p.uncosted.excluded_top.length > 0 && (
                     <div className="border-t border-gray-100 px-4 py-3">
                       <div className="text-sm font-medium text-gray-700">
-                        「원가 제외」로 결정된 SKU {p.uncosted.excluded_skus}개가 팔렸습니다 ·
+                        「원가 제외」로 찍혀 있는 SKU {p.uncosted.excluded_skus}개가 팔렸습니다 ·
                         우리 매출 {won(p.uncosted.excluded_our_revenue)}
                       </div>
+                      {/* ★★"이미 결정된 것"이라고 **단정하지 않는다**(2026-08-09 실사고).
+                          prod의 `ignored` 22건이 전부 `note='no suggestion or low score'`,
+                          즉 «샘플·증정으로 결정»이 아니라 **이름 유사도 매칭이 실패한 것**을
+                          같은 status에 넣어 둔 것이었다(ref 47 §2). 화면이 그걸 결정이라
+                          부르며 "그냥 두세요"로 안내하면, 정상 판매 상품이 영영 손익 밖에 남는다.
+                          status가 두 의미를 겸하는 한 화면이 할 수 있는 정직한 일은
+                          **기록된 사유를 그대로 보여 주는 것**이다. */}
                       <p className="mt-0.5 text-xs text-gray-500">
-                        샘플·증정 등으로 <b>원가를 안 붙이기로 이미 결정한 것</b>이라 위 작업
-                        목록에서 뺐습니다. 다만 그 결정이 아직 맞는지는 <b>가끔 봐야 합니다</b> —
-                        정상 판매로 바뀐 게 섞여 있으면 그만큼 손익이 안 잡힙니다.
+                        원가를 안 붙이기로 표시돼 있어 위 작업 목록에서 뺐습니다. ★다만 이 표시는
+                        <b> 두 가지를 겸하고 있습니다</b> — 샘플·증정처럼 <b>실제로 결정한 것</b>과,
+                        자동 매핑이 후보를 못 찾아 <b>그냥 제외로 찍힌 것</b>. 오른쪽 「기록된 사유」를
+                        보고 가르세요(<code className="text-[11px]">no suggestion or low score</code>
+                        는 <b>결정이 아니라 매칭 실패</b>입니다 — 그건 이어주면 손익에 들어옵니다).
                         고치려면 「종합 조망」의 '원가 매핑 관리'에서 제외를 풀고 연결하세요.
                       </p>
                       <Table
@@ -473,6 +516,7 @@ export default function Rocket1PRevenue() {
                           <Th right>판매량</Th>
                           <Th right>우리 매출(납품가)</Th>
                           <Th right>소비자 매출</Th>
+                          <Th>기록된 사유</Th>
                         </>}
                       >
                         {p.uncosted.excluded_top.map((u) => (
@@ -487,6 +531,13 @@ export default function Rocket1PRevenue() {
                             <Td right>{num(u.qty)}</Td>
                             <Td right>{won(u.our_revenue)}</Td>
                             <Td right>{won(u.consumer_revenue)}</Td>
+                            <Td>
+                              {u.excluded_note
+                                ? <span className="text-xs text-gray-600">{u.excluded_note}</span>
+                                /* ★사유가 없으면 «사유 없음»이 아니라 «기록 안 됨»이다.
+                                   빈 칸으로 두면 «결정에 이유가 있었다»로 읽힌다. */
+                                : <span className="text-xs text-gray-400">사유 기록 없음</span>}
+                            </Td>
                           </tr>
                         ))}
                       </Table>
@@ -505,13 +556,40 @@ export default function Rocket1PRevenue() {
                     순이익 = 우리 매출 − 원가 − 프로모션 분담금 − 광고비 − 납부세액.
                     <b> 소비자 매출(쿠팡가)은 손익에 들어가지 않습니다</b> — 그건 쿠팡의 매출이지
                     우리 돈이 아닙니다.
+                    {/* ★★각주가 «대부분»으로 얼버무리지 않는다(2026-08-09). 옵션 광고 원장은
+                        네 통으로 **남김없이** 갈라지고 그 합이 원 단위로 맞는다 — 그래서
+                        여기 적힌 숫자를 더하면 실제로 원장 총액이 된다. 예전 문구는 구멍1을
+                        «부분집합 제한»이라는 말로만 가리켰고 구멍2는 아예 언급이 없었다. */}
+                    {/* ★★`included`면 두 통이 **이미 위 손익에서 빠졌다** — 그때도 그것들을
+                        「손익 밖에 남은 합」에 세면 같은 돈을 두 번 세는 것이고, 사다리의
+                        «−» 줄과 각주가 서로를 부정한다(적대 리뷰 P1-2. 투영 실측: 원장
+                        797,431 = 손익 797,431인데 각주가 "손익 밖 99,232원"이라 말했다).
+                        그래서 열거와 «남은 합»을 **같은 술어**로 가른다. */}
                     {p.ad_spend != null && (
-                      <> 위 「매출 두 축」의 광고비는 <b>계정 총액 {won(p.ad_account_total)}</b>인데
-                        이 사다리는 <b>{won(p.ad_spend)}</b>입니다 — 차이의 대부분은
-                        {partial ? " 위 부분집합 제한(원가 등록된 옵션만)" : " 그레인 차이"}이고,
-                        여기에 그 기간 판매 없는 옵션분 {won(p.ad_no_sales)}
-                        {p.ad_no_sales_included ? "(포함됨)" : "(미포함)"},
-                        그리고 Billboard(PA)와 report/SALES의 그레인 차이가 더해집니다.</>
+                      <> 옵션 광고 원장(Billboard) <b>{won(p.ad_option_total)}</b>은 네 통으로
+                        갈라집니다 — 위 손익에 들어간 <b>{won(p.ad_spend)}</b>
+                        {p.ad_no_sales_included && (noSalesDays > 0 || noSales > 0) && (
+                          <> (그 안에 팔린 옵션의 판매 없는 날 {won(p.ad_no_sales_days)}
+                            {" "}+ 판매행 없는 옵션 {won(p.ad_no_sales)} 포함)</>
+                        )}
+                        {adUncosted > 0 && <> + 원가 미상 옵션 {won(p.ad_uncosted)}</>}
+                        {!p.ad_no_sales_included && noSalesDays > 0 &&
+                          <> + 팔린 옵션의 판매 없는 날 {won(p.ad_no_sales_days)}</>}
+                        {!p.ad_no_sales_included && noSales > 0 &&
+                          <> + 판매행 없는 옵션 {won(p.ad_no_sales)}</>}
+                        .{" "}
+                        {outsidePnl > 0
+                          ? <>손익 밖에 남은 합이 <b>{won(String(outsidePnl))}</b>입니다
+                              {/* ★술어가 `!partial`이면 안 된다(2R 트리아지): 남은 돈에 구멍1이
+                                  섞여 있으면 「귀속할 판매가 없는 돈만」이 거짓이다. 판별자는
+                                  basis가 아니라 **구멍1이 0인가**다 — 그게 그 문장의 내용이다. */}
+                              {adUncosted === 0
+                                ? " (원가 결손은 없고, 귀속할 판매가 없는 돈만 남았습니다)"
+                                : ` (그중 ${won(p.ad_uncosted)}은 원가 미상이라 빠진 것이고, 아래 목록을 해소하면 손익에 들어옵니다)`}.</>
+                          : <b>손익 밖에 남은 광고비는 없습니다.</b>}
+                        {" "}계정 확정 광고비(report/SALES)는 {won(p.ad_account_total)}이고
+                        원장과의 차 {won(data.ad_reconciliation.diff)}은
+                        {" "}Billboard(PA)와의 <b>정의 차이</b>입니다(수집 결손이 아닙니다).</>
                     )}
                   </p>
                 </>
@@ -520,8 +598,14 @@ export default function Rocket1PRevenue() {
           </Card>
 
           {/* ── 일별 손익 (Jino 2026-08-07: "우리의 일일 손익을 보고 싶은거야") ──
-              ★일별 순이익의 합 = 위 손익 사다리 = 옵션별 표의 합. 셋 다 같은 「날짜×옵션」
-                원자를 다른 방향으로 접은 것이라 원 단위까지 같다. */}
+              ★일별 순이익의 합 = 옵션별 표의 합. 둘 다 같은 「날짜×옵션」 원자를 다른 방향으로
+                접은 것이라 원 단위까지 같다.
+              ★★**사다리 타일과는 `basis='full'`일 때 다르다**(2026-08-10 적대 리뷰 P2):
+                타일은 귀속 불가 광고비 두 통을 세후로 **추가 차감**하는데 그 차감은 날짜에
+                배분되지 않는다(배분하면 그 날 행의 산술이 깨진다). 라이브 실측 창 08-04~08-10에서
+                Σ일별 1,816,394.64 vs 타일 1,295,207.37 — 차 521,187.27원 = ad_folded×100/110.
+                종전 주석은 「셋 다 원 단위까지 같다」였고 그건 이 분기에서 거짓이다.
+                아래 각주가 그 차이를 금액으로 말한다 — 안 적으면 사용자가 합을 맞춰 보다 놀란다. */}
           {data.daily.length > 0 && (
             <Card
               title={`일별 손익 (${data.daily.length}일)`}
@@ -559,10 +643,33 @@ export default function Rocket1PRevenue() {
                 <br />
                 <b>1P는 판매수수료·배송비가 없습니다</b>(쿠팡 부담) — 그래서 그 열이 없습니다.
                 차감되는 비용은 원가·프로모션 분담금·광고비·납부세액 넷뿐입니다.
-                {data.daily.some((d) => Number(d.ad_no_sales) > 0) && (
-                  <> 광고비 열엔 <b>그날 판매가 없던 옵션의 광고비가 빠져 있습니다</b>
-                    (기간 합 {won(data.pnl.ad_no_sales)}) — 귀속할 판매가 없어 위 손익에
-                    섞지 않았지만 실제로 나간 돈입니다.</>
+                {/* ★제목·인과절이 **두 분기 모두에서 참**이라야 한다(2026-08-10 적대 리뷰 P1).
+                    첫 판은 「날짜에 못 붙는」이라 썼는데 그건 거짓이다 — 세 통 전부 `daily[]`에
+                    날짜별 값이 있고(바로 아래 표시조건이 그걸 읽는다), 못 싣는 진짜 이유는
+                    **이 열이 «원가 확인분» 축이라 더하면 그 행의 산술이 깨지는 것**이다.
+                    각주의 거짓말을 없애려던 수정이 같은 문장에 새 거짓말을 넣었었다. */}
+                {data.daily.some((d) => Number(d.ad_no_sales) + Number(d.ad_no_sales_days)
+                  + Number(d.ad_uncosted) > 0) && (
+                  <> 일별 광고비 열엔 <b>세 통이 빠져 있습니다</b>
+                    (기간 합 {won(data.pnl.ad_unattributed)} = 원가 미상 {won(data.pnl.ad_uncosted)}
+                    {" "}+ 팔린 옵션의 판매 없는 날 {won(data.pnl.ad_no_sales_days)}
+                    {" "}+ 판매행 없는 옵션 {won(data.pnl.ad_no_sales)}). 이 열은 <b>원가 확인분 축</b>
+                    이라 여기에 더하면 그 행의 산술이 깨집니다.{" "}
+                    {/* ★★`included`면 **뒤 두 통만** 기간 사다리에 이미 들어가 있다. `ad_uncosted`는
+                        어느 분기에서도 차감되지 않으므로 «이 셋은»으로 묶어 말하면 거짓이 된다
+                        (적대 리뷰 P2 — 엔진에서 그 조합은 오늘 안 나오지만 화면은 타입이 허용하는
+                        모든 응답에서 옳아야 한다). */}
+                    {/* ★false 분기도 **원인을 하나로 뭉뚱그리지 않는다**(2R 이월): 「귀속할 판매가
+                        없어」는 뒤 두 통에만 맞고 `ad_uncosted`엔 틀리다 — 그 옵션은 팔렸고 원가가
+                        미상이라 빠진 것이다. 세 통의 사유가 각각 다르므로 여기선 **사실만** 말하고
+                        사유는 각 사다리 줄의 sub가 말한다. */}
+                    {data.pnl.ad_no_sales_included
+                      ? <>뒤 두 통은 <b>기간 사다리 순이익에는 이미 차감돼 있습니다</b> — 그래서
+                        <b> 일별 순이익의 합이 위 사다리보다 {won(
+                          (Number(data.pnl.ad_no_sales_days) + Number(data.pnl.ad_no_sales))
+                          * 100 / 110)} 큽니다</b>(그 차감은 날짜에 배분되지 않습니다).</>
+                      : <>세 통 다 <b>위 손익에도 안 들어갔습니다</b> — 실제로 나간 돈입니다
+                        (사유는 위 사다리의 각 줄에 적혀 있습니다).</>}</>
                 )}
                 {" "}날짜가 빠진 날은 판매분석이 그날치를 아직 안 준 것이지 판매 0이 아닙니다.
               </p>

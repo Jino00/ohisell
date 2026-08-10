@@ -49,13 +49,22 @@ ATOM_LIMIT = 1_000_000
 # ★`ad_account_total`이 있는 이유: B3가 옵션 축(Billboard)과 계정 확정액(report/SALES)을
 #   나란히 놓는다. 사다리에 한쪽만 있으면 화면이 그 차이를 볼 수단이 없다.
 _LADDER_KEYS = ("basis", "qty", "revenue", "cost", "promo_burden", "ad_spend", "vat",
-                "net_profit", "profit_rate", "ad_no_sales", "ad_no_sales_included",
+                "net_profit", "profit_rate", "ad_no_sales", "ad_no_sales_days",
+                "ad_uncosted", "ad_unattributed", "ad_no_sales_included",
                 "ad_option_total", "ad_account_total",
                 "cost_coverage", "revenue_priced", "blocked")
 
 _PASS, _FAIL, _UNDET = "pass", "fail", "undetermined"
 
 _A6_LABEL = "창에 걸친 프로모션 전건에 할인액 원천"
+
+# ★A7의 좌변은 **네 통의 합**이다(2026-08-09). 종전 좌변은 「원자 광고비 + 무판매 옵션」
+#   둘뿐이라 「팔린 옵션의 판매 없는 날」이 어느 쪽에도 없어 **라이브에서 늘 fail**이었다
+#   (창 2026-07-31~08-06에 435,916원). 그때는 그걸 «관측된 결손»이라 부르고 fail로 두었는데,
+#   이번에 화면 SA가 그 통을 이름과 금액으로 내놓았으므로 검사도 그것을 좌변에 넣는다.
+#   ★즉 A7의 성격이 바뀌었다: 「결손이 있는가」가 아니라 **「원장이 남김없이 갈렸는가」**다.
+#     결손의 크기는 이제 fail이 아니라 `ad_unattributed`가 상시로 말한다.
+_A7_LABEL = "광고 원장 완결 (귀속분 + 손익밖 + 판매없는날 + 무판매옵션 = 옵션 광고비 합)"
 
 # A7의 모집단 크기 — **합계가 아니라 행 수**다. `ad_option_total`은 «행이 없다»와 «0원 썼다»를
 # 둘 다 "0"으로 내므로 그것만으로는 가를 수 없다. 조건(vendor·Retail·창)은 화면 SA가 옵션
@@ -198,16 +207,25 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
             checks.append(_check(cid, label, None, None, verdict=_UNDET,
                                  note=f"손익이 없어 검사 대상이 없습니다 — {reason}"))
     else:
-        # ★사다리는 basis='full'일 때 «판매 없는 옵션 광고비»를 세후로 추가 차감하는데,
+        # ★사다리는 basis='full'일 때 «귀속 불가능한 광고비»를 세후로 추가 차감하는데,
         #   일별·옵션별 폴드에는 그 차감이 없다(귀속할 날·옵션이 없는 돈이라서). 비교하려면
         #   우변에 그 차감을 되돌린다 — 이건 재계산이 아니라 응답이 공개한 값의 역산이다.
         #   (평상시엔 included=False라 adj=0이다.)
-        adj = (_money(Decimal(p["ad_no_sales"]) * Decimal("100") / Decimal("110"))
+        # ★★**두 통이다**(2026-08-09 적대 리뷰 P1-1). 엔진이 접는 대상을
+        #   `ad_no_sales` → `ad_no_sales_days + ad_no_sales`로 넓혔는데 여기만 한 통이면
+        #   A1·A2가 **basis='full'인 다일 창에서 fail**한다 — 즉 «커버리지 100%»라는
+        #   목표를 달성하는 순간 검사가 깨진다. 라이브 투영 실측: 창 08-02~08-08에서
+        #   diff 351,520원. 접는 대상이 갈라진 것이 원인이므로 두 곳이 **같은 식**을 써야 한다.
+        # ★`_money`는 **합에 한 번** 건다 — 엔진(`pnl_net_total`)과 반올림 지점이 같아야
+        #   역산이 정확히 되돌아온다. 통별로 반올림하면 끝자리가 어긋난다.
+        adj = (_money((Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"]))
+                      * Decimal("100") / Decimal("110"))
                if p["ad_no_sales_included"] else ZERO)
         folds_net = net + adj
         adj_note = (None if adj == ZERO else
-                    f"사다리는 판매 없는 옵션 광고비 세후 {adj}원을 추가 차감(basis=full) — "
-                    "우변에 되더해 비교. ")
+                    f"사다리는 귀속 불가 광고비(팔린 옵션의 판매 없는 날 "
+                    f"{p['ad_no_sales_days']}원 + 판매행 없는 옵션 {p['ad_no_sales']}원)를 "
+                    f"세후 {adj}원으로 추가 차감(basis=full) — 우변에 되더해 비교. ")
         fold_note = (adj_note or "") + _IDENTITY_NOTE
         daily_sum = sum((Decimal(d["net_profit"]) for d in r["daily"]
                          if d["net_profit"] is not None), ZERO)
@@ -322,13 +340,16 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
     #       «둘 다 안 썼다»와 «둘 다 수집이 비었다»가 또 같은 모양이기 때문이다. 그래서 계정
     #       축은 판정자가 아니라 note의 근거로만 쓴다.
     if not all_options:
-        checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
+        checks.append(_check("A7", _A7_LABEL,
                              None, None, verdict=_UNDET,
                              note="옵션 표가 잘려 합을 낼 수 없습니다"))
     else:
+        # ★`atoms_ad`는 **귀속분 + 손익밖** 둘을 이미 합친 값이다 — 옵션 행의 `ad_spend`는
+        #   손익 포함 여부와 무관하게 그 옵션의 원자 광고비를 다 더한 것이라서다. 그래서
+        #   좌변에 `ad_uncosted`를 또 더하면 **이중계상**이 된다(테스트가 이 함정을 지킨다).
         atoms_ad = sum((Decimal(o["ad_spend"]) for o in r["options"]
                         if o["ad_spend"] is not None), ZERO)
-        left = atoms_ad + Decimal(p["ad_no_sales"])
+        left = atoms_ad + Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"])
         right = Decimal(p["ad_option_total"])
         ad_rows = int(db.execute(text(_AD_OPTION_ROW_COUNT_SQL), {
             "vendor": vendor, "since": date_from.isoformat(), "until": date_to.isoformat(),
@@ -341,23 +362,27 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
                 note += (f" ★계정 확정 광고비는 {p['ad_account_total']}원이 있습니다 — "
                          "즉 안 쓴 것이 아니라 **옵션 축(Billboard)이 비어 있는** 상태이고, "
                          "그러면 사다리의 광고비도 그만큼 작습니다(B3 참조).")
-            checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
+            checks.append(_check("A7", _A7_LABEL,
                                  left, right, verdict=_UNDET, note=note))
         elif not c["sales_data_covered"]:
-            checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
+            checks.append(_check("A7", _A7_LABEL,
                                  left, right, verdict=_UNDET,
                                  note="판매분석 미수집 창 — 원자가 없어 옵션 광고비 전액이 "
                                       "«판매 없는 옵션»으로 분류되므로 등식이 저절로 "
                                       "성립합니다. 귀속이 맞아서가 아니라 비교할 판매가 "
                                       "없어서라, 통과로 치지 않습니다."))
         else:
-            checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
+            checks.append(_check("A7", _A7_LABEL,
                                  left, right, verdict=_verdict(left == right),
-                                 note="차이 = 창 안에 판매행이 있는 옵션이 «판매 없는 날»에 쓴 "
-                                      "광고비 — 원자에도 ad_no_sales에도 귀속되지 않습니다"
-                                      "(실측 2026-08-07, 창 2026-07-31~08-06 기준 435,916원. "
-                                      "★이 지표는 창마다 값이 달라 창을 밝히지 않고 인용하면 "
-                                      "안 됩니다). fail은 검사 오류가 아니라 실제 결손 관측입니다."))
+                                 note="옵션 광고 원장이 네 통(손익 귀속분·손익밖·팔린 옵션의 "
+                                      "판매 없는 날·판매행 없는 옵션)으로 남김없이 갈렸는지 "
+                                      "봅니다. 2026-08-09 이전에는 셋째 통이 어느 쪽에도 없어 "
+                                      "이 검사가 상시 fail이었습니다(창 2026-07-31~08-06 기준 "
+                                      "435,916원). 지금 fail이면 그건 **새로 생긴 다섯째 경로**"
+                                      "라는 뜻이라 검사 자체를 의심해야 합니다. ★손익 밖에 남은 "
+                                      f"금액은 이제 ad_unattributed({p['ad_unattributed']}원)가 "
+                                      "상시로 말합니다 — 창마다 값이 달라 창을 밝히지 않고 "
+                                      "인용하면 안 됩니다."))
 
     # ── B1 — 두 축 대사. **절대 pass로 칠하지 않는다** ─────────────────
     checks.append(_check("B1", "두 축 대사 (계산서 ↔ 판매)",

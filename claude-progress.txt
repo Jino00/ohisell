@@ -14,10 +14,50 @@
     `invalid-signature`·`Signature '' is invalid` — **임시 스크립트가 `.env`를 로드하지 않아
     서명이 빈 문자열**이었다(집행 스크립트는 `app.database` import로 로드돼 성공).
     수집 경로는 멀쩡했다. 판별자 = 403 본문의 `type`. failures.jsonl 기록.
+  · ★**내가 어제 고친 오귀속을 오늘 새로 만들었다**(교훈 #196): change_log에 `manual_loss_stop`
+    이라는 **새 action 이름을 지어냈고** 값도 `"userLock=True (paused)"`로 써서, 주체 판정의
+    `OURS_ACTIONS_BY_AXIS`·`axis_value` 둘 다 통과 못 했다 → 다음 감사에서 「대행사 조작」으로
+    잡혔을 것. 발견은 **우연**(낯선 커밋 확인 중). 수리 = action `set_user_lock` + 값
+    `{"userLock": true}`로 교정, **코드 변경 0**. 라이브 재검증 `by_actor {ours:2, agency:0}`.
+  · ⚠️번호 충돌: 교훈 #189를 다른 세션이 먼저 써서 내 것을 **#195**로 재부여(main이 트렁크).
   · **남은 Jino 결정 3건**: ①TPU 캠페인(계정 44.3%·9일 −337,659) ④03 일예산 원복
     ⑤**대행사 통보 여부**(정지한 둘이 대행사 캠페인 — 07-30 되살림 선례).
 
-[2026-08-10 06:3x] 대행사 운영 평가(정지 10일) + ★계정 광고비 2배 오집계 정정 (교훈 #189)
+[2026-08-10 08:5x] prod nginx — index.html 캐시 금지 (Jino 승인, 교훈 #194)
+  · 계기: 07:4x에 프론트 배포가 정상인데 화면만 옛 문구라 「배포 실패」로 오독할 뻔했다.
+    sellc nginx에 index.html 전용 Cache-Control이 없어 브라우저가 옛 index.html→옛 번들을 붙들었다
+  · ★★**참조한 os.ohitech.co.kr 블록을 그대로 복사하면 안 됐다** — 거기엔 allowlist가 없는데
+    sellc의 location /에는 있다. try_files의 /index.html 폴백은 **내부 리다이렉트라 location
+    매칭을 다시 하므로**, allowlist를 빼면 **모든 SPA 경로가 IP 차단을 우회**한다
+    = 2026-07-17에 막은 공개 노출(익명 쓰기 112개)이 캐시 헤더 한 줄 때문에 되살아난다
+  · 적용: `location = /index.html`에 allowlist include + no-store/no-cache/must-revalidate + Pragma.
+    assets/*는 콘텐츠 해시라 **건드리지 않음**(os는 JS/CSS도 no-store하는데 그러면 매번 다시 받는다).
+    expires 지시자 미사용(add_header와 겹치면 Cache-Control이 두 줄)
+  · **검증**: ①차단 대상 127.0.0.1에서 / · /index.html · /rocket-1p-revenue · /assets/*.js ·
+    /api/health **전부 403**(우회 없음) ②헤더 한 줄로 정상, 해시 번들엔 헤더 없음
+    ③**하드 리프레시 없이** 새 번들을 집었고 PR #264 새 각주가 그대로 떴다
+  · 백업 `/etc/nginx/sites-available/sellc.ohitech.co.kr.bak-20260809-235449` · nginx -t 후 무중단 reload
+  · 상세: docs/tracks/active/track_coupang-promo-pnl.md D-CPP-28 후속
+
+[2026-08-10 07:4x] `ignored` 22건 전건 해소 → 라이브 최초 basis='full' · 일별 각주 교정 (D-CPP-28 후속, PR #264)
+  · 계기: Jino "나머지 15건 중 다리 있는 6건도 연결해줘" → "10건도 다 넣어줘"(51606930은 S10울트라 전용 지정)
+  · **+16건 연결로 `status='ignored'` 0건**. 6건=코드 다리(판정기 conflicts_bridge=[]) ·
+    10건=이름 정확일치(워치 스트랩 8·트라이폴드·탭S10울트라). ★스트랩은 소재별 원가 동일이라
+    색 판정이 틀려도 원가값 불변 · 51606930은 후보 둘 다 5,892.7로 손익 차이 없음
+  · **라이브 4창 전부 cost_coverage=1.0000 · basis=full · 사다리 광고비 = 옵션 원장 전액 · A1~A7 pass**
+  · ★★**basis='full'인 다일 창이 라이브에 처음 생겼다** — 그 자리가 적대 리뷰 P1-1이 지목했던 곳이고,
+    안 고쳤으면 세 창 모두 A1·A2가 fail이었다(교훈 #192: 도달 불가 분기 = 아직 안 본 분기)
+  · ★순이익이 내려간다: 08-01~07 이익률 12.03%→8.52%. 나빠진 게 아니라 **안 빼던 광고비를 이제 뺀다**
+  · PR #264 — 일별 각주가 full에서 사다리를 부정하던 것 교정 + Σ일별이 타일보다 큰 금액(521,187원)을
+    화면이 숫자로 말하게. 적대 2R GATE PASS · 변이 12종 전건 KILLED
+  · ★1R P1: 내가 원인을 **「붙일 날짜가 없어서」로 지어냈다** — 날짜별 값은 다 있었고(내가 넣었다)
+    진짜 이유는 그 열이 「원가 확인분」 축이라는 것(교훈 #193)
+  · ⚠️**발견**: prod nginx가 sellc의 index.html에 캐시 지시를 안 준다 → 배포 후에도 브라우저가
+    옛 번들을 쓴다(내가 직접 당했고 «배포 실패»로 오독할 뻔했다). 같은 서버 os.ohitech.co.kr엔
+    이미 no-store 블록이 있다 → 복제하면 되나 **prod 웹서버 설정이라 Jino 승인 대기**
+  · 상세: docs/tracks/active/track_coupang-promo-pnl.md D-CPP-28 후속
+
+[2026-08-10 06:3x] 대행사 운영 평가(정지 10일) + ★계정 광고비 2배 오집계 정정 (교훈 #195)
   · 계기: Jino "PAO가 광고 운영을 멈춘 후에 대행사가 광고 운영을 한 내용에 대해서 평가를 해봐".
   · ★**착수하자마자 어제 내 숫자가 2배임이 드러났다** — `keyword_id=''` 필터가 파워링크 중복은
     막지만 쇼핑의 `__backfill__` sentinel(=/stats 캠페인 총계)과 그룹 상세를 함께 더한다.
@@ -44,8 +84,33 @@
   · 곁가지: SQLite `HAVING <별칭>`이 원시 컬럼으로 해석돼 광고그룹 3개를 조용히 삼켰다
     (전환 0인 86,319원짜리 포함) → `HAVING SUM(cost)>0`. 전환 성숙도는 D+1 이후 불변(편향 없음).
   · 산출: 메모리 토픽 **`naver-ad-daily-aggregation-rule`** 신설(전제와 검산식을 함께 둠) ·
-    HANDOFF §5 전면 정정 · 교훈 #189 · failures.jsonl 1줄. **Jino 결정 대기 4건**(TPU·컨텐츠매체·
+    HANDOFF §5 전면 정정 · 교훈 #195(최초 #189 → 번호 충돌로 재부여) · failures.jsonl 1줄. **Jino 결정 대기 4건**(TPU·컨텐츠매체·
     폴드8울트라_사생활·03 예산). ⚠️`next_ids.sh`가 #186을 줬으나 실제 최댓값은 #188(정규식 결함 재확인).
+
+[2026-08-09 23:5x] 로켓1P 광고 원장 «네 통» 완결 + 원가 링크 7건 (D-CPP-28, PR #262 병합·prod 배포·라이브 합격)
+  · 계기: Jino "1.광고비가 실제보다 적게 계산돼 2.원가 안붙은 SKU 3.「원가 제외」 6개가 팔림 — 모두 해결"
+  · **세 문제가 한 뿌리**: ①은 ②③의 귀결이고, ③은 «결정»이 아니었다
+  · ★광고 원장이 네 통으로 갈리는데 **두 통이 화면에 한 줄도 없었다**:
+      구멍1 판매O·손익밖 33,750원(08-08) · 구멍2 팔린 옵션의 판매 없는 날 435,916원(07-31~08-06)
+    샌 이유 = 판정 그레인 불일치(`pnl_ad`=(날짜×옵션) vs `ad_no_sales`=(옵션)) → 교훈 #189
+  · ★`ignored` 22건 **전부** note='no suggestion or low score'·created_at 초단위 = 2026-06-17
+    일괄매핑의 **매칭 실패**를 제외로 찍은 것. 화면은 "이미 결정했으니 그냥 두세요"라 안내했다
+    → `excluded_note`를 그대로 보여주고 단정 제거(파싱해 판정하지는 않는다)
+  · ★근거화면 A7이 **상시 fail → pass**. 성격이 「결손이 있는가」→「원장이 남김없이 갈렸는가」로
+    바뀌었고 결손 크기는 `ad_unattributed`가 상시로 말한다 (교훈 #190)
+  · 데이터: 원가 링크 7건 연결(Jino 승인). 6건=코드 다리(ch5 externalVendorSku 정확일치,
+    D-CPP-27 판정기로 conflicts_bridge=[] 2차 확인) · 1건=이름 정확일치(워치 스트랩 그레이)
+  · **라이브 합격(prod, 창 08-08)**: cost_coverage 0.9483→**1.0000** · basis costed_subset→**full**
+    · 사다리 광고비 664,449→**797,431원 = 원장 전액** · 네 통 합 원단위 일치 · uncosted.skus=0
+    · 근거화면 **A1~A7 전건 pass**(3창) · A1~A3 차이 0.00/0.00/0E-12(full 창 포함)
+  · 리뷰: 적대 2라운드 GATE PASS. **1R P1 2건이 둘 다 «합격기준 달성 순간 터지는» 결함**
+    (A1·A2가 full 창에서 fail / 각주가 사다리를 부정). 생존 변이 6종 전부 «0인 값만 검사» (교훈 #191)
+  · 부수: `next_ids.sh` 정규식 3번째 형식 미대응 수리(#186을 줬는데 실제 최대 188) ·
+    ★`npx tsc --noEmit`은 이 repo에서 **아무것도 검사 안 한다**(files:[]+references) → `tsc -b`
+  · 이월: `ignored` status 3값화 스키마 · 나머지 15건 데이터(Jino "별도로 보자") ·
+    일별 축은 «광고만 쓴 날»을 표현 못 함(기간 타일은 정확) · `ad_uncosted` 라벨 vs 판별자 어긋남
+  · 상세: docs/tracks/active/track_coupang-promo-pnl.md D-CPP-28
+
 
 [2026-08-09 22:2x] 로켓1P 원가 링크 «대상» 전수 감사 — 판정기 + ref 52 (D-CPP-27, PR #260)
   · 계기: 원가 링크 172건이 `match_method='suggested'` — 이름이 비슷하다는 이유로 붙은 것.
