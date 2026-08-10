@@ -53,7 +53,7 @@ PAO의 안전 봉투를 **코드 상수 → DB로 조절 가능한 근거 있는
   `scripts/safe_deploy.sh backend/app/services/naver_ad/guardrail_params.py backend/app/services/naver_ad/guardrail_gate.py backend/app/services/naver_ad/naver_execution_harness.py backend/app/services/naver_ad/auto_operator.py backend/app/models.py backend/app/routers/naver_ad.py --restart`
 - [ ] **라이브 합격기준**(정지 상태에서도 관측 가능 — 레인이 아니라 **현황판 API**로 본다):
   ① KV에 테스트 값 투입 → 현황판이 `출처=DB`로 표시 → KV 삭제 → `출처=코드상수` 복귀
-  ② 현황판에 4개 값·출처·근거가 전부 표시
+  ② 현황판에 **3개**(cooldown_hours·max_daily_auto_bid_downs·max_auto_up_multiple) 값·출처·근거가 전부 표시
   ③ 소급채점 신선도 표시(현재 정상이라 stale 배너는 안 뜬다 — 인위적으로 확인하려면 `naver_retro_signal` 최신일을 임시로 뒤로 미뤄야 하는데 **권장하지 않는다**. 코드 경로는 단위 테스트로 덮여 있다)
   ④ PUT 400 메시지가 화면에 그대로 뜨는지(범위 밖 값으로)
 - [ ] 교훈 기재(**#216~#218 확인 후** 다음 번호로) — 후보: 「집계 전에 원문 표본을 눈으로 보라(분류 라벨을 먼저 믿지 않는다)」 · 「같은 값이 두 곳에서 계산되면 파라미터화는 정합 장치다」
