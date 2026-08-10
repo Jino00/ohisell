@@ -90,7 +90,10 @@ def test_net_profit_d3_formula(db):
     assert s["cost"] == Decimal("2000")
     assert s["net_profit_pre_rg"] == Decimal("8000")   # 10,000 − 2,000 (정산 전)
     assert s["rg_settlement_total"] == Decimal("800")
-    assert s["net_profit"] == Decimal("7200")          # 전액차감
+    # D-CPP-33: 납부세액 = 매출VAT(10,000×10/110=909.09) − 매입세액(원가 2,000×10/110=181.82)
+    #           = 727.27 → net = 7,200 − 727.27
+    assert s["payable_vat"] == Decimal("727.27")
+    assert s["net_profit"] == Decimal("6472.73")       # 전액차감 후 납부세액까지
 
 
 def test_3p_plus_rg_combined(db):

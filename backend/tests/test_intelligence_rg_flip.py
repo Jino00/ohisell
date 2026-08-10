@@ -133,7 +133,8 @@ def test_t4_xlsx_3p_ad_plus_rg(db):
     s = _cc(db)["account"]["summary"]
     assert s["net_profit_pre_rg"] == Decimal("-250")    # 윙 광고비(XLSX) 반영
     assert s["rg_settlement_total"] == Decimal("200")
-    assert s["net_profit"] == Decimal("-450")           # −250 − 200
+    # D-CPP-33: 그 뒤 납부세액이 붙는다. 매출 0 → 매입세액(광고 250)×10/110=22.73 환급
+    assert s["net_profit"] == Decimal("-427.27")        # −250 − 200 + 22.73
 
 
 # ─── 7) [t5] RG 광고 전액 차감 — 광고센터 미포함이라 이중계상 없음 ──
@@ -149,7 +150,8 @@ def test_t5_rg_ad_fully_deducted_no_xlsx_overlap(db):
     assert s["net_profit_pre_rg"] == Decimal("-250")    # 윙 광고만(XLSX)
     assert s["rg_settlement_total"] == Decimal("800")   # RG 광고 500 + 수수료 300
     assert s["rg_ad_settlement"] == Decimal("500")
-    assert s["net_profit"] == Decimal("-1050")          # −250 − 800 (RG 광고도 차감)
+    # D-CPP-33: 매입세액(광고 250)×10/110=22.73 환급. RG 정산액은 VAT 계산 밖(구 대시보드와 동일 기준)
+    assert s["net_profit"] == Decimal("-1027.27")       # −250 − 800 + 22.73
 
 
 # ─── 8) [D3] 브리지 필드 + 등식 ──────────────────────────────
@@ -181,7 +183,11 @@ def test_regression_no_rg_data_unchanged(db):
     s = _cc(db)["account"]["summary"]
     assert s["rg_settlement_total"] == _Z
     assert s["net_profit_pre_rg"] == Decimal("-320")
-    assert s["net_profit"] == Decimal("-320")           # IRON RULE: 기존 동작 보존
+    # IRON RULE: RG 데이터 0이면 «플립»은 no-op이어야 한다. D-CPP-33 이후 net_profit엔 납부세액이
+    # 더 붙으므로 절대값이 아니라 «플립이 아무것도 안 했다»를 직접 단언한다(불변식 보존).
+    assert s["net_profit_pre_shipping"] == s["net_profit_pre_rg"], "RG 플립 no-op"
+    assert s["net_profit"] == s["net_profit_pre_vat"] - s["payable_vat"]
+    assert s["net_profit"] == Decimal("-290.91")        # −320 + 매입세액 환급 29.09
     assert s["rg_flip_status"] == "not_applied_no_data"
 
 

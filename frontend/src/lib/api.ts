@@ -718,6 +718,16 @@ export interface OverviewResponse {
         refunded_lines_skipped?: number;
       };
       fee_base_clamped_options?: number;
+      // D-CPP-33: 배송 수입(순이익에만 반영·매출 축 불변) · 납부세액 · 반품 억제 실토
+      seller_shipping_3p?: string;
+      shipping_income_3p?: string;
+      shipment_count_3p?: number;
+      payable_vat?: string;
+      net_profit_pre_vat?: string;
+      return_suppression?: {
+        return_rows: number; deducted_rows: number;
+        suppressed_excluded_rows: number; suppressed_orphan_rows: number;
+      };
       // S3/S7(정합성 트랙): 매출 분해 — 쿠팡 판매분석 수동 대조용. revenue = revenue_3p + revenue_rg.
       revenue_3p?: string;            // 마켓플레이스(Wing) 3P 매출
       revenue_rg?: string;            // 로켓그로스 매출(gross·취소 미차감, D-11)

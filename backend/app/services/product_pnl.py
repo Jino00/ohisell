@@ -329,6 +329,10 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
             "account_only_ad_nonpa": -cc_sum["ad_nonpa_deducted"],
             "rg_settlement_flip": -cc_sum["rg_settlement_total"],
             "seller_shipping_3p": -cc_sum["seller_shipping_3p"],
+            # D-CPP-33에서 새로 계정 단위로 붙은 둘. 원장에 안 실으면 보존식이 깨진다
+            # (실제로 test_whole_ledger_conservation이 이 누락을 잡았다).
+            "shipping_income_3p": cc_sum["shipping_income_3p"],
+            "payable_vat": -cc_sum["payable_vat"],
         },
     ))
 

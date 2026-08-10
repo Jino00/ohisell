@@ -848,9 +848,15 @@ function AccountView({
           label="순이익"
           value={won(s.net_profit)}
           sub={
-            s.rg_flip_status === "applied_full"
-              ? `플립전 ${won(s.net_profit_pre_rg ?? "0")} − RG정산 ${won(s.rg_settlement_total ?? "0")}(전액)`
-              : "매출−반품−수수료−광고−원가 (RG 정산 데이터 없음)"
+            // D-CPP-33: 배송수입·납부세액이 순이익에 들어왔다. 옛 문구("매출−반품−수수료−광고−원가")는
+            // 이제 사실이 아니라 그대로 두면 화면이 거짓말을 한다.
+            [
+              s.rg_flip_status === "applied_full"
+                ? `RG정산 −${won(s.rg_settlement_total ?? "0")}(전액)`
+                : "RG 정산 데이터 없음",
+              `배송 ${won(s.shipping_income_3p ?? "0")}수입 −${won(s.seller_shipping_3p ?? "0")}비용`,
+              `납부세액 −${won(s.payable_vat ?? "0")}`,
+            ].join(" · ")
           }
         />
       </div>
