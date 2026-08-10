@@ -305,3 +305,51 @@ def test_payable_vat_is_deducted_like_the_other_engine(db):
     #   매출VAT 1,000 − 매입VAT (943.80+1,900)×10/110=258.53 → 납부세액 741.47
     assert s["payable_vat"] == Decimal("741.47")
     assert s["net_profit_pre_vat"] - s["payable_vat"] == s["net_profit"]
+
+
+def test_return_facts_survive_the_deduction_suppression(db):
+    """★적대 리뷰 P1-1: 억제는 «돈 축»만 죽여야 한다 — 사실 축은 살아 있어야 한다.
+
+    첫 구현은 억제를 _agg_returns 집계 자체에 걸어서, 라이브 90일 반품 53건·56개가 있는데도
+    화면이 「반품 0건 · 반품률 0%」라고 말했다. 화면이 사실을 두고 거짓말한 것이다.
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _order(db, 1, "O1", "V1", 10000)
+    _return(db, "COUPANG_WING1", "V1", 1, "R9")          # 고아 — 차감 대상 아님
+    db.commit()
+    r = _sum(db, "COUPANG_WING1")
+    s = r["account"]["summary"]
+    p = r["product"]["summary"]
+    row = next(x for x in r["product"]["by_option"] if x["vendor_item_id"] == "V1")
+
+    assert s["return_deduction"] == _Z, "돈은 빼지 않는다(매출에 없는 주문)"
+    assert p["return_qty"] == 1, "★그러나 반품이 «있었다»는 사실은 남아야 한다"
+    assert row["return_qty"] == 1
+    assert row["deductible_qty"] == 0, "그중 손익에 반영된 수량은 0"
+    assert row["return_rate"] is not None and Decimal(str(row["return_rate"])) > 0
+
+
+def test_shipment_dedup_counts_income_once_per_box(db):
+    """배송 수입은 «배송 1건당 1회»다 — 쿠팡이 배송 단위 값을 박스 내 모든 라인에 복사한다.
+
+    라인마다 더하면 다중라인 주문에서 과대계상된다(2026-08-03 실증). 비용 dedup에는 테스트가
+    있었지만 수입 쪽엔 없어 적대 리뷰 P2-2로 지적됐다 — 변이(dedup 제거)가 생존했다.
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _product(db, "V2", "COUPANG_WING1")
+    # 같은 배송박스(shipmentBoxId)의 두 라인에 배송비 2,500이 복사돼 있다.
+    # ★쿠팡의 배송 단위는 order_number가 아니라 shipmentBoxId다(_shipment_key) — 없으면
+    #   행별 고유 sentinel로 떨어져 서로 다른 주문이 한 배송으로 합쳐지는 것을 막는다.
+    for i, vid in enumerate(("V1", "V2")):
+        db.add(Order(channel_id=1, order_number="O1", platform_product_id=vid, quantity=1,
+                     platform_order_line_id=str(i),
+                     selling_price=Decimal("10000"), shipping_cost=Decimal("2500"),
+                     order_date=OD, status="delivered",
+                     raw_data='{"shipmentBoxId": "BOX1"}'))
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    assert s["shipment_count_3p"] == 1, "배송은 1건"
+    assert s["shipping_income_3p"] == Decimal("2500"), "5,000이면 라인마다 더한 것(과대계상)"
+    assert s["seller_shipping_3p"] == Decimal("1900"), "비용도 배송 1건분"

@@ -854,8 +854,12 @@ function AccountView({
               s.rg_flip_status === "applied_full"
                 ? `RG정산 −${won(s.rg_settlement_total ?? "0")}(전액)`
                 : "RG 정산 데이터 없음",
-              `배송 ${won(s.shipping_income_3p ?? "0")}수입 −${won(s.seller_shipping_3p ?? "0")}비용`,
-              `납부세액 −${won(s.payable_vat ?? "0")}`,
+              `배송 수입 +${won(s.shipping_income_3p ?? "0")} / 비용 −${won(s.seller_shipping_3p ?? "0")}`,
+              // ★납부세액은 «음수»(매입세액 환급)가 될 수 있다 — 매출이 없고 비용만 있는 창에서
+              //   실제로 그렇다. 부호를 앞에 박아 두면 「−−15원」이 찍힌다(적대 리뷰 P2-6).
+              Number(s.payable_vat ?? "0") < 0
+                ? `부가세 환급 +${won(String(Math.abs(Number(s.payable_vat ?? "0"))))}`
+                : `납부세액 −${won(s.payable_vat ?? "0")}`,
             ].join(" · ")
           }
         />

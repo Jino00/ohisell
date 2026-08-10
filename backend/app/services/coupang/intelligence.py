@@ -454,15 +454,28 @@ def _agg_returns(db: Session, dfrom: date, dto: date,
     )
     if channel_ids is not None:
         counted_q = counted_q.filter(Order.channel_id.in_(channel_ids))
-    q = q.filter(counted_q.exists())
-    rows = q.group_by(CoupangReturnItem.vendor_item_id).all()
+
+    # ★★적대 리뷰 P1-1 수용(2026-08-10): 억제를 여기서 «통째로» 걸면 사실 축까지 죽는다.
+    #   이 SA는 돈(return_deduction)만이 아니라 **사실**(return_qty·receipt_count·return_rate)의
+    #   유일한 원천이다. 첫 구현은 억제된 행을 집계에서 아예 빼서, 라이브 90일 반품 53건·56개가
+    #   있는데도 화면이 「반품 0건 · 반품률 0%」라고 말했다 — 화면이 사실을 두고 거짓말한 것이다.
+    #   → 사실은 «전부» 세고(억제 없음), 차감에 쓸 수량만 따로 센다(deductible_qty).
+    #   호출부는 return_deduction·net_qty엔 deductible_qty를, 표시엔 return_qty를 쓴다.
+    fact_rows = q.group_by(CoupangReturnItem.vendor_item_id).all()
+    ded_rows = (
+        q.filter(counted_q.exists())
+        .group_by(CoupangReturnItem.vendor_item_id)
+        .all()
+    )
+    deductible = {str(vid): int(cancel or 0) for vid, cancel, _cnt, _name in ded_rows}
     return {
         str(vid): {
-            "return_qty": int(cancel or 0),
-            "receipt_count": int(cnt or 0),
+            "return_qty": int(cancel or 0),          # 사실 — 억제 없음
+            "receipt_count": int(cnt or 0),          # 사실 — 억제 없음
+            "deductible_qty": deductible.get(str(vid), 0),  # 돈 — 매출에 잡힌 주문의 반품만
             "name": name,
         }
-        for vid, cancel, cnt, name in rows
+        for vid, cancel, cnt, name in fact_rows
     }
 
 
@@ -815,8 +828,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         revenue = o.get("revenue", _Z)
         order_qty = o.get("qty", 0)
         unit_price = o.get("unit_price", _Z) or m.get("sale_price", _Z)
-        return_qty = r.get("return_qty", 0)
-        return_deduction = unit_price * return_qty  # 추정(평균단가×반품수량)
+        return_qty = r.get("return_qty", 0)                 # 사실(표시용) — 고아·매출제외 포함
+        deductible_qty = r.get("deductible_qty", 0)         # 돈(차감용) — 매출에 잡힌 것만
+        return_deduction = unit_price * deductible_qty  # 추정(평균단가×차감대상수량)
         unit_price_by_vid[vid] = unit_price  # S4: 정산화 보정의 반품 되돌림용(동일 단가)
         # ── 수수료: 순매출 × 그 옵션의 요율 × 1.1 (D-CPP-32) ──
         # 순매출인 이유: 반품분은 쿠팡이 수수료도 환급한다(정산에 REFUND 음수 행). 총매출에 곱하면
@@ -851,7 +865,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         # 단가는 순판매수량(주문−반품)에 적용. 0/None은 원가정보 없음으로 간주(미반영).
         internal_cost = cm.get("cost_price")
         supply = m.get("supply_price")
-        net_qty = order_qty - return_qty
+        # 원가도 «돈 축»을 따른다 — 고아 반품은 그 주문 수량이 order_qty에 애초에 없으므로
+        # 빼면 없는 수량을 두 번 빼는 셈이 된다.
+        net_qty = order_qty - deductible_qty
         if internal_cost is not None and internal_cost > 0:
             unit_cost, cost_source = _f(internal_cost), "internal"
         elif supply is not None and supply > 0:
@@ -894,7 +910,8 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         product_rows.append({
             "vendor_item_id": vid, "name": name,
             "order_count": o.get("order_count", 0), "order_qty": order_qty,
-            "return_qty": return_qty,
+            "return_qty": return_qty,                       # 사실
+            "deductible_qty": deductible_qty,                # 그중 손익에 반영된 수량
             "return_rate": _ratio(Decimal(return_qty), order_qty),
             "stock": m.get("stock"), "on_sale": m.get("on_sale"),
             "status_name": m.get("status_name"),
@@ -1074,8 +1091,13 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # 매출VAT − 매입세액공제. 구 대시보드(profit_calculator)는 2026-08-04부터 이걸 빼 왔고
     # 종합조망만 안 빼서 두 화면이 갈렸다(라이브 7월 WING2 실측 차 32,262.96원 = 이 항목).
     # 매입세액에 넣는 것: 원가·수수료·배송비·광고비 — 넷 다 VAT 포함 축(payable_vat docstring).
-    # ★RG 정산액은 넣지 않는다 — 구 대시보드도 RG를 VAT 계산 밖(라우터에서 사후 차감)에 두므로
-    #   같은 기준을 유지한다. 배송 «수입»은 매출VAT 쪽에 더한다(구 대시보드의 shipping_revenue와 동일).
+    # ★★적대 리뷰 P1-2 수용(2026-08-10): 「구 대시보드도 RG를 VAT 밖에 둔다」던 첫 주석은 틀렸다.
+    #   구 대시보드는 RG를 **양쪽 다** 밖에 둔다 — profit_calculator는 orders만 읽고 prod orders에
+    #   RG 채널 행이 0건이라 그 VAT 과세표준엔 RG 매출이 애초에 없다. 반면 종합조망의 revenue는
+    #   RG를 편입하고(라이브 90일 매출의 83%가 RG) 있으므로, RG 정산액의 매입세액만 빼면
+    #   «매출은 넣고 매입은 부인»하는 편측 항이 된다 — 라이브 90일 2,631,770.27원 과다차감.
+    #   RG 정산 구성(광고·배송·입출고·판매수수료·보관…)은 전부 쿠팡에서 매입한 용역이라
+    #   total_fee와 성격이 같다. → rg_total도 매입세액에 넣는다.
     from app.services.profit_calculator import payable_vat
     _vat_revenue = account_sum["revenue"] + _ship["income"]
     # 원 단위 소수 2자리로 양자화 — /110이 무한소수라 그대로 두면 25자리가 API로 새고,
@@ -1085,6 +1107,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         account_sum["cost"], account_sum["total_fee"],
         _ship["cost"], account_sum["ad_spend"],
         account_sum["ad_nonpa_deducted"],   # 비-PA 광고비도 VAT 포함 실비용이다(매입세액 대상)
+        rg_total,                           # RG 정산액(VAT 포함 매입) — P1-2
     ).quantize(_Q2, ROUND_HALF_UP)
     account_sum["net_profit_pre_vat"] = account_sum["net_profit"]
     account_sum["payable_vat"] = _vat
