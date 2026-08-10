@@ -1291,7 +1291,7 @@ function RocketView({
                     onClick={() => setMapTab("confirmed")}
                     className={`px-3 py-1 text-xs rounded-md border ${mapTab === "confirmed" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}`}
                   >
-                    확정/제외 {mappings ? `(${mappings.length})` : ""}
+                    확정/연결안함 {mappings ? `(${mappings.length})` : ""}
                   </button>
                   <button onClick={loadCostMap} disabled={mapLoading} className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50">
                     {mapLoading ? "⟳" : "새로고침"}
@@ -1369,7 +1369,7 @@ function RocketView({
 
                 {mapTab === "confirmed" && mappings && (
                   mappings.length === 0 ? (
-                    <p className="text-xs text-gray-400">확정/제외된 매핑 없음</p>
+                    <p className="text-xs text-gray-400">확정·연결 안 함 매핑 없음</p>
                   ) : (
                     <div className="overflow-x-auto">
                     <table className="min-w-full text-xs">
@@ -1389,7 +1389,7 @@ function RocketView({
                             <td className="py-1.5 pr-2 text-gray-600">{m.internal_sku}</td>
                             <td className="py-1.5 pr-2">
                               <span className={`px-1.5 py-0.5 rounded text-xs ${m.status === "confirmed" ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
-                                {m.status === "confirmed" ? "확정" : "제외"}
+                                {m.status === "confirmed" ? "확정" : "연결 안 함"}
                               </span>
                             </td>
                             <td className="py-1.5 pr-2 text-right text-gray-500">

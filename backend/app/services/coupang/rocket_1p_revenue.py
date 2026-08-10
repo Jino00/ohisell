@@ -822,7 +822,7 @@ def compute_rocket_1p_revenue(
                                         if u["is_new"] and u["our_revenue_known"]), ZERO)),
             # ★판정에 쓴 지평을 숨기지 않는다 — 기준이 안 보이면 화면을 믿을 근거가 없다.
             "new_sku_window_days": new_sku_days,
-            # ★「원가 제외」로 이미 결정된 SKU도 **이름으로 보인다**(2026-08-07, Jino).
+            # ★「연결 안 함」으로 찍힌 SKU도 **이름으로 보인다**(2026-08-07, Jino).
             #   개수만 세면 "그중 실제로는 원가가 있어야 할 게 섞였나"를 확인할 방법이 없다.
             #   작업 목록(top)과는 **분리**한다 — 여기 있는 건 시키는 게 아니라 재검토 대상이다.
             "excluded_top": [

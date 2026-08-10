@@ -330,7 +330,7 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
   });
 });
 
-describe("「원가 제외」 — 결정과 매칭 실패를 가른다", () => {
+describe("「연결 안 함」 — 결정과 매칭 실패를 가른다", () => {
   const EXCLUDED = withPnl({}, {
     excluded_skus: 2, excluded_our_revenue: "57400",
     excluded_top: [
