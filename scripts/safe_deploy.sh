@@ -367,7 +367,40 @@ if [ "$RESTART" = 1 ]; then
     fail "무중단 재시작 실패 — 배포는 완료, 재시작만 미완"
   fi
 elif [ "$RESTART_LEGACY" = 1 ]; then
+  # ★2026-08-10 수리: 이 탈출구는 «성공이라 말하면서 아무것도 안 하고» 있었다.
+  #   블루-그린(2026-08-05)이 pm2 앱 이름을 ohisell-backend-8001/8011로 바꿨는데 여기는
+  #   여전히 `pm2 restart ohisell-backend`를 불렀다. 이름이 없으니 pm2가 실패하는데
+  #   `2>&1 >/dev/null`이 그걸 삼키고, 스크립트는 그대로 "✅ 배포 완료"를 찍었다.
+  #   실측(2026-08-10 16:04): pid·uptime 불변인데 성공 출력 — 무중단 경로가 막힌 상황에서
+  #   유일한 탈출구가 거짓 초록이면 구버전이 계속 돌면서 배포됐다고 믿게 된다.
+  #   그래서 ①실제 앱 이름을 찾아 재시작하고 ②pid가 바뀌었는지·헬스가 도는지 검증하고
+  #   ③아니면 실패로 끝낸다.
   echo "⚠️  레거시 재시작(다운타임 ~50초 — 그 사이 요청은 502가 됩니다)"
-  ssh -o BatchMode=yes "$HOST" "pm2 restart ohisell-backend >/dev/null 2>&1; sleep 6; pm2 list | grep ohisell-backend"
+  ssh -o BatchMode=yes "$HOST" bash -s <<'REMOTE' || fail "레거시 재시작 실패 — 배포는 완료, 재시작만 미완"
+set -u
+APP=$(pm2 jlist 2>/dev/null | python3 -c '
+import json,sys
+try: procs=json.load(sys.stdin)
+except Exception: sys.exit(1)
+for p in procs:
+    n=p.get("name","")
+    if n.startswith("ohisell-backend") and p.get("pm2_env",{}).get("status")=="online":
+        print(n); break
+')
+[ -n "${APP:-}" ] || { echo "  ❌ 온라인 상태인 ohisell-backend* 프로세스를 못 찾았습니다." >&2; exit 1; }
+PORT=$(printf '%s' "$APP" | grep -oE '[0-9]+$' || true); PORT=${PORT:-8001}
+OLD=$(pm2 jlist | python3 -c "import json,sys;print(next((p['pid'] for p in json.load(sys.stdin) if p['name']=='$APP'),''))")
+echo "  대상: $APP (:$PORT) · 현재 pid=$OLD"
+pm2 restart "$APP" >/dev/null || { echo "  ❌ pm2 restart $APP 실패" >&2; exit 1; }
+for i in $(seq 1 40); do
+  sleep 3
+  NEW=$(pm2 jlist | python3 -c "import json,sys;print(next((p['pid'] for p in json.load(sys.stdin) if p['name']=='$APP'),''))")
+  if [ -n "$NEW" ] && [ "$NEW" != "$OLD" ] && curl -sf -m 5 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+    echo "  ✅ 재시작 확인: pid $OLD → $NEW · 헬스 OK(:$PORT)"; exit 0
+  fi
+done
+echo "  ❌ 재시작 검증 실패(pid 불변이거나 헬스 무응답) — 구버전이 계속 돌고 있을 수 있습니다." >&2
+exit 1
+REMOTE
 fi
 echo "✅ 배포 완료 (commit $COMMIT)"
