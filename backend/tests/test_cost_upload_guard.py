@@ -84,6 +84,31 @@ def test_screen_blocks_buffered_value(truth):
     assert hit["buffer"] == pytest.approx(265.3)
 
 
+def test_screen_blocks_every_known_buffer(truth):
+    """★버퍼 **5종 전부**를 막는가.
+
+    적대 리뷰 변이 M-f(「폰」 버퍼만 차단)가 cost 관련 293건 전건에서 **살아남았다** —
+    테스트가 쓰는 값이 2616(폰) 하나뿐이었기 때문이다. 라이브 적중 기준 도어락·플립 18건 +
+    폴드 18건이 회귀해도 죽는 테스트가 없었다. 각 버퍼마다 정본값을 골라 왕복시킨다.
+    """
+    base = truth["_values"][0]
+    for label, buf in truth["known_buffers"].items():
+        hit = screen_cost(base + buf, truth)
+        assert hit is not None, f"버퍼 '{label}'({buf})가 유입 경로에서 안 막힌다"
+        assert hit["buffer_label"] == label
+        assert hit["truth"] == pytest.approx(base)
+
+
+def test_every_truth_value_passes(truth):
+    """★정본 47개 값이 **전부** 통과하는가 — 거짓 차단 0을 회귀로 못 박는다.
+
+    (정본값끼리 버퍼만큼 차이 나는 쌍이 생기면 올바른 원가가 업로드 불가가 된다.
+     오늘은 0쌍이지만 스냅샷이 갱신되면 깨질 수 있어 여기서 지킨다.)
+    """
+    blocked = [v for v in truth["_values"] if screen_cost(v, truth) is not None]
+    assert blocked == [], f"정본 값이 차단된다 — 올바른 엑셀이 못 올라간다: {blocked}"
+
+
 def test_screen_passes_truth_value(truth):
     """★정본 값은 통과해야 한다 — 안 그러면 올바른 엑셀이 업로드 불가가 된다."""
     assert screen_cost(_TRUTH, truth) is None
@@ -101,6 +126,36 @@ def test_screen_passes_undetermined_value(truth):
 def test_screen_is_noop_without_snapshot():
     """스냅샷이 없으면 판정하지 않는다(fail-soft) — 가드 부재가 업로드를 막지 않는다."""
     assert screen_cost(_BUFFERED, None) is None
+
+
+def test_try_load_truth_returns_none_not_empty_dict(tmp_path):
+    """★실패 센티널은 **None**이다 — `{}`가 아니다.
+
+    적대 리뷰 변이 M-d(실패 시 `{}` 반환)가 살아남았다. `screen_cost`는 `truth is None`으로,
+    `/upload` 라우터는 truthiness로 판정해 관용구가 섞여 있어서 센티널이 바뀌면 한쪽만 깨진다.
+    """
+    missing = tmp_path / "없는파일.json"
+    assert try_load_truth(missing) is None
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("[1, 2, 3]", encoding="utf-8")  # 루트가 list — 좁은 except면 TypeError로 샌다
+    assert try_load_truth(broken) is None
+
+
+def test_screen_survives_a_snapshot_that_loads_but_cannot_classify(tmp_path):
+    """★load는 되는데 classify가 터지는 스냅샷에서도 500이 아니라 통과여야 한다.
+
+    `known_buffers` 키가 빠지면 `classify`가 KeyError를 낸다. load만 fail-soft로 감싸면
+    fail-soft가 반쪽이라 업로드 전체가 죽는다(적대 리뷰 P2).
+    """
+    half = tmp_path / "half.json"
+    half.write_text(
+        '{"items": [{"row": 1, "section": "s", "item": "i", "cost": 2350.7}]}',
+        encoding="utf-8",
+    )
+    t = try_load_truth(half)
+    assert t is not None  # 로딩 자체는 성공한다
+    assert screen_cost(_BUFFERED, t) is None  # 판정은 못 하되 터지지 않는다
 
 
 def test_screen_survives_unparseable_cost(truth):

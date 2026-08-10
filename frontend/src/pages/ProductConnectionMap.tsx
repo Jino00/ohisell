@@ -139,12 +139,18 @@ function ConnectionMapTab() {
         r.duplicate_channel_ids.length +
         r.mapping_conflicts.length +
         r.label_mismatches.length;
+      // ★원가 거부는 «확인 필요 N건(콘솔)»에 섞지 않고 **따로 앞세운다**(D-CPP-35).
+      //   섞으면 「수정 N」 옆에서 묻히는데, 운영자가 읽어야 할 것은 «내 엑셀의 원가가
+      //   반영되지 않았다»이다. 이걸 놓치면 옛 엑셀을 계속 쓰게 된다.
+      const blocked = r.cost_buffers?.length ?? 0;
       setUploadMsg(
         `상품 생성 ${r.products_created} · 수정 ${r.products_updated} · 매핑 ${r.mappings_created} · 주문연결 ${r.orders_linked}` +
           (r.mappings_conflicted ? ` / 충돌 ${r.mappings_conflicted}(기존 유지)` : "") +
+          (blocked ? ` / ⚠️ 원가 거부 ${blocked}건 — 버퍼가 얹힌 값이라 원가를 반영하지 않았다(매핑은 반영됨, 사유는 콘솔)` : "") +
+          (r.cost_guard_unavailable ? ` / ⚠️ 원가 미검사(${r.cost_guard_unavailable})` : "") +
           (issues ? ` / 확인 필요 ${issues}건(콘솔)` : ""),
       );
-      if (issues) console.warn("매핑 적재 무결성 이슈", r);
+      if (issues || blocked || r.cost_guard_unavailable) console.warn("매핑 적재 무결성 이슈", r);
       load(q);
     } catch (e) {
       setUploadMsg(`업로드 실패: ${e}`);

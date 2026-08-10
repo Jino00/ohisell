@@ -116,10 +116,14 @@ def try_load_truth(path: pathlib.Path | str | None = None) -> dict | None:
     ★가드가 업로드를 «검사기 부재»로 막지 않게 하려는 것이다(fail-soft). 대신 부르는 쪽은
       응답에 «검사 못 했다»를 반드시 남겨야 한다 — 조용히 통과시키면 «검사해서 깨끗함»과
       «검사 자체를 안 함»이 같은 모양이 된다(교훈 #123이 반복해 당한 형태).
+
+    ★`except Exception`이다. 좁게 잡았더니(`OSError/ValueError/KeyError`) 루트가 list인 스냅샷이
+      `TypeError`로 빠져나가 **업로드 전체가 500**이 됐다 — fail-soft가 정반대로 작동한 것이다
+      (적대 리뷰 P2). 같은 리포의 `scheduler_health`가 이미 넓게 잡고 있다.
     """
     try:
         return load_truth(path)
-    except (OSError, ValueError, KeyError):
+    except Exception:
         return None
 
 
@@ -138,7 +142,12 @@ def screen_cost(cost, truth: dict | None) -> dict | None:
         c = round(float(cost), 1)
     except (TypeError, ValueError):
         return None  # 값 파싱은 부르는 쪽의 책임 — 여기서 판정 실패를 «버퍼»로 만들지 않는다
-    verdict, info = classify(c, truth)
+    try:
+        verdict, info = classify(c, truth)
+    except Exception:
+        # ★load가 성공해도 classify가 터질 수 있다(예: `known_buffers` 키가 빠진 스냅샷 → KeyError).
+        #   load만 감싸면 fail-soft가 반쪽이라 업로드가 500으로 죽는다(적대 리뷰 P2).
+        return None
     if verdict != "buffered":
         return None
     return {
