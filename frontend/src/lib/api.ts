@@ -3082,6 +3082,49 @@ export function putNaverExpertDelegation(delegatedTypes: string[]): Promise<Nave
   });
 }
 
+// ── 안전 봉투 파라미터 현황판 (D-NAO-172 P1) — GET/PUT /settings/guardrail-params ──
+// source가 이 화면의 핵심: db(설정값)면 DB가 이기고 있는 것, code(기본값)면 코드 상수로
+// 돈다는 뜻. rejected=true면 DB에 값은 있는데 타입·범위 밖이라 코드 상수로 조용히 폴백된 것.
+export interface NaverGuardrailParam {
+  key: string;
+  label: string;
+  value: number;
+  source: "db" | "code";
+  code_default: number;
+  min: number;
+  max: number;
+  why: string;
+  direction: "tighten_down" | "tighten_up";
+  rejected: boolean;
+  updated_at: string | null;
+}
+export interface NaverGuardrailRetroFreshness {
+  latest_asof: string | null;
+  expected_asof: string;
+  stale: boolean;
+  lag_days: number | null;
+}
+export interface NaverGuardrailParamsResponse {
+  params: NaverGuardrailParam[];
+  from_db_enabled: boolean;
+  retro_freshness: NaverGuardrailRetroFreshness;
+}
+
+export function getNaverGuardrailParams(): Promise<NaverGuardrailParamsResponse> {
+  return fetchApi<NaverGuardrailParamsResponse>("/api/naver/ad/settings/guardrail-params");
+}
+
+// body는 {key: 값} — 넘긴 키만 남고 나머지는 코드 상수로 복귀(전체 치환). 범위 밖·타입
+// 불일치는 400 + 한국어 메시지(그대로 표면화할 것 — 자체 문구로 갈아치우지 않는다).
+export function putNaverGuardrailParams(
+  values: Record<string, number>,
+): Promise<NaverGuardrailParamsResponse> {
+  return fetchApi<NaverGuardrailParamsResponse>("/api/naver/ad/settings/guardrail-params", {
+    method: "PUT",
+    body: JSON.stringify(values),
+  });
+}
+
 // 대시보드 미니 스프린트 T1/T2 — 엔진 파이프라인 5단계 라이브 증거 상태 + optimizer 커버리지
 // (dashboard_overview.py 응답과 1:1 대응, PLAN_naver-ad-dashboard-mini.md §1 T1).
 export interface NaverDashboardEngineStage {

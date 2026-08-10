@@ -22,6 +22,8 @@ import {
   getNaverExpertDelegation,
   putNaverExpertDelegation,
   getNaverDashboardOverview,
+  getNaverGuardrailParams,
+  putNaverGuardrailParams,
   type NaverAdProposal,
   type NaverAdCampaignSettings,
   type NaverAdOptimizer,
@@ -30,12 +32,46 @@ import {
   type NaverExpertScorecard,
   type NaverExpertDelegationSettings,
   type NaverDashboardOverview,
+  type NaverGuardrailParamsResponse,
+  type NaverGuardrailParam,
 } from "../lib/api";
 import { isoKST, won, roasX, NO_DATA } from "../lib/format";
+import { buildGuardrailSaveBody } from "../lib/guardrailParamsSave";
 import { LayerNav } from "../components/ui";
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
+}
+
+// 안전 봉투 파라미터(D-NAO-172) — 값 표기는 키별 하드코딩 분기. 소수 그대로 보이면
+// (0.15·2.0) 사람이 즉시 「이게 뭔가」를 못 읽는다 — 키가 4개뿐이라 일반화보다 이게 정직하다.
+function fmtGuardrailValue(p: NaverGuardrailParam): string {
+  switch (p.key) {
+    case "max_change_pct":
+      return `±${(p.value * 100).toFixed(0)}%`;
+    case "max_auto_up_multiple":
+      return `${p.value.toFixed(1)}배`;
+    case "cooldown_hours":
+      return `${p.value}시간`;
+    case "max_daily_auto_bid_downs":
+      return `${p.value}회/일`;
+    default:
+      return String(p.value);
+  }
+}
+function fmtGuardrailRange(p: NaverGuardrailParam): string {
+  switch (p.key) {
+    case "max_change_pct":
+      return `±${(p.min * 100).toFixed(0)}% ~ ±${(p.max * 100).toFixed(0)}%`;
+    case "max_auto_up_multiple":
+      return `${p.min.toFixed(1)}배 ~ ${p.max.toFixed(1)}배`;
+    case "cooldown_hours":
+      return `${p.min}시간 ~ ${p.max}시간`;
+    case "max_daily_auto_bid_downs":
+      return `${p.min}회 ~ ${p.max}회`;
+    default:
+      return `${p.min} ~ ${p.max}`;
+  }
 }
 // T2 — 백엔드 last_evidence_at은 naive KST 문자열(다른 콘솔 코드도 동일 관례,
 // 예: p.created_at?.slice(0,16) 직접 슬라이스 — Date 객체로 재해석하면 이중 시프트된다).
@@ -317,6 +353,72 @@ export default function NaverAdOptimizationConsole() {
   const [delegationBusy, setDelegationBusy] = useState(false);
   const [delegationPanelOpen, setDelegationPanelOpen] = useState(false);
 
+  // 안전 봉투 파라미터 현황판(D-NAO-172 P1) — 값·출처·근거를 상시 노출(기본 펼침, 위임
+  // 스위치처럼 접지 않는다 — 「판단의 근거를 보이자」가 이 기능의 목적이라 감추면 안 된다).
+  const [guardrail, setGuardrail] = useState<NaverGuardrailParamsResponse | null>(null);
+  const [guardrailLoading, setGuardrailLoading] = useState(false);
+  const [guardrailError, setGuardrailError] = useState<string | null>(null);
+  // 입력칸 값(문자열, key별). touched=사용자가 이번 세션에 직접 고친 키만 표시.
+  const [guardrailEdits, setGuardrailEdits] = useState<Record<string, string>>({});
+  const [guardrailTouched, setGuardrailTouched] = useState<Record<string, boolean>>({});
+  const [guardrailSaving, setGuardrailSaving] = useState(false);
+  const [guardrailSaveError, setGuardrailSaveError] = useState<string | null>(null);
+
+  async function loadGuardrail() {
+    setGuardrailLoading(true);
+    setGuardrailError(null);
+    try {
+      const data = await getNaverGuardrailParams();
+      setGuardrail(data);
+      const nextEdits: Record<string, string> = {};
+      for (const p of data.params) nextEdits[p.key] = String(p.value);
+      setGuardrailEdits(nextEdits);
+      setGuardrailTouched({});
+    } catch (e: any) {
+      setGuardrailError(e.message);
+    } finally {
+      setGuardrailLoading(false);
+    }
+  }
+
+  function updateGuardrailEdit(key: string, value: string) {
+    setGuardrailEdits((prev) => ({ ...prev, [key]: value }));
+    setGuardrailTouched((prev) => ({ ...prev, [key]: true }));
+    setGuardrailSaveError(null);
+  }
+
+  // PUT은 전체 치환(넘긴 키만 남고 나머지는 코드 상수로 복귀) — 그래서 이번에 손대지 않은
+  // 항목이라도 지금 DB값(source=="db")으로 와 있는 건 같이 실어 보낸다. 안 그러면 파라미터
+  // 하나만 고쳐 저장해도 나머지 기존 설정값이 조용히 코드 기본값으로 리셋된다.
+  async function saveGuardrail() {
+    if (!guardrail || guardrailSaving) return;
+    // ★조립 규칙은 순수 함수로 분리돼 테스트로 못박혀 있다(guardrailParamsSave.test.ts).
+    //   PUT이 전체 치환이라, 하나만 고쳐 저장했을 때 나머지가 조용히 기본값으로 돌아가면
+    //   봉투가 아무도 모르게 바뀐다 — 이 기능이 막으려던 사고 그 자체다.
+    const built = buildGuardrailSaveBody(guardrail.params, guardrailEdits, guardrailTouched);
+    if (!built.ok) {
+      setGuardrailSaveError(built.error);
+      return;
+    }
+    const body = built.body;
+    setGuardrailSaving(true);
+    setGuardrailSaveError(null);
+    try {
+      const updated = await putNaverGuardrailParams(body);
+      setGuardrail(updated);
+      const nextEdits: Record<string, string> = {};
+      for (const p of updated.params) nextEdits[p.key] = String(p.value);
+      setGuardrailEdits(nextEdits);
+      setGuardrailTouched({});
+    } catch (e: any) {
+      // ★서버 400 한국어 메시지를 그대로 노출(자체 문구로 갈아치우지 않는다) — 서버가 왜
+      // 거부했는지가 정보다.
+      setGuardrailSaveError(e.message);
+    } finally {
+      setGuardrailSaving(false);
+    }
+  }
+
   async function loadDashboardOverview() {
     setDashboardLoading(true);
     setDashboardError(null);
@@ -422,6 +524,7 @@ export default function NaverAdOptimizationConsole() {
   useEffect(() => { loadPanel(); }, []);
   useEffect(() => { loadAva(); }, []);
   useEffect(() => { loadDelegation(); }, []);
+  useEffect(() => { loadGuardrail(); }, []);
 
   function updateEdit(campaignId: string, patch: Partial<EditState>) {
     setEdits((prev) => ({ ...prev, [campaignId]: { ...prev[campaignId], ...patch } }));
@@ -747,6 +850,114 @@ export default function NaverAdOptimizationConsole() {
             ? "없음"
             : openActions.map(actionLabelKo).join(", ")}
         ). 모드·공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에 반영됩니다.
+      </div>
+
+      {/* 안전 봉투 파라미터 현황판 (D-NAO-172 P1) — 값·출처·근거 상시 노출 */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
+        <h3 className="text-sm font-medium text-gray-700 mb-3">안전 봉투 (Guardrail)</h3>
+
+        {guardrailError && <div className="text-sm text-red-600 mb-3">{guardrailError}</div>}
+
+        {guardrail && !guardrail.from_db_enabled && (
+          <div className="bg-gray-50 border border-gray-200 text-gray-600 text-xs rounded-lg p-3 mb-3">
+            되돌림 스위치가 내려가 있어 모든 값이 코드 기본값으로 돕니다.
+          </div>
+        )}
+
+        {guardrail && guardrail.retro_freshness.stale && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-3 mb-3">
+            소급채점이 {guardrail.retro_freshness.lag_days ?? "?"}일 뒤처져 있습니다(최신{" "}
+            {guardrail.retro_freshness.latest_asof ?? "없음"}, 기대 {guardrail.retro_freshness.expected_asof}
+            ). 이 상태에서는 봉투 판단의 입력이 낡습니다.
+          </div>
+        )}
+        {guardrail && !guardrail.retro_freshness.stale && (
+          <div className="text-xs text-green-700 mb-3">
+            소급채점 신선함(최신 {guardrail.retro_freshness.latest_asof ?? "없음"})
+          </div>
+        )}
+
+        {guardrailLoading ? (
+          <div className="text-sm text-gray-400 py-4 text-center">불러오는 중...</div>
+        ) : !guardrail ? (
+          <div className="text-sm text-gray-400 py-4 text-center">데이터 없음</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-400 border-b border-gray-100">
+                  <th className="py-1.5 pr-3 font-medium">파라미터</th>
+                  <th className="py-1.5 pr-3 font-medium">현재값</th>
+                  <th className="py-1.5 pr-3 font-medium">출처</th>
+                  <th className="py-1.5 pr-3 font-medium">허용 범위</th>
+                  <th className="py-1.5 pr-3 font-medium">수정</th>
+                </tr>
+              </thead>
+              <tbody>
+                {guardrail.params.map((p) => (
+                  <tr key={p.key} className="border-b border-gray-50 align-top">
+                    <td className="py-2 pr-3 text-gray-700 min-w-[160px]">
+                      {p.label}
+                      <details className="mt-1">
+                        <summary className="text-[11px] text-blue-600 cursor-pointer select-none">
+                          근거 보기
+                        </summary>
+                        <p className="text-[11px] text-gray-500 mt-1 leading-relaxed whitespace-pre-line max-w-xs">
+                          {p.why}
+                        </p>
+                      </details>
+                    </td>
+                    <td className="py-2 pr-3 text-gray-700 whitespace-nowrap">{fmtGuardrailValue(p)}</td>
+                    <td className="py-2 pr-3">
+                      <span
+                        className={`px-1.5 py-0.5 text-[11px] rounded font-medium ${
+                          p.source === "db" ? "bg-blue-50 text-blue-700" : "bg-gray-100 text-gray-500"
+                        }`}
+                      >
+                        {p.source === "db" ? "설정값" : "기본값"}
+                      </span>
+                      {p.rejected && (
+                        <div className="text-[11px] text-red-600 mt-1 max-w-[160px]">
+                          설정한 값이 허용 범위를 벗어나 기본값으로 되돌아갔습니다
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 text-xs text-gray-500 whitespace-nowrap">{fmtGuardrailRange(p)}</td>
+                    <td className="py-2 pr-3">
+                      <input
+                        type="number"
+                        step="any"
+                        min={p.min}
+                        max={p.max}
+                        value={guardrailEdits[p.key] ?? String(p.value)}
+                        disabled={guardrailSaving}
+                        onChange={(ev) => updateGuardrailEdit(p.key, ev.target.value)}
+                        title={`API 단위 그대로 입력(예: max_change_pct는 0.15 = ±15%)`}
+                        className="w-24 border border-gray-200 rounded px-1.5 py-1 text-xs disabled:opacity-50"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="flex items-center gap-2 mt-3">
+              <button
+                type="button"
+                disabled={guardrailSaving}
+                onClick={saveGuardrail}
+                className="px-3 py-1.5 text-xs rounded border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                저장
+              </button>
+              {guardrailSaving && <span className="text-xs text-gray-400">저장 중...</span>}
+              {guardrailSaveError && <span className="text-xs text-red-600">{guardrailSaveError}</span>}
+            </div>
+            <p className="text-[11px] text-gray-400 mt-2">
+              입력은 API 단위 그대로입니다(소수). 표시된 값(±%·배·시간·회)과 다릅니다 — 위 「근거
+              보기」에 실제 코드 기본값·허용 범위가 같이 있습니다.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Ava 위임 자동승인 설정 (X1a T5, D-NAO-25) — 기본 접힘 */}
