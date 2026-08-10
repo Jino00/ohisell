@@ -170,7 +170,7 @@ def _line_commission(
 ) -> Decimal:
     """라인 수수료. 채널별 실측 우선:
     - cafe24/naver: 동기화 시 산출된 commission_amount.
-    - 쿠팡 3P(WING1/2): 그 옵션의 정산 실측 «요율» × 매출 × 1.1, 요율 미상이면 채널 정률(D-CPP-30).
+    - 쿠팡 3P(WING1/2): 그 옵션의 정산 실측 «요율» × 매출 × 1.1, 요율 미상이면 채널 정률(D-CPP-32).
     - 그 외(쿠팡 RG/로켓·미지정): 채널 정률.
     fee_rates = (account_key, vendor_item_id)→요율(소수) 룩업(원칙18-6 Harness 주입). None이면 채널 정률."""
     if ch and ch.code == "CAFE24":
@@ -181,7 +181,7 @@ def _line_commission(
         # commission_amount 없으면 채널 정률 폴백 (API 미지원 케이스 방어)
         rate = ch.commission_rate if ch else ZERO
         return revenue * rate / Decimal("100")
-    # 쿠팡 3P(WING1/2): 그 옵션의 «요율» × 매출 × 1.1 (D-CPP-30).
+    # 쿠팡 3P(WING1/2): 그 옵션의 «요율» × 매출 × 1.1 (D-CPP-32).
     # ★왜 실측 «금액» 우선을 그만뒀나: 정산 행에서 service_fee = sale_amount×service_fee_ratio가
     #   661건 전수 성립하므로 실측 금액과 요율 계산은 같은 값이다(라이브 2026-08-10, 최대 차 0.8원
     #   반올림). 다른 점은 커버리지뿐 — 정산은 D+9~10 지연되므로 실측 금액만 쓰면 최근 주문이 폴백에
@@ -204,7 +204,7 @@ def _coupang_3p_fee_rates(
 
     각 집계 함수가 라인 루프 전에 한 번 호출해 _line_commission에 주입 → N×스캔 제거.
     ★주문번호가 아니라 계정 단위로 받는다 — 요율은 창 안 주문의 정산을 기다릴 필요가 없고
-    (그게 D-CPP-30의 요점이다) 같은 옵션의 과거 정산이면 무엇이든 요율을 알려주기 때문이다."""
+    (그게 D-CPP-32의 요점이다) 같은 옵션의 과거 정산이면 무엇이든 요율을 알려주기 때문이다."""
     account_keys = sorted({
         c.code
         for o in orders
@@ -856,7 +856,7 @@ def calculate_daily_trend(
 
     orders = query.all()
     channel_map, product_map = _build_channel_maps(db)
-    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-30)
+    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-32)
 
     # 수동 매출이 있으면 주문이 없어도 계속 진행
     manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
@@ -1033,7 +1033,7 @@ def calculate_channel_summary(
     )
     orders = query.all()
     channel_map, product_map = _build_channel_maps(db)
-    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-30)
+    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-32)
     manual_lookup_ch = get_daily_manual_revenue(db, date_from, date_to)
     return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to)
     exchange_pnl = _exchange_shipping_pnl(db, channel_map, date_from, date_to)
@@ -1264,7 +1264,7 @@ def calculate_product_profit(
     if not orders and not return_pnl_prod:
         return []
 
-    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-30)
+    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-32)
     all_option_ids = list(set(o.platform_product_id for o in orders if o.platform_product_id))
     ad_lookup = _get_ad_spend_lookup(ad_db, date_from, date_to, all_option_ids)
 

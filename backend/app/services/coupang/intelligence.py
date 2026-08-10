@@ -684,7 +684,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     returns = _agg_returns(db, dfrom, dto, acc["account_key"], acc["channel_ids"])
     fees = _agg_fees(db, dfrom, dto, acc["account_key"])
     rg_fees = _agg_rg_settlement_fees(db, dfrom, dto, acc["account_key"])  # D-6/D-7: 대조 뷰용
-    # D-CPP-30: 수수료를 «정산 인식일 축의 실측 금액»이 아니라 «주문 축의 요율 계산»으로 바꾼다.
+    # D-CPP-32: 수수료를 «정산 인식일 축의 실측 금액»이 아니라 «주문 축의 요율 계산»으로 바꾼다.
     #   왜: _agg_fees는 recognition_date 창이라 매출(주문일 창)과 **다른 주문**을 가리켰고, 정산이
     #   D+9~10 지연되므로 최근 주문은 수수료가 통째로 0원으로 잡혔다(라이브 2026-08-10: WING2 30일
     #   49라인 중 25라인·450,700원이 수수료 0원 → 순이익 약 29,000원 과대).
@@ -744,7 +744,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         return_qty = r.get("return_qty", 0)
         return_deduction = unit_price * return_qty  # 추정(평균단가×반품수량)
         unit_price_by_vid[vid] = unit_price  # S4: 정산화 보정의 반품 되돌림용(동일 단가)
-        # ── 수수료: 순매출 × 그 옵션의 요율 × 1.1 (D-CPP-30) ──
+        # ── 수수료: 순매출 × 그 옵션의 요율 × 1.1 (D-CPP-32) ──
         # 순매출인 이유: 반품분은 쿠팡이 수수료도 환급한다(정산에 REFUND 음수 행). 총매출에 곱하면
         # 반품된 건의 수수료를 우리만 계속 무는 셈이 된다.
         known_rate = fee_rate_by_vid.get(vid)
@@ -798,7 +798,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
             "revenue": revenue, "return_deduction": return_deduction,
             "service_fee": service_fee, "service_fee_vat": service_fee_vat,
             "total_fee": total_fee, "ad_spend": ad_spend,
-            # D-CPP-30: 값과 «근거 등급»을 같이 싣는다. 등급을 안 실으면 화면이 실토할 수가 없다.
+            # D-CPP-32: 값과 «근거 등급»을 같이 싣는다. 등급을 안 실으면 화면이 실토할 수가 없다.
             "fee_rate": fee_rate, "fee_basis": fee_basis, "fee_base": fee_base,
             "fee_base_clamped": fee_base_clamped,
             "settled_fee": settled_fee, "settled_fee_rows": settled_rows,
@@ -842,7 +842,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         "ad_spend": sum((x["ad_spend"] for x in account_rows), _Z),
         "cost": sum((x["cost"] for x in account_rows), _Z),
         "net_profit": sum((x["net_profit"] for x in account_rows), _Z),
-        # D-CPP-30 ④ 화면이 실토하게 — 수수료 요율의 근거 등급을 금액으로 드러낸다.
+        # D-CPP-32 ④ 화면이 실토하게 — 수수료 요율의 근거 등급을 금액으로 드러낸다.
         "fee_rate_known_options": sum(
             1 for x in account_rows if x["fee_basis"] == BASIS_SETTLED and x["fee_base"] > _Z
         ),
@@ -878,7 +878,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # 쿠팡 판매분석과 일치하나, RG 정산차감(rg_total)은 정산인식일 기준(판매보다 지연)이라 단기
     # 윈도우 RG 순이익은 낙관적(매출 전액 인식·정산 일부만 차감), 장기·정산완료 구간에서 수렴.
     account_sum["net_profit_basis"] = (
-        "mixed: revenue=order-date(paid_at), commission=order-date(net_revenue x option rate, D-CPP-30), "
+        "mixed: revenue=order-date(paid_at), commission=order-date(net_revenue x option rate, D-CPP-32), "
         "rg_settlement_deduction=recognition-date(lags). "
         "RG net_profit optimistic on short windows; converges over closed periods (D-9)."
     )

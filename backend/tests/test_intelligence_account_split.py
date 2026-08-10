@@ -115,7 +115,7 @@ def test_opix_only(seeded):
     s = _sum(seeded, "COUPANG_WING1")["account"]["summary"]
     assert s["revenue"] == Decimal("10000")
     assert s["ad_spend"] == Decimal("3000")
-    # D-CPP-30: 수수료 = 과세표준 × 요율 × 1.1. V1은 3P매출 10,000 − 반품차감 10,000 = 0 →
+    # D-CPP-32: 수수료 = 과세표준 × 요율 × 1.1. V1은 3P매출 10,000 − 반품차감 10,000 = 0 →
     # 수수료 0. 전량 반품이면 쿠팡이 수수료도 환급하므로 0이 사실이다(정산에 REFUND 음수 행).
     assert s["fee_base_total"] == _Z
     assert s["total_fee"] == _Z
@@ -136,7 +136,7 @@ def test_ohi_only_includes_rocket_via_company(seeded):
 
 
 def test_fee_uses_that_options_settled_rate_not_flat_78(seeded):
-    """★D-CPP-30의 요점: 옵션마다 요율이 다르면 그 옵션의 요율을 쓴다.
+    """★D-CPP-32의 요점: 옵션마다 요율이 다르면 그 옵션의 요율을 쓴다.
 
     라이브 실측(2026-08-10): WING2에 6.4% 옵션이 275,720원어치, WING1에 10.5%·10.8%가
     1,320,600원어치 있다. 단일 7.8% 폴백은 전자를 과대, 후자를 과소 계상한다.

@@ -72,4 +72,53 @@ $(printf '%s\n' "$added" | sed 's/^/     + /')
 EOF
 fi
 
+# ── 3) **번호 중복 거부** (2026-08-10 승격 — `read-external-values-before-writing` 4회 재발).
+#    ★왜 여기서 «거부»인가: 번호 충돌은 revert로 못 되돌린다. 병합된 뒤에 발견하면
+#      본문은 그대로 두고 **번호와 참조를 전수로 고쳐야** 하고, 커밋 메시지의 옛 번호는
+#      **영원히 못 고친다**. 이 repo는 그 수리를 이미 4번 했다(D-NAO-146·147·148,
+#      교훈 #129·#130, 교훈 #189, 교훈 #195). §2의 «보여주기»로는 부족한 이유다.
+#    ★`next_ids.sh`가 있는데도 계속 났다 — 도구가 아니라 **부르는 순서**가 틀렸다(교훈 #201:
+#      계산과 쓰기를 한 호출에 묶어 답이 오기 전에 답을 지어냈다). 그래서 «쓰는 시점»에 건다.
+#    ★오탐 0 요구사항(§0 주석): 대조 대상은 **이 커밋이 새로 추가하는 번호**뿐이고,
+#      기준은 **이미 로컬에 있는 origin/main**이다(훅은 네트워크를 쓰지 않는다).
+#      origin/main ref가 없으면 조용히 통과한다.
+if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+  _dups=""
+  # 결정 원장: `- **D-NAO-123 (` 꼴만 헤딩으로 본다. `D-NAO-89 구현 완료` 같은 후속은
+  # 괄호가 없어 자연히 빠진다(2026-08-10 실측으로 확인한 판별자).
+  # 교훈 원장: `## 교훈 #123` 꼴.
+  for f in $(git diff --cached --name-only --diff-filter=AM 2>/dev/null); do
+    case "$f" in
+      docs/tracks/active/*.md) _pat='^\+- \*\*D-(NAO|CPP)-[0-9]+ \(' ; _ext='D-(NAO|CPP)-[0-9]+' ;;
+      *LESSONS_LEARNED.md)     _pat='^\+## 교훈 #[0-9]+'              ; _ext='교훈 #[0-9]+' ;;
+      *) continue ;;
+    esac
+    # 이 커밋이 새로 «추가»하는 번호
+    _new=$(git diff --cached -U0 -- "$f" | grep -E "$_pat" | grep -oE "$_ext" | sort -u)
+    [ -z "$_new" ] && continue
+    # origin/main 쪽에 이미 있는 번호(같은 파일 기준)
+    _old=$(git show "origin/main:$f" 2>/dev/null | grep -oE "$_ext" | sort -u)
+    [ -z "$_old" ] && continue
+    _hit=$(printf '%s\n' "$_new" | grep -xF -f <(printf '%s\n' "$_old") || true)
+    [ -n "$_hit" ] && _dups="$_dups$(printf '%s\n' "$_hit" | sed "s|^|     $f: |")\n"
+  done
+  if [ -n "$_dups" ]; then
+    printf '\n❌ **번호 충돌** — 이 커밋이 origin/main에 이미 있는 번호를 새로 쓴다\n\n' >&2
+    printf "$_dups" >&2
+    cat >&2 <<'EOF'
+
+   병행 세션이 그 번호를 먼저 썼다. 병합 뒤에 고치려면 번호·참조를 전수로 고쳐야 하고
+   **커밋 메시지의 옛 번호는 영원히 못 고친다**(이 repo에서 4회 발생).
+
+   해야 할 것 — main이 트렁크이므로 **내 것을 뒤로 재번호**한다:
+     git fetch origin && git merge origin/main
+     scripts/next_ids.sh          # ← 출력을 «읽고 나서» 본문을 고친다 (교훈 #201)
+
+   그래도 커밋해야 한다면: git commit --no-verify   ← 의식적 선택으로 남는다
+
+EOF
+    exit 1
+  fi
+fi
+
 exit 0

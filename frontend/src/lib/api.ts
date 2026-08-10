@@ -655,7 +655,7 @@ export interface OverviewAccountRow {
   cost: string;
   has_cost: boolean;
   net_profit: string;
-  // D-CPP-30: 수수료의 «근거 등급». 값만 있으면 화면이 실토할 수 없다.
+  // D-CPP-32: 수수료의 «근거 등급». 값만 있으면 화면이 실토할 수 없다.
   fee_rate?: string;            // 이 옵션에 적용한 요율(소수. 0.078 = 7.8%)
   fee_basis?: 'settled_rate' | 'default_rate';
   fee_base?: string;            // 과세표준 = 3P매출 − 반품차감 (매출과 다르다: 1P·RG 제외)
@@ -706,7 +706,7 @@ export interface OverviewResponse {
       service_fee_vat: string; total_fee: string; ad_spend: string;
       cost: string; net_profit: string;
       cost_covered_options: number; option_count: number;
-      // D-CPP-30: 수수료 근거 실토 — 요율을 아는 옵션/모르는 옵션과 그 금액
+      // D-CPP-32: 수수료 근거 실토 — 요율을 아는 옵션/모르는 옵션과 그 금액
       fee_rate_known_options?: number;
       fee_rate_default_options?: number;
       fee_default_revenue?: string;    // 기본 7.8%로 «추정»한 과세표준

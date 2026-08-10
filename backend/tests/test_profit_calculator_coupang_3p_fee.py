@@ -1,5 +1,5 @@
 # test_profit_calculator_coupang_3p_fee.py — 쿠팡 3P 판매수수료 실측화 머니 테스트
-# D-CPP-30(2026-08-10, 옛 PLAN_coupang-3p-fee-actualization D-A/D-B/D-E를 대체):
+# D-CPP-32(2026-08-10, 옛 PLAN_coupang-3p-fee-actualization D-A/D-B/D-E를 대체):
 #   3P(WING1/2) 라인 수수료 = 매출 × «그 옵션의 정산 실측 요율» × 1.1,
 #   요율 미상이면 채널 정률(7.8%) × 1.1. RG/네이버/카페24 불변.
 #   ★왜 실측 «금액» 우선을 그만뒀나: 정산 행에서 service_fee = sale_amount×service_fee_ratio가
@@ -41,7 +41,7 @@ def _ord(order_number: str, vid: str = "V1", commission_amount=None) -> Order:
 
 
 def test_3p_uses_that_options_settled_rate():
-    # D-CPP-30: 룩업은 «금액»이 아니라 «요율»이다. 키=(account_key, vendor_item_id).
+    # D-CPP-32: 룩업은 «금액»이 아니라 «요율»이다. 키=(account_key, vendor_item_id).
     # 6.4% 옵션 → 10,000 × 0.064 × 1.1 = 704
     rates = {("COUPANG_WING1", "V1"): D("0.064")}
     assert _line_commission(_ch("COUPANG_WING1"), _ord("ORD1"), D("10000"), rates) == D("704.000")
@@ -180,7 +180,7 @@ def test_two_engines_share_the_rate_and_vat_but_not_the_return_deduction(db):
 
     profit_calculator는 반품 주문을 status(REVENUE_EXCLUDED)로 통째 제외하고 매출도 gross이고,
     intelligence는 매출 gross에서 return_deduction을 따로 뺀다. 그래서 반품이 있는 창에서
-    두 엔진의 수수료가 갈린다(라이브 90일 실측 43,647원). 이건 D-CPP-30의 스코프가 아니라
+    두 엔진의 수수료가 갈린다(라이브 90일 실측 43,647원). 이건 D-CPP-32의 스코프가 아니라
     「반품 실비용·부가세 두 엔진 통일」(다음 작업)의 몫이다 — 여기선 조용히 흐르지 않게 고정한다.
     """
     from app.services.coupang.option_fee_rate import commission_for
@@ -238,7 +238,7 @@ def _seed_order(db, channel_id, order_number, vid, price, qty=1, day=5):
 
 
 def test_end_to_end_daily_trend_option_rate_vs_channel_rate(db):
-    """D-CPP-30: 옵션 요율을 아는 것과 모르는 것이 각각 제 값으로 계산된다.
+    """D-CPP-32: 옵션 요율을 아는 것과 모르는 것이 각각 제 값으로 계산된다.
 
     ★핵심은 «주문 A의 정산이 이 창에 있느냐»가 아니라 «그 옵션의 요율을 아느냐»다.
     옛 계약에선 정산 행이 없는 주문이 계정 단일 정률로 떨어졌고, 그래서 6.4%·10.8% 옵션이

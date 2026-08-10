@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlalchemy import (
     JSON, BigInteger, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer, Numeric,
-    String, Text, UniqueConstraint, func, text,
+    String, Text, UniqueConstraint, event, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -2537,6 +2537,72 @@ class NaverChangeLog(Base):
     # NULL = 시각 불명(우리 실집행 행·창 밖·editTm 미제공). 화면은 NULL이면 종전대로
     # changed_at을 쓰고 `time_basis='detected'`로 표시한다.
     occurred_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# ── B-1: change_log 쓰기 가드 (D-NAO-169, 2026-08-10 · 교훈 #196·#209) ──────────
+# 왜 여기(모델 이벤트)인가: `NaverChangeLog(...)` 생성 지점이 **17곳**이고 앞으로 더 는다.
+# 호출부마다 규약을 지키게 하는 방식은 이미 실패했다 — 2026-08-10에 내가 임시 스크립트로
+# 두 행을 쓰면서 ①없는 action 이름(`manual_loss_stop`)을 지어내고 ②`changed_at`에 네이버
+# editTm의 **UTC** 시각을 그대로 넣었다. 둘 다 내 합격기준(쓰기 성공·라이브 PAUSED) 안에서는
+# 전부 초록이었고, 발견은 **우연**이었다.
+#
+# ★두 검사의 강도가 다른 이유(이 repo의 «거부+자백» 관례):
+#   - **시각 규약은 하드 거부**한다. 판별이 명확하고(두 칸을 대조), 라이브 위반이 **0건**이라
+#     정상 경로를 깰 위험이 없다.
+#   - **action 이름은 경고만** 한다. 하드 거부하려면 change_log에 실제로 도달하는 action
+#     전수 인벤토리가 필요한데, 코드의 action 리터럴에는 `WriteResult.action`(쓰기 어댑터)이
+#     섞여 있어 **확신할 수 없다.** 확신 없는 거부는 돈 경로를 깬다 —
+#     못 세는 것을 세는 척하지 않는다.
+KNOWN_CHANGE_LOG_ACTIONS: frozenset[str] = frozenset({
+    # 우리 실집행(dry_run=False)
+    "update_bid", "set_user_lock", "manual_emergency_stop", "update_budget",
+    "budget_up_pacing", "budget_down_pacing", "exclude_search_term",
+    "create_campaign", "create_adgroup", "create_ad",
+    "optimizer_change", "auto_operate_change", "add_negative_keyword",
+    "update_expert_delegation", "system_status_change", "set_loss_policy",
+    # 외부 변경 «탐지»(우리 쓰기가 아니다 — 주체 판정에서 agency 쪽으로 간다)
+    "external_bid_change", "external_status_change", "external_qi_change",
+    "external_keyword_added", "external_keyword_removed",
+    # 시뮬·페이싱(dry_run=True)
+    "flight_pacing", "flight_pacing_silent", "daily_reflection",
+})
+
+# changed_at ↔ executed_at 허용 오차. 실제 사고는 **9시간**(UTC↔KST)이었고, 라이브에는
+# 30분을 넘는 행이 하나도 없다(2026-08-10 실측). 넉넉히 잡아도 그 사고는 확실히 걸린다.
+_CHANGE_LOG_MAX_TIME_SKEW_SECONDS = 30 * 60
+
+
+def _validate_change_log(mapper, connection, target) -> None:  # noqa: ANN001 — SQLAlchemy 시그니처
+    """`NaverChangeLog` insert 직전 검증. 시각 규약 위반은 거부, 미등록 action은 경고."""
+    import logging
+
+    log = logging.getLogger(__name__)
+
+    action = (target.action or "").strip()
+    if action and action not in KNOWN_CHANGE_LOG_ACTIONS:
+        # ★경고이지 거부가 아니다(위 §강도 참조). 새 action을 **의도적으로** 추가할 땐
+        #   KNOWN_CHANGE_LOG_ACTIONS에 같이 넣어 이 경고를 끈다 — 그게 «지어낸 이름»과
+        #   «새로 만든 이름»을 가르는 유일한 신호다.
+        log.warning(
+            "change_log 미등록 action=%r (entity=%s dry_run=%s) — 오타·즉흥 작명이면 고치고, "
+            "의도된 신설이면 models.KNOWN_CHANGE_LOG_ACTIONS에 추가할 것 (교훈 #196)",
+            action, target.entity_id, target.dry_run,
+        )
+
+    changed_at = target.changed_at
+    executed_at = target.executed_at
+    if isinstance(changed_at, datetime) and isinstance(executed_at, datetime):
+        skew = abs((changed_at - executed_at).total_seconds())
+        if skew > _CHANGE_LOG_MAX_TIME_SKEW_SECONDS:
+            raise ValueError(
+                f"change_log 시각 규약 위반: changed_at={changed_at} 과 executed_at={executed_at} 가 "
+                f"{skew / 3600:.1f}시간 어긋났다. **두 칸 모두 KST naive**여야 한다 — 네이버 API의 "
+                f"editTm은 UTC(`...Z`)라 그대로 넣으면 9시간 어긋난다(2026-08-10 실사고, "
+                f"change_log 5854·5855). `app.utils.kst.kst_now()`를 쓸 것. (action={action!r})"
+            )
+
+
+event.listen(NaverChangeLog, "before_insert", _validate_change_log)
 
 
 class NaverProposal(Base):

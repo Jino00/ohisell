@@ -1,8 +1,8 @@
 ---
 pattern: 가드를 넣었으면 «이번 사고의 입력»으로 돌려서 실제로 걸리는지 본다
 sources: [교훈 #199, 교훈 #197, 교훈 #196, D-NAO-163 P1-2·P1-3, D-CPP-29]
-enforcement: none
-enforcement_target: (미정) 가드 도입 PR에 «사고 입력 재현 테스트» 의무화 — 적대 리뷰 체크항목 또는 테스트 관례
+enforcement: test
+enforcement_target: 가드 도입 시 «사고 입력 재현 테스트» + 변이 주입. 선례 = test_change_log_write_guard.py(D-NAO-169) · test_naver_sa_writer.py::test_b4_rejects_when_every_shopping_ad_overrides_group_bid(D-NAO-166) · test_naver_ad_d_nao_57.py::test_collected_uses_recent_sample_not_wide_window(D-NAO-168)
 recurrence_tags: [false-green, claimed-vs-wired]
 ---
 
@@ -35,11 +35,25 @@ recurrence_tags: [false-green, claimed-vs-wired]
 2. 가드 위치가 틀렸다 → 그 입력이 지나는 **다른 경로**에 있다 ([[write-to-the-binding-layer]])
 3. 애초에 가드로 못 막는다 → 주석을 정직하게 고친다(막는다 → 완화한다)
 
-## 처분 (미완 — 부채)
+## 처분 ✅ (2026-08-10, D-NAO-169)
 
-`enforcement: none`. 지금은 **적대 리뷰가 사후에 잡아주는 데 의존**한다(#199도 리뷰가 잡았다).
-승격 후보: 가드 도입 시 **「이 사고 입력으로 돌린 테스트」를 PR 필수 항목으로** —
-변이 주입과 짝이 되는 «역방향 검사»다(변이=코드를 틀리게, 이건=입력을 사고대로).
+**«사고 입력 재현 테스트»가 관례로 섰다** — 같은 날 가드 셋을 넣으면서 전부 적용했고,
+매번 **실제로 뭔가를 잡았다**:
+
+| 가드 | 사고 입력 재현 | 그 테스트가 잡은 것 |
+|---|---|---|
+| B-4 실효 레이어(D-NAO-166) | 03 캠페인 소재 36개 **전부 false** | — (설계가 처음부터 맞았다) |
+| BEP 창 불일치(D-NAO-168) | 과거 11건 무료 → 최근 10건 3,000원 | **변이 2종 생존** — 내 수정이 테스트로 미고정이었다 |
+| change_log 가드(D-NAO-169) | `manual_loss_stop` + UTC `changed_at` | **설계 자체가 틀렸다** — 아래 |
+
+★**D-NAO-169에서 이 패턴이 «가드를 만들기 전에» 작동했다.** 처음 설계는
+「`after_value`에 `userLock`이 있으면 action은 `set_user_lock`이어야 한다」였는데,
+실측해 보니 `update_bid`의 `after_value`가 **엔티티 전체 객체**라 `userLock`·`bidAmt`가
+둘 다 들어 있었다 — 그 규칙은 `update_bid`·`update_budget`·`budget_*_pacing`을
+**전부 거짓 차단**했을 것이다. 사고 입력이 아니라 **정상 입력**으로 돌려 본 것이 살렸다.
+
+**즉 이 패턴의 완성형은 양방향이다**: 가드를 ①사고 입력으로 돌려 «잡는가» ②정상 입력
+전수로 돌려 «안 깨뜨리는가». 후자를 빼먹으면 돈 경로가 조용히 멈춘다.
 
 ## 감사 질문
 

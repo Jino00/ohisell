@@ -10,7 +10,14 @@
 #
 # 사용: scripts/wisdom_audit.sh            (오늘 날짜로 생성)
 #       scripts/wisdom_audit.sh --stdout   (파일 안 쓰고 화면에만)
-set -euo pipefail
+set -uo pipefail
+# ★`-e`를 일부러 빼 둔다(2026-08-10, 교훈 #209 — 같은 결함을 **세 번** 고친 뒤 내린 결론).
+#   이 스크립트는 «리포트»다. 여기서 grep·루프의 «못 찾음»은 거의 전부 **정상 결과**다 —
+#   결번 0건 / 미처분 교훈 0건 / 부채 0건 / 승격 대상 0건 전부 «좋은 상태»인데,
+#   `-e` + `pipefail` 아래서는 그때만 스크립트가 죽어 **빈 출력 + exit 1**이 된다.
+#   그 화면은 「이상 없음」과 「실행 안 됨」이 구별되지 않는 가장 나쁜 실패 모양이다.
+#   `|| true`를 지점마다 붙이는 방식은 **세 번 다 빠뜨렸다** — 새 섹션을 추가할 때마다
+#   다시 빠뜨릴 것이므로, 구조로 바꾼다. 대신 실제 치명 오류는 아래 명시적 검사로 잡는다.
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WIKI="$REPO/docs/wiki"
@@ -19,7 +26,10 @@ TODAY="$(TZ=Asia/Seoul date +%Y%m%d)"
 TODAY_H="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')"
 OUT="$REPO/docs/references/wisdom_audit_${TODAY}.md"
 
-[ -d "$WIKI" ] || { echo "위키 폴더 없음: $WIKI" >&2; exit 1; }
+[ -d "$WIKI" ] || { echo "❌ 위키 폴더 없음: $WIKI" >&2; exit 1; }
+[ -r "$LESSONS" ] || { echo "❌ 교훈 원장을 읽을 수 없다: $LESSONS" >&2; exit 1; }
+# ★리포트가 «완주했다»를 스스로 증명하게 한다 — 중간에 죽으면 이 줄이 안 찍힌다.
+trap 'echo; echo "— 감사 리포트 끝 (정상 완주) —"' EXIT
 
 emit() {
   echo "# 주간 지혜 감사 — $TODAY_H"
@@ -44,9 +54,16 @@ emit() {
   local nums; nums=$(grep -oE '^## 교훈 #[0-9]+' "$LESSONS" 2>/dev/null | grep -oE '[0-9]+' | sort -un)
   n_ledger=$(echo "$nums" | grep -c . || echo 0)
   lo=$(echo "$nums" | head -1); hi=$(echo "$nums" | tail -1)
-  n_cited=$(for n in $nums; do grep -qh "교훈 #$n\b" "$WIKI"/*.md 2>/dev/null && echo "$n"; done | wc -l | tr -d ' ')
+  # ★`|| true` 필수(gaps와 같은 이유): 마지막 교훈이 위키에 없으면 루프의 종료코드가 1이
+  #   되고 `pipefail`+`set -e`가 스크립트를 죽인다. 「처분 안 된 교훈이 있다」는 **정상 상태**인데
+  #   그때만 감사가 죽으면, 감사가 가장 필요한 순간에 아무 말도 안 하게 된다.
+  n_cited=$(for n in $nums; do grep -qh "교훈 #$n\b" "$WIKI"/*.md 2>/dev/null && echo "$n" || true; done | wc -l | tr -d ' ')
+  # ★`|| true` 필수 — 결번이 **하나도 없으면** grep이 exit 1을 내고 `set -e`가 스크립트를
+  #   통째로 죽인다. 2026-08-10에 실제로 그랬다: 결번 #176~#185가 메워지자 감사가
+  #   «조용히 아무것도 출력하지 않고» 종료했다. 「이상 없음」이 「실행 안 됨」과 같은
+  #   화면으로 보이는 형태다([[green-does-not-mean-verified]]).
   gaps=$(awk -v lo="$lo" -v hi="$hi" 'BEGIN{for(i=lo;i<=hi;i++)print i}' \
-         | grep -vxF -f <(echo "$nums") | tr '\n' ' ')
+         | grep -vxF -f <(echo "$nums") | tr '\n' ' ' || true)
 
   echo "## 지표 (기계 수집)"
   echo
@@ -81,6 +98,27 @@ emit() {
   fi
   echo
   echo "> 각 부채: **이번 주에 이것 때문에 손해가 났는가?** 났으면 도구화 백로그 상위로."
+  echo
+
+  # ── 인덱스↔파일 표류 ────────────────────────────────────────────────────
+  # ★왜 기계가 세는가: 2026-08-10에 실제로 갈라졌다 — `write-to-the-binding-layer`를
+  #   B-4로 처분하고 **패턴 파일만** 고쳤더니 WISDOM.md는 계속 부채 2건이라고 말했다.
+  #   사람이 두 곳을 맞추는 방식은 이 repo에서 반복적으로 실패했다([[text-rules-fail-build-tools]]).
+  local idx_debt
+  idx_debt=$(grep -oE '지식 부채, `enforcement: none`\) ⚠️ \*\*[0-9]+건' "$WIKI/WISDOM.md" 2>/dev/null \
+             | grep -oE '[0-9]+' | head -1)
+  echo "## §2-b 인덱스↔파일 표류"
+  echo
+  if [ -z "$idx_debt" ]; then
+    echo "  ⚠️ WISDOM.md에서 부채 건수 문구를 못 찾았다(형식이 바뀌었나?) — 수동 확인 필요"
+  elif [ "$idx_debt" = "$n_debt" ]; then
+    echo "  ✅ 일치 — WISDOM.md $idx_debt건 = 파일 실측 $n_debt건"
+  else
+    echo "  ⚠️ **불일치** — WISDOM.md는 ${idx_debt}건이라 하는데 파일 실측은 ${n_debt}건이다."
+    # ★백틱은 반드시 이스케이프 — 큰따옴표 안의 백틱은 명령 치환이라
+    #   `enforcement:: command not found`가 감사 출력에 섞인다(2026-08-10 실제로 겪음).
+    echo '     **파일이 정본이다**(`enforcement:` 필드). WISDOM.md를 고칠 것.'
+  fi
   echo
 
   # ── 승격 대상 ────────────────────────────────────────────────────────
