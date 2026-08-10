@@ -106,7 +106,7 @@ Jino 지시로 나머지 16건을 마저 연결해 **`status='ignored'`가 0건*
   화면이 숫자로 말하게. 적대 2R `GATE: PASS`, 변이 12종 전건 KILLED.
 - 교훈 #192(도달 불가 분기 = 아직 안 본 분기) · #193(인과절을 지어내면 새 거짓말이 된다)
 
-### ⚠️⚠️ prod nginx가 `index.html`에 캐시 지시를 안 준다 — **화면 검증이 거짓말할 수 있다**
+### ✅ prod nginx `index.html` 캐시 금지 — 적용 완료 (2026-08-10 08:5x, Jino 승인)
 `sellc.ohitech.co.kr` nginx에 `index.html` 전용 `Cache-Control`이 없어, 프론트 배포 후에도
 브라우저가 옛 `index.html`을 붙들어 **옛 번들을 계속 쓴다.** 2026-08-10 07:4x에 직접 당했다 —
 서버는 새 번들을 정확히 내주는데 화면은 옛 문구였다.
@@ -116,14 +116,22 @@ ssh sellc.ohitech.co.kr "cat /home/ubuntu/ohisell/frontend/dist/.build-stamp;
   grep -o 'assets/[^\"]*\.js' /home/ubuntu/ohisell/frontend/dist/index.html"
 ```
 그 다음 그 번들 파일을 `grep`해 새 문자열이 있는지 본다. 브라우저는 마지막에 본다.
-같은 서버 `os.ohitech.co.kr`엔 이미 `no-cache, no-store, must-revalidate` 블록이 있다 —
-복제하면 되지만 **prod 웹서버 설정이라 Jino 승인 대기**.
+**적용됨**: `location = /index.html`에 allowlist include + `no-store, no-cache, must-revalidate`
++ `Pragma: no-cache`. `assets/*`는 콘텐츠 해시라 안 건드렸다.
+★★**같은 서버 `os.ohitech.co.kr` 블록을 그대로 복사하면 안 됐다** — 거기엔 allowlist가 없는데
+sellc의 `location /`에는 있고, `try_files`의 `/index.html` 폴백은 **내부 리다이렉트라 location
+매칭을 다시 한다.** allowlist를 빼면 모든 SPA 경로가 **IP 차단을 우회**한다(2026-07-17에 막은
+공개 노출 재발). 교훈 #194.
+**검증**: 차단 대상 127.0.0.1에서 `/` `/index.html` `/rocket-1p-revenue` `/assets/*.js`
+`/api/health` **전부 403** · 헤더 한 줄 · **하드 리프레시 없이** 새 번들을 집었다.
+**롤백**: `sudo cp /etc/nginx/sites-available/sellc.ohitech.co.kr.bak-20260809-235449 \
+/etc/nginx/sites-available/sellc.ohitech.co.kr && sudo nginx -t && sudo systemctl reload nginx`
 
 ## 6. 이월 (다음 세션이 볼 것)
 - [ ] **`ignored` status 3값화** — «결정»과 «매칭 실패»를 스키마로 가른다. **데이터는 다 해소됐지만
       다음 일괄 매핑이 또 같은 라벨을 찍는다** — 근본 해법은 여전히 이쪽이다. 스키마 마이그레이션이라 별건.
 - [x] ~~나머지 `ignored` 15건 데이터~~ — ✅ **2026-08-10 전건 해소**(§5-1). `ignored` 0건.
-- [ ] **prod nginx `index.html` 캐시 지시** — §5-1 참조. Jino 승인 대기(웹서버 설정).
+- [x] ~~prod nginx `index.html` 캐시 지시~~ — ✅ **2026-08-10 적용 완료**(§5-1). 교훈 #194.
 - [ ] **일별 축이 «광고만 쓴 날»을 표현 못 한다** — `daily` 행은 판매행 있는 날에만 생긴다.
       실측 창 05-28~06-03에서 일별 Σ와 기간 통이 2,367,116원 차이. **기간 타일은 정확하고**
       화면 각주도 그쪽을 인용하므로 «틀린 숫자»는 아니다. 일별에 그 날을 넣으려면 표 모양·

@@ -1,3 +1,19 @@
+[2026-08-10 08:5x] prod nginx — index.html 캐시 금지 (Jino 승인, 교훈 #194)
+  · 계기: 07:4x에 프론트 배포가 정상인데 화면만 옛 문구라 「배포 실패」로 오독할 뻔했다.
+    sellc nginx에 index.html 전용 Cache-Control이 없어 브라우저가 옛 index.html→옛 번들을 붙들었다
+  · ★★**참조한 os.ohitech.co.kr 블록을 그대로 복사하면 안 됐다** — 거기엔 allowlist가 없는데
+    sellc의 location /에는 있다. try_files의 /index.html 폴백은 **내부 리다이렉트라 location
+    매칭을 다시 하므로**, allowlist를 빼면 **모든 SPA 경로가 IP 차단을 우회**한다
+    = 2026-07-17에 막은 공개 노출(익명 쓰기 112개)이 캐시 헤더 한 줄 때문에 되살아난다
+  · 적용: `location = /index.html`에 allowlist include + no-store/no-cache/must-revalidate + Pragma.
+    assets/*는 콘텐츠 해시라 **건드리지 않음**(os는 JS/CSS도 no-store하는데 그러면 매번 다시 받는다).
+    expires 지시자 미사용(add_header와 겹치면 Cache-Control이 두 줄)
+  · **검증**: ①차단 대상 127.0.0.1에서 / · /index.html · /rocket-1p-revenue · /assets/*.js ·
+    /api/health **전부 403**(우회 없음) ②헤더 한 줄로 정상, 해시 번들엔 헤더 없음
+    ③**하드 리프레시 없이** 새 번들을 집었고 PR #264 새 각주가 그대로 떴다
+  · 백업 `/etc/nginx/sites-available/sellc.ohitech.co.kr.bak-20260809-235449` · nginx -t 후 무중단 reload
+  · 상세: docs/tracks/active/track_coupang-promo-pnl.md D-CPP-28 후속
+
 [2026-08-10 07:4x] `ignored` 22건 전건 해소 → 라이브 최초 basis='full' · 일별 각주 교정 (D-CPP-28 후속, PR #264)
   · 계기: Jino "나머지 15건 중 다리 있는 6건도 연결해줘" → "10건도 다 넣어줘"(51606930은 S10울트라 전용 지정)
   · **+16건 연결로 `status='ignored'` 0건**. 6건=코드 다리(판정기 conflicts_bridge=[]) ·
