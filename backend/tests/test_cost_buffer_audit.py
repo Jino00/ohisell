@@ -87,6 +87,19 @@ def test_sections_are_not_all_collapsed_into_one(truth):
         assert need in secs, f"{need} 섹션이 사라졌다 — 파서가 헤더 행을 흘렸을 수 있다"
 
 
+def test_otao_rows_keep_their_own_section(truth):
+    """★8~14행(오타오 강화유리)은 **자기 계열 이름**을 지킨다 — 앞 항목명이 새면 안 된다.
+
+    2R 회귀: 섹션 파싱을 고치면서 이 5행이 4행의 **항목명**(「맥세이프 그립톡」)을 계열로
+    물려받았다. 지금은 CNY 단가라 100원 컷오프에 걸려 출력에 안 나오지만, §7-5의
+    「I·C·E열로 파서 확장」을 하면 이 섹션의 상품원가(3,102.7 등)가 **틀린 계열명을 달고**
+    드리프트 목록에 나온다. 확장 전에 죽도록 여기서 못 박는다.
+    """
+    otao = [i for i in truth["items"] if 8 <= i["row"] <= 14]
+    assert len(otao) == 5
+    assert {i["section"] for i in otao} == {"오타오_강화유리필름"}
+
+
 def test_cny_unit_prices_are_excluded_from_matching(truth):
     """★오타오 섹션의 **CNY 단가**(12.2 등)는 원가가 아니다 — 매칭 후보에서 빠져야 한다.
 
