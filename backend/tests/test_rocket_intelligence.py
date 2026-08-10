@@ -235,6 +235,27 @@ def test_cost_excluded_is_unresolved_not_zero_cost(db):
     assert cc["unmapped_order_amount"] == _Z               # «매핑 없음»과는 여전히 구분된다
 
 
+def test_coverage_response_keys_are_stable(db):
+    """★프론트가 **직접 읽는 키**라 이름이 바뀌면 화면이 조용히 «—»가 된다(적대 리뷰 P2-4).
+
+    타입스크립트는 API 경계를 못 잡는다 — 백엔드가 키 이름을 바꿔도 프론트는 컴파일된다.
+    그래서 이름을 여기서 못 박는다. (2026-08-10에 `ignored_*` → `excluded_*`로 바꿨다.)
+    """
+    _po(db, 1, 50000, datetime(2026, 6, 5, 3, 0, 0), qty=5)
+    _item(db, 1, "PN-FREE", 5, 50000)
+    _map(db, "PN-FREE", status="excluded")
+    db.commit()
+    cc = compute_rocket_overview(db, *WIN)["cost_coverage"]
+    for key in ("excluded_sku_count", "excluded_order_amount", "confirmed_sku_count",
+                "unmapped_sku_count", "unmapped_order_amount", "resolved_order_amount",
+                "detail_order_amount", "coverage_pct"):
+        assert key in cc, f"프론트가 읽는 키 {key}가 사라졌다"
+    assert cc["excluded_sku_count"] == 1
+    assert "ignored_sku_count" not in cc and "ignored_order_amount" not in cc, "옛 키가 남으면 두 이름이 공존한다"
+    # ★detail은 **셋을 다 품는다** — 하나라도 빠지면 「수집된 금액」이 실제보다 작아진다.
+    assert Decimal(cc["detail_order_amount"]) == Decimal(50000)
+
+
 def test_excluded_and_unmapped_are_both_unresolved_but_distinguishable(db):
     """★둘 다 미해결이지만 **할 일이 다르다** — 화면이 가를 수 있어야 한다.
 

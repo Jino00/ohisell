@@ -8,6 +8,7 @@ import {
   fetchRocketCostMapUnmapped,
   fetchRocketCostMap,
   upsertRocketCostMap,
+  excludeRocketCostMap,
   deleteRocketCostMap,
   fetchRocketPromoPnl,
   patchPromotionManual,
@@ -994,10 +995,7 @@ function RocketView({
       return;
     }
     try {
-      await upsertRocketCostMap({
-        product_number: productNumber, status: "excluded",
-        match_method: "manual", note: reason.trim(),
-      });
+      await excludeRocketCostMap(productNumber, reason);
       setMapMsg(`⏭ ${productNumber} 「연결 안 함」 처리 — 사유: ${reason.trim()}`);
       loadCostMap();
     } catch (e: any) {

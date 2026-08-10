@@ -51,7 +51,9 @@ const SOURCE_LABEL: Record<PnlAuditAtom["cost_source"], { text: string; cls: str
   manual: { text: "수기 확인", cls: "bg-green-50 text-green-700" },
   suggested: { text: "이름 유사도 — 사람 미확인", cls: "bg-amber-100 text-amber-800" },
   unknown: { text: "확정 방법 미기록", cls: "bg-amber-50 text-amber-700" },
-  excluded: { text: "원가 제외 결정", cls: "bg-gray-100 text-gray-600" },
+  // ★「원가 0원으로 결정」이 아니다 — 연결을 안 하기로 정한 것이고 손익에선 「모름」이다
+  //   (2026-08-10 뜻 통일. 옛 문구 「원가 제외 결정」은 원가 0을 연상시켰다).
+  excluded: { text: "연결 안 함(원가 모름)", cls: "bg-gray-100 text-gray-600" },
   no_cost: { text: "원가 미등록 — 다리는 있음", cls: "bg-red-50 text-red-700" },
   no_link: { text: "다리 없음 — 연결부터", cls: "bg-red-50 text-red-700" },
 };

@@ -56,6 +56,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # ★되돌려도 «원가 0원» 해석은 코드에서 사라진 상태다 — 값 이름만 원복한다.
+    #
+    # ⚠️**코드까지 롤백하면 위험하다**(적대 리뷰 P2-10): 신코드가 만든 «진짜» excluded 행이
+    #   `ignored`가 되고, 구코드는 그것을 다시 **원가 0원·해결됨**으로 센다 = 이익 과대가
+    #   되살아난다. 이름 되돌리기의 본질적 위험이라 마이그레이션이 막을 수 없다 —
+    #   코드를 되돌려야 한다면 그 행들을 먼저 확인할 것:
+    #     SELECT product_number, note FROM rocket_product_cost_map WHERE status='excluded';
     if not _has_table("rocket_product_cost_map"):
         return
     op.execute(

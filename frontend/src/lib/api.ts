@@ -1874,6 +1874,28 @@ export function fetchRocketCostMap(): Promise<RocketMappingItem[]> {
   return fetchApi<RocketMappingItem[]>("/api/coupang/ops/rocket/cost-map");
 }
 
+/** 「연결 안 함」으로 정한다 — **사유 필수**.
+ *
+ *  ★왜 전용 함수인가(2026-08-10 적대 리뷰 P2-7): 화면이 `note`를 빼먹으면 백엔드가 422로
+ *    거부해 **모든 제외 클릭이 조용히 실패**한다(화면엔 «❌ 제외 실패»만 뜬다). 백엔드
+ *    테스트는 그걸 못 잡는다 — 백엔드는 정상 동작하기 때문이다. 계약을 여기 한 곳에 모아
+ *    테스트가 물게 한다.
+ *  ★`match_method='manual'`을 여기서 박는다 — 자동 계열을 넘기면 백엔드가 거부한다.
+ */
+export function excludeRocketCostMap(
+  product_number: string, note: string,
+): Promise<RocketMappingItem> {
+  const reason = (note ?? "").trim();
+  if (!reason) {
+    return Promise.reject(new Error(
+      "사유가 필요합니다 — 사유 없는 제외는 나중에 «결정»과 «매칭 실패»를 가를 수 없습니다",
+    ));
+  }
+  return upsertRocketCostMap({
+    product_number, status: "excluded", match_method: "manual", note: reason,
+  });
+}
+
 export function upsertRocketCostMap(body: {
   product_number: string;
   internal_sku?: string;

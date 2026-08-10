@@ -1758,6 +1758,9 @@ def rocket_cost_map_upsert(
             status=str(body.get("status") or "confirmed"),
             match_method=str(body.get("match_method") or "manual"),
             note=body.get("note"),
+            # ★이 라우터가 «사람이 쓰는 입구»다 — 그래서 여기서만 제외를 허용한다.
+            #   배치·스크립트는 서비스를 직접 부르므로 기본값(False)에 막힌다.
+            allow_excluded=True,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
