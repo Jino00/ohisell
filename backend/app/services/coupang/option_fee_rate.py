@@ -111,9 +111,16 @@ def fee_reconciliation(
     그래서 «이미 정산된 주문라인»에서만 계산값과 실측값을 대조해 어긋남을 화면으로 올린다.
     (미정산 라인은 대조 대상이 아니다 — 비교할 실측이 없다.)
 
-    반환: checked_lines / computed / actual / diff / max_line_diff / refunded_lines_skipped.
+    반환: checked_lines / computed / actual / diff / max_line_diff / max_line_excess /
+          refunded_lines_skipped.
     ★판정은 diff(부호합)만으로 하면 안 된다 — 라인별 +X/−X가 상쇄돼 초록이 된다.
-      max_line_diff(라인당 최대 어긋남)를 같이 봐야 한다. 허용치는 라인당 1원(쿠팡의 행당 반올림).
+      라인당 어긋남도 봐야 한다. 다만 «라인당 1원»은 틀린 허용치다 — 라이브 반증:
+      order 22100168302205(수량 2, 31,800원, 6.4%)의 실측은 2,240원인데 라인 단위로 곱하면
+      2,238.72원이라 1.28원 차가 난다. 쿠팡이 **개당으로 반올림**하기 때문이다
+      (15,900×6.4%=1,017.6→1,018, ×2=2,036, VAT 204). 그래서 허용치를 수량에 비례시킨다:
+      수수료 반올림 0.5/개 + VAT 반올림 0.5 + 여유. 이걸 안 하면 수량 2 이상 주문이
+      들어오는 창마다 감시 장치가 거짓 빨강이 되고, 거짓 경보는 감시를 죽인다.
+      판정은 max_line_diff(원값)가 아니라 **max_line_excess(허용치 초과분)**로 한다.
     """
     from app.models import Channel, Order  # 순환 임포트 회피(이 함수만 ORM 엔티티가 필요)
     from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
@@ -125,7 +132,8 @@ def fee_reconciliation(
 
     scope = list(account_keys) if account_keys else list(COUPANG_3P_CODES)
     q = (
-        db.query(Order.order_number, Order.platform_product_id, Order.selling_price, Channel.code)
+        db.query(Order.order_number, Order.platform_product_id, Order.selling_price,
+                 Order.quantity, Channel.code)
         .join(Channel, Order.channel_id == Channel.id)
         .filter(
             Channel.code.in_(scope),
@@ -136,7 +144,7 @@ def fee_reconciliation(
     )
     lines = q.all()
     empty = {"checked_lines": 0, "computed": _Z, "actual": _Z, "diff": _Z,
-             "max_line_diff": _Z, "refunded_lines_skipped": 0}
+             "max_line_diff": _Z, "max_line_excess": _Z, "refunded_lines_skipped": 0}
     if not lines:
         return empty
 
@@ -150,7 +158,8 @@ def fee_reconciliation(
     computed_sum = _Z
     actual_sum = _Z
     max_line_diff = _Z
-    for onum, vid, price, code in lines:
+    max_line_excess = _Z
+    for onum, vid, price, qty, code in lines:
         key = (str(code), str(onum), str(vid))
         actual = actual_map.get(key)
         if actual is None:  # 미정산 — 대조할 실측이 없다
@@ -168,14 +177,31 @@ def fee_reconciliation(
         gap = abs(computed - actual)
         if gap > max_line_diff:
             max_line_diff = gap
+        excess = gap - _line_rounding_allowance(qty)
+        if excess > max_line_excess:
+            max_line_excess = excess
     return {
         "checked_lines": checked,
         "computed": computed_sum,
         "actual": actual_sum,
         "diff": computed_sum - actual_sum,
         "max_line_diff": max_line_diff,
+        # 허용치를 넘은 최대 어긋남. 0 이하면 전부 반올림 범위 안이다(=전제 유지).
+        "max_line_excess": max_line_excess,
         "refunded_lines_skipped": skipped,
     }
+
+
+def _line_rounding_allowance(quantity) -> Decimal:
+    """라인 하나에서 «반올림만으로» 생길 수 있는 최대 어긋남.
+
+    쿠팡은 개당 수수료를 반올림하고(±0.5/개) 그 합의 10%를 다시 반올림한다(±0.5).
+    우리는 라인총액에 요율을 곱하므로 그 차이가 수량에 비례해 쌓인다. 여유 0.05를 더 둔다.
+    """
+    q = int(quantity or 1)
+    if q < 1:
+        q = 1
+    return Decimal("0.5") * q + Decimal("0.55")
 
 
 def commission_for(

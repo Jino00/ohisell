@@ -714,7 +714,8 @@ export interface OverviewResponse {
       settled_fee_recognized?: string; // 창 안 정산 인식 실측(참고·축 다름)
       fee_check?: {                    // 전제 검증: 정산된 라인에서 계산==실측 인가
         checked_lines: number; computed: string; actual: string;
-        diff: string; max_line_diff: string; refunded_lines_skipped?: number;
+        diff: string; max_line_diff: string; max_line_excess?: string;
+        refunded_lines_skipped?: number;
       };
       fee_base_clamped_options?: number;
       // S3/S7(정합성 트랙): 매출 분해 — 쿠팡 판매분석 수동 대조용. revenue = revenue_3p + revenue_rg.

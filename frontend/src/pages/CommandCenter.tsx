@@ -691,12 +691,15 @@ function FeeBasisCard({ data }: { data: OverviewResponse }) {
   const knownOptions = s.fee_rate_known_options ?? 0;
   if (knownOptions === 0 && defaultOptions === 0) return null;
 
-  // 전제 검증: 이미 정산된 라인에서 «계산 == 실측»이어야 한다. 라인당 1원(쿠팡의 행당 반올림)까지 정상.
-  // ★부호합(diff)만 보면 안 된다 — 라인별 +X/−X가 상쇄돼 초록이 된다. 라인당 최대 어긋남을 같이 본다.
+  // 전제 검증: 이미 정산된 라인에서 «계산 == 실측»이어야 한다.
+  // ★부호합(diff)만 보면 안 된다 — 라인별 +X/−X가 상쇄돼 초록이 된다. 라인당 어긋남도 본다.
+  // ★단 라인당 허용치는 «수량에 비례»한다 — 쿠팡이 개당으로 반올림하기 때문(백엔드가 계산해
+  //   max_line_excess로 준다: 0 이하면 전부 반올림 범위 안). 고정 1원으로 재면 수량 2 이상
+  //   주문이 있는 창마다 거짓 빨강이 뜨고, 거짓 경보는 감시 장치를 죽인다.
   const diff = Math.abs(Number(chk?.diff ?? "0"));
   const tolerance = Math.max(1, Number(chk?.checked_lines ?? 0));
-  const maxLine = Number(chk?.max_line_diff ?? "0");
-  const premiseBroken = !!chk && chk.checked_lines > 0 && (diff > tolerance || maxLine > 1);
+  const excess = Number(chk?.max_line_excess ?? "0");
+  const premiseBroken = !!chk && chk.checked_lines > 0 && (diff > tolerance || excess > 0);
 
   return (
     <div className={`mb-4 rounded-lg border p-3 text-sm ${premiseBroken ? "border-red-300 bg-red-50" : "border-gray-200 bg-white"}`}>

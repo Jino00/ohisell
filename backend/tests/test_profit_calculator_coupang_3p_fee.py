@@ -346,3 +346,33 @@ def test_end_to_end_naver_uses_commission_amount(db):
     db.commit()
     trend = calculate_daily_trend(db, None, naver, date(2026, 6, 1), date(2026, 6, 30))
     assert D(trend[0]["commission"]) == D("550")  # 실측 commission_amount, 3P 로직 무관
+
+
+def test_rounding_allowance_scales_with_quantity(db):
+    """★라이브 반증(2026-08-10): 「라인당 1원」 허용치는 틀렸다 — 거짓 빨강이 난다.
+
+    order 22100168302205: 수량 2 · 31,800원 · 6.4%. 쿠팡은 **개당**으로 반올림한다
+    (15,900×6.4%=1,017.6→1,018, ×2=2,036, VAT round(203.6)=204 → 합 2,240).
+    우리는 라인총액에 곱하므로 2,238.72 — 차 1.28원이 «정상»이다.
+    수량에 비례하지 않는 허용치를 쓰면 수량 2 이상 주문이 있는 창마다 감시가 빨강이 된다.
+    """
+    wing = _seed_channel(db, "COUPANG_WING2", "7.8")
+    _seed_order(db, wing, "ORDQ2", "V64", "31800", qty=2, day=5)
+    # 쿠팡 실측 그대로: service_fee 2,036 + vat 204 = 2,240
+    _fee(db, "ORDQ2", "V64", "COUPANG_WING2", "SALE", 2036, 204, ratio="6.4")
+    db.commit()
+    r = fee_reconciliation(db, datetime(2026, 6, 1), datetime(2026, 6, 30), ["COUPANG_WING2"])
+    assert r["checked_lines"] == 1
+    assert r["max_line_diff"] == D("1.280"), "원 어긋남은 1원을 넘는다(사실)"
+    assert r["max_line_excess"] <= D("0"), "그러나 반올림 허용 범위 안이므로 경보가 아니다"
+
+
+def test_rounding_allowance_still_catches_a_real_rate_drift(db):
+    """허용치를 늘렸어도 «진짜» 요율 어긋남은 잡아야 한다 — 안 잡히면 감시가 껍데기다."""
+    wing = _seed_channel(db, "COUPANG_WING2", "7.8")
+    _seed_order(db, wing, "ORDQ2", "V64", "31800", qty=2, day=5)
+    # 쿠팡이 실제로는 7.8%를 뗐는데 우리는 6.4%로 알고 있는 상황
+    _fee(db, "ORDQ2", "V64", "COUPANG_WING2", "SALE", 2480, 248, ratio="6.4")
+    db.commit()
+    r = fee_reconciliation(db, datetime(2026, 6, 1), datetime(2026, 6, 30), ["COUPANG_WING2"])
+    assert r["max_line_excess"] > D("0"), "요율이 어긋나면 허용치를 넘어야 한다"
