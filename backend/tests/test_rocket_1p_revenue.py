@@ -1177,3 +1177,62 @@ def test_ad_only_day_is_absent_from_daily_and_that_is_stated(db):
     assert r["pnl"]["ad_no_sales_days"] == "5000"
     # — 그러나 일별 합에는 없다. 이 부등호가 위 테스트의 성립 조건이다.
     assert sum((Decimal(d["ad_no_sales_days"]) for d in r["daily"]), ZERO_D) == ZERO_D
+
+
+# ══════════════════════════════════════════════════════════════════
+# 일별 「광고비」 열의 **분모** — 화면 라벨이 참인 이유를 잠근다 (2026-08-10)
+#
+# Jino: *"광고비가 실제 광고비보다 적게 계산되고 있어."*
+# 화면 열 머리가 「광고비(전량)」였고 각주가 *"그날 전부이고"*라고 단정했는데, 실측은
+# 창 08-03~08-09에서 일별 합 5,412,823 vs 옵션 원장 6,092,627 — **679,804원(11.2%) 부족**이었고
+# 그 차이가 정확히 ad_no_sales + ad_no_sales_days였다. 라벨을 「광고비(판매행)」로 고쳤다.
+#
+# ★여기서 지키는 것은 **문구가 아니라 그 문구가 참인 이유**다. `ad_spend_all`이 언젠가
+#   «전량»으로 바뀌면 라벨이 다시 거짓이 되는데, 그건 문구 테스트로는 안 잡힌다.
+# ══════════════════════════════════════════════════════════════════
+def test_daily_ad_column_excludes_options_with_no_sales_row(db):
+    """★일별 `ad_spend_all`은 «그날 판매행이 있는 옵션»의 광고비만이다 — 전량이 아니다."""
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)
+    _sale(db, "A", "S1", 10, "200000", d=date(2026, 8, 3))
+    _ad_option(db, "A", "20000", d=date(2026, 8, 3))
+    _ad_option(db, "Z", "50000", d=date(2026, 8, 3))   # ★판매행이 아예 없는 옵션
+    db.commit()
+    r = compute_rocket_1p_revenue(db, date(2026, 8, 3), date(2026, 8, 3))
+    d0 = r["daily"][0]
+    assert Decimal(d0["ad_spend_all"]) == Decimal("20000"), (
+        "판매행 없는 옵션의 광고비가 일별 열에 섞였다 — 그러면 열 이름이 「판매행」이 아니게 된다")
+    assert Decimal(r["pnl"]["ad_no_sales"]) == Decimal("50000")
+
+
+def test_daily_ad_sum_plus_two_holes_equals_the_option_ledger(db):
+    """★★항등식: Σ일별 광고비 + 구멍2 + 구멍3 = 옵션 원장 총액.
+
+    이게 성립하니까 화면이 「일별을 다 더해도 원장보다 작고, 그 차이가 구멍2＋구멍3」이라고
+    말할 수 있다. 이 항등식이 깨지면 각주가 거짓이 된다 — 라이브에서 정확히 그 상태였다
+    (일별 합 5,412,823 + 679,804 = 6,092,627).
+    """
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)
+    _price(db, "S2", "10000", 2)
+    _cost(db, "S2", 3000)
+    # 08-03: A는 팔리고 광고도 씀 / Z는 광고만(판매행 아예 없음) → 구멍3
+    _sale(db, "A", "S1", 10, "200000", d=date(2026, 8, 3))
+    _ad_option(db, "A", "20000", d=date(2026, 8, 3))
+    _ad_option(db, "Z", "50000", d=date(2026, 8, 3))
+    # 08-04: B는 팔렸으나 광고 쓴 08-03엔 판매행이 없다 → 구멍2
+    _sale(db, "B", "S2", 5, "100000", d=date(2026, 8, 4))
+    _ad_option(db, "B", "30000", d=date(2026, 8, 3))
+    db.commit()
+
+    r = compute_rocket_1p_revenue(db, date(2026, 8, 3), date(2026, 8, 4))
+    p = r["pnl"]
+    daily_sum = sum(Decimal(d["ad_spend_all"]) for d in r["daily"])
+    holes = Decimal(p["ad_no_sales"]) + Decimal(p["ad_no_sales_days"])
+    ledger = Decimal(str(p["ad_option_total"]))
+
+    assert Decimal(p["ad_no_sales_days"]) == Decimal("30000"), "구멍2(팔린 옵션·그날 판매행 없음)"
+    assert Decimal(p["ad_no_sales"]) == Decimal("50000"), "구멍3(창 안에 판매행 아예 없음)"
+    assert daily_sum + holes == ledger, (
+        "일별 합 %s + 구멍 %s != 원장 %s — 각주의 설명이 거짓이 된다" % (daily_sum, holes, ledger))
+    assert daily_sum < ledger, "일별 합이 원장과 같으면 열 이름이 「전량」이어야 한다"
