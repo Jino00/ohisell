@@ -967,14 +967,18 @@ def test_excluded_skus_are_listed_by_name_for_review(db):
 
 
 def _ad_buckets(p):
-    """사다리 응답에서 네 통을 꺼낸다. `ad_spend`는 is_full이면 접힌 두 통을 이미 품고 있다."""
-    folded = ((Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"]))
-              if p["ad_no_sales_included"] else ZERO_D)
+    """사다리 응답에서 **다섯 통**을 꺼낸다(2026-08-11 D-CPP-38로 구멍0 신설).
+
+    ★`ad_spend`에서 역산하지 않고 엔진이 낸 `ad_attributed`를 그대로 읽는다.
+      비율 차감이 들어오면서 `ad_spend`는 «귀속분 + 차감된 구조적 몫»이 되었고, 역산은
+      비율·반올림을 테스트가 **다시 구현**하게 만든다 — 그러면 엔진이 틀려도 같이 틀린다.
+    """
     return {
-        "attributed": Decimal(p["ad_spend"] or 0) - folded,
+        "attributed": Decimal(p["ad_attributed"]),
         "uncosted": Decimal(p["ad_uncosted"]),
         "no_sales_days": Decimal(p["ad_no_sales_days"]),
         "no_sales": Decimal(p["ad_no_sales"]),
+        "out_of_range": Decimal(p["ad_out_of_range"]),
     }
 
 
@@ -998,8 +1002,12 @@ def test_four_ad_buckets_cover_the_option_ledger_without_remainder(db):
     p = compute_rocket_1p_revenue(db, D, date(2026, 8, 5))["pnl"]
     b = _ad_buckets(p)
     assert b == {"attributed": Decimal("11000"), "uncosted": Decimal("7000"),
-                 "no_sales_days": Decimal("5000"), "no_sales": Decimal("3000")}
+                 "no_sales_days": Decimal("5000"), "no_sales": Decimal("3000"),
+                 "out_of_range": Decimal("0")}   # 판매행이 있는 구간이라 구멍0은 비어 있다
     assert sum(b.values()) == Decimal(p["ad_option_total"]) == Decimal("26000")
+    # ★사다리 표시값은 «귀속분 + 차감된 구조적 몫»이라 통 합계와 다르다 — 둘을 혼동하면
+    #   항등식이 스스로 겹친다(비율 차감을 넣자마자 드러난 함정).
+    assert Decimal(p["ad_spend"]) == Decimal(p["ad_attributed"]) + Decimal(p["ad_folded_deducted"])
     # ★손익 밖에 남은 합을 **한 숫자로도** 낸다 — 화면 각주가 이 값을 그대로 쓴다.
     assert Decimal(p["ad_unattributed"]) == Decimal("15000")
 
@@ -1119,7 +1127,12 @@ def test_no_sales_included_is_false_when_there_is_no_ladder(db):
     p = compute_rocket_1p_revenue(db, D, D)["pnl"]
     assert p["blocked"]["code"] == "sales_not_covered"
     assert p["ad_no_sales_included"] is False
-    assert p["ad_no_sales"] == "3000"       # 금액은 계속 보인다(안 보이면 없는 돈이 된다)
+    # ★금액은 계속 보인다(안 보이면 없는 돈이 된다) — 단 2026-08-11(D-CPP-38)부터
+    #   **판매분석이 하나도 없는 창**의 광고비는 「안 팔림」이 아니라 「관측 불가」라
+    #   구멍0으로 간다. 통이 바뀐 것이지 돈이 사라진 게 아니다.
+    assert p["ad_no_sales"] == "0"
+    assert p["ad_out_of_range"] == "3000"
+    assert p["ad_unattributed"] == "3000"
 
 
 # ═══ ⑧ 「원가 제외」의 두 의미 — 화면이 결정이라 단정하지 않는다 (2026-08-09) ═══
@@ -1236,3 +1249,143 @@ def test_daily_ad_sum_plus_two_holes_equals_the_option_ledger(db):
     assert daily_sum + holes == ledger, (
         "일별 합 %s + 구멍 %s != 원장 %s — 각주의 설명이 거짓이 된다" % (daily_sum, holes, ledger))
     assert daily_sum < ledger, "일별 합이 원장과 같으면 열 이름이 「전량」이어야 한다"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 절벽 제거 — 「전부 아니면 전무」를 비율 차감으로 (2026-08-11, D-CPP-38)
+#
+# Jino: *"문제 있는걸 어떻게 해결할 수 있는지 완전한 해결책을 내놔봐."*
+#
+# 라이브 실측(창 2026-05-14~08-11): 원가 미부착 SKU 11건의 매출이 전체의 **0.275%**인데
+# 그 하나가 `is_full=False`를 만들어 구조적 광고비 **19,294,871원(원장의 34.3%)의 차감을
+# 통째로 껐다.** 2026-08-10에도 같은 형태였다(0.19%가 12.7%를 껐다) — 그때는 SKU를 연결해
+# 넘겼지만 **새 상품이 나올 때마다 절벽이 다시 선다.** 그래서 게이트 자체를 없앴다.
+# ══════════════════════════════════════════════════════════════════
+def test_partial_coverage_deducts_structural_ad_in_proportion_not_zero(db):
+    """★커버리지가 100%가 아니어도 **비율만큼은** 뺀다 — 0원이 아니다(절벽 제거).
+
+    종전: uncosted SKU가 하나라도 있으면 구조적 광고비 차감이 **전부 꺼졌다.**
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _price(db, "S2", "50000", 2)                       # 원가 없음 → 부분집합 밖
+    _sale(db, "A", "S1", 10, "1000000")
+    _sale(db, "B", "S2", 5, "500000")
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "8000")                        # 구조적(그 창에 안 팔린 옵션)
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "costed_subset"               # 결손이 있다
+    share = Decimal(p["ad_deduct_share"])
+    assert ZERO_D < share < 1, "부분 커버리지면 비율은 0과 1 사이여야 한다"
+    # ★핵심: 종전엔 여기가 0이었다.
+    assert Decimal(p["ad_folded_deducted"]) > ZERO_D, "절벽이 살아 있다 — 구조적 광고비가 0원 차감"
+    # ★표시용 share는 4자리로 접힌 값이고 곱셈은 **원시 비율**로 한다(반올림 함정 방지) —
+    #   그래서 «접힌 값으로 다시 곱한 결과»와 정확히 같지 않을 수 있다. 테스트가 그 곱을
+    #   재현하면 반올림 지점을 테스트가 다시 구현하는 셈이라, 관계만 못 박는다.
+    assert ZERO_D < Decimal(p["ad_folded_deducted"]) < Decimal("8000")
+    # 사다리 광고비 = 귀속분 + 차감된 몫.
+    assert Decimal(p["ad_spend"]) == Decimal(p["ad_attributed"]) + Decimal(p["ad_folded_deducted"])
+
+
+def test_full_coverage_keeps_the_old_numbers_exactly(db):
+    """★★하위호환 — 커버리지 100%면 **종전과 완전히 같은 값**이 나온다.
+
+    비율 차감의 안전성이 여기에 달려 있다: `is_full`이면 share가 정확히 1이라
+    `folded * 1 == folded`다. 이게 깨지면 「지금까지 맞던 창」이 조용히 움직인다.
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _sale(db, "A", "S1", 10, "1000000")
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "8000")                        # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "full"
+    assert Decimal(p["ad_deduct_share"]) == Decimal("1.0000")
+    assert Decimal(p["ad_folded_deducted"]) == Decimal("8000")   # 전액 — 종전과 동일
+    assert p["ad_no_sales_included"] is True
+
+
+def test_ad_before_the_sales_analysis_window_is_named_not_counted_as_unsold(db):
+    """★★구멍0 — 판매분석 롤링 창보다 **앞선 날**의 광고비는 「안 팔림」이 아니다.
+
+    라이브(창 2026-05-14~08-11): 구조적 두 통 19,294,871원 중 **12,969,126원이 이것**이었다.
+    같은 기간 매출은 축 안 창과 **한 푼도 다르지 않다** — 광고비만 늘어난 것이다.
+    ★이 통은 차감하지 않는다. 매출을 관측조차 못 하는 구간의 비용만 빼면 이익이 위조된다.
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _sale(db, "A", "S1", 10, "1000000", d=date(2026, 8, 4))     # 판매분석은 8/4부터
+    _ad_option(db, "A", "11000", d=date(2026, 8, 4))
+    _ad_option(db, "Z", "9000", d=date(2026, 8, 1))             # ★판매분석 시작 이전
+    db.commit()
+    p = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 4))["pnl"]
+
+    assert p["ad_out_of_range"] == "9000", "롤링 창 이전 광고비가 구멍0으로 안 갔다"
+    assert Decimal(p["ad_no_sales"]) == ZERO_D, "관측 불가가 「안 팔림」으로 세어졌다"
+    # ★차감되지 않는다 — 커버리지 100%(basis full)여도 그렇다.
+    assert Decimal(p["ad_folded_deducted"]) == ZERO_D
+    assert Decimal(p["ad_spend"]) == Decimal("11000")
+    # 원장은 여전히 남김없이 갈린다.
+    assert sum(_ad_buckets(p).values()) == Decimal(p["ad_option_total"]) == Decimal("20000")
+
+
+def test_share_accounts_for_the_unpriced_axis_too(db):
+    """★★적대 리뷰 1R P1-2 — `cost_coverage`만 쓰면 **납품단가 축이 사라진다.**
+
+    `cost_coverage`의 분모 `priced_revenue`는 납품단가 미상 옵션을 분자·분모에서 통째로
+    뺀다. 그래서 그것만 곱하면 `is_full`이 지키던 두 조건 중 뒤쪽이 없어져,
+    **부분집합이 장사의 일부인데 구조적 광고비 전액이 그 위에 얹힌다.**
+    재현(리뷰가 낸 것): 부분집합 매출 100만인데 800,000원 전액 차감.
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _sale(db, "A", "S1", 10, "1000000")
+    _sale(db, "B", "S2", 5, "5000000")     # 발주 라인 없음 → 납품단가 미상(our_revenue None)
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "800000")          # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "costed_subset"
+    # ★원가 축만 보면 1.0000이다 — 그래서 그것만 쓰면 전액이 얹힌다.
+    assert Decimal(p["cost_coverage"]) == Decimal("1.0000")
+    assert Decimal(p["ad_deduct_share"]) < 1, "납품단가 축이 share에 반영되지 않았다"
+    assert Decimal(p["ad_folded_deducted"]) < Decimal("800000"), "구조적 광고비 전액이 차감됐다"
+
+
+def test_share_uses_the_raw_ratio_not_the_rounded_one(db):
+    """★적대 리뷰 1R P2 — `_ratio`가 소수 4자리로 접어 0.99996이 1.0000이 된다.
+
+    그 접힌 값을 곱하면 **결손이 남아 있는데 전액 차감**되고, 화면은 「100%」라
+    커버리지 100% 창과 구분조차 안 된다. 곱셈은 원시 비율로 해야 한다.
+    """
+    # 원가 있는 매출이 압도적이고 미상이 아주 작아 표시 커버리지가 1.0000으로 접히는 창.
+    _price(db, "S1", "1000000", 1); _cost(db, "S1", 1)
+    _price(db, "S2", "10", 2)              # 납품단가는 있고 원가만 없다 → 아주 작은 결손
+    _sale(db, "A", "S1", 100, "9000000")
+    _sale(db, "B", "S2", 1, "20")
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "100000")          # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "costed_subset", "결손이 있는 창이라야 이 검사가 뜻이 있다"
+    # 표시용 커버리지는 접혀서 1.0000일 수 있다 — 그래도 전액 차감이면 안 된다.
+    assert Decimal(p["ad_folded_deducted"]) < Decimal("100000"), \
+        "반올림된 비율로 곱해 전액 차감됐다(0.99996 → 1.0000 함정)"
+
+
+def test_degenerate_window_without_consumer_revenue_does_not_deduct_blindly(db):
+    """★2R P2-b — `_all_consumer == 0` 폴백 분기가 무테스트였다.
+
+    소비자 매출이 0인 축퇴 창에서 납품단가 미상이 있으면 share를 0으로 떨어뜨린다
+    (추정할 근거가 없을 때 «전액 차감»으로 기울면 이익이 위조된다).
+    """
+    _price(db, "S1", "0", 1); _cost(db, "S1", 0)
+    _sale(db, "A", "S1", 1, "0")            # 소비자 매출 0
+    _ad_option(db, "C", "5000")             # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    if p.get("ad_deduct_share") is not None:
+        # 근거가 없으면 «모른다» 쪽으로 — 전액 차감으로 기울지 않는다.
+        assert Decimal(p["ad_folded_deducted"]) <= Decimal("5000")

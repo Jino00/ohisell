@@ -35,10 +35,17 @@ const BASE: R = {
   },
   pnl: {
     basis: "costed_subset", qty: 200, revenue: "2198728", cost: "863821.70",
-    promo_burden: "195000", ad_spend: "664449", vat: "43223.40",
+    promo_burden: "195000", ad_spend: "758561", vat: "43223.40",
     net_profit: "432233.90", profit_rate: "0.1966",
     ad_no_sales: "99232", ad_no_sales_days: "0", ad_uncosted: "33750",
     ad_unattributed: "132982", ad_no_sales_included: false,
+    // D-CPP-38 — 5통 분할 + 비율 차감. BASE는 costed_subset(coverage 0.9483)이므로
+    // 구조적 통도 **그 비율만큼 차감된다**(종전엔 0원이었다 — 그게 절벽이었다).
+    // ★5통 합 = 원장(797,431): 664,449 + 33,750 + 99,232 + 0 + 0. 그리고
+    //   ad_spend = ad_attributed + ad_folded_deducted = 664,449 + 94,112 = 758,561.
+    //   (적대 리뷰 P2 — 종전 픽스처는 엔진이 낼 수 없는 조합이라 P1을 가리고 있었다.)
+    ad_out_of_range: "0", ad_deduct_share: "0.9483",
+    ad_folded_deducted: "94112", ad_attributed: "664449",
     ad_account_total: "797241.00", ad_option_total: "797431",
     cost_coverage: "0.9483", revenue_priced: "2318513",
     promo_burden_known: true, blocked: null,
@@ -124,8 +131,9 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
     mount(BASE);
     // 원가 미상분은 매출도 손익 밖이라 **어떤 경우에도** 차감 대상이 아니다.
     expect((await ladderLine("원가 미상 옵션")).textContent).not.toContain("−");
-    // 판매행 없는 옵션분은 included=false이므로 이 창에서는 부호가 없다.
-    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).not.toContain("−");
+    // ★2026-08-11(D-CPP-38): 구조적 통은 이제 **비율만큼 차감된다** — 부호가 붙는 게 맞다.
+    //   대신 «몇 %만 반영»인지 말한다. 부호를 숨기면 «안 뺐다»는 거짓말이 된다.
+    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).toContain("94.8%만 반영");
   });
 
   it("M2 팔린 옵션의 «판매 없는 날» 광고비가 줄로 보인다 (근거화면 A7이 고발하던 돈)", async () => {
@@ -157,7 +165,9 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
     //   테스트가 통과했다 — 0으로만 검사하는 통과는 아무것도 안 지킨다(교훈 #181).
     mount(withPnl({ ad_no_sales_days: "435916", ad_unattributed: "568898" }));
     const text = (await footnote()).textContent ?? "";
-    for (const s of ["797,431원", "664,449원", "33,750원", "435,916원", "99,232원", "568,898원"]) {
+    // ★D-CPP-38: 「손익 밖에 남은 합」 = 원장 − 사다리 광고비 = 797,431 − 758,561 = 38,870.
+    //   비율 차감이 들어오면서 이 값이 통 합계가 아니라 **차액**이 됐다(통을 늘려도 안 깨진다).
+    for (const s of ["797,431원", "664,449원", "33,750원", "435,916원", "99,232원", "38,870원"]) {
       expect(text, `각주에 ${s}가 없다`).toContain(s);
     }
     // ★계정 총액과의 차는 «결손»이 아니라 **정의 차이**라고 말한다(오독하면 수집 장애로 읽힌다).
@@ -179,7 +189,9 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
     // ★이미 차감된 132,982원을 «남은 합»으로 다시 부르면 같은 돈을 두 번 세는 것이다.
     expect(text).not.toContain("손익 밖에 남은 합이 132,982원");
     // 대신 «그 안에 포함»으로 말한다 — 통이 사라지는 것도 아니다.
-    expect(text).toContain("그 안에");
+    // ★D-CPP-38: 「그 안에 …포함」 대신 **실린 몫을 금액으로** 말한다 — 비율 차감이라
+    //   「전부 포함/전부 미포함」 둘 다 대개 거짓이기 때문이다.
+    expect(text).toContain("손익에 실린 몫");
     expect(text).toContain("33,750원");
   });
 
@@ -214,7 +226,8 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
     // ★이 라벨이 금지선(부분집합 매출에서 전량 비용 빼기 금지)의 유일한 화면 경고다.
     mount(BASE);
     expect((await ladderLine("원가 미상 옵션")).textContent).toContain("위 손익에 미포함");
-    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).toContain("위 손익에 미포함");
+    // ★구조적 통은 이제 부분 차감되므로 «미포함»이 아니다 — 대신 반영률을 말한다.
+    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).toContain("만 반영");
   });
 });
 
@@ -258,19 +271,23 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
         basis: "full", ad_spend: "6092627", ad_uncosted: "0",
         ad_no_sales_days: "345359", ad_no_sales: "334445",
         ad_unattributed: "679804", ad_no_sales_included: true, cost_coverage: "1.0000",
+        // ★basis full ⟹ share가 정확히 1 ⟹ 구조적 두 통 전액 차감(하위호환의 축).
+        ad_deduct_share: "1.0000", ad_folded_deducted: "679804",
       }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }),
       daily: [{ ...DAILY[0], ad_uncosted: "0", ad_no_sales_days: "345359", ad_no_sales: "334445" }],
     });
     const note = await screen.findByText(
       (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
     const text = note.textContent ?? "";
-    expect(text).toContain("기간 사다리 순이익에는 이미 차감돼 있습니다");
+    expect(text).toContain("기간 사다리 순이익에 이미 차감돼 있습니다");
     expect(text).not.toContain("위 손익에도 안 들어갔습니다");
     expect(text).toContain("679,804원");           // 크기는 계속 보인다
     // ★M-A: 인과절(«왜 이 열에 못 싣나»)이 통째로 사라져도 아무도 안 잡던 자리.
     expect(text).toContain("원가 확인분 축");
-    // ★«이 셋은»이 아니라 «뒤 두 통은» — ad_uncosted는 어느 분기에서도 차감되지 않는다.
-    expect(text).toContain("뒤 두 통은");
+    // ★«이 셋은»이 아니라 실제 차감액을 말한다 — ad_uncosted는 어느 분기에서도 차감되지 않는다.
+    // ★D-CPP-38: 통 단위가 아니라 **실제로 차감된 금액**을 말한다(부분 차감이 가능해졌다).
+    //   이 창은 basis full이라 전액(679,804) 차감이 맞다.
+    expect(text).toContain("679,804원");
     expect(text).not.toContain("이 셋은");
     // ★일별 순이익 합이 사다리보다 큰 금액을 **숫자로** 말한다((345359+334445)×100/110 = 618,004).
     //   ★★**방향까지** 못 박는다: Σ일별 = pnl_net이고 타일 = pnl_net − 세후차감 이므로 일별이
@@ -278,6 +295,8 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     expect(text).toContain("618,004원 큽니다");
     expect(text).not.toContain("작습니다");
     // ★제목이 «세 통»을 말한다 — 「일부가 빠져 있습니다」로 뭉뚱그리면 몇 갈래인지 알 수 없다(M-I).
+    // ★몇 갈래인지 말한다 — 「일부가 빠져 있습니다」로 뭉뚱그리면 알 수 없다(M-I).
+    //   ★D-CPP-38: 구멍0이 있으면 「네 통」이 된다 — 갯수가 응답을 따라간다.
     expect(text).toContain("세 통이 빠져 있습니다");
   });
 
@@ -292,6 +311,8 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
         basis: "full", ad_spend: "6092627", ad_uncosted: "0",
         ad_no_sales_days: "345359", ad_no_sales: "334445",
         ad_unattributed: "679804", ad_no_sales_included: true, cost_coverage: "1.0000",
+        // ★basis full ⟹ share가 정확히 1 ⟹ 구조적 두 통 전액 차감(하위호환의 축).
+        ad_deduct_share: "1.0000", ad_folded_deducted: "679804",
       }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }),
       daily: [{ ...DAILY[0], ad_uncosted: "0", ad_no_sales_days: "345359", ad_no_sales: "334445" }],
     });
@@ -311,6 +332,83 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     expect(text).toContain("그 차이가 구멍2＋구멍3입니다");
     // ★「우리 매출(전량)」은 실제로 전량이므로 그 주장은 남아 있어야 한다(과교정 방지).
     expect(text).toContain("「우리 매출(전량)」은 그날 전부");
+  });
+
+  it("★원장 각주가 구멍0을 **열거한다** — 통이 늘면 각주도 는다 (1R P1-1)", async () => {
+    // 1R P1-1: 통을 5개로 늘리면서 각주는 「네 통」 열거 그대로여서, 인쇄된 등식이
+    // 12,969,126원 어긋났다(좌변이 우변의 98배). 통을 늘릴 때마다 여기가 깨지는 구조였다.
+    mount(withPnl({
+      basis: "costed_subset", ad_out_of_range: "12969126",
+      ad_deduct_share: "0.9973", ad_folded_deducted: "6308665", ad_attributed: "664449",
+    }));
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("옵션 광고 원장"));
+    const t = note.textContent ?? "";
+    expect(t).toContain("다섯 통");
+    expect(t).toContain("판매분석이 없는 기간");
+    expect(t).toContain("12,969,126");
+  });
+
+  it("★원장 각주의 «통 수»도 응답을 따라간다 + 구멍0을 차감 대상으로 읽히게 두지 않는다 (2R P2-c·d)", async () => {
+    // 2R P2-c: 열거는 조건부인데 갯수만 「다섯 통」 상수라, 구멍0이 0원인 창에서
+    //          넷만 세고 다섯이라 말했다 — 일별 각주에서 P1-1으로 고발된 것과 같은 형태.
+    // 2R P2-d: 「뒤 둘에서 …뺀 나머지」의 서수가 구멍0이 있으면 어긋나, 차감하지 않는다고
+    //          못 박은 구멍0이 부분 차감된 것처럼 읽혔다.
+    mount(withPnl({ ad_out_of_range: "0", ad_attributed: "664449" }));
+    const four = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("옵션 광고 원장"));
+    expect(four.textContent ?? "").toContain("네 통으로");
+    expect(four.textContent ?? "").not.toContain("다섯 통");
+    cleanup();
+
+    mount(withPnl({ ad_out_of_range: "12969126", ad_attributed: "664449" }));
+    const five = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("옵션 광고 원장"));
+    const t = five.textContent ?? "";
+    expect(t).toContain("다섯 통으로");
+    expect(t).toContain("차감 대상이 아닙니다");   // 구멍0의 성격을 문장이 못 박는다
+    expect(t).not.toContain("뒤 둘에서");
+  });
+
+  it("★차감액이 0이면 «전부 안 들어갔다»고 말한다 (2R P2-a — 그 갈래가 무테스트였다)", async () => {
+    mount({
+      ...withPnl({ ad_folded_deducted: "0", ad_deduct_share: "0.0000",
+                   ad_no_sales_days: "435916", ad_uncosted: "33750" }),
+      daily: [{ ...DAILY[0], ad_no_sales_days: "435916", ad_uncosted: "33750" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
+    const t = note.textContent ?? "";
+    expect(t).toContain("위 손익에도 안 들어갔습니다");
+    expect(t).not.toContain("이미 차감돼 있습니다");
+  });
+
+  it("★일별 각주의 «갈래 수»가 응답을 따라간다 — 상수가 아니다 (1R P1-1)", async () => {
+    mount({
+      ...withPnl({ ad_out_of_range: "12969126", ad_no_sales_days: "435916" }),
+      daily: [{ ...DAILY[0], ad_no_sales_days: "435916" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
+    const t = note.textContent ?? "";
+    expect(t).toContain("네 통이 빠져 있습니다");   // 구멍0이 있으면 넷이다
+    expect(t).not.toContain("세 통이 빠져 있습니다");
+    expect(t).toContain("판매분석이 없는 기간");
+  });
+
+  it("★구멍0(판매분석 없는 기간)은 이름과 금액을 갖고, **차감되지 않는다** (D-CPP-38)", async () => {
+    // 라이브 창 05-14~08-11: 구조적 두 통 19,294,871원 중 12,969,126원이 이것이었다.
+    // 종전엔 구멍2·3에 섞여 「광고했는데 안 팔림 34.3%」를 만들었다 — 3분의 2가 다른 것이었다.
+    mount(withPnl({
+      basis: "costed_subset", ad_out_of_range: "12969126",
+      ad_deduct_share: "0.9973", ad_folded_deducted: "6308665",
+    }));
+    const line = await ladderLine("판매분석이 없는 기간");
+    const t = line.textContent ?? "";
+    expect(t).toContain("12,969,126");
+    expect(t).toContain("위 손익에 미포함");   // ★차감되지 않는다 — 그렇게 말한다
+    expect(t).not.toContain("−");              // 부호가 붙으면 «뺐다»로 읽힌다
+    expect(t).toContain("관측 불가");           // 「안 팔림」과 가른다
   });
 
   it("★광고 대사 문장이 **방향**을 말로 못 박는다 (2026-08-11 QA — 부호가 거꾸로 읽혔다)", async () => {
@@ -394,7 +492,8 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     const note = await screen.findByText(
       (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
     const t = note.textContent ?? "";
-    expect(t).toContain("위 손익에도 안 들어갔습니다");
+    // ★D-CPP-38: costed_subset도 비율만큼 차감되므로 「전부 안 들어갔다」는 거짓이 됐다.
+    expect(t).toContain("이미 차감돼 있습니다");
     // ★사유를 하나로 뭉뚱그리지 않는다 — 「귀속할 판매가 없어」는 구멍1엔 틀리다(2R 이월).
     expect(t).not.toContain("귀속할 판매가 없어");
     expect(t).not.toContain("기간 사다리 순이익에는 이미 차감");
