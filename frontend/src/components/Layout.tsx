@@ -111,21 +111,27 @@ export function buildPipelineHealthBanner(
   //      여기서는 "사건"이 아니라 "지금 상태"를 매일 대조한다(exclusion_survival.py 설계 그대로).
   const es = health.exclusion_survival;
   if (es && es.healthy === false) {
-    if (es.breached.length > 0) {
+    const total = es.breached_total ?? es.breached.length;
+    if (total > 0) {
       const b = es.breached[0];
       const stateLabel: Record<string, string> = {
         alive: "걸려 있음", missing: "사라짐", deleted: "삭제됨(delFlag)", unknown: "확인 실패",
       };
-      const label = b.live_state ? (stateLabel[b.live_state] ?? b.live_state) : "확인 실패";
-      parts.push(
-        `우리가 건 검색어 제외 ${es.breached.length}건이 라이브에서 사라짐` +
-          (b.search_term ? ` (예: "${b.search_term}" ${label})` : ""),
-      );
+      const label = b?.live_state ? (stateLabel[b.live_state] ?? b.live_state) : "확인 실패";
+      // ★«사라짐»과 «확인 실패»를 한 문장으로 뭉치지 않는다 — 조회가 실패한 것을 소실로
+      //   읽히게 하면 대응(콘솔에서 다시 걸기)이 헛돈다(적대 리뷰 P2-4).
+      const allUnknown = es.breached.every((x) => x.live_state === "unknown");
+      const head = allUnknown
+        ? `우리가 건 검색어 제외 ${total}건을 확인하지 못함`
+        : `우리가 건 검색어 제외 ${total}건이 라이브에서 어긋남`;
+      parts.push(head + (b?.search_term ? ` (예: "${b.search_term}" ${label})` : ""));
+    } else if ((es.never_checked_due ?? 0) > 0 && !es.last_checked_at) {
+      // ★«아직 안 돌았다»와 «멈췄다»는 다르다 — 마지막 대조 자체가 없으면 멈춘 게 아니라
+      //   시작을 안 한 것이다. 이 구분이 NULL을 남긴 이유다(교훈 #123의 형태).
+      parts.push(`제외 ${es.never_checked_due}건이 아직 한 번도 대조되지 않음`);
     } else if (es.stale) {
       const lastDate = es.last_checked_at ? es.last_checked_at.slice(0, 10) : "없음";
       parts.push(`제외 생존 대조가 멈춤 (마지막 대조 ${lastDate})`);
-    } else if (es.never_checked > 0) {
-      parts.push(`제외 ${es.never_checked}건이 한 번도 대조되지 않음`);
     }
   }
 

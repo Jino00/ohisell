@@ -133,12 +133,44 @@ def test_alive_by_keyword_when_id_changed_and_note_says_so():
     assert "다른 id" in note
 
 
-def test_keyword_match_tolerates_spacing_and_case():
-    state, _, found = es._classify(
-        _row(restrict_kwd_id=None, search_term="ipad Paper Film"),
-        [_live(nccAdgroupRestrictKwdId="rst-x", keyword="ipadpaperfilm")],
+def test_near_match_is_unknown_not_alive():
+    """★표기만 다른 행을 alive로 세면 **우리 조치가 사라진 바로 그 경우에 초록**이 된다.
+
+    네이버 제외키워드에서 「아이패드 종이필름」과 「아이패드종이필름」은 서로 다른 키워드다.
+    그리고 그 id를 회수하면 더 나쁘다 — restrict_kwd_id의 유일한 실쓰기 소비자가 개방
+    (delete_restricted_keywords)이라, 우리가 걸지 않은 제외를 나중에 우리가 지운다.
+    (적대 리뷰 P1-2. 초판은 이 경우를 alive로 판정했다.)
+    """
+    state, note, found = es._classify(
+        _row(restrict_kwd_id=None),
+        [_live(nccAdgroupRestrictKwdId="rst-other", keyword="아이패드 종이필름")],
+    )
+    assert state == es.STATE_UNKNOWN
+    assert found is None, "판별 못 한 행의 id를 회수하면 감시가 나중에 남의 제외를 지운다"
+
+
+def test_exact_match_wins_over_near_match_regardless_of_response_order():
+    """★정확 일치가 응답 뒤쪽에 있어도 그걸 고른다 — 단일 OR 필터면 순서가 판정을 정한다."""
+    state, note, found = es._classify(
+        _row(restrict_kwd_id=None),
+        [
+            _live(nccAdgroupRestrictKwdId="rst-other", keyword="아이패드 종이필름"),
+            _live(nccAdgroupRestrictKwdId="rst-ours"),
+        ],
     )
     assert state == es.STATE_ALIVE
+    assert found == "rst-ours"
+
+
+def test_duplicate_exact_matches_are_unknown_not_a_guess():
+    """★동명이 둘이면 어느 행이 우리 것인지 모른다 — writer가 같은 모호성에서 fail-closed로
+    거부하는 것과 같은 규율을 쓴다([0]으로 고르면 리포 안에서 규율이 갈라진다)."""
+    state, note, found = es._classify(
+        _row(restrict_kwd_id=None),
+        [_live(nccAdgroupRestrictKwdId="rst-a"), _live(nccAdgroupRestrictKwdId="rst-b")],
+    )
+    assert state == es.STATE_UNKNOWN
+    assert found is None
 
 
 def test_soft_deleted_same_keyword_is_deleted_not_alive():
@@ -220,12 +252,31 @@ def test_one_group_failure_does_not_erase_other_groups(db, monkeypatch):
 # ═══ 요약층 — survival_summary ═══
 
 
-def test_summary_is_unhealthy_when_never_checked(db):
-    """★«한 번도 대조 안 함»은 alive가 아니다 — NULL을 초록으로 세면 감시가 켜지기 전부터 초록이다."""
-    db.add(_row())
+def test_summary_is_unhealthy_when_an_old_row_was_never_checked(db):
+    """★«한 번도 대조 안 함»은 alive가 아니다 — NULL을 초록으로 세면 감시가 켜지기 전부터 초록이다.
+
+    단 «오래됐는데 여태 안 본» 행이어야 한다(아래 짝 테스트 참조).
+    """
+    db.add(_row(excluded_at=NOW - timedelta(days=5)))
     db.commit()
     s = es.survival_summary(db, now=NOW)
-    assert s["never_checked"] == 1 and s["healthy"] is False
+    assert s["never_checked_due"] == 1 and s["healthy"] is False
+
+
+def test_a_just_created_exclusion_does_not_turn_the_banner_red(db):
+    """★방금 실행한 제외는 다음 대조(08:25) 전까지 NULL인 게 정상이다.
+
+    이걸 곧장 이상으로 세면 **제외를 한 건 실행할 때마다 다음 날까지 전역 배너가 빨강**이고,
+    계약 P2가 「Jino가 콘솔에서 20~50건 제외」이므로 그 상태가 상시화된다 — 상시 빨강은 이
+    감시가 실제로 죽는 방식이다(적대 리뷰 P1-3. 초판은 여기서 healthy=False였다).
+    """
+    db.add(_row(excluded_at=NOW - timedelta(hours=2)))
+    db.commit()
+    s = es.survival_summary(db, now=NOW)
+    assert s["never_checked"] == 1, "아직 안 본 사실 자체는 응답에 남는다"
+    assert s["never_checked_due"] == 0
+    assert s["stale"] is False
+    assert s["healthy"] is True
 
 
 def test_summary_is_unhealthy_when_check_went_stale(db):
@@ -252,6 +303,49 @@ def test_summary_breach_carries_enough_to_act_on(db):
     assert b["search_term"] == LIVE_TERM
     assert b["adgroup_id"] == LIVE_ADGROUP
     assert b["live_state"] == es.STATE_MISSING
+
+
+def test_a_neglected_row_is_caught_even_when_the_check_itself_is_fresh(db):
+    """★대조는 어제도 오늘도 돌았는데 **어떤 행만** 계속 안 보고 있는 경우.
+
+    이걸 놓치면 그 행은 영원히 사각지대다 — `stale`은 «마지막 대조 시각»만 보므로 다른 행이
+    잘 대조되는 한 초록이다. `never_checked_due`가 healthy 판정에 **따로** 들어가야 하는
+    이유가 이것이고, 이 테스트가 없으면 그 항을 지워도 아무것도 안 죽는다(변이 M21 생존).
+    """
+    db.add(_row(live_state=es.STATE_ALIVE, live_checked_at=NOW - timedelta(hours=2)))
+    db.add(_row(search_term="사각지대검색어", restrict_kwd_id="rst-blind",
+                excluded_at=NOW - timedelta(days=5)))  # live_checked_at = NULL
+    db.commit()
+
+    s = es.survival_summary(db, now=NOW)
+    assert s["stale"] is False, "마지막 대조는 신선하다 — stale로는 안 잡힌다"
+    assert s["never_checked_due"] == 1
+    assert s["healthy"] is False
+
+
+def test_breached_list_is_capped_but_says_the_total(db):
+    """★헬스 응답은 프론트가 폴링마다 받는다 — 어긋남이 수백 건이면 payload가 통째로 부푼다.
+    잘라내되 **잘랐다는 사실이 숨지 않게** 총계를 함께 낸다."""
+    for i in range(es.BREACH_SAMPLE_CAP + 5):
+        db.add(_row(search_term=f"사라진검색어{i}", restrict_kwd_id=f"rst-{i}",
+                    live_state=es.STATE_MISSING, live_checked_at=NOW))
+    db.commit()
+    s = es.survival_summary(db, now=NOW)
+    assert len(s["breached"]) == es.BREACH_SAMPLE_CAP
+    assert s["breached_total"] == es.BREACH_SAMPLE_CAP + 5
+
+
+def test_row_without_adgroup_is_marked_undecidable_not_skipped(db, monkeypatch):
+    """★대조 불가 행을 조용히 건너뛰면 그 행은 영원히 «한 번도 대조 안 함»으로 남아
+    배너가 영구히 빨강이 된다(적대 리뷰 P2-6)."""
+    db.add(_row(adgroup_id="", excluded_at=NOW - timedelta(days=5)))
+    db.commit()
+    _patch_live(monkeypatch, {})
+
+    result = es.check_survival(db, now=NOW)
+    assert result["unknown"] == 1
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.live_state == es.STATE_UNKNOWN and row.live_checked_at == NOW
 
 
 def test_summary_stays_quiet_with_no_rows(db):

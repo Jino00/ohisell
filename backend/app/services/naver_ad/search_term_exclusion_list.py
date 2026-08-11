@@ -241,7 +241,6 @@ def build_exclusion_list(
             # 방지로 거르는 게 맞지만, 사람이 보는 리스트에서 상품 핵심어를 조용히 빼면
             # 광고비가 가장 큰 구간이 통째로 안 보인다(01 지문방지 계열이 정확히 그 모양이다).
             "whitelisted": _is_whitelisted(term, whitelist),
-            "loss_estimate": int(cost - amt / float(bep)) if bep > 0 else None,
             "reason": _reason(roas, bep, cost, clk, conv, amt, bep_slot["product_count"]),
             "revert_howto": REVERT_HOWTO,
         })
@@ -251,7 +250,9 @@ def build_exclusion_list(
     candidates = candidates[:round_cap]
 
     # 성숙도로 잘라낸 최근 구간의 비용 — 「빠진 것이 화면에 보인다」의 근거(PLAN §5 4).
-    maturity_rows = _agg(window_to + timedelta(days=1), as_of)
+    # ★비용 0인 행은 빼고 센다 — 본 루프가 `cost <= 0`을 대상에서 제외하므로, 여기만 전부 세면
+    #   같은 패널에서 그레인이 갈라져 건수가 수십 배로 보인다(실측 37,189 vs 828, 적대 리뷰 P2-1).
+    maturity_rows = [r for r in _agg(window_to + timedelta(days=1), as_of) if int(r[6]) > 0]
     maturity_cost = sum(int(r[6]) for r in maturity_rows)
 
     fresh_q = db.query(

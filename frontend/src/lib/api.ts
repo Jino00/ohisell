@@ -650,7 +650,12 @@ export interface SchedulerHealthExclusionSurvival {
     excluded_at: string | null;
     cost_at_exclusion: number | null;
   }[];
+  // 잘린 목록의 총계 — breached는 상한(20건)까지만 실린다. 구버전 백엔드 안전을 위해 optional.
+  breached_total?: number;
   never_checked: number;
+  // 그중 «대조 주기를 넘겼는데도 여태 안 본» 건수. 방금 실행한 제외는 여기 안 들어간다
+  // (그걸 이상으로 세면 제외 한 건마다 다음 날까지 배너가 빨강이 된다).
+  never_checked_due?: number;
   last_checked_at: string | null;
   stale_hours: number;
   stale: boolean;
@@ -674,7 +679,8 @@ export interface SchedulerHealth {
   // 구백엔드 안전을 위해 optional · 대조 불가면 null · 정상이면 mismatch=[]
   vendor_item_conservation?: SchedulerHealthConservation | null;
   // 구백엔드 안전을 위해 optional · monitored=0(대상 없음)이어도 healthy=true로 온다
-  exclusion_survival?: SchedulerHealthExclusionSurvival;
+  // 백엔드는 요약 자체를 못 했을 때 명시적으로 null을 준다(cost_drift·vendor_item_conservation과 같은 관례).
+  exclusion_survival?: SchedulerHealthExclusionSurvival | null;
   as_of: string;
 }
 
@@ -3009,7 +3015,12 @@ export interface NaverExclusionSurvival {
   monitored: number;
   alive: number;
   breached: NaverExclusionSurvivalBreachRow[];
+  // 잘린 목록의 총계 — breached는 상한(20건)까지만 실린다. 구버전 백엔드 안전을 위해 optional.
+  breached_total?: number;
   never_checked: number;
+  // 그중 «대조 주기를 넘겼는데도 여태 안 본» 건수. 방금 실행한 제외는 여기 안 들어간다
+  // (그걸 이상으로 세면 제외 한 건마다 다음 날까지 배너가 빨강이 된다).
+  never_checked_due?: number;
   last_checked_at: string | null;
   stale_hours: number;
   stale: boolean;

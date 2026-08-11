@@ -285,4 +285,88 @@ describe("buildPipelineHealthBanner", () => {
     expect(banner!.summary).toContain("옵션별 3P 매출이 낡은 값으로 구른다");
     expect(banner!.summary).toContain("(15일째)");
   });
+
+  // ── 검색어 제외 조치 생존 (D-NAO-173 P1-①) ─────────────────────────
+  // ★이 블록이 없어서 적대 리뷰가 배너 분기를 **통째로 지워도** 311/311이 통과했다(P1-1).
+  //   cost_drift·disk_low·보존식 세 분기는 모두 백엔드 판정과 같은 커밋에 배너 테스트가
+  //   들어왔는데 이번만 빠졌다 — 그 구멍이 곧 «판정은 하는데 화면은 조용한» 상태다.
+  const survival = (
+    over: Partial<NonNullable<SchedulerHealth["exclusion_survival"]>> = {},
+  ) => ({
+    monitored: 1,
+    alive: 0,
+    breached: [],
+    breached_total: 0,
+    never_checked: 0,
+    never_checked_due: 0,
+    last_checked_at: "2026-08-11T08:25:00+09:00",
+    stale_hours: 30,
+    stale: false,
+    healthy: false,
+    revert_howto: "네이버 검색광고 콘솔에서 삭제하면 복구된다",
+    impact: "우리가 건 제외가 사라지면 그 검색어에 광고비가 다시 흐른다",
+    as_of: "2026-08-11T12:00:00+09:00",
+    ...over,
+  });
+
+  const breachRow = (over = {}) => ({
+    campaign_id: "cmp-1", adgroup_id: "grp-1", search_term: "아이패드종이필름",
+    live_state: "missing", live_note: "라이브 목록에 없다", excluded_at: "2026-07-22T09:00:00",
+    cost_at_exclusion: 22854, ...over,
+  });
+
+  it("제외가 사라지면 배너에 검색어까지 나온다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({ exclusion_survival: survival({ breached: [breachRow()], breached_total: 1 }) }),
+    );
+    expect(banner).not.toBeNull();
+    expect(banner!.summary).toContain("어긋남");
+    expect(banner!.summary).toContain("아이패드종이필름");
+    expect(banner!.summary).toContain("사라짐");
+  });
+
+  it("★조회 실패(unknown)를 «사라짐»이라 말하지 않는다 — 대응이 달라진다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        exclusion_survival: survival({
+          breached: [breachRow({ live_state: "unknown", live_note: "라이브 조회 실패" })],
+          breached_total: 1,
+        }),
+      }),
+    );
+    expect(banner!.summary).toContain("확인하지 못함");
+    expect(banner!.summary).not.toContain("어긋남");
+  });
+
+  it("★«아직 안 돌았다»와 «멈췄다»를 구분한다", () => {
+    const never = buildPipelineHealthBanner(
+      makeHealth({
+        exclusion_survival: survival({ never_checked: 1, never_checked_due: 1, last_checked_at: null }),
+      }),
+    );
+    expect(never!.summary).toContain("아직 한 번도 대조되지 않음");
+
+    const stopped = buildPipelineHealthBanner(
+      makeHealth({
+        exclusion_survival: survival({ stale: true, last_checked_at: "2026-08-05T08:25:00+09:00" }),
+      }),
+    );
+    expect(stopped!.summary).toContain("대조가 멈춤");
+    expect(stopped!.summary).toContain("2026-08-05");
+  });
+
+  it("생존 감시가 정상이면 이 분기는 침묵(다른 문제만 나온다)", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        exclusion_survival: survival({ healthy: true, alive: 1 }),
+        missing_jobs: ["auto_sync_orders"],
+      }),
+    );
+    expect(banner!.summary).toBe("잡 실패: auto_sync_orders");
+  });
+
+  it("구버전 백엔드(키 없음)에서도 다른 판정을 가리지 않는다", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ exclusion_survival: undefined }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({ exclusion_survival: null }))).toBeNull();
+  });
 });
