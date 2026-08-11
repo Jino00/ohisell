@@ -51,6 +51,8 @@ ATOM_LIMIT = 1_000_000
 _LADDER_KEYS = ("basis", "qty", "revenue", "cost", "promo_burden", "ad_spend", "vat",
                 "net_profit", "profit_rate", "ad_no_sales", "ad_no_sales_days",
                 "ad_uncosted", "ad_unattributed", "ad_no_sales_included",
+                # D-CPP-38 — 5통 분할 + 비율 차감. 여기 없으면 감사가 옛 4통으로 판정한다.
+                "ad_out_of_range", "ad_folded_deducted", "ad_attributed", "ad_deduct_share",
                 "ad_option_total", "ad_account_total",
                 "cost_coverage", "revenue_priced", "blocked")
 
@@ -218,9 +220,16 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
         #   diff 351,520원. 접는 대상이 갈라진 것이 원인이므로 두 곳이 **같은 식**을 써야 한다.
         # ★`_money`는 **합에 한 번** 건다 — 엔진(`pnl_net_total`)과 반올림 지점이 같아야
         #   역산이 정확히 되돌아온다. 통별로 반올림하면 끝자리가 어긋난다.
-        adj = (_money((Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"]))
-                      * Decimal("100") / Decimal("110"))
-               if p["ad_no_sales_included"] else ZERO)
+        # ★★2026-08-11(D-CPP-38): 엔진이 **비율 차감**으로 바뀌어 접는 금액이 더 이상
+        #   «두 통의 전액 or 0»이 아니다. 그래서 여기서 **다시 계산하지 않고 엔진이 공개한
+        #   `ad_folded_deducted`를 그대로 쓴다.** 재계산하면 반올림·비율이 두 곳에서 갈라져
+        #   또 «합격하는 순간 깨지는» 검사가 된다 — 2026-08-09에 이미 그 형태로 당했다.
+        #   (옛 응답 호환: 키가 없으면 옛 식으로 되돌린다.)
+        _folded = p.get("ad_folded_deducted")
+        if _folded is None:
+            _folded = ((Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"]))
+                       if p["ad_no_sales_included"] else ZERO)
+        adj = _money(Decimal(_folded) * Decimal("100") / Decimal("110"))
         folds_net = net + adj
         adj_note = (None if adj == ZERO else
                     f"사다리는 귀속 불가 광고비(팔린 옵션의 판매 없는 날 "
@@ -349,7 +358,12 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
         #   좌변에 `ad_uncosted`를 또 더하면 **이중계상**이 된다(테스트가 이 함정을 지킨다).
         atoms_ad = sum((Decimal(o["ad_spend"]) for o in r["options"]
                         if o["ad_spend"] is not None), ZERO)
-        left = atoms_ad + Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"])
+        # ★구멍0(`ad_out_of_range`)을 더한다 — 2026-08-11(D-CPP-38)에 원장이 4통에서 5통으로
+        #   갈라졌다. 이 항을 빼면 «원장이 남김없이 갈렸는가»가 **판매분석 롤링 창보다 앞선
+        #   기간을 조회하는 순간 fail**한다(라이브 90일 창에서 12,969,126원). A7의 성격이
+        #   「결손 고발」이 아니라 「완결성 확인」이므로 통이 늘면 좌변도 늘어야 한다.
+        left = (atoms_ad + Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"])
+                + Decimal(p.get("ad_out_of_range") or 0))
         right = Decimal(p["ad_option_total"])
         ad_rows = int(db.execute(text(_AD_OPTION_ROW_COUNT_SQL), {
             "vendor": vendor, "since": date_from.isoformat(), "until": date_to.isoformat(),

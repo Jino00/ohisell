@@ -967,14 +967,18 @@ def test_excluded_skus_are_listed_by_name_for_review(db):
 
 
 def _ad_buckets(p):
-    """사다리 응답에서 네 통을 꺼낸다. `ad_spend`는 is_full이면 접힌 두 통을 이미 품고 있다."""
-    folded = ((Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"]))
-              if p["ad_no_sales_included"] else ZERO_D)
+    """사다리 응답에서 **다섯 통**을 꺼낸다(2026-08-11 D-CPP-38로 구멍0 신설).
+
+    ★`ad_spend`에서 역산하지 않고 엔진이 낸 `ad_attributed`를 그대로 읽는다.
+      비율 차감이 들어오면서 `ad_spend`는 «귀속분 + 차감된 구조적 몫»이 되었고, 역산은
+      비율·반올림을 테스트가 **다시 구현**하게 만든다 — 그러면 엔진이 틀려도 같이 틀린다.
+    """
     return {
-        "attributed": Decimal(p["ad_spend"] or 0) - folded,
+        "attributed": Decimal(p["ad_attributed"]),
         "uncosted": Decimal(p["ad_uncosted"]),
         "no_sales_days": Decimal(p["ad_no_sales_days"]),
         "no_sales": Decimal(p["ad_no_sales"]),
+        "out_of_range": Decimal(p["ad_out_of_range"]),
     }
 
 
@@ -998,8 +1002,12 @@ def test_four_ad_buckets_cover_the_option_ledger_without_remainder(db):
     p = compute_rocket_1p_revenue(db, D, date(2026, 8, 5))["pnl"]
     b = _ad_buckets(p)
     assert b == {"attributed": Decimal("11000"), "uncosted": Decimal("7000"),
-                 "no_sales_days": Decimal("5000"), "no_sales": Decimal("3000")}
+                 "no_sales_days": Decimal("5000"), "no_sales": Decimal("3000"),
+                 "out_of_range": Decimal("0")}   # 판매행이 있는 구간이라 구멍0은 비어 있다
     assert sum(b.values()) == Decimal(p["ad_option_total"]) == Decimal("26000")
+    # ★사다리 표시값은 «귀속분 + 차감된 구조적 몫»이라 통 합계와 다르다 — 둘을 혼동하면
+    #   항등식이 스스로 겹친다(비율 차감을 넣자마자 드러난 함정).
+    assert Decimal(p["ad_spend"]) == Decimal(p["ad_attributed"]) + Decimal(p["ad_folded_deducted"])
     # ★손익 밖에 남은 합을 **한 숫자로도** 낸다 — 화면 각주가 이 값을 그대로 쓴다.
     assert Decimal(p["ad_unattributed"]) == Decimal("15000")
 
@@ -1119,7 +1127,12 @@ def test_no_sales_included_is_false_when_there_is_no_ladder(db):
     p = compute_rocket_1p_revenue(db, D, D)["pnl"]
     assert p["blocked"]["code"] == "sales_not_covered"
     assert p["ad_no_sales_included"] is False
-    assert p["ad_no_sales"] == "3000"       # 금액은 계속 보인다(안 보이면 없는 돈이 된다)
+    # ★금액은 계속 보인다(안 보이면 없는 돈이 된다) — 단 2026-08-11(D-CPP-38)부터
+    #   **판매분석이 하나도 없는 창**의 광고비는 「안 팔림」이 아니라 「관측 불가」라
+    #   구멍0으로 간다. 통이 바뀐 것이지 돈이 사라진 게 아니다.
+    assert p["ad_no_sales"] == "0"
+    assert p["ad_out_of_range"] == "3000"
+    assert p["ad_unattributed"] == "3000"
 
 
 # ═══ ⑧ 「원가 제외」의 두 의미 — 화면이 결정이라 단정하지 않는다 (2026-08-09) ═══
@@ -1236,3 +1249,79 @@ def test_daily_ad_sum_plus_two_holes_equals_the_option_ledger(db):
     assert daily_sum + holes == ledger, (
         "일별 합 %s + 구멍 %s != 원장 %s — 각주의 설명이 거짓이 된다" % (daily_sum, holes, ledger))
     assert daily_sum < ledger, "일별 합이 원장과 같으면 열 이름이 「전량」이어야 한다"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 절벽 제거 — 「전부 아니면 전무」를 비율 차감으로 (2026-08-11, D-CPP-38)
+#
+# Jino: *"문제 있는걸 어떻게 해결할 수 있는지 완전한 해결책을 내놔봐."*
+#
+# 라이브 실측(창 2026-05-14~08-11): 원가 미부착 SKU 11건의 매출이 전체의 **0.275%**인데
+# 그 하나가 `is_full=False`를 만들어 구조적 광고비 **19,294,871원(원장의 34.3%)의 차감을
+# 통째로 껐다.** 2026-08-10에도 같은 형태였다(0.19%가 12.7%를 껐다) — 그때는 SKU를 연결해
+# 넘겼지만 **새 상품이 나올 때마다 절벽이 다시 선다.** 그래서 게이트 자체를 없앴다.
+# ══════════════════════════════════════════════════════════════════
+def test_partial_coverage_deducts_structural_ad_in_proportion_not_zero(db):
+    """★커버리지가 100%가 아니어도 **비율만큼은** 뺀다 — 0원이 아니다(절벽 제거).
+
+    종전: uncosted SKU가 하나라도 있으면 구조적 광고비 차감이 **전부 꺼졌다.**
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _price(db, "S2", "50000", 2)                       # 원가 없음 → 부분집합 밖
+    _sale(db, "A", "S1", 10, "1000000")
+    _sale(db, "B", "S2", 5, "500000")
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "8000")                        # 구조적(그 창에 안 팔린 옵션)
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "costed_subset"               # 결손이 있다
+    share = Decimal(p["ad_deduct_share"])
+    assert ZERO_D < share < 1, "부분 커버리지면 비율은 0과 1 사이여야 한다"
+    # ★핵심: 종전엔 여기가 0이었다.
+    assert Decimal(p["ad_folded_deducted"]) > ZERO_D, "절벽이 살아 있다 — 구조적 광고비가 0원 차감"
+    assert Decimal(p["ad_folded_deducted"]) == (Decimal("8000") * share).quantize(Decimal("0.01"))
+    # 사다리 광고비 = 귀속분 + 차감된 몫.
+    assert Decimal(p["ad_spend"]) == Decimal(p["ad_attributed"]) + Decimal(p["ad_folded_deducted"])
+
+
+def test_full_coverage_keeps_the_old_numbers_exactly(db):
+    """★★하위호환 — 커버리지 100%면 **종전과 완전히 같은 값**이 나온다.
+
+    비율 차감의 안전성이 여기에 달려 있다: `is_full`이면 share가 정확히 1이라
+    `folded * 1 == folded`다. 이게 깨지면 「지금까지 맞던 창」이 조용히 움직인다.
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _sale(db, "A", "S1", 10, "1000000")
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "8000")                        # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "full"
+    assert Decimal(p["ad_deduct_share"]) == Decimal("1.0000")
+    assert Decimal(p["ad_folded_deducted"]) == Decimal("8000")   # 전액 — 종전과 동일
+    assert p["ad_no_sales_included"] is True
+
+
+def test_ad_before_the_sales_analysis_window_is_named_not_counted_as_unsold(db):
+    """★★구멍0 — 판매분석 롤링 창보다 **앞선 날**의 광고비는 「안 팔림」이 아니다.
+
+    라이브(창 2026-05-14~08-11): 구조적 두 통 19,294,871원 중 **12,969,126원이 이것**이었다.
+    같은 기간 매출은 축 안 창과 **한 푼도 다르지 않다** — 광고비만 늘어난 것이다.
+    ★이 통은 차감하지 않는다. 매출을 관측조차 못 하는 구간의 비용만 빼면 이익이 위조된다.
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _sale(db, "A", "S1", 10, "1000000", d=date(2026, 8, 4))     # 판매분석은 8/4부터
+    _ad_option(db, "A", "11000", d=date(2026, 8, 4))
+    _ad_option(db, "Z", "9000", d=date(2026, 8, 1))             # ★판매분석 시작 이전
+    db.commit()
+    p = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 4))["pnl"]
+
+    assert p["ad_out_of_range"] == "9000", "롤링 창 이전 광고비가 구멍0으로 안 갔다"
+    assert Decimal(p["ad_no_sales"]) == ZERO_D, "관측 불가가 「안 팔림」으로 세어졌다"
+    # ★차감되지 않는다 — 커버리지 100%(basis full)여도 그렇다.
+    assert Decimal(p["ad_folded_deducted"]) == ZERO_D
+    assert Decimal(p["ad_spend"]) == Decimal("11000")
+    # 원장은 여전히 남김없이 갈린다.
+    assert sum(_ad_buckets(p).values()) == Decimal(p["ad_option_total"]) == Decimal("20000")

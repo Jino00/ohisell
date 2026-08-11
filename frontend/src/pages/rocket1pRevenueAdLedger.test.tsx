@@ -39,6 +39,10 @@ const BASE: R = {
     net_profit: "432233.90", profit_rate: "0.1966",
     ad_no_sales: "99232", ad_no_sales_days: "0", ad_uncosted: "33750",
     ad_unattributed: "132982", ad_no_sales_included: false,
+    // D-CPP-38 — 5통 분할 + 비율 차감. BASE는 costed_subset(coverage 0.9483)이므로
+    // 구조적 통도 **그 비율만큼 차감된다**(종전엔 0원이었다 — 그게 절벽이었다).
+    ad_out_of_range: "0", ad_deduct_share: "0.9483",
+    ad_folded_deducted: "94112", ad_attributed: "570337",
     ad_account_total: "797241.00", ad_option_total: "797431",
     cost_coverage: "0.9483", revenue_priced: "2318513",
     promo_burden_known: true, blocked: null,
@@ -124,8 +128,9 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
     mount(BASE);
     // 원가 미상분은 매출도 손익 밖이라 **어떤 경우에도** 차감 대상이 아니다.
     expect((await ladderLine("원가 미상 옵션")).textContent).not.toContain("−");
-    // 판매행 없는 옵션분은 included=false이므로 이 창에서는 부호가 없다.
-    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).not.toContain("−");
+    // ★2026-08-11(D-CPP-38): 구조적 통은 이제 **비율만큼 차감된다** — 부호가 붙는 게 맞다.
+    //   대신 «몇 %만 반영»인지 말한다. 부호를 숨기면 «안 뺐다»는 거짓말이 된다.
+    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).toContain("94.8%만 반영");
   });
 
   it("M2 팔린 옵션의 «판매 없는 날» 광고비가 줄로 보인다 (근거화면 A7이 고발하던 돈)", async () => {
@@ -214,7 +219,8 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
     // ★이 라벨이 금지선(부분집합 매출에서 전량 비용 빼기 금지)의 유일한 화면 경고다.
     mount(BASE);
     expect((await ladderLine("원가 미상 옵션")).textContent).toContain("위 손익에 미포함");
-    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).toContain("위 손익에 미포함");
+    // ★구조적 통은 이제 부분 차감되므로 «미포함»이 아니다 — 대신 반영률을 말한다.
+    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).toContain("만 반영");
   });
 });
 
@@ -311,6 +317,21 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     expect(text).toContain("그 차이가 구멍2＋구멍3입니다");
     // ★「우리 매출(전량)」은 실제로 전량이므로 그 주장은 남아 있어야 한다(과교정 방지).
     expect(text).toContain("「우리 매출(전량)」은 그날 전부");
+  });
+
+  it("★구멍0(판매분석 없는 기간)은 이름과 금액을 갖고, **차감되지 않는다** (D-CPP-38)", async () => {
+    // 라이브 창 05-14~08-11: 구조적 두 통 19,294,871원 중 12,969,126원이 이것이었다.
+    // 종전엔 구멍2·3에 섞여 「광고했는데 안 팔림 34.3%」를 만들었다 — 3분의 2가 다른 것이었다.
+    mount(withPnl({
+      basis: "costed_subset", ad_out_of_range: "12969126",
+      ad_deduct_share: "0.9973", ad_folded_deducted: "6308665",
+    }));
+    const line = await ladderLine("판매분석이 없는 기간");
+    const t = line.textContent ?? "";
+    expect(t).toContain("12,969,126");
+    expect(t).toContain("위 손익에 미포함");   // ★차감되지 않는다 — 그렇게 말한다
+    expect(t).not.toContain("−");              // 부호가 붙으면 «뺐다»로 읽힌다
+    expect(t).toContain("관측 불가");           // 「안 팔림」과 가른다
   });
 
   it("★광고 대사 문장이 **방향**을 말로 못 박는다 (2026-08-11 QA — 부호가 거꾸로 읽혔다)", async () => {

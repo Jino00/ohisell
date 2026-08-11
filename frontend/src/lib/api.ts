@@ -1508,6 +1508,16 @@ export interface Rocket1PPnl {
   ad_uncosted: string;
   /** 위 셋의 합 = 「계정 총액과 사다리가 왜 다른가」의 답 전체. */
   ad_unattributed: string;
+  /** ★구멍0 — **판매분석 롤링 창보다 앞선 날**의 광고비(D-CPP-38). 「안 팔림」이 아니라
+   *  «관측 불가»다. 어떤 경우에도 차감하지 않는다. 이 통이 없으면 그 돈이 구멍2·3에 섞여
+   *  「광고했는데 안 팔림」의 크기를 부풀린다(라이브 19,294,871 중 12,969,126이 이것). */
+  ad_out_of_range: string;
+  /** 구조적 두 통(구멍2·3)에 실제로 곱해진 비율. 종전엔 0 아니면 1이었다(절벽). */
+  ad_deduct_share: string | null;
+  /** 그 비율을 곱해 **실제로 차감된** 금액. `ad_spend` = `ad_attributed` + 이 값. */
+  ad_folded_deducted: string;
+  /** 원자에 붙은 **순수 귀속분**. `ad_spend`와 다르다(그건 차감된 구조적 몫을 품는다). */
+  ad_attributed: string;
   ad_no_sales_included: boolean;
   ad_account_total: string;        // 계정 총액(report/SALES) — 사다리 광고비와 왜 다른지 대조용
   ad_option_total: string;         // 옵션 합계(Billboard, 판매 없는 옵션 포함)

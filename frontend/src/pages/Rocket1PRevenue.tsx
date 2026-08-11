@@ -290,6 +290,11 @@ export default function Rocket1PRevenue() {
                  날)는 근거 화면 A7이 fail로만 고발하고 있었다. 안 보이는 돈은 없는 돈이 된다. */
               const noSalesDays = Number(p.ad_no_sales_days);
               const adUncosted = Number(p.ad_uncosted);
+              // ★D-CPP-38 — 구조적 두 통에 실제로 곱해진 비율(%). null이면 판정 불가.
+              //   종전엔 0 아니면 100뿐이었다(절벽). 이제 커버리지 비율이다.
+              const foldPct = p.ad_deduct_share === null || p.ad_deduct_share === undefined
+                ? null : Math.round(Number(p.ad_deduct_share) * 1000) / 10;
+              const outOfRange = Number(p.ad_out_of_range ?? 0);
               /* ★«손익 밖에 남은 돈»은 `ad_unattributed`와 **다르다**: included면 뒤 두 통이
                  이미 순이익에서 빠졌으므로 남은 것은 구멍1뿐이다. 두 값을 같이 쓰면 각주가
                  사다리를 부정한다(적대 리뷰 P1-2). 술어는 사다리 부호와 같은 것을 쓴다. */
@@ -342,11 +347,11 @@ export default function Rocket1PRevenue() {
                             사이로 새던 돈이다(창 07-31~08-06 435,916원). 하루 창에선 0이다. */}
                         {noSalesDays > 0 && (
                           <PnlLine
-                            label={p.ad_no_sales_included
-                              ? "광고비 (팔린 옵션의 판매 없는 날)"
-                              : "광고비 (팔린 옵션의 판매 없는 날) — 위 손익에 미포함"}
+                            label={foldPct === null ? "광고비 (팔린 옵션의 판매 없는 날)"
+                              : foldPct >= 100 ? "광고비 (팔린 옵션의 판매 없는 날)"
+                              : `광고비 (팔린 옵션의 판매 없는 날) — ${foldPct}%만 반영`}
                             value={won(p.ad_no_sales_days)}
-                            sign={p.ad_no_sales_included ? "minus" : undefined}
+                            sign={foldPct !== null && foldPct > 0 ? "minus" : undefined}
                             sub="그 옵션은 기간 안에 팔렸지만 광고를 쓴 그 날엔 판매행이 없습니다 — 귀속할 원자가 없는 돈입니다" />
                         )}
                         {/* ★구멍3 — 그 창에 판매행이 없는 옵션의 광고비. 예전 판은 이 돈을 손익에
@@ -354,14 +359,24 @@ export default function Rocket1PRevenue() {
                             통째로 사라졌고, basis='full'에서는 부호까지 뒤집혔다(적대 리뷰 P1). */}
                         {noSales > 0 && (
                           <PnlLine
-                            label={p.ad_no_sales_included
+                            label={foldPct === null || foldPct >= 100
                               ? "광고비 (그 기간 판매 없는 옵션)"
-                              : "광고비 (그 기간 판매 없는 옵션) — 위 손익에 미포함"}
+                              : `광고비 (그 기간 판매 없는 옵션) — ${foldPct}%만 반영`}
                             value={won(p.ad_no_sales)}
-                            sign={p.ad_no_sales_included ? "minus" : undefined}
-                            sub={p.ad_no_sales_included
-                              ? "광고는 돌았는데 그 기간에 안 팔린 옵션"
-                              : "귀속할 판매가 없어 부분집합에 섞지 않았습니다 — 실제로 나간 돈입니다"} />
+                            sign={foldPct !== null && foldPct > 0 ? "minus" : undefined}
+                            sub="광고는 돌았는데 그 기간에 안 팔린 옵션" />
+                        )}
+                        {/* ★★구멍0 — 판매분석 롤링 창보다 **앞선 날**의 광고비(D-CPP-38).
+                            「안 팔림」이 아니라 «관측 불가»다. 라이브 창 05-14~08-11에서
+                            12,969,126원이 여기 있었고, 종전엔 구멍2·3에 섞여 「광고했는데
+                            안 팔림 34.3%」를 만들고 있었다 — 그 3분의 2가 다른 것이었다.
+                            ★차감하지 않는다: 매출을 관측조차 못 하는 구간의 비용만 빼면
+                            이익이 한쪽으로 위조된다(구멍1을 안 빼는 것과 같은 이유). */}
+                        {outOfRange > 0 && (
+                          <PnlLine
+                            label="광고비 (판매분석이 없는 기간) — 위 손익에 미포함"
+                            value={won(p.ad_out_of_range)}
+                            sub="쿠팡 판매분석은 롤링 약 2개월이라 그 이전 날은 «안 팔림»이 아니라 «관측 불가»입니다 — 팔렸는지 자체를 알 수 없어 차감하지 않습니다" />
                         )}
                         <PnlLine label="부가세 (납부세액)" value={won(p.vat)} sign="minus"
                           sub="매출VAT − 매입세액공제" />
