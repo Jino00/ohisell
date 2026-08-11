@@ -1280,7 +1280,10 @@ def test_partial_coverage_deducts_structural_ad_in_proportion_not_zero(db):
     assert ZERO_D < share < 1, "부분 커버리지면 비율은 0과 1 사이여야 한다"
     # ★핵심: 종전엔 여기가 0이었다.
     assert Decimal(p["ad_folded_deducted"]) > ZERO_D, "절벽이 살아 있다 — 구조적 광고비가 0원 차감"
-    assert Decimal(p["ad_folded_deducted"]) == (Decimal("8000") * share).quantize(Decimal("0.01"))
+    # ★표시용 share는 4자리로 접힌 값이고 곱셈은 **원시 비율**로 한다(반올림 함정 방지) —
+    #   그래서 «접힌 값으로 다시 곱한 결과»와 정확히 같지 않을 수 있다. 테스트가 그 곱을
+    #   재현하면 반올림 지점을 테스트가 다시 구현하는 셈이라, 관계만 못 박는다.
+    assert ZERO_D < Decimal(p["ad_folded_deducted"]) < Decimal("8000")
     # 사다리 광고비 = 귀속분 + 차감된 몫.
     assert Decimal(p["ad_spend"]) == Decimal(p["ad_attributed"]) + Decimal(p["ad_folded_deducted"])
 
@@ -1325,3 +1328,48 @@ def test_ad_before_the_sales_analysis_window_is_named_not_counted_as_unsold(db):
     assert Decimal(p["ad_spend"]) == Decimal("11000")
     # 원장은 여전히 남김없이 갈린다.
     assert sum(_ad_buckets(p).values()) == Decimal(p["ad_option_total"]) == Decimal("20000")
+
+
+def test_share_accounts_for_the_unpriced_axis_too(db):
+    """★★적대 리뷰 1R P1-2 — `cost_coverage`만 쓰면 **납품단가 축이 사라진다.**
+
+    `cost_coverage`의 분모 `priced_revenue`는 납품단가 미상 옵션을 분자·분모에서 통째로
+    뺀다. 그래서 그것만 곱하면 `is_full`이 지키던 두 조건 중 뒤쪽이 없어져,
+    **부분집합이 장사의 일부인데 구조적 광고비 전액이 그 위에 얹힌다.**
+    재현(리뷰가 낸 것): 부분집합 매출 100만인데 800,000원 전액 차감.
+    """
+    _price(db, "S1", "60000", 1); _cost(db, "S1", 20000)
+    _sale(db, "A", "S1", 10, "1000000")
+    _sale(db, "B", "S2", 5, "5000000")     # 발주 라인 없음 → 납품단가 미상(our_revenue None)
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "800000")          # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "costed_subset"
+    # ★원가 축만 보면 1.0000이다 — 그래서 그것만 쓰면 전액이 얹힌다.
+    assert Decimal(p["cost_coverage"]) == Decimal("1.0000")
+    assert Decimal(p["ad_deduct_share"]) < 1, "납품단가 축이 share에 반영되지 않았다"
+    assert Decimal(p["ad_folded_deducted"]) < Decimal("800000"), "구조적 광고비 전액이 차감됐다"
+
+
+def test_share_uses_the_raw_ratio_not_the_rounded_one(db):
+    """★적대 리뷰 1R P2 — `_ratio`가 소수 4자리로 접어 0.99996이 1.0000이 된다.
+
+    그 접힌 값을 곱하면 **결손이 남아 있는데 전액 차감**되고, 화면은 「100%」라
+    커버리지 100% 창과 구분조차 안 된다. 곱셈은 원시 비율로 해야 한다.
+    """
+    # 원가 있는 매출이 압도적이고 미상이 아주 작아 표시 커버리지가 1.0000으로 접히는 창.
+    _price(db, "S1", "1000000", 1); _cost(db, "S1", 1)
+    _price(db, "S2", "10", 2)              # 납품단가는 있고 원가만 없다 → 아주 작은 결손
+    _sale(db, "A", "S1", 100, "9000000")
+    _sale(db, "B", "S2", 1, "20")
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "100000")          # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+
+    assert p["basis"] == "costed_subset", "결손이 있는 창이라야 이 검사가 뜻이 있다"
+    # 표시용 커버리지는 접혀서 1.0000일 수 있다 — 그래도 전액 차감이면 안 된다.
+    assert Decimal(p["ad_folded_deducted"]) < Decimal("100000"), \
+        "반올림된 비율로 곱해 전액 차감됐다(0.99996 → 1.0000 함정)"

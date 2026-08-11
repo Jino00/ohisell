@@ -712,7 +712,33 @@ def compute_rocket_1p_revenue(
     #   ★구멍1(`ad_uncosted`)은 여전히 **어느 분기에서도 안 뺀다** — 그 매출이 통째로 부분집합
     #     밖이라 비용만 빼면 이익이 역방향으로 위조된다(D-CPP-28 금지선, 불변).
     #   ★구멍0(`ad_out_of_range`)도 안 뺀다 — 매출을 관측조차 못 하는 구간이다.
-    ad_deduct_share = cost_coverage if cost_coverage is not None else ZERO
+    #   ★★비율은 **두 축을 다 반영해야 한다**(적대 리뷰 P1-2). `cost_coverage`의 분모인
+    #     `priced_revenue`는 **납품단가가 없는 옵션을 분자·분모에서 통째로 뺀다.** 그래서
+    #     그것만 쓰면 종전 `is_full`이 지키던 두 조건(`uncosted_rows==0` **and**
+    #     `coverage_unpriced==0`) 중 뒤쪽이 사라진다 — 납품단가 미상 옵션이 매출의 대부분인
+    #     창에서 `cost_coverage=1.0000`이 나와 **구조적 광고비 전액이 작은 부분집합에 얹힌다**
+    #     (재현: 부분집합 매출 100만인데 800,000원 전액 차감). 이 diff가 스스로 «해서는 안
+    #     된다»고 적은 연산이 그 자리에서 되살아난다.
+    #   ★납품단가 축의 분모는 **소비자 매출**이다 — 납품단가가 없어도 소비자 매출은 있다.
+    #     그래서 «관측된 장사 중 손익 부분집합이 차지하는 몫»을 두 축의 곱으로 낸다.
+    #     둘 다 1이면 곱도 1이라 **하위호환이 유지된다**(is_full ⟹ 두 축 모두 1).
+    _priced_consumer = sum(
+        (Decimal(o["consumer_revenue"]) for o in options
+         if o["our_revenue"] is not None and o["consumer_revenue"] is not None), ZERO
+    )
+    _all_consumer = sum(
+        (Decimal(o["consumer_revenue"]) for o in options
+         if o["consumer_revenue"] is not None), ZERO
+    )
+    #   ★★**반올림된 비율을 쓰지 않는다**(적대 리뷰 P2). `_ratio`는 소수 4자리로 quantize해서
+    #     커버리지 0.99996이 1.0000이 된다 — 그 값을 곱하면 결손이 남아 있는데 **전액 차감**이
+    #     되고, 화면은 「100%」라 커버리지 100% 창과 구분조차 안 된다. 기존 코드가 `is_full`을
+    #     «반올림된 비율이 아니라 구조»로 판정한 이유가 정확히 이것이다. 여기선 **원시 나눗셈**을
+    #     쓴다 — 표시용으로만 뒤에서 4자리로 접는다.
+    _priced_share = ((_priced_consumer / _all_consumer) if _all_consumer > ZERO
+                     else (Decimal(1) if coverage_unpriced == 0 else ZERO))
+    _cost_share = (costed_revenue / priced_revenue) if priced_revenue > ZERO else ZERO
+    ad_deduct_share = _cost_share * _priced_share
     # ★is_full이면 **귀속 불가능한 두 통을 다 넣는다**(2026-08-09 교정). 예전 판은 구멍3만
     #   넣어서, 커버리지가 100%가 되어 basis='full'("기간 전체")이 돼도 구멍2가 여전히 빠졌다 —
     #   «의도된 종착 상태에 거짓말이 남는다»는 같은 결함이 한 겹 아래에 또 있었던 것이다.
@@ -838,7 +864,8 @@ def compute_rocket_1p_revenue(
         "ad_unattributed": str(ad_unattributed),
         # ★구조적 두 통(구멍2·3)에 **실제로 곱해진 비율**과 그 결과 금액.
         #   종전엔 0 아니면 1이었다(절벽). 이제 커버리지 비율이다 — 0.9973이면 99.73%를 뺀다.
-        "ad_deduct_share": _s(ad_deduct_share) if covered else None,
+        # 표시용으로만 4자리로 접는다 — 곱셈은 위에서 **원시 비율**로 했다.
+        "ad_deduct_share": _s(ad_deduct_share.quantize(Decimal("0.0001"))) if covered else None,
         "ad_folded_deducted": str(ad_folded_deducted),
         # ad_no_sales·ad_no_sales_days 둘의 포함 여부. ad_uncosted는 포함 대상이 아니다.
         # ★`has_pnl`을 **곱한다**(2026-08-09 실측 교정): `is_full`은 «결손 0»이라 판매분석
