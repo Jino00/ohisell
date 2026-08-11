@@ -596,8 +596,37 @@ def compute_rocket_1p_revenue(
     #   ★귀속 불가능한 돈이라 부분집합 손익에는 섞지 않고, 'full'일 때만 차감한다.
     #     어느 쪽이든 **항상 금액을 싣는다** — 안 보이면 없는 돈이 된다.
     sold_option_ids = set(opt_acc)
+    # ★★구멍0 — **판매분석이 존재하지 않는 날의 광고비**(2026-08-11 신설, D-CPP-38).
+    #   쿠팡 판매분석은 롤링 약 2개월이라(전역 실측: 2026-06-01부터) 그보다 앞선 날은
+    #   «안 팔린» 게 아니라 **관측 불가**다. 그런데 종전 판정은 날짜를 안 보고 옵션만 봐서
+    #   그 광고비를 구멍2·3에 섞었다. 실측(창 2026-05-14~08-11): 구조적 두 통 19,294,871원
+    #   중 **12,969,126원이 관측 구간 밖**이었고 — 그 창의 매출은 축 안 창과 **한 푼도 같다**.
+    #   즉 화면이 「광고했는데 안 팔림 34.3%」라고 말하던 것의 3분의 2가 다른 것이었다.
+    #   ★이 통은 **어떤 경우에도 차감하지 않는다**: 매출을 관측 못 하는 구간의 비용만 빼면
+    #     이익이 한쪽으로 위조된다(구멍1을 안 빼는 것과 같은 이유).
+    def _observed(day_key: str) -> bool:
+        """그 날짜에 판매분석이 **존재할 수 있는가**(행이 있었나가 아니다).
+
+        범위 안인데 행이 없으면 그건 진짜 «그날 안 팔림»이다 — 구멍2·3이 맞다.
+
+        ★**머리만 자른다**(`>= obs_from`), 꼬리는 안 자른다. 둘은 성격이 다르다:
+          · 머리(롤링 창 이전) — 쿠팡이 **영영 안 준다**. 관측 불가가 확정이다.
+          · 꼬리(마지막 수집일 이후) — 아직 **안 온 것**이고 곧 온다. 그건 신선도 문제라
+            `freshness` 블록이 따로 말하고 있으므로 여기서 또 갈래를 만들지 않는다.
+          꼬리까지 자르면 «오늘 쓴 광고비»가 매일 관측 불가로 빠졌다가 하루 뒤 되돌아와
+          값이 출렁인다 — 그건 이 통의 목적(고정된 사실을 이름 붙이기)과 반대다.
+        """
+        return obs_from is not None and day_key >= obs_from
+
+    ad_out_of_range = sum(
+        (v for (dk, oid), v in ad_by_day_option.items()
+         if not _observed(dk) and (dk, oid) not in atom_keys), ZERO
+    )
+    # ★구멍3을 **날짜 그레인으로 다시 센다.** 종전엔 `ad_by_option`(옵션 합계)이라 날짜를
+    #   못 봐서 관측 구간 밖을 갈라낼 수 없었다. 합계는 같고 갈래만 늘어난다.
     ad_no_sales = sum(
-        (v for k, v in ad_by_option.items() if k not in sold_option_ids), ZERO
+        (v for (dk, oid), v in ad_by_day_option.items()
+         if oid not in sold_option_ids and _observed(dk)), ZERO
     )
     # ★★구멍2 — **팔린 옵션이 «안 팔린 날»에 쓴 광고비**(2026-08-09에 배선. 발견 자체는
     #   2026-08-07 근거 화면 A7이었고, 그때는 "관측된 결손"으로 fail만 띄우고 엔진은 안 고쳤다).
@@ -609,11 +638,11 @@ def compute_rocket_1p_revenue(
     #     결론내면 안 된다 — 창을 밝히지 않고 인용하지 말 것.
     ad_no_sales_days = sum(
         (v for (dk, oid), v in ad_by_day_option.items()
-         if oid in sold_option_ids and (dk, oid) not in atom_keys), ZERO
+         if oid in sold_option_ids and (dk, oid) not in atom_keys and _observed(dk)), ZERO
     )
     # ★네 통의 합 = 옵션 광고 원장 전액. 이 항등식이 이 블록의 존재 이유다 — 어느 통도
     #   «남는 것»이 아니라 이름과 금액을 가진다. (테스트가 전건 대조로 지킨다.)
-    ad_unattributed = ad_uncosted + ad_no_sales_days + ad_no_sales
+    ad_unattributed = ad_uncosted + ad_no_sales_days + ad_no_sales + ad_out_of_range
 
     cost_coverage = _ratio(costed_revenue, priced_revenue) if priced_revenue > ZERO else None
     uncosted_rows = sorted(
@@ -669,6 +698,47 @@ def compute_rocket_1p_revenue(
     #   「원가 확인 100% · 기간 전체」로 뜨고 그 아래 「원가 미등록 SKU N개」가 동시에 떴다.
     is_full = not uncosted_rows and coverage_unpriced == 0
     include_no_sales = is_full
+    # ★★절벽 제거 — 「전부 아니면 전무」를 **비율 차감**으로 바꾼다 (2026-08-11, D-CPP-38).
+    #   종전 실측(창 2026-05-14~08-11): 원가 미부착 SKU 11건의 매출이 전체의 **0.275%**인데
+    #   그 결손 하나가 `is_full=False`를 만들어 구조적 광고비 **19,294,871원(원장의 34.3%)의
+    #   차감을 통째로 껐다.** 입력의 크기와 출력의 크기가 비례하지 않는 게이트였다.
+    #   같은 형태를 2026-08-10에도 겪었다(0.19%가 12.7%를 껐다) — 그때는 SKU를 연결해
+    #   넘겼는데, **새 상품이 나올 때마다 절벽이 다시 선다.** 그래서 이번엔 게이트를 없앤다.
+    #
+    #   ★비율은 `cost_coverage`(= 원가 붙은 매출 ÷ 납품단가 붙은 매출)다. 부분집합이 매출의
+    #     99.73%를 차지하면 귀속 불가 광고비도 99.73%만 그 부분집합의 몫이다.
+    #   ★**하위호환**: `is_full`이면 구조상 `cost_coverage == 1`이라 종전과 **완전히 같은 값**이
+    #     나온다(테스트가 이걸 지킨다). 달라지는 것은 종전에 0원이던 `costed_subset` 분기뿐이다.
+    #   ★구멍1(`ad_uncosted`)은 여전히 **어느 분기에서도 안 뺀다** — 그 매출이 통째로 부분집합
+    #     밖이라 비용만 빼면 이익이 역방향으로 위조된다(D-CPP-28 금지선, 불변).
+    #   ★구멍0(`ad_out_of_range`)도 안 뺀다 — 매출을 관측조차 못 하는 구간이다.
+    #   ★★비율은 **두 축을 다 반영해야 한다**(적대 리뷰 P1-2). `cost_coverage`의 분모인
+    #     `priced_revenue`는 **납품단가가 없는 옵션을 분자·분모에서 통째로 뺀다.** 그래서
+    #     그것만 쓰면 종전 `is_full`이 지키던 두 조건(`uncosted_rows==0` **and**
+    #     `coverage_unpriced==0`) 중 뒤쪽이 사라진다 — 납품단가 미상 옵션이 매출의 대부분인
+    #     창에서 `cost_coverage=1.0000`이 나와 **구조적 광고비 전액이 작은 부분집합에 얹힌다**
+    #     (재현: 부분집합 매출 100만인데 800,000원 전액 차감). 이 diff가 스스로 «해서는 안
+    #     된다»고 적은 연산이 그 자리에서 되살아난다.
+    #   ★납품단가 축의 분모는 **소비자 매출**이다 — 납품단가가 없어도 소비자 매출은 있다.
+    #     그래서 «관측된 장사 중 손익 부분집합이 차지하는 몫»을 두 축의 곱으로 낸다.
+    #     둘 다 1이면 곱도 1이라 **하위호환이 유지된다**(is_full ⟹ 두 축 모두 1).
+    _priced_consumer = sum(
+        (Decimal(o["consumer_revenue"]) for o in options
+         if o["our_revenue"] is not None and o["consumer_revenue"] is not None), ZERO
+    )
+    _all_consumer = sum(
+        (Decimal(o["consumer_revenue"]) for o in options
+         if o["consumer_revenue"] is not None), ZERO
+    )
+    #   ★★**반올림된 비율을 쓰지 않는다**(적대 리뷰 P2). `_ratio`는 소수 4자리로 quantize해서
+    #     커버리지 0.99996이 1.0000이 된다 — 그 값을 곱하면 결손이 남아 있는데 **전액 차감**이
+    #     되고, 화면은 「100%」라 커버리지 100% 창과 구분조차 안 된다. 기존 코드가 `is_full`을
+    #     «반올림된 비율이 아니라 구조»로 판정한 이유가 정확히 이것이다. 여기선 **원시 나눗셈**을
+    #     쓴다 — 표시용으로만 뒤에서 4자리로 접는다.
+    _priced_share = ((_priced_consumer / _all_consumer) if _all_consumer > ZERO
+                     else (Decimal(1) if coverage_unpriced == 0 else ZERO))
+    _cost_share = (costed_revenue / priced_revenue) if priced_revenue > ZERO else ZERO
+    ad_deduct_share = _cost_share * _priced_share
     # ★is_full이면 **귀속 불가능한 두 통을 다 넣는다**(2026-08-09 교정). 예전 판은 구멍3만
     #   넣어서, 커버리지가 100%가 되어 basis='full'("기간 전체")이 돼도 구멍2가 여전히 빠졌다 —
     #   «의도된 종착 상태에 거짓말이 남는다»는 같은 결함이 한 겹 아래에 또 있었던 것이다.
@@ -676,11 +746,11 @@ def compute_rocket_1p_revenue(
     #     없어야 is_full이다), 0이 아닌 상태에서 넣으면 **부분집합 매출에 전량 광고비를**
     #     빼는 것이 되어 손익이 위조된다.
     ad_folded = ad_no_sales_days + ad_no_sales
-    pnl_ad_total = pnl_ad + (ad_folded if include_no_sales else ZERO)
+    # ★비율 차감. is_full이면 share=1이라 `_money(ad_folded * 1) == ad_folded` — 종전과 동일.
+    ad_folded_deducted = _money(ad_folded * ad_deduct_share)
+    pnl_ad_total = pnl_ad + ad_folded_deducted
     # 귀속 불가 광고비도 매입세액공제 대상이라 세후로 차감한다(payable_vat와 같은 축).
-    pnl_net_total = pnl_net - (
-        _money(ad_folded * Decimal("100") / Decimal("110")) if include_no_sales else ZERO
-    )
+    pnl_net_total = pnl_net - _money(ad_folded_deducted * Decimal("100") / Decimal("110"))
     pnl_vat = pnl_revenue - pnl_cost - pnl_burden - pnl_ad_total - pnl_net_total
 
     # ── 일별 손익 (Jino 2026-08-07: "일일 손익을 보고 싶은거야") ─────────
@@ -781,8 +851,22 @@ def compute_rocket_1p_revenue(
         # ★판매행은 있으나 손익 부분집합에 못 들어간 옵션의 광고비(구멍1).
         #   **is_full이면 정의상 0**이고, 0이 아닐 땐 순이익에 절대 넣지 않는다(위 주석).
         "ad_uncosted": str(ad_uncosted),
-        # 위 셋의 합 — 「계정 총액과 사다리가 왜 다른가」의 답 전체.
+        # ★★**순수 귀속분**(원자에 붙은 광고비)만. `ad_spend`와 다르다 — `ad_spend`는
+        #   사다리에 실린 값이라 «귀속분 + 차감된 구조적 몫»이다. 둘을 한 값으로 쓰면
+        #   원장 분할 항등식이 스스로 겹친다(비율 차감을 넣자마자 그게 드러났다).
+        #   원장 분할 = ad_attributed + ad_uncosted + ad_no_sales + ad_no_sales_days + ad_out_of_range
+        "ad_attributed": str(pnl_ad),
+        # ★구멍0 — **판매분석이 존재하지 않는 날의 광고비**(D-CPP-38). 「안 팔림」이 아니라
+        #   «관측 불가»다. 어떤 분기에서도 차감하지 않는다. 이 통이 없으면 그 돈이 구멍2·3에
+        #   섞여 「광고했는데 안 팔림」의 크기를 부풀린다(실측 19,294,871 중 12,969,126이 이것).
+        "ad_out_of_range": str(ad_out_of_range),
+        # 위 넷의 합 — 「계정 총액과 사다리가 왜 다른가」의 답 전체.
         "ad_unattributed": str(ad_unattributed),
+        # ★구조적 두 통(구멍2·3)에 **실제로 곱해진 비율**과 그 결과 금액.
+        #   종전엔 0 아니면 1이었다(절벽). 이제 커버리지 비율이다 — 0.9973이면 99.73%를 뺀다.
+        # 표시용으로만 4자리로 접는다 — 곱셈은 위에서 **원시 비율**로 했다.
+        "ad_deduct_share": _s(ad_deduct_share.quantize(Decimal("0.0001"))) if covered else None,
+        "ad_folded_deducted": str(ad_folded_deducted),
         # ad_no_sales·ad_no_sales_days 둘의 포함 여부. ad_uncosted는 포함 대상이 아니다.
         # ★`has_pnl`을 **곱한다**(2026-08-09 실측 교정): `is_full`은 «결손 0»이라 판매분석
         #   미수집 창에서도 참이 된다(원자가 없으면 미상 SKU도 0건이다). 그 창은 사다리 자체가
