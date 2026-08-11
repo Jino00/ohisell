@@ -224,7 +224,14 @@ def detect_new_exclusions(
     recorded: list[dict] = []
     errors: list[str] = []
     groups_with_zero = 0
+    unverifiable_groups = 0
     for adgroup_id in adgroup_ids:
+        # ★쇼핑 그룹은 이 API가 제외 목록을 돌려주지 않는다(2026-08-11 실측: 콘솔 43건 vs
+        #   API 0건). 그러니 여기서 «없다»를 근거로 아무 판단도 하지 않는다 — 자동 발견은
+        #   구조적으로 파워링크 전용이고, 쇼핑의 유일한 입구는 화면 수동 기록이다.
+        if naver_sa_writer.get_adgroup_type(adgroup_id) not in (None, "WEB_SITE"):
+            unverifiable_groups += 1
+            continue
         try:
             live = naver_sa_writer.get_restricted_keywords(adgroup_id)
         except Exception as e:  # noqa: BLE001 — 한 그룹 실패가 나머지를 지우지 않는다
@@ -249,6 +256,8 @@ def detect_new_exclusions(
 
     return {
         "scanned_groups": len(adgroup_ids),
+        # 쇼핑이라 애초에 대조가 불가능해 건너뛴 그룹 — «찾은 게 없다»와 «볼 수 없다»를 가른다.
+        "unverifiable_groups": unverifiable_groups,
         "groups_with_zero": groups_with_zero,
         "recorded": recorded,
         "errors": errors,

@@ -187,6 +187,9 @@ def test_soft_deleted_same_keyword_is_deleted_not_alive():
 def _patch_live(monkeypatch, mapping: dict[str, list[dict]], fail: set[str] = frozenset()):
     from app.services.naver_ad import naver_sa_writer
 
+    # 기본은 파워링크(WEB_SITE) — 라이브 대조가 진실을 말하는 유일한 유형이다.
+    monkeypatch.setattr(naver_sa_writer, "get_adgroup_type", lambda a: "WEB_SITE")
+
     def fake(adgroup_id: str):
         if adgroup_id in fail:
             raise RuntimeError("boom")
@@ -432,3 +435,45 @@ def test_job_is_registered_so_the_check_actually_runs():
     assert ss.job_func_for("verify_search_term_exclusions") is not None
     src = open(ss.__file__.replace(".pyc", ".py")).read()
     assert '("verify_search_term_exclusions", "25 8 * * *")' in src
+
+
+def test_shopping_exclusion_is_unverifiable_not_missing(db, monkeypatch):
+    """★★2026-08-11 실측: 쇼핑 광고그룹은 콘솔에 제외가 **43건** 등록돼 있어도
+    `GET restricted-keywords`가 200/**0건**을 돌려준다 — 이 API는 쇼핑에서 「없다」고 거짓말한다.
+
+    그 거짓말을 missing으로 받으면 **우리가 콘솔에서 자른 검색어가 매일 「사라졌다」로 뜨고**
+    배너가 상시 빨강이 된다(= 이 감시가 실제로 죽는 방식). 「사라졌다」와 「볼 수 없다」는 다르다.
+    """
+    from app.services.naver_ad import naver_sa_writer
+
+    db.add(_row(adgroup_id="grp-shopping", search_term="골프", restrict_kwd_id=None,
+                excluded_at=NOW - timedelta(days=5)))
+    db.commit()
+    monkeypatch.setattr(naver_sa_writer, "get_adgroup_type", lambda a: "SHOPPING")
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords",
+                        lambda a: (_ for _ in ()).throw(AssertionError("쇼핑이면 조회조차 하지 않는다")))
+
+    result = es.check_survival(db, now=NOW)
+    assert result["unverifiable"] == 1 and result["missing"] == 0
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.live_state == es.STATE_UNVERIFIABLE
+    assert "SHOPPING" in row.live_note
+
+    s = es.survival_summary(db, now=NOW)
+    assert s["breached"] == [], "볼 수 없는 것을 어긋남으로 세면 안 된다"
+    assert s["unverifiable"] == 1, "대신 «못 보는 몫»이 숫자로 드러나야 한다"
+    assert s["healthy"] is True, "쇼핑 제외 하나 때문에 배너가 상시 빨강이 되면 안 된다"
+
+
+def test_powerlink_group_is_still_verified_normally(db, monkeypatch):
+    """쇼핑 예외가 파워링크 대조까지 꺼 버리면 감시가 통째로 무력해진다."""
+    from app.services.naver_ad import naver_sa_writer
+
+    db.add(_row())
+    db.commit()
+    monkeypatch.setattr(naver_sa_writer, "get_adgroup_type", lambda a: "WEB_SITE")
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [_live()])
+
+    result = es.check_survival(db, now=NOW)
+    assert result["alive"] == 1 and result["unverifiable"] == 0

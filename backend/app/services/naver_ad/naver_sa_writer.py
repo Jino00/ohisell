@@ -103,6 +103,21 @@ def _get_adgroup(adgroup_id: str) -> dict:
     return resp.json()
 
 
+def get_adgroup_type(adgroup_id: str) -> str | None:
+    """광고그룹 유형(WEB_SITE/SHOPPING/…) — 없으면 None.
+
+    ★왜 공개 함수인가(2026-08-11 실측): `restricted-keywords`는 **WEB_SITE에서만 진실을
+    말한다.** 쇼핑 광고그룹은 콘솔에 제외 검색어가 43건 등록돼 있어도 이 API가 200/**0건**을
+    돌려준다(쓰기는 400/3728로 아예 막혀 있고, 읽기는 «없다»고 거짓말한다). 그래서 조치 생존
+    감시가 이 유형을 먼저 보고 «대조 불가»를 «사라졌다»와 갈라야 한다 — 안 그러면 콘솔에서
+    자른 쇼핑 검색어가 매일 「우리 조치가 사라졌다」로 뜬다."""
+    try:
+        return _get_adgroup(adgroup_id).get("adgroupType")
+    except Exception:  # noqa: BLE001 — 조회 실패는 «모름»(None)이지 «WEB_SITE 아님»이 아니다
+        log.exception("get_adgroup_type 실패 adgroup=%s", adgroup_id)
+        return None
+
+
 def add_restricted_keywords(adgroup_id: str, keywords: list[str]) -> WriteResult:
     """POST /ncc/adgroups/{adgroupId}/restricted-keywords — 제외키워드 추가(ref 27 §2-1).
 

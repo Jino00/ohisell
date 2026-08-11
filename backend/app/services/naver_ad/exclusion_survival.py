@@ -47,6 +47,14 @@ STATE_ALIVE = "alive"
 STATE_MISSING = "missing"
 STATE_DELETED = "deleted"
 STATE_UNKNOWN = "unknown"
+# ★대조 자체가 불가능한 조치(2026-08-11 실측). 쇼핑 광고그룹은 콘솔에 제외 검색어가 43건
+# 등록돼 있어도 `GET restricted-keywords`가 200/**0건**을 돌려준다 — 즉 이 API는 쇼핑에서
+# 「없다」고 거짓말한다. 이걸 missing으로 세면 **콘솔에서 자른 쇼핑 검색어가 매일 「우리 조치가
+# 사라졌다」로 뜬다**(상시 빨강 = 이 감시가 죽는 방식). 「사라졌다」와 「볼 수 없다」는 다르다.
+STATE_UNVERIFIABLE = "unverifiable"
+
+# 라이브 대조가 진실을 말하는 유일한 광고그룹 유형.
+_VERIFIABLE_ADGROUP_TYPE = "WEB_SITE"
 
 # 되돌림·복구 경로(화면·API가 같은 문장을 쓴다 — 두 벌이 되면 갈라진다).
 REVERT_HOWTO = (
@@ -157,7 +165,10 @@ def check_survival(db: Session, *, now: datetime | None = None) -> dict:
             continue
         by_group.setdefault(r.adgroup_id, []).append(r)
 
-    counts = {STATE_ALIVE: 0, STATE_MISSING: 0, STATE_DELETED: 0, STATE_UNKNOWN: 0}
+    counts = {
+        STATE_ALIVE: 0, STATE_MISSING: 0, STATE_DELETED: 0,
+        STATE_UNKNOWN: 0, STATE_UNVERIFIABLE: 0,
+    }
     errors: list[str] = []
 
     # 그룹 id가 없으면 대조 자체가 불가능하다 — 조용히 건너뛰면 그 행은 영원히 «한 번도 대조
@@ -170,6 +181,21 @@ def check_survival(db: Session, *, now: datetime | None = None) -> dict:
             counts[STATE_UNKNOWN] += 1
 
     for adgroup_id, group_rows in by_group.items():
+        # ★유형을 먼저 본다 — 쇼핑 그룹에서 `restricted-keywords`는 「없다」고 거짓말한다
+        #   (2026-08-11 실측: 콘솔 43건 vs API 0건). 그 거짓말을 missing으로 받으면 우리가
+        #   실제로 자른 검색어가 매일 「사라졌다」로 뜬다.
+        adgroup_type = naver_sa_writer.get_adgroup_type(adgroup_id)
+        if adgroup_type is not None and adgroup_type != _VERIFIABLE_ADGROUP_TYPE:
+            for r in group_rows:
+                r.live_state = STATE_UNVERIFIABLE
+                r.live_checked_at = now
+                r.live_note = (
+                    f"광고그룹 유형이 {adgroup_type}이라 라이브 대조 불가 — 이 API는 쇼핑에서 "
+                    "제외 목록을 돌려주지 않는다(콘솔에서만 확인 가능)"
+                )
+                counts[STATE_UNVERIFIABLE] += 1
+            continue
+
         try:
             live = naver_sa_writer.get_restricted_keywords(adgroup_id)
         except Exception as e:  # noqa: BLE001 — 그룹 하나의 실패가 나머지 감시를 죽이지 않는다
@@ -202,6 +228,7 @@ def check_survival(db: Session, *, now: datetime | None = None) -> dict:
         "missing": counts[STATE_MISSING],
         "deleted": counts[STATE_DELETED],
         "unknown": counts[STATE_UNKNOWN],
+        "unverifiable": counts[STATE_UNVERIFIABLE],
         "errors": errors,
         "as_of": now.isoformat(),
     }
@@ -233,7 +260,10 @@ def survival_summary(
         .filter(NaverSearchTermExclusion.status == MONITORED_STATUS)
         .all()
     )
+    # ★unverifiable은 어긋남이 아니다 — 「사라졌다」가 아니라 「볼 수 없다」이므로 배너를 켜지
+    #   않는다. 다만 조용히 묻히면 «감시되고 있다»는 착시가 생기므로 건수를 따로 낸다.
     breached_all = [r for r in rows if r.live_state in (STATE_MISSING, STATE_DELETED, STATE_UNKNOWN)]
+    unverifiable = [r for r in rows if r.live_state == STATE_UNVERIFIABLE]
     # 배너·헬스 응답에 실리는 목록이라 상한을 둔다(총계는 breached_total로 따로 낸다).
     breached = [
         {
@@ -262,6 +292,12 @@ def survival_summary(
     return {
         "monitored": len(rows),
         "alive": sum(1 for r in rows if r.live_state == STATE_ALIVE),
+        # 라이브 대조가 불가능한 조치(쇼핑) — 이 감시가 «못 보는» 몫을 숫자로 드러낸다.
+        "unverifiable": len(unverifiable),
+        "unverifiable_note": (
+            "쇼핑 광고그룹의 제외는 네이버 API가 돌려주지 않아 라이브 대조가 불가능하다"
+            "(콘솔에서만 확인 가능). 효과 자체는 성적표가 검색어 비용으로 판정한다."
+        ),
         "breached": breached,
         "breached_total": len(breached_all),
         "never_checked": len(never_checked),
