@@ -9,12 +9,14 @@
 // ★문구는 새로 짓지 않는다 — reason/why/impact/revert_howto는 백엔드 문장을 그대로 렌더한다.
 //   문구 정본이 두 벌이 되면 갈라진다(백엔드 SA docstring 참조).
 import { useEffect, useState } from "react";
-import { Card, Table, Th, Td, Badge, LayerNav, Loading, EmptyState } from "../components/ui";
+import { Card, Table, Th, Td, Badge, Button, LayerNav, Loading, EmptyState } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num, won, roasX, NO_DATA } from "../lib/format";
 import {
   getSearchTermExclusionList, getSearchTermExclusionSurvival,
+  getSearchTermExclusionScorecard, postSearchTermExecution, postSearchTermExecutionDetect,
   type NaverExclusionListResponse, type NaverExclusionCandidate, type NaverExclusionSurvival,
+  type NaverSearchTermScorecard, type NaverExclusionVerdict, type NaverSearchTermExecutionResultKind,
 } from "../lib/api";
 
 const DAYS_OPTIONS = [14, 30, 60];
@@ -50,14 +52,22 @@ export default function NaverAdExclusionList() {
   const [roundCap, setRoundCap] = useState(50);
   const [campaignId, setCampaignId] = useState("");
   const [campaignOptions, setCampaignOptions] = useState<{ id: string; name: string }[]>([]);
+  // 실행 기록·라이브 자동 발견 성공 후 성적표·후보 목록을 재조회하기 위한 트리거
+  // (docs/PLAN §4-a P2 — 화면이 최신이 되게 한다).
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refetch = () => setRefreshTick((t) => t + 1);
 
   const { data, error } = useAsyncData(
     () => getSearchTermExclusionList({ days, campaignId: campaignId || undefined, roundCap }),
-    [days, campaignId, roundCap],
+    [days, campaignId, roundCap, refreshTick],
   );
   const { data: survival, error: survivalError } = useAsyncData(
     () => getSearchTermExclusionSurvival(),
-    [],
+    [refreshTick],
+  );
+  const { data: scorecard, error: scorecardError } = useAsyncData(
+    () => getSearchTermExclusionScorecard(),
+    [refreshTick],
   );
 
   // 캠페인 필터 옵션 — 별도 목록 API가 없어 「전체」 조회 응답의 candidates에서 뽑는다.
@@ -127,6 +137,14 @@ export default function NaverAdExclusionList() {
         )}
       </Card>
 
+      {/* ①-b 성적표 — 실행된 제외가 실제로 효과가 있었나(후보 표보다 위, PLAN §4-a P2-②) */}
+      <ScorecardSection
+        scorecard={scorecard}
+        error={scorecardError}
+        campaignId={campaignId}
+        onChanged={refetch}
+      />
+
       {error ? (
         <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />
       ) : data === null ? (
@@ -140,7 +158,11 @@ export default function NaverAdExclusionList() {
           <BucketSummary data={data} />
 
           {/* ④ 후보 표 */}
-          <CandidateTable candidates={data.candidates} candidateCost={data.candidate_cost} />
+          <CandidateTable
+            candidates={data.candidates}
+            candidateCost={data.candidate_cost}
+            onRecorded={refetch}
+          />
         </>
       )}
     </div>
@@ -194,6 +216,135 @@ function SurvivalPanel({ survival }: { survival: NaverExclusionSurvival }) {
         </Table>
       )}
     </div>
+  );
+}
+
+const VERDICT_ORDER: NaverExclusionVerdict[] = ["stopped", "still_spending", "pending", "no_baseline"];
+
+const VERDICT_LABEL: Record<NaverExclusionVerdict, string> = {
+  stopped: "멈췄음",
+  still_spending: "아직 쓰고 있음",
+  pending: "판정 대기",
+  no_baseline: "기준 없음",
+};
+
+// still_spending은 「제외가 반영되지 않았을 수 있음」의 핵심 신호라 붉게, stopped는 초록.
+const VERDICT_BADGE_TONE: Record<NaverExclusionVerdict, "good" | "bad" | "neutral"> = {
+  stopped: "good",
+  still_spending: "bad",
+  pending: "neutral",
+  no_baseline: "neutral",
+};
+
+/** 소수 일평균 값 — 화면 표시 직전에만 반올림한다(집계·회수액 계산엔 원값을 그대로 쓴다). */
+function wonPerDay(n: number | null | undefined): string {
+  return n == null ? NO_DATA : won(Math.round(n));
+}
+
+function ScorecardSection({
+  scorecard, error, campaignId, onChanged,
+}: {
+  scorecard: NaverSearchTermScorecard | null;
+  error: string | null;
+  campaignId: string;
+  onChanged: () => void;
+}) {
+  const [detecting, setDetecting] = useState(false);
+  const [detectMsg, setDetectMsg] = useState<string | null>(null);
+  const [detectErr, setDetectErr] = useState<string | null>(null);
+
+  async function handleDetect() {
+    setDetecting(true);
+    setDetectErr(null);
+    setDetectMsg(null);
+    try {
+      const r = await postSearchTermExecutionDetect(campaignId || undefined);
+      setDetectMsg(
+        `${num(r.scanned_groups)}개 그룹 조회 · 새로 등록 ${num(r.recorded.length)}건 · `
+        + `빈 응답 그룹 ${num(r.groups_with_zero)}개(실패 ${num(r.errors.length)}건)`,
+      );
+      onChanged();
+    } catch (e) {
+      setDetectErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDetecting(false);
+    }
+  }
+
+  return (
+    <Card
+      title="성적표 — 실행된 제외가 실제로 효과가 있었나"
+      right={
+        <Button variant="secondary" onClick={handleDetect} disabled={detecting}>
+          {detecting ? "조회 중…" : "라이브에서 자동 발견"}
+        </Button>
+      }
+    >
+      {(detectMsg || detectErr) && (
+        <p className={`px-4 pt-3 text-xs ${detectErr ? "text-red-700" : "text-gray-500"}`}>
+          {detectErr ? `불러오지 못했습니다: ${detectErr}` : detectMsg}
+        </p>
+      )}
+      {error ? (
+        <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />
+      ) : scorecard === null ? (
+        <Loading rows={3} />
+      ) : scorecard.total === 0 ? (
+        <EmptyState reason="아직 실행된 제외가 없습니다 — 아래 후보에서 콘솔 실행 후 기록하세요" />
+      ) : (
+        <>
+          <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
+            총 {num(scorecard.total)}건 · 판정됨 {num(scorecard.judged_count)}건 ·
+            판정 대기 {num(scorecard.pending_count)}건 ·
+            회수한 총이익(판정분) {won(scorecard.profit_recovered_judged)} ·
+            성숙 기준일 {scorecard.mature_through}
+          </p>
+          <div className="flex flex-wrap gap-3 px-4 py-2 text-sm border-b border-gray-100">
+            {VERDICT_ORDER.map((v) => (
+              <span key={v} className="flex items-center gap-1.5">
+                <Badge tone={VERDICT_BADGE_TONE[v]}>{VERDICT_LABEL[v]}</Badge>
+                <span className="tabular-nums text-gray-700">{num(scorecard.by_verdict[v] ?? 0)}건</span>
+              </span>
+            ))}
+          </div>
+          <Table
+            head={
+              <>
+                <Th>검색어</Th><Th>캠페인/그룹</Th><Th>실행일</Th>
+                <Th right>전 일평균 광고비</Th><Th right>후 일평균 광고비</Th>
+                <Th>판정</Th><Th right>회수 총이익</Th><Th>사유</Th>
+                <Th right>캠페인 전환매출 전→후(일평균)</Th>
+              </>
+            }
+          >
+            {scorecard.items.map((it) => (
+              <tr key={it.exclusion_id}>
+                <Td>{it.search_term}</Td>
+                <Td>
+                  <span className="text-gray-500">
+                    {it.campaign_name ?? it.campaign_id ?? NO_DATA} / {it.adgroup_name ?? it.adgroup_id ?? NO_DATA}
+                  </span>
+                </Td>
+                <Td>{it.excluded_at.slice(0, 10)}</Td>
+                <Td right>{wonPerDay(it.before.cost_per_day)}</Td>
+                <Td right>{wonPerDay(it.after.cost_per_day)}</Td>
+                <Td>
+                  <Badge tone={VERDICT_BADGE_TONE[it.verdict]}>{VERDICT_LABEL[it.verdict]}</Badge>
+                </Td>
+                <Td right>{it.profit_recovered == null ? NO_DATA : won(it.profit_recovered)}</Td>
+                <Td><span className="text-xs text-gray-600">{it.why}</span></Td>
+                <Td right>
+                  <span className="text-gray-500">
+                    {wonPerDay(it.campaign.before.conv_amt_per_day)} →{" "}
+                    {it.campaign.after == null ? NO_DATA : wonPerDay(it.campaign.after.conv_amt_per_day)}
+                  </span>
+                </Td>
+              </tr>
+            ))}
+          </Table>
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -258,9 +409,75 @@ function BucketSummary({ data }: { data: NaverExclusionListResponse }) {
   );
 }
 
+type ExecState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; result: NaverSearchTermExecutionResultKind; diary: boolean }
+  | { status: "error"; message: string };
+
+const EXEC_RESULT_LABEL: Record<NaverSearchTermExecutionResultKind, string> = {
+  created: "기록됨",
+  already_recorded: "이미 기록됨",
+  re_excluded: "재제외 기록됨",
+};
+
+function ExecutionCell({ state, onClick }: { state: ExecState; onClick: () => void }) {
+  if (state.status === "loading") {
+    return <Button variant="secondary" disabled>기록 중…</Button>;
+  }
+  if (state.status === "error") {
+    return (
+      <div className="space-y-1">
+        <p className="text-xs text-red-700">{state.message}</p>
+        <Button variant="secondary" onClick={onClick}>다시 시도</Button>
+      </div>
+    );
+  }
+  if (state.status === "done") {
+    return (
+      <div className="space-y-1">
+        <Badge tone="good">{EXEC_RESULT_LABEL[state.result]}</Badge>
+        {/* diary===false는 조용히 넘기면 안 된다 — 이 조치가 학습 사슬 입구에서 빠졌다는 뜻이다
+            (search_term_execution.py의 fail-open 계약: 등록은 유지, 학습만 안 잡힌다). */}
+        {state.diary === false && (
+          <p className="text-xs text-red-700">
+            운영일기 기록 실패 — 이 조치는 학습에 잡히지 않습니다
+          </p>
+        )}
+      </div>
+    );
+  }
+  return <Button variant="secondary" onClick={onClick}>제외했음 기록</Button>;
+}
+
 function CandidateTable({
-  candidates, candidateCost,
-}: { candidates: NaverExclusionCandidate[]; candidateCost: number }) {
+  candidates, candidateCost, onRecorded,
+}: { candidates: NaverExclusionCandidate[]; candidateCost: number; onRecorded: () => void }) {
+  const [execState, setExecState] = useState<Record<string, ExecState>>({});
+
+  async function handleRecord(c: NaverExclusionCandidate) {
+    const key = `${c.adgroup_id}/${c.search_term}`;
+    setExecState((s) => ({ ...s, [key]: { status: "loading" } }));
+    try {
+      const r = await postSearchTermExecution({
+        campaignId: c.campaign_id,
+        adgroupId: c.adgroup_id,
+        searchTerm: c.search_term,
+        // ★백엔드 문구 정본은 c.reason(리스트 생성기가 만든 근거 문장) — 화면이 새로 짓지 않는다.
+        rationale: c.reason,
+      });
+      setExecState((s) => ({
+        ...s, [key]: { status: "done", result: r.result, diary: r.diary },
+      }));
+      onRecorded();
+    } catch (e) {
+      setExecState((s) => ({
+        ...s,
+        [key]: { status: "error", message: e instanceof Error ? e.message : String(e) },
+      }));
+    }
+  }
+
   return (
     <Card title="제외 후보">
       <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
@@ -269,9 +486,14 @@ function CandidateTable({
       {/* 되돌림 경로는 표 위에 한 번만 둔다 — 전 행이 같은 문장이라 열로 두면 표를 못 읽는다.
           「무엇을 자를지와 어떻게 되돌릴지가 같은 화면에」(계약 판단기준 5)는 이걸로 충족된다. */}
       {candidates.length > 0 && (
-        <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
-          되돌림 — {candidates[0].revert_howto}
-        </p>
+        <>
+          <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
+            되돌림 — {candidates[0].revert_howto}
+          </p>
+          <p className="px-4 py-2 text-xs text-gray-400 border-b border-gray-100">
+            네이버 콘솔에서 실제로 자른 뒤 눌러 주세요 — 시스템은 네이버에 쓰지 않습니다
+          </p>
+        </>
       )}
       {candidates.length === 0 ? (
         <EmptyState
@@ -284,39 +506,46 @@ function CandidateTable({
             <>
               <Th>검색어</Th><Th>캠페인</Th><Th>광고그룹</Th>
               <Th right>30일 광고비</Th><Th right>클릭</Th><Th right>전환</Th><Th right>전환매출</Th>
-              <Th right>ROAS</Th><Th right>적용 BEP</Th><Th>사유</Th>
+              <Th right>ROAS</Th><Th right>적용 BEP</Th><Th>사유</Th><Th>실행 기록</Th>
             </>
           }
         >
-          {candidates.map((c, i) => (
-            <tr key={`${c.adgroup_id}/${c.search_term}#${i}`}>
-              <Td>
-                {c.search_term}
-                {c.whitelisted && (
-                  <span className="ml-1"><Badge tone="owner">상품 핵심어</Badge></span>
-                )}
-              </Td>
-              <Td><span className="text-gray-500">{c.campaign_name ?? c.campaign_id}</span></Td>
-              <Td><span className="text-gray-500">{c.adgroup_name ?? c.adgroup_id}</span></Td>
-              <Td right>{won(c.cost)}</Td>
-              <Td right>{num(c.clk)}</Td>
-              <Td right>{num(c.conv_purchase_cnt)}</Td>
-              <Td right>{won(c.conv_purchase_amt)}</Td>
-              <Td right>{roasX(c.roas)}</Td>
-              <Td right>
-                {roasX(c.applied_bep)}
-                {c.bep_product_count > 1 && (
-                  <span
-                    className="block text-[11px] text-gray-400"
-                    title={c.bep_products.map((p) => `${p.product_name ?? p.channel_product_id}: ${roasX(p.bep_roas)}`).join(", ")}
-                  >
-                    상품 {c.bep_product_count}개 중 최저
-                  </span>
-                )}
-              </Td>
-              <Td><span className="text-xs text-gray-600">{c.reason}</span></Td>
-            </tr>
-          ))}
+          {candidates.map((c, i) => {
+            const key = `${c.adgroup_id}/${c.search_term}`;
+            const st = execState[key] ?? { status: "idle" as const };
+            return (
+              <tr key={`${key}#${i}`}>
+                <Td>
+                  {c.search_term}
+                  {c.whitelisted && (
+                    <span className="ml-1"><Badge tone="owner">상품 핵심어</Badge></span>
+                  )}
+                </Td>
+                <Td><span className="text-gray-500">{c.campaign_name ?? c.campaign_id}</span></Td>
+                <Td><span className="text-gray-500">{c.adgroup_name ?? c.adgroup_id}</span></Td>
+                <Td right>{won(c.cost)}</Td>
+                <Td right>{num(c.clk)}</Td>
+                <Td right>{num(c.conv_purchase_cnt)}</Td>
+                <Td right>{won(c.conv_purchase_amt)}</Td>
+                <Td right>{roasX(c.roas)}</Td>
+                <Td right>
+                  {roasX(c.applied_bep)}
+                  {c.bep_product_count > 1 && (
+                    <span
+                      className="block text-[11px] text-gray-400"
+                      title={c.bep_products.map((p) => `${p.product_name ?? p.channel_product_id}: ${roasX(p.bep_roas)}`).join(", ")}
+                    >
+                      상품 {c.bep_product_count}개 중 최저
+                    </span>
+                  )}
+                </Td>
+                <Td><span className="text-xs text-gray-600">{c.reason}</span></Td>
+                <Td>
+                  <ExecutionCell state={st} onClick={() => handleRecord(c)} />
+                </Td>
+              </tr>
+            );
+          })}
         </Table>
       )}
     </Card>

@@ -101,6 +101,8 @@ from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import exclusion_survival
 from app.services.naver_ad import search_term_exclusion_list
+from app.services.naver_ad import search_term_execution
+from app.services.naver_ad import search_term_scorecard
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import modification_feed
 from app.services.naver_ad import naver_execution_harness
@@ -1954,6 +1956,76 @@ def get_search_term_exclusion_list(
     for c in result["candidates"]:
         c["campaign_name"] = camp_names.get(c["campaign_id"])
         c["adgroup_name"] = ent_names.get(("adgroup", c["adgroup_id"]))
+    return result
+
+
+class SearchTermExecutionIn(BaseModel):
+    """사람이 콘솔에서 실행한 제외 1건의 보고(D-NAO-173 P2-①)."""
+
+    campaign_id: str
+    adgroup_id: str
+    search_term: str
+    rationale: str
+
+
+@router.post("/search-term/executions")
+def post_search_term_execution(
+    payload: SearchTermExecutionIn, db: Session = Depends(get_db)
+) -> dict:
+    """**사람이 이미 실행한** 제외를 원장 + 운영일기에 등록한다(D-NAO-173 P2-①).
+
+    ★이 라우터의 「쓰기 금지」 주석과 충돌하지 않는다: 금지선은 «자동 제외 **실행** 금지»이고,
+      이 경로는 네이버에 아무것도 쓰지 않는다 — 사람이 한 일을 우리 기록에 남길 뿐이다.
+      기록이 없으면 diary→outcome→wisdom 사슬의 입력이 0이라 **열 번을 잘라도 아무것도
+      배우지 않는다.** 실행과 기록을 같은 것으로 취급하면 그 상태가 금지선의 이름으로 굳는다.
+    """
+    return search_term_execution.record_execution(
+        db,
+        campaign_id=payload.campaign_id,
+        adgroup_id=payload.adgroup_id,
+        search_term=payload.search_term,
+        rationale=payload.rationale,
+    )
+
+
+@router.post("/search-term/executions/detect")
+def post_detect_search_term_executions(
+    campaign_id: str | None = Query(None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """라이브 제외키워드를 읽어 **원장에 없는 제외를 스스로 발견**해 등록한다(읽기+원장 쓰기).
+
+    사람의 보고에 의존하지 않는 경로다 — 보고를 잊으면 그 조치는 영원히 시스템 밖이고, 이
+    리포는 이미 «보고에 없던 변경»에 한 번 당했다(대행사 되돌림 2건 중 1건은 change_log에
+    행조차 없었다). 네이버에 쓰지 않는다."""
+    adgroup_ids = None
+    if campaign_id:
+        adgroup_ids = [
+            r[0] for r in db.query(NaverSearchTermDaily.adgroup_id)
+            .filter(
+                NaverSearchTermDaily.campaign_id == campaign_id,
+                NaverSearchTermDaily.adgroup_id != "",
+            ).distinct().all()
+        ]
+    return search_term_execution.detect_new_exclusions(db, adgroup_ids=adgroup_ids)
+
+
+@router.get("/search-term/exclusion-scorecard")
+def get_search_term_exclusion_scorecard(
+    window_days: int = Query(search_term_scorecard.WINDOW_DAYS, ge=3, le=60),
+    db: Session = Depends(get_db),
+) -> dict:
+    """실행된 제외의 전후 대조표(읽기 전용, D-NAO-173 P2-②).
+
+    직접 효과는 검색어 grain(그 검색어가 실제로 멈췄나), 부작용은 캠페인 grain(전환매출·총이익이
+    유지됐나)으로 나눠 본다 — 한 층만 보면 각각 다른 방식으로 속는다."""
+    result = search_term_scorecard.build_scorecard(db, window_days=window_days)
+    camp_ids = {i["campaign_id"] for i in result["items"] if i["campaign_id"]}
+    ent_keys = {("adgroup", i["adgroup_id"]) for i in result["items"] if i["adgroup_id"]}
+    ent_names, camp_names = _batch_entity_names(db, ent_keys, camp_ids)
+    for i in result["items"]:
+        i["campaign_name"] = camp_names.get(i["campaign_id"])
+        i["adgroup_name"] = ent_names.get(("adgroup", i["adgroup_id"]))
     return result
 
 

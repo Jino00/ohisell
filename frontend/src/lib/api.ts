@@ -3034,6 +3034,139 @@ export function getSearchTermExclusionSurvival(): Promise<NaverExclusionSurvival
   return fetchApi<NaverExclusionSurvival>("/api/naver/ad/search-term/exclusion-survival");
 }
 
+// ── 검색어 제외 실행 기록 + 성적표 (D-NAO-173 P2, docs/PLAN_search-term-exclusion-list.md §4-a) ──
+// 시스템은 네이버에 쓰지 않는다 — 사람이 콘솔에서 실행한 것을 기록만 하고, 그 기록이
+// diary→outcome→wisdom 학습 사슬의 입구가 된다(search_term_execution.py docstring 참조).
+
+export type NaverSearchTermExecutionResultKind = "created" | "already_recorded" | "re_excluded";
+
+export interface NaverSearchTermExecutionResult {
+  result: NaverSearchTermExecutionResultKind;
+  exclusion_id: number;
+  cost_at_exclusion: number;
+  cycle: number;
+  next_review_at?: string;
+  /** false면 이 조치가 학습 사슬에 안 잡힌다 — 화면에서 반드시 표면화해야 한다. */
+  diary: boolean;
+}
+
+export function postSearchTermExecution(body: {
+  campaignId: string;
+  adgroupId: string;
+  searchTerm: string;
+  rationale: string;
+}): Promise<NaverSearchTermExecutionResult> {
+  return fetchApi<NaverSearchTermExecutionResult>("/api/naver/ad/search-term/executions", {
+    method: "POST",
+    body: JSON.stringify({
+      campaign_id: body.campaignId,
+      adgroup_id: body.adgroupId,
+      search_term: body.searchTerm,
+      rationale: body.rationale,
+    }),
+  });
+}
+
+export interface NaverSearchTermDetectRecorded extends NaverSearchTermExecutionResult {
+  adgroup_id: string;
+  search_term: string;
+}
+
+export interface NaverSearchTermDetectResult {
+  scanned_groups: number;
+  groups_with_zero: number;
+  recorded: NaverSearchTermDetectRecorded[];
+  errors: string[];
+  as_of: string;
+}
+
+export function postSearchTermExecutionDetect(campaignId?: string): Promise<NaverSearchTermDetectResult> {
+  const q = new URLSearchParams();
+  if (campaignId) q.set("campaign_id", campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverSearchTermDetectResult>(
+    `/api/naver/ad/search-term/executions/detect${qs ? `?${qs}` : ""}`,
+    { method: "POST" },
+  );
+}
+
+/** 검색어 grain 전후 대조(직접 효과) — 사후 창이 성숙 전이면 pending(판정하지 않음). */
+export interface NaverSearchTermWindowStat {
+  from: string | null;
+  to: string | null;
+  days: number;
+  cost: number;
+  clk: number;
+  conv_purchase_cnt: number;
+  conv_purchase_amt: number;
+  cost_per_day: number;
+  amt_per_day: number;
+}
+
+/** 캠페인 grain 전후 대조(부작용 — 볼륨 절멸이 났나). after_days가 0이면 after는 null. */
+export interface NaverSearchTermCampaignWindowStat {
+  from: string;
+  to: string;
+  days: number;
+  cost: number;
+  conv_amt: number;
+  clk: number;
+  cost_per_day: number;
+  conv_amt_per_day: number;
+  profit_contrib: number | null;
+  profit_contrib_per_day: number | null;
+}
+
+export type NaverExclusionVerdict = "stopped" | "still_spending" | "pending" | "no_baseline";
+
+export interface NaverSearchTermScorecardItem {
+  exclusion_id: number;
+  campaign_id: string | null;
+  adgroup_id: string | null;
+  search_term: string;
+  excluded_at: string;
+  cost_at_exclusion: number | null;
+  live_state: string | null;
+  applied_bep: number | null;
+  before: NaverSearchTermWindowStat;
+  after: NaverSearchTermWindowStat;
+  after_days: number;
+  verdict: NaverExclusionVerdict;
+  /** 백엔드 문장 그대로 렌더 — 프론트에서 새로 짓지 않는다. */
+  why: string;
+  profit_recovered: number | null;
+  campaign: {
+    before: NaverSearchTermCampaignWindowStat;
+    after: NaverSearchTermCampaignWindowStat | null;
+  };
+  // 라우터가 붙이는 표시용 이름 — 매핑 없으면 null.
+  campaign_name: string | null;
+  adgroup_name: string | null;
+}
+
+export interface NaverSearchTermScorecard {
+  window_days: number;
+  maturity_lag_days: number;
+  mature_through: string;
+  total: number;
+  by_verdict: Record<NaverExclusionVerdict, number>;
+  // ★판정된 것만 합산 — pending을 0원으로 세면 성과가 희석되고, 빼고 세면 부풀려진다.
+  profit_recovered_judged: number;
+  judged_count: number;
+  pending_count: number;
+  items: NaverSearchTermScorecardItem[];
+  as_of: string;
+}
+
+export function getSearchTermExclusionScorecard(windowDays?: number): Promise<NaverSearchTermScorecard> {
+  const q = new URLSearchParams();
+  if (windowDays != null) q.set("window_days", String(windowDays));
+  const qs = q.toString();
+  return fetchApi<NaverSearchTermScorecard>(
+    `/api/naver/ad/search-term/exclusion-scorecard${qs ? `?${qs}` : ""}`,
+  );
+}
+
 // ── 네이버 SA 광고 최적화 콘솔 (P2-S3b, track_naver-ad-optimization) ──
 export type NaverExpertVerdict = "agree" | "partial" | "reject" | "insufficient_evidence" | "commentary";
 

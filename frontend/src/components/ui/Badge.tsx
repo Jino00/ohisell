@@ -10,6 +10,10 @@ const TONE = {
   // 세 번째 용도라 색을 새로 준다. amber는 이 코드베이스에서 이미 주의 색이다
   // (「수정 사항」의 시각 보정·소급 백필 표시).
   alert: "bg-amber-50 text-amber-700",
+  // D-NAO-173 P2 — 제외 성적표 판정(stopped/still_spending)엔 "성공/실패" 대비가 필요한데
+  // 기존 4색 어디에도 그 대비가 없었다. SurvivalPanel의 emerald/red 관례를 배지로 옮긴다.
+  good: "bg-emerald-50 text-emerald-700",
+  bad: "bg-red-50 text-red-700",
 } as const;
 
 export function Badge({ tone = "neutral", children }: { tone?: keyof typeof TONE; children: ReactNode }) {
