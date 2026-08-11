@@ -102,6 +102,27 @@ DATA_FRESHNESS_RULES: tuple[dict, ...] = (
     {"source": "vendor_item_sales", "name": "wing_vendor_item_sales", "account_key": "COUPANG_WING2",
      "max_age_days": 3.0,
      "impact": "쿠팡 판매분석 옵션축(오하이테크) 정체 — 옵션별 3P 매출이 낡은 값으로 구른다"},
+    # ★아래 두 규칙에서 `account_key`는 **표시용**이다(배너 문구·verdict 라벨) — 쿼리 필터는
+    #   vendor_id로 건다. 위 네 규칙은 account_key로 **실제 필터**를 걸므로 같은 필드가 규칙에
+    #   따라 다른 역할을 한다. 그래도 vendor_id를 새로 하드코딩하지 않고 기존 상수를 재사용하는
+    #   쪽을 택했다 — 진실이 두 곳에 생기는 비용이 더 크기 때문이다(적대 리뷰 P2 채택).
+    # ── 쿠팡 광고비 (2026-08-11 신설) ──
+    # max_age_days=3.0 근거(라이브 실측): report/SALES 축(vendor_id=ADV_SALES)은 최근 21일 중
+    #   20일이 적재된 «일별» 소스다. 정상이면 최신 cost_date는 어제(age≈1일)이고, 한 회차를
+    #   놓치면 2일이 된다. 3.0이면 **두 회차 연속 실패에서 울리고** 정상 운영에선 조용하다
+    #   (판매분석 규칙 3.0과 같은 논리).
+    # ★광고센터 광고주로 잡히는 계정은 WING1뿐이다(D-CPP-38) — account_key는 그래서 WING1이다.
+    {"source": "ad_cost", "name": "coupang_ad_cost_sales", "account_key": "COUPANG_WING1",
+     "max_age_days": 3.0,
+     "impact": "쿠팡 광고비(report/SALES) 정체 — net_profit 차감 축이 낡은 값으로 구른다"},
+    # ── 로켓1P 정산 (2026-08-11 신설) ──
+    # max_age_days=10.0 근거(라이브 실측): 최근 90일 issue_date 간격 분포는 1일 47회 · 2일 7회 ·
+    #   3일 4회 · **7일 2회**로 관측 최대가 7일이다. 7.0으로 잡으면 정상 운영에서 두 번 울려
+    #   알림 피로가 생기고, 그건 이 감시선 계열이 실제로 죽는 방식이다(WING1을 판매분석에서
+    #   제외한 것과 같은 이유). 10.0 = 관측 최대 7 + 여유 3.
+    {"source": "rocket_settlement", "name": "rocket_1p_settlement", "account_key": "COUPANG_WING2",
+     "max_age_days": 10.0,
+     "impact": "로켓1P 정산(세금계산서) 정체 — 1P 매출 정본이 낡았다"},
 )
 
 # 쿠키 freshness 감시 대상 — 돈에 직결되는 fail-soft 잡의 쿠키만(codex P2: 전체 감시 시 폐기/회전
@@ -386,6 +407,25 @@ def _latest_for_rule(db, rule: dict):
         return (
             db.query(func.max(CoupangVendorItemSalesDaily.sale_date))
             .filter(CoupangVendorItemSalesDaily.account_key == rule["account_key"])
+            .scalar()
+        )
+    if source == "ad_cost":
+        from app.models import CoupangAdCostDaily  # noqa: PLC0415
+        from app.services.coupang.ad_cost_sync import _SALES_KEY  # noqa: PLC0415
+
+        # report/SALES 축이 일별 확정 정본이다(vendor별 축은 성격이 달라 대상이 아니다).
+        return (
+            db.query(func.max(CoupangAdCostDaily.cost_date))
+            .filter(CoupangAdCostDaily.vendor_id == _SALES_KEY)
+            .scalar()
+        )
+    if source == "rocket_settlement":
+        from app.models import CoupangRocketSettlement  # noqa: PLC0415
+        from app.services.coupang.rocket_1p_channel_pnl import ROCKET_1P_VENDOR_ID  # noqa: PLC0415
+
+        return (
+            db.query(func.max(CoupangRocketSettlement.issue_date))
+            .filter(CoupangRocketSettlement.vendor_id == ROCKET_1P_VENDOR_ID)
             .scalar()
         )
     raise ValueError(f"알 수 없는 data freshness source: {source!r}")
