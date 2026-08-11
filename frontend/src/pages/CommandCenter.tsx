@@ -419,12 +419,14 @@ function Card({ label, value, sub }: { label: string; value: React.ReactNode; su
   );
 }
 
-// S7(정합성 트랙 D-1·D-11): 매출·광고 분해 검산 패널 — 쿠팡 Wing 대시보드와 수동 1:1 대조용.
-// 시스템은 사실/지표만(D-3) — 일치/불일치 판정은 Jino가 옆 화면과 눈으로 대조한다.
-function ReconciliationCard({ data }: { data: OverviewResponse }) {
-  const s = data.account.summary;
-  const a = data.ad.summary;
-  const Row = ({ label, value, hint, gross }: { label: string; value: string; hint: string; gross?: boolean }) => (
+// ★모듈 스코프로 올렸다(2026-08-11): 종전엔 ReconciliationCard 안에서 정의돼
+//   `react-hooks/static-components`가 **사용처마다** 경고를 냈다(8건). 렌더마다 새 컴포넌트
+//   타입이 만들어져 React가 subtree를 통째로 재마운트하는 것도 실제 비용이다.
+//   행을 하나 더 붙일 때마다 lint 부채가 늘어나는 구조라, 이번에 행을 늘리면서 같이 없앤다.
+function ReconRow({ label, value, hint, gross }: {
+  label: string; value: string | null; hint: string; gross?: boolean;
+}) {
+  return (
     <div className="flex items-baseline justify-between py-1.5 border-b border-indigo-100 last:border-0">
       <div>
         <span className="text-sm text-gray-700">{label}</span>
@@ -434,6 +436,14 @@ function ReconciliationCard({ data }: { data: OverviewResponse }) {
       <span className="text-sm font-semibold text-gray-900 tabular-nums">{won(value)}</span>
     </div>
   );
+}
+
+// S7(정합성 트랙 D-1·D-11): 매출·광고 분해 검산 패널 — 쿠팡 Wing 대시보드와 수동 1:1 대조용.
+// 시스템은 사실/지표만(D-3) — 일치/불일치 판정은 Jino가 옆 화면과 눈으로 대조한다.
+export function ReconciliationCard({ data }: { data: OverviewResponse }) {
+  const s = data.account.summary;
+  const a = data.ad.summary;
+  const Row = ReconRow;
   return (
     <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 mb-4">
       <div className="text-sm font-semibold text-indigo-800 mb-2">
@@ -447,15 +457,48 @@ function ReconciliationCard({ data }: { data: OverviewResponse }) {
           <Row label="ㄴ 로켓그로스 RG" value={s.revenue_rg ?? "0"} hint="판매분석 · 로켓그로스" gross />
         </div>
         <div>
-          <div className="text-xs font-medium text-indigo-500 mb-1 mt-3 md:mt-0">광고 (쿠팡 [광고센터])</div>
-          <Row label="전체 광고비 (ALL)" value={a.ad_confirmed_total ?? s.ad_spend} hint="광고센터 · 전체 광고비(비-PA 포함) · net_profit 차감 기준" />
-          <Row label="ㄴ 집행 (상품검색광고/PA)" value={a.ad_confirmed_pa ?? s.ad_spend} hint="광고센터 · 집행 광고비(DELIVERED)" />
-          <Row label="ㄴ 비-PA (브랜드/디스플레이)" value={a.ad_confirmed_nonpa ?? "0"} hint="전체−집행 · net_profit에 추가 차감 반영(D-15)" />
+          {/* ★광고센터 소스는 «광고주 단위»다 — 광고주 계정(오픽스)에만 적용된다.
+              적용 안 되는 계정에서 0원이라 단정하면 «광고를 안 썼다»로 읽힌다. 실제로 2026-08-11
+              오하이테크 화면이 그랬다: 여기 0원인데 같은 화면 요약·옵션표는 11,247원.
+              그래서 «무엇을 보고 있는지»를 라벨로 밝히고 값은 옵션축(=실제 net_profit 차감액)을 쓴다. */}
+          <div className="text-xs font-medium text-indigo-500 mb-1 mt-3 md:mt-0">
+            광고 {a.ad_confirmed_applies === false ? "(옵션축 — 광고센터 미태깅 계정)" : "(쿠팡 [광고센터])"}
+          </div>
+          {a.ad_confirmed_applies === false ? (
+            <>
+              <Row
+                label="전체 광고비"
+                value={s.ad_spend}
+                hint="옵션축 실집행(PA) · net_profit 차감 기준 — 이 계정은 광고센터 보고서에 광고주로 안 잡힌다"
+              />
+              {/* ★값을 «모른다»고 말한다 — 0원이라 쓰면 이 PR이 없앤 패턴 그대로다(적대 리뷰 P2-3).
+                  비-PA는 «전체−집행»인데 광고센터 값이 없으니 산출 자체가 불가능하다.
+                  net_profit에 추가 차감이 0인 것은 사실이고, 그건 힌트가 말한다. */}
+              <Row
+                label="ㄴ 비-PA (브랜드/디스플레이)"
+                value={null}
+                hint="광고센터 값이 없어 산출 불가 · net_profit 추가 차감은 없음(0원)"
+              />
+            </>
+          ) : (
+            <>
+              <Row label="전체 광고비 (ALL)" value={a.ad_confirmed_total ?? s.ad_spend} hint="광고센터 · 전체 광고비(비-PA 포함) · net_profit 차감 기준" />
+              <Row label="ㄴ 집행 (상품검색광고/PA)" value={a.ad_confirmed_pa ?? s.ad_spend} hint="광고센터 · 집행 광고비(DELIVERED)" />
+              <Row label="ㄴ 비-PA (브랜드/디스플레이)" value={a.ad_confirmed_nonpa ?? "0"} hint="전체−집행 · net_profit에 추가 차감 반영(D-15)" />
+            </>
+          )}
         </div>
       </div>
+      {/* ★각주도 계정에 따라 갈라야 한다 — 미적용 계정에 「ALL로 차감 · 집행+비-PA로 분해」라
+          적으면 위에서 고친 거짓 단정이 각주로 되살아난다(둘 다 그 계정엔 사실이 아니다). */}
       <p className="text-xs text-indigo-600 mt-2 bg-indigo-100 rounded px-2 py-1">
         RG 매출은 주문 API 기준 <b>gross(취소 미차감)</b> — 쿠팡 판매분석의 net과 ~5% 차이는 기준 차이이며 계산 오류 아님(D-11).
-        광고비는 쿠팡 <b>"전체 광고비"(ALL)</b>로 순이익에서 차감 — 집행(상품검색광고)+비-PA(브랜드/디스플레이)로 분해 표시(D-15).
+        {a.ad_confirmed_applies === false ? (
+          <> 이 계정은 쿠팡 <b>광고센터 보고서에 광고주로 잡히지 않아</b> 「전체 광고비(ALL)」·비-PA 분해가 없다 —
+          순이익에서 차감되는 값은 <b>옵션축 실집행(PA)</b>이다(D-CPP-38).</>
+        ) : (
+          <> 광고비는 쿠팡 <b>"전체 광고비"(ALL)</b>로 순이익에서 차감 — 집행(상품검색광고)+비-PA(브랜드/디스플레이)로 분해 표시(D-15).</>
+        )}
       </p>
     </div>
   );

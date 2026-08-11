@@ -137,7 +137,16 @@ def test_gate_wing2_does_not_apply_ofix_nonpa(db):
     ad = compute_command_center(db, WIN[0], WIN[1], "COUPANG_WING2")["ad"]["summary"]
     assert s["ad_nonpa_deducted"] == _Z          # ★오픽스 비-PA 오적용 방지
     assert s["net_profit"] == Decimal("-90.91")   # WING2 옵션 광고 100 − 매입세액 환급 9.09
-    assert ad["ad_confirmed_nonpa"] == _Z
+    # ★★«미적용»은 0이 아니라 None이다 (2026-08-11 시각 QA로 발견한 실토 결함).
+    #   종전엔 여기 0을 실어 보냈고, 프론트의 `?? s.ad_spend` 폴백은 null만 잡으므로 화면이
+    #   「전체 광고비(ALL) 0원 · net_profit 차감 기준」이라 **단정**했다 — 같은 화면 요약은
+    #   11,247원인데. 돈은 안 틀렸지만 «광고를 안 썼다»로 읽히는 거짓 실토였다(교훈 #235 형태).
+    assert ad["ad_confirmed_applies"] is False
+    assert ad["ad_confirmed_nonpa"] is None
+    assert ad["ad_confirmed_total"] is None
+    assert ad["ad_confirmed_pa"] is None
+    # 실제 차감액은 옵션축 값이고, 화면은 이 값으로 폴백한다.
+    assert ad["ad_spend"] == Decimal("100")
 
 
 # ─── 3c) 게이트: 오픽스(WING1) 계정뷰는 적용 ──────────────────────
@@ -147,8 +156,91 @@ def test_gate_wing1_applies(db):
     _seed_option_ad(db, "W1OPT", 100, vendor=_OFIX)
     _seed_sales(db, 1000, 1065)
     db.commit()
-    s = compute_command_center(db, WIN[0], WIN[1], "COUPANG_WING1")["account"]["summary"]
+    out = compute_command_center(db, WIN[0], WIN[1], "COUPANG_WING1")
+    s = out["account"]["summary"]
+    ad = out["ad"]["summary"]
     assert s["ad_nonpa_deducted"] == Decimal("65")   # 오픽스 계정 → 적용
+    # ★적용되는 계정에선 실제 값이 실린다 — None이 «적용 안 됨»의 신호로만 쓰이는지 못 박는다.
+    assert ad["ad_confirmed_applies"] is True
+    assert ad["ad_confirmed_total"] == Decimal("1065")
+    assert ad["ad_confirmed_pa"] == Decimal("1000")
+    assert ad["ad_confirmed_nonpa"] == Decimal("65")
+
+
+def test_applied_account_with_zero_ad_reports_zero_not_none(db):
+    """★★«측정된 0원»과 «미적용»을 구분한다.
+
+    광고주 계정인데 그 기간 광고비가 0원이면 그건 **사실**이고 0으로 실려야 한다.
+    None으로 뭉개면 화면이 옵션축으로 폴백해 «광고센터 기준 0원»이라는 진짜 사실을 잃는다.
+    (이 테스트가 없으면 «전부 None으로 주기»라는 게으른 수정이 통과한다.)
+    """
+    _seed_account(db, 1, "COUPANG_WING1", _OFIX, "W1OPT")
+    _seed_option_ad(db, "W1OPT", 100, vendor=_OFIX)
+    _seed_sales(db, 0, 0)          # 광고센터 보고서에 0원으로 «측정»됨
+    db.commit()
+    ad = compute_command_center(db, WIN[0], WIN[1], "COUPANG_WING1")["ad"]["summary"]
+    assert ad["ad_confirmed_applies"] is True
+    assert ad["ad_confirmed_total"] == _Z    # None이 아니다 — 0원이 사실이다
+    assert ad["ad_confirmed_nonpa"] == _Z
+
+
+def test_all_accounts_view_still_applies(db):
+    """★account=None(전체 합산)은 종전대로 적용된다 — 오픽스가 유일 광고주이므로.
+
+    ⚠️**이 테스트는 «적용 여부»만 고정한다 — 전체 합산 뷰의 «표시 정합성»을 보증하지 않는다.**
+      적대 리뷰(2026-08-11 P2-1)가 지적: 전체 합산 뷰의 `ad_confirmed_total`은
+      「net_profit 차감 기준」이라 인쇄되지만 실제 차감액은 **그것 + 비광고주 계정의 옵션축
+      광고비**다(아래 테스트가 그 간극을 실제로 못 박는다). 이 PR 범위 밖의 기존 결함이고,
+      여기서 «정상»으로 봉인되지 않게 하려고 아래 테스트를 같이 둔다.
+    """
+    _seed_account(db, 1, "COUPANG_WING1", _OFIX, "W1OPT")
+    _seed_option_ad(db, "W1OPT", 100, vendor=_OFIX)
+    _seed_sales(db, 1000, 1065)
+    db.commit()
+    out = compute_command_center(db, WIN[0], WIN[1], None)
+    assert out["ad"]["summary"]["ad_confirmed_applies"] is True
+    assert out["account"]["summary"]["ad_nonpa_deducted"] == Decimal("65")
+
+
+def test_all_accounts_view_confirmed_total_is_not_the_deducted_amount(db):
+    """★★전체 합산 뷰에는 «같은 거짓말»이 남아 있다 — 봉인하지 말고 명시한다 (적대 리뷰 P2-1).
+
+    `ad_confirmed_total`(광고센터 ALL)은 **광고주 계정 것만** 센다. 그런데 net_profit에서
+    실제로 빠지는 광고비는 «전 계정 옵션축 PA + 광고주 비-PA»다. 비광고주 계정(오하이테크)이
+    광고를 쓰면 그 차액만큼 화면 단정(「net_profit 차감 기준」)이 사실과 어긋난다.
+
+    이 테스트는 **현재 동작을 기술(characterize)**한다 — 통과한다고 «옳다»는 뜻이 아니다.
+    고칠 때 여기가 빨개지면서 «이제 정합한다»로 단언을 바꾸면 된다.
+    """
+    _seed_account(db, 1, "COUPANG_WING1", _OFIX, "W1OPT")
+    _seed_option_ad(db, "W1OPT", 1000, vendor=_OFIX)     # 광고주 옵션 PA
+    _seed_account(db, 2, "COUPANG_WING2", _OHAI, "W2OPT")
+    _seed_option_ad(db, "W2OPT", 100, vendor=_OHAI)      # 비광고주 옵션 PA — ALL에 안 잡힌다
+    _seed_sales(db, 1000, 1065)                          # 광고센터 ALL=1065(집행1000+비PA65)
+    db.commit()
+    out = compute_command_center(db, WIN[0], WIN[1], None)
+    shown = out["ad"]["summary"]["ad_confirmed_total"]           # 화면이 「차감 기준」이라 인쇄
+    deducted = out["account"]["summary"]["ad_spend"] + out["account"]["summary"]["ad_nonpa_deducted"]
+    assert shown == Decimal("1065")
+    assert deducted == Decimal("1165")     # 옵션축 1000+100, 비-PA 65
+    # ★현재는 어긋난다. 이 부등식이 등식이 되는 날 = 전체 합산 뷰 표시가 고쳐진 날.
+    assert shown != deducted, "전체 합산 뷰가 정합해졌다면 이 테스트를 등식으로 바꾸고 부채를 닫아라"
+
+
+def test_money_path_unchanged_when_not_applied(db):
+    """★★돈은 안 바뀐다 — 이 수정은 «표시»만 고친다.
+
+    미적용 계정의 net_profit·ad_nonpa_deducted는 수정 전과 같아야 한다(회귀 가드).
+    표시를 고치다 돈을 건드리면 그게 훨씬 나쁜 사고다.
+    """
+    _seed_account(db, 2, "COUPANG_WING2", _OHAI, "W2OPT")
+    _seed_option_ad(db, "W2OPT", 100, vendor=_OHAI)
+    _seed_sales(db, 1000, 1065)
+    db.commit()
+    s = compute_command_center(db, WIN[0], WIN[1], "COUPANG_WING2")["account"]["summary"]
+    assert s["ad_nonpa_deducted"] == _Z
+    assert s["net_profit"] == Decimal("-90.91")
+    assert s["ad_spend"] == Decimal("100")      # 옵션축 값이 실제 차감액
 
 
 # ─── 4) 회귀 가드: 광고 데이터 전무 → 불변 ───────────────────────

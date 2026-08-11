@@ -832,9 +832,14 @@ export interface OverviewResponse {
       ad_spend: string; impressions: number; clicks: number;
       conv_revenue: string; roas: string | null;
       // S5a/D-15: report/SALES vendor-level 권위값(쿠팡 광고센터 0.02% 일치). ad_spend는 옵션 rollup.
-      ad_confirmed_pa?: string;       // 집행(DELIVERED, 상품검색광고/PA)
-      ad_confirmed_total?: string;    // 전체(ALL_DELIVERED, 비-PA 포함)
-      ad_confirmed_nonpa?: string;    // 비-PA(전체−집행) = net_profit 추가 차감
+      // ★광고센터(report/SALES) 소스는 «광고주 단위»라 광고주 계정(오픽스)에만 적용된다.
+      //   적용 안 되는 계정(오하이테크 등)에선 백엔드가 **null**을 준다 — 0이 아니다.
+      //   0으로 주면 「측정된 0원」과 구별이 안 돼 화면이 «광고를 안 썼다»고 단정한다
+      //   (2026-08-11 실제로 그 상태였다: 위쪽 0원 · 아래쪽 11,247원).
+      ad_confirmed_applies?: boolean; // 이 계정에 광고센터 소스가 적용되나
+      ad_confirmed_pa?: string | null;    // 집행(DELIVERED, 상품검색광고/PA) · 미적용이면 null
+      ad_confirmed_total?: string | null; // 전체(ALL_DELIVERED, 비-PA 포함) · 미적용이면 null
+      ad_confirmed_nonpa?: string | null; // 비-PA(전체−집행) = net_profit 추가 차감 · 미적용이면 null
       ad_basis?: string;
     };
     by_option: OverviewAdRow[];

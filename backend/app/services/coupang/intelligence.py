@@ -998,12 +998,22 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     _ad_vendor = (os.getenv("COUPANG_AD_VENDOR_ID")
                   or os.getenv("COUPANG_WING1_VENDOR_ID") or "A01564720")
     _apply_nonpa = account is None or acc["vendor_id"] == _ad_vendor
-    _conf = (_adcost.get_ad_cost_totals(db, dfrom, dto)
-             if _apply_nonpa else {"pa": 0, "total": 0, "nonpa": 0})
-    _nonpa = _f(_conf["nonpa"])
-    ad_sum["ad_confirmed_pa"] = _f(_conf["pa"])        # 집행(report/SALES DELIVERED, vendor-level)
-    ad_sum["ad_confirmed_total"] = _f(_conf["total"])  # 전체(report/SALES ALL_DELIVERED)
-    ad_sum["ad_confirmed_nonpa"] = _nonpa              # 비-PA(전체−집행) = net_profit 추가 차감분
+    _conf = _adcost.get_ad_cost_totals(db, dfrom, dto) if _apply_nonpa else None
+    # 돈 경로는 불변: 미적용이면 비-PA 추가차감 0원(회귀가드 — 아래 net_profit 계산이 이 값을 쓴다).
+    _nonpa = _f(_conf["nonpa"]) if _conf is not None else _Z
+    # ★★«미적용»을 0으로 표현하지 않는다 (D-CPP-38, 2026-08-11 시각 QA 발견).
+    #   종전엔 게이트에 걸린 계정(WING2 등)에도 0을 실어 보냈고, 프론트의 `?? s.ad_spend` 폴백은
+    #   null/undefined만 잡으므로 화면이 **「전체 광고비(ALL) 0원 · net_profit 차감 기준」이라고
+    #   단정**했다. 그런데 같은 화면 아래 요약·옵션표는 11,247원이다 — 한 화면에서 광고비가 두 값.
+    #   돈은 안 틀렸다(순이익은 옵션축 값을 제대로 뺀다). 틀린 건 실토다: 읽는 사람은
+    #   «오하이테크는 광고를 안 썼다»로 읽는다. 「위쪽 단정이 아래쪽 사실을 덮는다」(교훈 #235).
+    #   → 광고센터 소스가 이 계정에 **적용되지 않으면 None**을 준다. 그래야 화면이 «값 없음»과
+    #     «측정된 0원»을 구분하고, 폴백(옵션축)이 살아난다. 판정 플래그도 같이 실어
+    #     프론트가 «무엇을 보고 있는지»를 말할 수 있게 한다.
+    ad_sum["ad_confirmed_applies"] = bool(_apply_nonpa)
+    ad_sum["ad_confirmed_pa"] = _f(_conf["pa"]) if _conf is not None else None
+    ad_sum["ad_confirmed_total"] = _f(_conf["total"]) if _conf is not None else None
+    ad_sum["ad_confirmed_nonpa"] = _nonpa if _conf is not None else None
     ad_sum["ad_basis"] = (
         "ad_spend=option-level PA rollup(per-product breakdown). "
         "ad_confirmed_*=report/SALES vendor-level(쿠팡 광고센터 0.02% 일치, 정합 대조용). "
