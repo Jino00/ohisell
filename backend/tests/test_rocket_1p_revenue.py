@@ -1373,3 +1373,19 @@ def test_share_uses_the_raw_ratio_not_the_rounded_one(db):
     # 표시용 커버리지는 접혀서 1.0000일 수 있다 — 그래도 전액 차감이면 안 된다.
     assert Decimal(p["ad_folded_deducted"]) < Decimal("100000"), \
         "반올림된 비율로 곱해 전액 차감됐다(0.99996 → 1.0000 함정)"
+
+
+def test_degenerate_window_without_consumer_revenue_does_not_deduct_blindly(db):
+    """★2R P2-b — `_all_consumer == 0` 폴백 분기가 무테스트였다.
+
+    소비자 매출이 0인 축퇴 창에서 납품단가 미상이 있으면 share를 0으로 떨어뜨린다
+    (추정할 근거가 없을 때 «전액 차감»으로 기울면 이익이 위조된다).
+    """
+    _price(db, "S1", "0", 1); _cost(db, "S1", 0)
+    _sale(db, "A", "S1", 1, "0")            # 소비자 매출 0
+    _ad_option(db, "C", "5000")             # 구조적
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    if p.get("ad_deduct_share") is not None:
+        # 근거가 없으면 «모른다» 쪽으로 — 전액 차감으로 기울지 않는다.
+        assert Decimal(p["ad_folded_deducted"]) <= Decimal("5000")

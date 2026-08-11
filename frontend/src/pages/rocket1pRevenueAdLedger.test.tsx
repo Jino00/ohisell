@@ -349,6 +349,40 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     expect(t).toContain("12,969,126");
   });
 
+  it("★원장 각주의 «통 수»도 응답을 따라간다 + 구멍0을 차감 대상으로 읽히게 두지 않는다 (2R P2-c·d)", async () => {
+    // 2R P2-c: 열거는 조건부인데 갯수만 「다섯 통」 상수라, 구멍0이 0원인 창에서
+    //          넷만 세고 다섯이라 말했다 — 일별 각주에서 P1-1으로 고발된 것과 같은 형태.
+    // 2R P2-d: 「뒤 둘에서 …뺀 나머지」의 서수가 구멍0이 있으면 어긋나, 차감하지 않는다고
+    //          못 박은 구멍0이 부분 차감된 것처럼 읽혔다.
+    mount(withPnl({ ad_out_of_range: "0", ad_attributed: "664449" }));
+    const four = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("옵션 광고 원장"));
+    expect(four.textContent ?? "").toContain("네 통으로");
+    expect(four.textContent ?? "").not.toContain("다섯 통");
+    cleanup();
+
+    mount(withPnl({ ad_out_of_range: "12969126", ad_attributed: "664449" }));
+    const five = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("옵션 광고 원장"));
+    const t = five.textContent ?? "";
+    expect(t).toContain("다섯 통으로");
+    expect(t).toContain("차감 대상이 아닙니다");   // 구멍0의 성격을 문장이 못 박는다
+    expect(t).not.toContain("뒤 둘에서");
+  });
+
+  it("★차감액이 0이면 «전부 안 들어갔다»고 말한다 (2R P2-a — 그 갈래가 무테스트였다)", async () => {
+    mount({
+      ...withPnl({ ad_folded_deducted: "0", ad_deduct_share: "0.0000",
+                   ad_no_sales_days: "435916", ad_uncosted: "33750" }),
+      daily: [{ ...DAILY[0], ad_no_sales_days: "435916", ad_uncosted: "33750" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
+    const t = note.textContent ?? "";
+    expect(t).toContain("위 손익에도 안 들어갔습니다");
+    expect(t).not.toContain("이미 차감돼 있습니다");
+  });
+
   it("★일별 각주의 «갈래 수»가 응답을 따라간다 — 상수가 아니다 (1R P1-1)", async () => {
     mount({
       ...withPnl({ ad_out_of_range: "12969126", ad_no_sales_days: "435916" }),

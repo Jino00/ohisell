@@ -582,7 +582,8 @@ export default function Rocket1PRevenue() {
                         797,431 = 손익 797,431인데 각주가 "손익 밖 99,232원"이라 말했다).
                         그래서 열거와 «남은 합»을 **같은 술어**로 가른다. */}
                     {p.ad_spend != null && (
-                      <> 옵션 광고 원장(Billboard) <b>{won(p.ad_option_total)}</b>은 다섯 통으로
+                      <> 옵션 광고 원장(Billboard) <b>{won(p.ad_option_total)}</b>은
+                        {" "}{outOfRange > 0 ? "다섯" : "네"} 통으로
                         갈라집니다 — 귀속분 <b>{won(p.ad_attributed)}</b>
                         {Number(p.ad_folded_deducted) > 0 && (
                           <> + 구조적 광고비 중 손익에 실린 몫 {won(p.ad_folded_deducted)}
@@ -592,7 +593,8 @@ export default function Rocket1PRevenue() {
                         {noSalesDays > 0 && <> + 팔린 옵션의 판매 없는 날 {won(p.ad_no_sales_days)}</>}
                         {noSales > 0 && <> + 판매행 없는 옵션 {won(p.ad_no_sales)}</>}
                         {outOfRange > 0 && <> + 판매분석이 없는 기간 {won(p.ad_out_of_range)}</>}
-                        {" "}(뒤 둘에서 위의 «실린 몫»을 뺀 나머지).{" "}
+                        {" "}(구조적 두 통에서 위의 «실린 몫»을 뺀 나머지
+                        {outOfRange > 0 && <> — 「판매분석이 없는 기간」은 차감 대상이 아닙니다</>}).{" "}
                         {outsidePnl > 0
                           ? <>손익 밖에 남은 합이 <b>{won(String(outsidePnl))}</b>입니다
                               {/* ★술어가 `!partial`이면 안 된다(2R 트리아지): 남은 돈에 구멍1이
