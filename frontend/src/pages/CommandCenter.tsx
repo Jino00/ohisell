@@ -424,7 +424,7 @@ function Card({ label, value, sub }: { label: string; value: React.ReactNode; su
 //   타입이 만들어져 React가 subtree를 통째로 재마운트하는 것도 실제 비용이다.
 //   행을 하나 더 붙일 때마다 lint 부채가 늘어나는 구조라, 이번에 행을 늘리면서 같이 없앤다.
 function ReconRow({ label, value, hint, gross }: {
-  label: string; value: string; hint: string; gross?: boolean;
+  label: string; value: string | null; hint: string; gross?: boolean;
 }) {
   return (
     <div className="flex items-baseline justify-between py-1.5 border-b border-indigo-100 last:border-0">
@@ -471,10 +471,13 @@ export function ReconciliationCard({ data }: { data: OverviewResponse }) {
                 value={s.ad_spend}
                 hint="옵션축 실집행(PA) · net_profit 차감 기준 — 이 계정은 광고센터 보고서에 광고주로 안 잡힌다"
               />
+              {/* ★값을 «모른다»고 말한다 — 0원이라 쓰면 이 PR이 없앤 패턴 그대로다(적대 리뷰 P2-3).
+                  비-PA는 «전체−집행»인데 광고센터 값이 없으니 산출 자체가 불가능하다.
+                  net_profit에 추가 차감이 0인 것은 사실이고, 그건 힌트가 말한다. */}
               <Row
                 label="ㄴ 비-PA (브랜드/디스플레이)"
-                value="0"
-                hint="광고센터 값이 없어 산출 불가 · net_profit 추가 차감 없음"
+                value={null}
+                hint="광고센터 값이 없어 산출 불가 · net_profit 추가 차감은 없음(0원)"
               />
             </>
           ) : (

@@ -185,7 +185,14 @@ def test_applied_account_with_zero_ad_reports_zero_not_none(db):
 
 
 def test_all_accounts_view_still_applies(db):
-    """★account=None(전체 합산)은 종전대로 적용된다 — 오픽스가 유일 광고주이므로."""
+    """★account=None(전체 합산)은 종전대로 적용된다 — 오픽스가 유일 광고주이므로.
+
+    ⚠️**이 테스트는 «적용 여부»만 고정한다 — 전체 합산 뷰의 «표시 정합성»을 보증하지 않는다.**
+      적대 리뷰(2026-08-11 P2-1)가 지적: 전체 합산 뷰의 `ad_confirmed_total`은
+      「net_profit 차감 기준」이라 인쇄되지만 실제 차감액은 **그것 + 비광고주 계정의 옵션축
+      광고비**다(아래 테스트가 그 간극을 실제로 못 박는다). 이 PR 범위 밖의 기존 결함이고,
+      여기서 «정상»으로 봉인되지 않게 하려고 아래 테스트를 같이 둔다.
+    """
     _seed_account(db, 1, "COUPANG_WING1", _OFIX, "W1OPT")
     _seed_option_ad(db, "W1OPT", 100, vendor=_OFIX)
     _seed_sales(db, 1000, 1065)
@@ -193,6 +200,31 @@ def test_all_accounts_view_still_applies(db):
     out = compute_command_center(db, WIN[0], WIN[1], None)
     assert out["ad"]["summary"]["ad_confirmed_applies"] is True
     assert out["account"]["summary"]["ad_nonpa_deducted"] == Decimal("65")
+
+
+def test_all_accounts_view_confirmed_total_is_not_the_deducted_amount(db):
+    """★★전체 합산 뷰에는 «같은 거짓말»이 남아 있다 — 봉인하지 말고 명시한다 (적대 리뷰 P2-1).
+
+    `ad_confirmed_total`(광고센터 ALL)은 **광고주 계정 것만** 센다. 그런데 net_profit에서
+    실제로 빠지는 광고비는 «전 계정 옵션축 PA + 광고주 비-PA»다. 비광고주 계정(오하이테크)이
+    광고를 쓰면 그 차액만큼 화면 단정(「net_profit 차감 기준」)이 사실과 어긋난다.
+
+    이 테스트는 **현재 동작을 기술(characterize)**한다 — 통과한다고 «옳다»는 뜻이 아니다.
+    고칠 때 여기가 빨개지면서 «이제 정합한다»로 단언을 바꾸면 된다.
+    """
+    _seed_account(db, 1, "COUPANG_WING1", _OFIX, "W1OPT")
+    _seed_option_ad(db, "W1OPT", 1000, vendor=_OFIX)     # 광고주 옵션 PA
+    _seed_account(db, 2, "COUPANG_WING2", _OHAI, "W2OPT")
+    _seed_option_ad(db, "W2OPT", 100, vendor=_OHAI)      # 비광고주 옵션 PA — ALL에 안 잡힌다
+    _seed_sales(db, 1000, 1065)                          # 광고센터 ALL=1065(집행1000+비PA65)
+    db.commit()
+    out = compute_command_center(db, WIN[0], WIN[1], None)
+    shown = out["ad"]["summary"]["ad_confirmed_total"]           # 화면이 「차감 기준」이라 인쇄
+    deducted = out["account"]["summary"]["ad_spend"] + out["account"]["summary"]["ad_nonpa_deducted"]
+    assert shown == Decimal("1065")
+    assert deducted == Decimal("1165")     # 옵션축 1000+100, 비-PA 65
+    # ★현재는 어긋난다. 이 부등식이 등식이 되는 날 = 전체 합산 뷰 표시가 고쳐진 날.
+    assert shown != deducted, "전체 합산 뷰가 정합해졌다면 이 테스트를 등식으로 바꾸고 부채를 닫아라"
 
 
 def test_money_path_unchanged_when_not_applied(db):

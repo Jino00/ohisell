@@ -26,6 +26,13 @@ import type { OverviewResponse } from "../lib/api";
 
 afterEach(cleanup);
 
+// ★계정축(account.summary.ad_spend)과 광고축(ad.summary.ad_spend)에 **다른 값**을 준다
+//   (적대 리뷰 MF10): 종전 픽스처는 둘 다 11,247이라 «어느 축을 쓰는가»를 구분하지 못했고,
+//   `s.ad_spend` → `a.ad_spend` 변이가 살아남았다. net_profit에서 실제로 빠지는 것은
+//   **계정축**이므로 화면도 그것을 보여야 한다.
+const ACCOUNT_AD = "11247.00";   // net_profit 차감액 = 화면이 보여야 하는 값
+const AD_AXIS_AD = "99999.00";   // 광고 탭 롤업(다른 축) — 여기 나오면 오배선이다
+
 function makeData(
   adSummary: Record<string, unknown>,
   accountSummary: Record<string, unknown> = {},
@@ -37,12 +44,12 @@ function makeData(
         revenue: "908510.00",
         revenue_3p: "867810.00",
         revenue_rg: "40700.00",
-        ad_spend: "11247.00",
+        ad_spend: ACCOUNT_AD,
         ...accountSummary,
       },
       by_option: [],
     },
-    ad: { summary: { ad_spend: "11247.00", ...adSummary }, by_option: [] },
+    ad: { summary: { ad_spend: AD_AXIS_AD, ...adSummary }, by_option: [] },
     product: { summary: {}, by_option: [] },
   } as unknown as OverviewResponse;
 }
@@ -56,10 +63,14 @@ describe("정합성 카드 — 광고 블록", () => {
       ad_confirmed_nonpa: null,
     })} />);
 
-    // 실제 net_profit 차감액이 보인다
+    // 실제 net_profit 차감액(=계정축)이 보인다
     expect(screen.getByText("11,247원")).toBeTruthy();
-    // ★«광고센터 기준 0원»이라는 거짓 단정이 없다 — 광고 블록에 0원 행은 비-PA 하나뿐이고
-    //   그건 「산출 불가」라고 말한다.
+    // ★광고 탭 롤업(광고축)을 쓰면 안 된다 — 그건 net_profit 차감액이 아니다(MF10).
+    expect(screen.queryByText("99,999원")).toBeNull();
+    // ★«광고센터 기준 0원»이라는 거짓 단정이 없다 — 광고 블록에 0원 행 자체가 없다.
+    expect(screen.queryByText("0원")).toBeNull();
+    // 비-PA는 «모른다»고 말한다(0원이라 쓰지 않는다 — 적대 리뷰 P2-3)
+    expect(screen.getByText("—")).toBeTruthy();
     expect(screen.getByText(/광고센터 값이 없어 산출 불가/)).toBeTruthy();
     // 라벨이 출처를 밝힌다(「광고센터」라고 하지 않는다)
     expect(screen.getByText(/광고센터 미태깅 계정/)).toBeTruthy();
@@ -101,6 +112,7 @@ describe("정합성 카드 — 광고 블록", () => {
       ad_confirmed_nonpa: "0",
     })} />);
     expect(screen.queryByText("11,247원")).toBeNull();
+    expect(screen.queryByText("99,999원")).toBeNull();
     expect(screen.getAllByText("0원").length).toBeGreaterThanOrEqual(3);
   });
 
