@@ -93,9 +93,21 @@ DATA_FRESHNESS_RULES: tuple[dict, ...] = (
     #   어제다(age ≈ 1.2일). 일일 트리거(request_wing_vendor_summary_daily, 05:20 KST)가
     #   정상이면 age는 다음 회차 직전에 최대 ~2.25일에 이른다. 3.0이면 **한 회차를 통째로
     #   놓쳤을 때 울리고**(2.25 < 3.0 < 3.25) 정상 운영에선 조용하다.
-    # ★WING1은 일부러 제외한다 — 오픽스 3P는 RG로 이관돼 실적이 거의 없고(90일 3P 옵션 3개),
-    #   판매분석 수집도 일일 트리거 대상이 아니다. 넣으면 영구 빨강이 되어 알림 피로가 생기고,
-    #   그건 이 감시선 계열이 실제로 죽는 방식이다(WATCHDOG_COOKIES가 WING1/2를 뺀 것과 같은 이유).
+    # ★WING1도 편입한다 (D-CPP-40, 2026-08-12). 종전 주석은 «WING1은 일부러 제외 — 오픽스 3P는
+    #   실적이 거의 없고(90일 3P 옵션 3개) 일일 트리거 대상도 아니다»였다. 그 전제 두 개가 모두
+    #   바뀌었다: ①「3P가 비었다」는 참이지만 같은 판매분석이 싣는 **RFM(RG)축이 63일 3,931만원**
+    #   으로 이 계정의 지배 축이다(오픽스 매출의 98.9%가 RG) ②WING1이 이제 일일 트리거 대상이다
+    #   (request_wing_vendor_summary_daily 튜플에 편입).
+    # ★「영구 빨강」 우려가 여기선 성립하지 않는다 — 수집 경로가 살아 있음을 실측했다:
+    #   데몬 `com.ohisell.wing` 상주 · config에 vs_days/vi_days 없음(기본 45/7 적용) ·
+    #   요약축 126행 06-07~08-08 연속. 즉 울리면 그건 «고칠 수 있는 정체»이지 «구조적 부재»가 아니다.
+    #   (옵션축은 신설 후 WING1 0행이었는데, 그 원인도 부재가 아니라 트리거 누락이었다.)
+    {"source": "vendor_summary", "name": "wing_vendor_summary", "account_key": "COUPANG_WING1",
+     "max_age_days": 3.0,
+     "impact": "쿠팡 판매분석 요약축(오픽스) 정체 — RG 매출(계정의 98.9%) 대조 상대가 낡았다"},
+    {"source": "vendor_item_sales", "name": "wing_vendor_item_sales", "account_key": "COUPANG_WING1",
+     "max_age_days": 3.0,
+     "impact": "쿠팡 판매분석 옵션축(오픽스) 정체 — 옵션별 RG 매출이 낡은 값으로 구른다"},
     {"source": "vendor_summary", "name": "wing_vendor_summary", "account_key": "COUPANG_WING2",
      "max_age_days": 3.0,
      "impact": "쿠팡 판매분석 요약축(오하이테크) 정체 — 3P 매출 대조 상대가 낡았다"},

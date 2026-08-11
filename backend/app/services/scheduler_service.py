@@ -1201,9 +1201,16 @@ def request_wing_vendor_summary_daily_job():
         from app.services.coupang import vendor_summary_sync
 
         results = []
-        for account_key in ("COUPANG_WING2",):
-            # WING1은 대상이 아니다 — 오픽스 3P는 RG로 이관돼 판매분석 3P가 사실상 비어 있고
-            # (90일 3P 옵션 3개), 옵션축 수집 대상도 아니다. 켜야 할 때 이 튜플만 늘리면 된다.
+        # ★WING1 편입 (D-CPP-40, 2026-08-12). 종전 제외 근거는 «오픽스 3P는 RG로 이관돼 판매분석
+        #   3P가 사실상 비어 있다(90일 3P 옵션 3개)»였다. 그 관찰 자체는 참이지만(WING1 NORMAL
+        #   90일 5,139,710원), **거기서 계정 전체를 빼는 결론까지는 근거가 없었다** — 같은 판매분석이
+        #   싣는 RFM(RG)축이 63일 39,312,430원으로 이 계정의 지배 축이고, 오픽스 매출의 98.9%가
+        #   RG다. 3P만 보고 계정을 판정한 것이 누락의 원인이다(ref 55 §3).
+        # ★"수집 불가"가 아니었다: 수집 경로는 계정 무관 범용이고(데몬·ingest·UI 버튼 `ofix_sales`),
+        #   WING1 세션도 green이었다. 사람이 버튼을 눌러야만 갱신됐고 마지막 클릭이 08-09였을 뿐이다.
+        #   실측(2026-08-12): 적재 126행 06-07~08-08 연속 · 창을 적재 범위 안으로 잡으면
+        #   `revenue_canonical.wing_used=true`, `factor_rg=0.925`로 안분이 실제로 걸린다.
+        for account_key in ("COUPANG_WING1", "COUPANG_WING2"):
             results.append(vendor_summary_sync.request_refresh(db, account_key))
         log.info("[스케줄러] Wing 판매분석 갱신 요청: %s", results)
     except Exception as e:

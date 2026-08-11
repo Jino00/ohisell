@@ -521,8 +521,12 @@ def test_freshness_rule_reads_the_right_table_for_each_source(db):
     _seed_summary(db, "2026-08-08", 1000)
     vis.ingest_vendor_item_sales(db, ACC, [_row("2026-08-06", "111", 1000)])
 
-    summary_rule = next(r for r in DATA_FRESHNESS_RULES if r["name"] == "wing_vendor_summary")
-    item_rule = next(r for r in DATA_FRESHNESS_RULES if r["name"] == "wing_vendor_item_sales")
+    # ★이름만으로 고르면 안 된다 — D-CPP-40 이후 같은 name이 계정별로 둘씩 있다(WING1·WING2).
+    #   계정을 안 걸면 이 테스트가 심지도 않은 계정의 규칙을 집어 no_data를 본다.
+    summary_rule = next(r for r in DATA_FRESHNESS_RULES
+                        if r["name"] == "wing_vendor_summary" and r["account_key"] == ACC)
+    item_rule = next(r for r in DATA_FRESHNESS_RULES
+                     if r["name"] == "wing_vendor_item_sales" and r["account_key"] == ACC)
     assert _latest_for_rule(db, summary_rule) == date(2026, 8, 8)
     assert _latest_for_rule(db, item_rule) == date(2026, 8, 6)
 
@@ -560,8 +564,12 @@ def test_fresh_sales_analysis_is_silent(db):
 
     수집 직후에도 최신 날짜는 «어제»다(닫힌 과거일만 받는다). 그 정상 상태가 조용해야 한다.
     """
-    _seed_summary(db, "2026-08-09", 34300)           # NOW=08-10 → 나이 약 1.5일 < 3.0
-    vis.ingest_vendor_item_sales(db, ACC, [_row("2026-08-09", "111", 34300)])
+    # ★두 계정 모두 심는다 — D-CPP-40으로 WING1도 감시 대상이 됐다. 한쪽만 심으면
+    #   «신선한데 시끄럽다»가 아니라 «안 심은 계정이 no_data»인 것이고, 그건 이 테스트가
+    #   보려는 것과 다르다.
+    for acc in ("COUPANG_WING1", "COUPANG_WING2"):
+        _seed_summary(db, "2026-08-09", 34300, account=acc)   # NOW=08-10 → 나이 약 1.5일 < 3.0
+        vis.ingest_vendor_item_sales(db, acc, [_row("2026-08-09", "111", 34300)])
     h = compute_scheduler_health(db, _FakeScheduler(), NOW)
     names = {d["name"] for d in h["data_stale"]}
     assert "wing_vendor_summary" not in names
@@ -628,12 +636,15 @@ def test_check_failed_also_breaks_healthy_and_carries_an_impact_label(db, monkey
     }])["healthy"] is False
 
 
-def test_daily_trigger_job_requests_only_its_own_account(db, monkeypatch):
-    """★★새 잡이 **자기 계정만** 요청한다 (적대 리뷰 M6 — 큐 도난 함정).
+def test_daily_trigger_job_requests_each_account_explicitly(db, monkeypatch):
+    """★★잡이 **계정을 하나씩 명시해서** 요청한다 (적대 리뷰 M6 — 큐 도난 함정 + D-CPP-40).
 
-    갱신 요청 큐는 계정 차원이다. WING1을 요청하면 오픽스 데몬이 그걸 집어 가고 WING2는
-    영원히 안 받는다 — 즉 13일 정체가 그대로 재발한다. 리뷰에서 이 계정을 WING1로 바꾼
-    변이가 테스트 0건이라 생존했다.
+    갱신 요청 큐는 계정 차원이고 claim은 원자적이다. 계정을 명시하지 않으면 백엔드가 WING1
+    큐로 해석해 한쪽 데몬이 남의 요청을 집어 간다(fetcher 주석 1252-1254). 종전 이 테스트는
+    «WING2만»을 못 박았는데, D-CPP-40에서 WING1이 편입되며 그 단언이 결정을 거꾸로 고정하게
+    됐다. 지금 지켜야 하는 것은 «둘 다, 각자 자기 이름으로»다.
+
+    ★WING1을 빼는 변이가 여기서 죽는다 — 그게 오픽스 판매분석이 08-09에 멈춘 그 상태다.
     """
     import app.services.scheduler_service as ss
     from app.services.coupang import vendor_summary_sync
@@ -644,7 +655,8 @@ def test_daily_trigger_job_requests_only_its_own_account(db, monkeypatch):
     monkeypatch.setattr(ss, "_get_own_db_session", lambda: db)
 
     ss.request_wing_vendor_summary_daily_job()
-    assert asked == ["COUPANG_WING2"], f"요청 계정이 틀렸다: {asked}"
+    assert sorted(asked) == ["COUPANG_WING1", "COUPANG_WING2"], f"요청 계정이 틀렸다: {asked}"
+    assert len(asked) == len(set(asked)), f"같은 계정을 두 번 요청했다: {asked}"
 
 
 def test_daily_trigger_job_is_watched_so_its_death_is_not_silent():
@@ -654,15 +666,43 @@ def test_daily_trigger_job_is_watched_so_its_death_is_not_silent():
     assert "request_wing_vendor_summary_daily" in WATCHDOG_JOBS
 
 
-def test_wing1_is_deliberately_excluded_from_sales_analysis_freshness():
-    """★WING1 제외는 **의도**다 — 오픽스 3P는 RG로 이관돼 넣으면 영구 빨강이 된다.
+def test_wing1_sales_analysis_is_now_watched_on_both_axes():
+    """★★D-CPP-40: WING1도 판매분석 신선도 감시 대상이다 (종전 «의도적 제외»를 뒤집는다).
 
-    (알림 피로가 이 감시선 계열이 실제로 죽는 방식이다. WATCHDOG_COOKIES가 WING1/2를 뺀
-     것과 같은 이유.) 나중에 켤 때 이 테스트가 «왜 없었는지»를 알려 준다.
+    옛 제외 근거는 «오픽스 3P는 RG로 이관돼 실적이 거의 없다(90일 3P 옵션 3개)»였고 그
+    관찰 자체는 참이다. 틀린 것은 **거기서 계정 전체를 뺀 것**이다 — 같은 판매분석이 싣는
+    RFM(RG)축이 63일 3,931만원으로 오픽스 매출의 98.9%를 차지한다. 3P만 보고 계정을
+    판정하면 그 계정의 지배 축이 통째로 감시 밖에 남는다.
+
+    ★「영구 빨강」 우려의 전제도 실측으로 깨졌다(2026-08-12): 요약축은 이미 126행
+    06-07~08-08 연속 적재돼 있었고, 데몬(com.ohisell.wing)도 살아 있다. 즉 «구조적 부재»가
+    아니라 «트리거 누락»이었고, 울리면 고칠 수 있는 정체다.
+
+    이 테스트는 WING1을 다시 빼는 변이에서 죽는다.
     """
-    wing1_sales = [
-        r for r in DATA_FRESHNESS_RULES
-        if r["account_key"] == "COUPANG_WING1"
-        and r.get("source") in ("vendor_summary", "vendor_item_sales")
-    ]
-    assert wing1_sales == []
+    for src in ("vendor_summary", "vendor_item_sales"):
+        accs = {r["account_key"] for r in DATA_FRESHNESS_RULES if r.get("source") == src}
+        assert accs == {"COUPANG_WING1", "COUPANG_WING2"}, f"{src} 감시 계정이 틀렸다: {accs}"
+    # 규칙 이름이 계정별로 중복되는 구조가 됐다 — 이름만으로 규칙을 고르는 코드는 틀린다.
+    pairs = [(r["name"], r["account_key"]) for r in DATA_FRESHNESS_RULES]
+    assert len(pairs) == len(set(pairs)), f"(name, account_key)가 중복이다: {pairs}"
+
+
+def test_sales_analysis_thresholds_are_pinned_not_just_present():
+    """★임계값 자체를 못 박는다 — «규칙이 있다»와 «규칙이 판정한다»는 다르다.
+
+    변이 실측(2026-08-12): WING1 옵션축 규칙의 `max_age_days`를 3.0 → 999.0으로 바꿨을 때
+    **테스트 49건이 전부 통과했다.** 규칙의 존재만 단언하면 임계값을 무력화하는 변이가
+    그대로 살아남는다 — 목록에는 있는데 영원히 안 울리는 감시선이 된다(교훈 #257의 변형:
+    이번엔 목록에 있어도 조용하다).
+
+    3.0 근거: 두 축 모두 «닫힌 과거일»만 받으므로 수집 직후 최신일이 어제(age≈1.2일)이고,
+    일일 트리거가 정상이면 다음 회차 직전 최대 ~2.25일이다. 3.0이면 한 회차를 통째로
+    놓쳤을 때 울리고 정상 운영에선 조용하다(2.25 < 3.0 < 3.25).
+    """
+    for src in ("vendor_summary", "vendor_item_sales"):
+        for r in [x for x in DATA_FRESHNESS_RULES if x.get("source") == src]:
+            assert r["max_age_days"] == 3.0, (
+                f"{src}/{r['account_key']} 임계 {r['max_age_days']} — 3.0이어야 한다"
+            )
+            assert r["impact"], f"{src}/{r['account_key']}에 impact 문구가 없다"
