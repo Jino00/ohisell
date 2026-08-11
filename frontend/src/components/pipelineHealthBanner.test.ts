@@ -189,4 +189,100 @@ describe("buildPipelineHealthBanner", () => {
     expect(banner!.summary).toContain("원가가 정본과 다름 5건");
     expect(banner!.summary).toContain("auto_sync_orders");
   });
+
+  // ── 판매분석 보존식 (D-CPP-36) ────────────────────────────────────────
+  // ★백엔드 판정과 **같은 커밋에** 이 분기가 있어야 한다. disk_low가 판정에만 있고 표시가
+  //   없어 배너가 통째로 숨었던 것이 바로 이 실패다(교훈 #223).
+  const conservation = (
+    over: Partial<NonNullable<SchedulerHealth["vendor_item_conservation"]>> = {},
+  ) => ({
+    window: { start: "2026-07-27", end: "2026-08-10" },
+    compared: 9,
+    mismatch: [],
+    summary_only: [],
+    option_only: [],
+    ...over,
+  });
+
+  it("보존식 불일치가 배너에 뜬다 — 건수 + 최대 차액의 날짜/유형", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        vendor_item_conservation: conservation({
+          mismatch: [
+            {
+              account_key: "COUPANG_WING2", date: "2026-08-05",
+              registration_type: "NORMAL", option_gmv: 100000,
+              summary_gmv: 188800, diff: -88800,
+            },
+            {
+              account_key: "COUPANG_WING2", date: "2026-08-07",
+              registration_type: "NORMAL", option_gmv: 86500,
+              summary_gmv: 86501, diff: -1,
+            },
+          ],
+        }),
+      }),
+    );
+    expect(banner).not.toBeNull();
+    expect(banner!.summary).toContain("판매분석 옵션↔요약 합 불일치 2건");
+    // ★차액이 가장 큰 건을 고른다 — 첫 건을 쓰면 1원 차이가 대표로 나가 심각도가 가려진다.
+    expect(banner!.summary).toContain("2026-08-05");
+    expect(banner!.summary).toContain("-88,800원");
+    expect(banner!.summary).not.toContain("2026-08-07");
+  });
+
+  it("★summary_only만 있으면 침묵 — «아직 안 옴»은 «틀렸다»가 아니다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        vendor_item_conservation: conservation({
+          summary_only: [
+            {
+              account_key: "COUPANG_WING2", date: "2026-08-09",
+              registration_type: "NORMAL", summary_gmv: 34300,
+            },
+          ],
+        }),
+      }),
+    );
+    expect(banner).toBeNull();
+  });
+
+  it("보존식이 null/undefined면 침묵 — 구백엔드에서도 배너가 깨지지 않는다", () => {
+    expect(
+      buildPipelineHealthBanner(makeHealth({ vendor_item_conservation: null })),
+    ).toBeNull();
+    expect(
+      buildPipelineHealthBanner(makeHealth({ vendor_item_conservation: undefined })),
+    ).toBeNull();
+  });
+
+  it("보존식 불일치가 잡 실패를 가리지 않는다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        vendor_item_conservation: conservation({
+          mismatch: [{
+            account_key: "COUPANG_WING2", date: "2026-08-05",
+            registration_type: "RFM", option_gmv: 0, summary_gmv: 1, diff: -1,
+          }],
+        }),
+        missing_jobs: ["request_wing_vendor_summary_daily"],
+      }),
+    );
+    expect(banner!.summary).toContain("판매분석 옵션↔요약 합 불일치 1건");
+    expect(banner!.summary).toContain("request_wing_vendor_summary_daily");
+  });
+
+  it("판매분석 신선도 impact가 그대로 배너에 나온다(data_stale 경로 재사용)", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        data_stale: [{
+          name: "wing_vendor_item_sales", account_key: "COUPANG_WING2",
+          state: "stale", age_days: 15.2, max_age_days: 3,
+          impact: "쿠팡 판매분석 옵션축(오하이테크) 정체 — 옵션별 3P 매출이 낡은 값으로 구른다",
+        }],
+      }),
+    );
+    expect(banner!.summary).toContain("옵션별 3P 매출이 낡은 값으로 구른다");
+    expect(banner!.summary).toContain("(15일째)");
+  });
 });

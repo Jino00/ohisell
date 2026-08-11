@@ -489,4 +489,9 @@ class SchedulerHealthOut(BaseModel):
     #   dict로 두는 이유: 배너가 쓰는 모양이 바뀌어도 스키마를 따라 고칠 필요가 없고,
     #   구조를 못 박는 일은 프론트 타입과 배선 테스트가 한다.
     cost_drift: dict | None = None
+    # 쿠팡 판매분석 보존식(Σ옵션 GMV == 요약축 GMV) 대조 결과. 정상이면 mismatch=[], 대조 자체를
+    # 못 했으면 None. ★위 cost_drift 주석의 사고를 그대로 되풀이하지 않으려고 **먼저** 넣었다 —
+    # 서비스층이 판정을 내도 이 줄이 없으면 response_model이 응답에서 지운다. 짝이 되는 테스트는
+    # `test_vendor_item_axis.py::test_health_route_actually_returns_conservation`.
+    vendor_item_conservation: dict | None = None
     as_of: str

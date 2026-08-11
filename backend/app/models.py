@@ -925,6 +925,49 @@ class CoupangVendorSummaryDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangVendorItemSalesDaily(Base):
+    """쿠팡 Wing 판매분석 «일자×옵션» 정본 매출 축 (D-CPP-36, 2026-08-10).
+
+    소스: m-wing.coupang.com /tenants/rfm-ss/api/business-insight/vi-detail-search
+      (2026-08-10 라이브 정찰). 요약축(CoupangVendorSummaryDaily)과 **같은 세션·같은 회차**에
+      수집한다 — 그래야 보존식(Σ옵션 == 요약)이 같은 시점을 비교한다.
+      백엔드 requests 직접 호출 금지(cf_clearance 재생 불가, D-5) — ingest 수신 전용.
+
+    grain: (account_key, sale_date, vendor_item_id). 같은 날짜를 다시 받으면 교체(snapshot upsert).
+    vendor_item_id는 `CoupangRevenueFee.vendor_item_id`(수수료 요율 SoT)·`Order.platform_product_id`와
+      **같은 문자열 옵션ID**다 → 옵션별 매출↔수수료↔주문이 캐스팅 없이 조인된다.
+      ★`externalSkuIds`는 실측 전건 빈 배열이라 우리 SKU 코드로는 조인할 수 없다(창작 금지).
+
+    gmv/units_sold 음수 허용: 쿠팡 GMV = 판매액 − 환불액이라 환불 초과일은 정당하게 음수다
+      (요약축이 이미 같은 정책 — 그때 «비용은 0 이상» 가정을 복제해 45일 백필이 통째로 막혔다).
+
+    이번 범위 밖: 이 축을 손익 엔진이 소비하는 재계산(종합조망 `wing_used` 판정은 요약축 그대로).
+      UV/PV/검색량 등은 raw_metrics(JSON)에 원본만 보존한다 — 재조회가 봇 감지 때문에 비싸다.
+    """
+
+    __tablename__ = "coupang_vendor_item_sales_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_key", "sale_date", "vendor_item_id",
+            name="uq_coupang_vendor_item_sales_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sale_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    vendor_item_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # 옵션ID = 결합키
+    registration_type: Mapped[str] = mapped_column(String(10), nullable=False)  # NORMAL(3P) / RFM(RG)
+    item_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    product_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    gmv: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 쿠팡 공식 GMV(원)
+    units_sold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    raw_metrics: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # businessInsightsMetricsResponse 원본 JSON
+    last_refresh: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ──────────────────────────────────────────────
 # 쿠팡 반품/취소 (순매출 차감 회계축 — P2)
 # ──────────────────────────────────────────────

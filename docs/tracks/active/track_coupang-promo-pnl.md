@@ -18,6 +18,98 @@
 
 ## 확정 결정 (D-CPP-N)
 
+### D-CPP-36 — 판매분석 옵션축 신설: **새 테이블**로 적재 + 보존식 상설 배선 + 신선도 규칙에 `source` 도입 (2026-08-10 밤~08-11, PR #281)
+
+> ⚠️ **번호 재부여**: 이 결정은 처음 D-CPP-35로 붙였으나, 기록하는 사이 병행 세션이 커밋
+> `053a83c`(「엑셀 업로드가 버퍼 값을 쓰기 전에 거부한다」)로 D-CPP-35를 선점해 **D-CPP-36으로
+> 뒤로 옮겼다**(main이 트렁크, 본문 불변, 참조 20곳 갱신). 커밋 `0d3826c`·`914718f` 메시지의
+> 「D-CPP-35」는 고칠 수 없으므로 여기 남긴다.
+
+> Jino 승인(2026-08-10): 계약 승인 + 여러 후보 중 「신선도 표면 먼저 묶어서」 선택.
+
+#### 정찰 (2026-08-10)
+`POST /tenants/rfm-ss/api/business-insight/vi-detail-search`(m-wing same-origin). 자체 fetch는
+Akamai가 `TypeError: Failed to fetch`로 막아 페처의 검증된 `_POST_JSON_JS`(XSRF 헤더+
+`redirect:'manual'`) 재사용이 필수. 요청은 startDate/endDate **창 집계**(일별 값 없음)라
+일자별로 호출해야 한다. 조인 키는 `vendorItemId`(=`coupang_revenue_fee.vendor_item_id`=
+`orders.platform_product_id`), `externalSkuIds`는 전건 빈 배열이라 SKU 조인은 안 된다.
+대조 3회 전부 차 0(08-01~09 450,700 / 08-05 188,800 / 08-07 86,500).
+
+#### 확정 (번복 금지)
+- **옵션축은 «일자×옵션» grain의 새 테이블**(`coupang_vendor_item_sales_daily`)로 적재한다 —
+  요약축(`coupang_wing_vendor_summary`류) 확장이 아니다. 요약축이 **독립된 대조 상대**로 남아야
+  Σ옵션==요약 보존식이 자기 대조가 안 된다(같은 테이블에 얹으면 검사가 자기 자신을 검사한다).
+- **보존식**(Σ옵션 GMV == 요약 GMV, **허용오차 0**)을 헬스에 상설 배선한다
+  (`SchedulerHealthOut.vendor_item_conservation`) — 검사기를 만들어도 안 부르면 없는 것과 같다
+  (D-CPP-33과 같은 교훈을 이 축에도 적용).
+- **`DATA_FRESHNESS_RULES`에 `source` 지시를 도입**한다. 이전엔 규칙 조회가 RG 정산 테이블
+  한 곳에 하드코딩돼 있어 새 파이프라인을 넣을 수단이 없었다(교훈 #235). 판매분석 두 축
+  (요약·옵션)을 **WING2만** 추가 — WING1은 3P가 RG로 이관돼 판매행이 원천적으로 옵션축을
+  못 채운다(영구 빨강을 신선도 배너에 만드는 것은 이번 스코프가 의도적으로 피하는 것). 임계 3.0일.
+- **갱신 요청 트리거를 사람 버튼 → 크론(05:20 KST)으로 이관**한다. WING2 판매분석은 UI가
+  갱신 요청 자체를 만들지 않아(코드 주석 「현재 휴면」) 07-26 이후 13일 정체했다 — 「버튼-only」는
+  «사람이 매일 누른다»를 전제하는데 누를 버튼조차 없는 계정이 있었다(교훈 #234).
+- **검사창(보존식 대조 기간) = 수집창(페처 요청 기간) = 7일로 묶는다.** 한쪽만 늘리면 그 사이
+  간극(8~14일 전 등)을 어떤 회차도 못 고치는 영구 빨강이 된다 — 배너는 최대 2주 켜져 있는데
+  운영자가 할 조치가 없다(교훈 #237). 두 상수를 테스트로 양방향 고정.
+
+#### 구현
+- 마이그 `vi1s2a3x4b5c` → `coupang_vendor_item_sales_daily`(`raw_metrics` JSON 보존)
+- SA `vendor_item_sales_sync`(멱등 upsert + 배치 내 dedupe + `conservation_check`)
+- 라우터 `POST /api/coupang/ops/wing/vendor-item-sales/ingest`
+- 페처 `_vi_days`/`_vi_payload`/`_parse_vi_page`/`_fetch_vi_detail`/`_push_vendor_item_sales`
+  (요약축 성공 직후 같은 페이지·같은 회차, 창 7일, 페이지 상한 20)
+- 스케줄러 `request_wing_vendor_summary_daily_job`(05:20 KST, `WATCHDOG_JOBS` 포함)
+- `SchedulerHealthOut.vendor_item_conservation` + 배너 분기 + `check_failed` 상태
+
+#### 라이브 합격 (prod, 2026-08-10 23:10 KST · 무중단 배포 `a92aca7`, 활성 :8011)
+- 옵션축 469행·14일(07-27~08-09) · ingest `received=469 ingested=469` · 403 0건
+- 08-01~08-09 3P 옵션축 GMV **450,700** == 요약축 **450,700** → **차 0**
+- 보존식 전 기간 어긋난 (일자,유형) 칸 **0** · 라이브 HTTP `compared=14 · mismatch=0`
+  (다음날 창 이동 후 `compared=12 · mismatch=0`)
+- `GET /api/scheduler/health` **HTTP body에 `vendor_item_conservation` 실존**
+- 양방향 전이: 수집 전 `healthy:false`+`wing_vendor_item_sales no_data` → 수집 후
+  `healthy:true`+`data_stale` 0건
+- 번들 `index-BdiAJ7g_.js`에 새 배너 문자열 실존(「판매분석 옵션↔요약 합 불일치」)
+- 조인: 판매옵션 16개 중 14개가 요율 SoT와 직결
+- 요약축도 같은 회차에 90행 재적재(06-26~08-09)
+- ★**「판매옵션 11개」는 12개가 옳았다**: `87287287411`이 08-05 +20,700 / 08-06 −20,700으로
+  **창 집계에선 정확히 상쇄돼 사라진다**. 일별 grain이 그 사실을 되살렸다(GMV 총액 불변) —
+  grain 결정이 실측으로 정당화됐다.
+
+#### 적대 리뷰 — 1R FAIL(P1 3건) → 전건 수용 → 2R PASS(P1=0)
+리뷰어가 재현으로 확인:
+- **P1-1**: prod `autoflush=False`라 **배치 내** 중복이 UNIQUE 위반 → HTTP 500 + 회차 전량
+  롤백. **테스트 픽스처가 prod와 다른 의미론(`autoflush=True`)이라 500을 완전히 가렸다.**
+  → 배치 내 dedupe(마지막 값 승) + 픽스처 정정 + `ingested`/`received` 분리.
+- **P1-2**: 마이그 미적용 상태에서 `data_stale` 4건이 유지돼야 하는데 1R엔 0건이었다(RG 정산
+  까지 소실). 오타 `source`도 `check_failed`로 표면화하도록 수정.
+- **P1-3**: D+1부터 그 날짜가 두 창(검사창·수집창)에서 **동시에** 빠져 「고칠 수 있는 동안만
+  울린다」— 위 「검사창=수집창=7일」 확정으로 흡수.
+- 수정이 만든 새 결함 없음.
+- **P2**: 채택 6(페이지 상한 20 · 행 단위 파싱 방어 · `total_orders` 상한 ·
+  `ingested`/`received` 분리 · 페처 옵션축 테스트 신설 · `_CATCHUP_ORDER` 근거 주석) /
+  기각 2(옵션별 `int(round())` 합산 — 라이브 3회 전부 정수고 소수가 오면 영구 빨강이
+  **정당한 경보** / `vendor_item_id` 길이 검증 — SQLite 무시, Postgres 이관은 별 트랙) /
+  이월 1(`option_only`가 판정·배너에서 버려진다) / 해소 1(nginx `client_max_body_size 50M`
+  실측 — 7일 0.81MB·14일 1.61MB, 여유 30배 이상)
+
+#### 검증(격리 사본 `git archive a92aca7`에서 측정)
+전체 **5325 passed** · 변이 **21/21 KILLED** · 신규 테스트 파일 2개(`test_vendor_item_axis.py`
+39건 · `test_wing_vi_detail.py` 22건) · 프론트 tsc 0 · eslint 0 errors(경고 54=상한) · 배너
+테스트 19건.
+
+#### 남은 것 (다음 세션 — 상세는 `.claude/memory/HANDOFF_wing-option-axis_20260811.md`)
+- ★**PR 병합 후 `bash tools/install_local_runtime.sh` 필수** — 데몬은 repo가 아니라
+  `/Users/jino/.ohisell/tools/wing_browser_fetcher.py` 설치본을 돈다. 안 하면 05:20 크론이
+  요약축만 받고 옵션축은 3일 뒤 stale로 뜬다.
+- `option_only`가 판정·배너에서 버려진다 — 요약축 신선도가 max(date)만 보므로 «중간 구멍»을
+  못 본다(요약축의 기존 성질). 옵션축을 손익 엔진에 배선하는 슬라이스에서
+  «option_gmv≠0인 option_only»를 판정에 넣을 것.
+- `check_failed`가 배너엔 `impact`만 나가 「조회 실패」가 「정체」로 보인다(`reason`은 API body
+  에만) — 2R 리뷰어 관찰, P1 아님.
+- 옵션축을 손익 엔진이 소비하는 재계산은 이번 범위 밖.
+
 ### D-CPP-32 — 정산 통보는 «금액»이 아니라 «요율»을 알려준다. 그러니 정산을 기다리지 않는다 (2026-08-10, PR #273)
 
 > ⚠️ **번호 재부여**: 이 결정은 처음에 D-CPP-30으로 붙였으나, 기록하는 사이 병행 세션이

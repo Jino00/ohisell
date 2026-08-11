@@ -54,7 +54,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -210,6 +210,175 @@ def _vs_payload(cfg: dict, window: tuple | None = None) -> dict:
         "registrationTypes": ["NORMAL", "RFM"],
         "searchIds": [],
     }
+
+
+# ── 옵션(vendorItem)축 — 판매분석 «일자×옵션» (D-CPP-36, 2026-08-10 라이브 정찰) ──────
+# 요약축과 **같은 origin·같은 세션·같은 _POST_JSON_JS**를 쓴다. 새 fetch를 쓰면 Akamai 센서가
+#   `TypeError: Failed to fetch`로 막는다(정찰 중 실측 — XSRF 헤더가 없으면 통과 못 한다).
+VI_DETAIL_PATH = "/tenants/rfm-ss/api/business-insight/vi-detail-search"
+# 한 요청당 옵션 수. 실측 응답의 paginationDetails가 totalPages를 주므로 순회는 그걸 따른다.
+_VI_PAGE_SIZE = 50
+# 옵션축을 받을 창 폭(일). ★요약축(45일)보다 좁은 이유: 옵션축은 **일자마다 따로 호출**해야
+#   한다(응답이 startDate~endDate 창 집계라 일별 값이 없다). 45일이면 매 회차 45회 요청이 되고
+#   그건 봇 감지 하에서 「조회만, 천천히」를 어긴다. 7일이면 회차당 7~10요청이고, 한 회차를
+#   놓쳐도 다음 회차가 겹쳐 덮으므로 구멍이 안 남는다(요약축의 45일 자가치유와 같은 원리를
+#   좁은 창으로 얻는다). 백필이 필요하면 config `vi_days`를 한 번 늘려 돌린다.
+_VI_DEFAULT_DAYS = 7
+# ★`vi_days`를 늘리려면 서버의 `CONSERVATION_WINDOW_DAYS`(scheduler_health.py)도 같이 늘려야
+#   한다. 검사창이 수집창보다 넓으면 «아무도 다시 받지 않는 구간»에 보존식을 단언하게 되고,
+#   그 불일치는 어떤 회차도 고칠 수 없다 → 수리 경로 없는 영구 빨강(적대 리뷰 P1-3).
+# 하루당 페이지 상한 — 실측은 3페이지(146옵션/50)다. 응답이 거대한 totalPages를 줘도
+#   여기서 멈춘다(봇 감지 하에서 요청 폭주가 계정을 잃는 길이다).
+_VI_MAX_PAGES = 20
+# 페이지 사이 지연(ms) — 요약축 과거창(500ms)과 같은 계열. 일자 사이엔 더 길게 둔다.
+_VI_PAGE_DELAY_MS = 700
+_VI_DAY_DELAY_MS = 1200
+
+
+def _vi_days(cfg: dict) -> list[date]:
+    """옵션축을 받을 날짜 목록 — 어제부터 과거로 vi_days일(닫힌 과거일만, 최신 우선).
+
+    요약축과 같은 «닫힌 과거일» 규율(D-3): 오늘은 아직 확정이 아니라 받지 않는다.
+    """
+    days = _cfg_int(cfg, "vi_days", _VI_DEFAULT_DAYS)
+    # 요약축 `_vs_windows`와 같은 기준일 계산(KST 어제) — 두 축의 창이 어긋나면 보존식이 헛돈다.
+    yesterday = datetime.now(KST).date() - timedelta(days=1)
+    return [yesterday - timedelta(days=i) for i in range(days)]
+
+
+def _vi_payload(day: date, page_number: int) -> dict:
+    """vi-detail-search body — 하루 단위(startDate == endDate).
+
+    ★단일 일자 창이 요약축과 정확히 일치함을 실측했다(2026-08-10: 08-05 188,800=188,800,
+      08-07 86,500=86,500). 그래서 일자별로 받아도 합이 요약축과 어긋나지 않는다.
+    """
+    iso = day.isoformat()
+    return {
+        "startDate": iso,
+        "endDate": iso,
+        "registrationTypes": ["NORMAL", "RFM"],
+        "pageNumber": page_number,
+        "pageSize": _VI_PAGE_SIZE,
+        "sortBy": "GMV",
+        "sortOrder": "DESC",
+        "includeSoldVICount": True,
+    }
+
+
+def _parse_vi_page(body: str, day: date) -> tuple[list[dict], int] | None:
+    """vi-detail-search 응답 1페이지 → (행 목록, totalPages). 실패 시 None.
+
+    ★판매 0인 옵션도 그대로 담는다(GMV 0 행). 화면에 146개가 뜨는데 판매는 11개뿐이라
+      «안 팔린 옵션»이 데이터에 없으면 「안 팔린 날 광고비」 같은 후속 질문을 못 한다.
+    """
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or "vendorItems" not in data:
+        return None
+    pag = data.get("paginationDetails") or {}
+    try:
+        total_pages = int(pag.get("totalPages") or 1)
+    except (TypeError, ValueError):
+        total_pages = 1
+    # ★상한(적대 리뷰 P2-3): 응답이 totalPages=5000을 주면 하루에 5000요청을 그대로 순회해
+    #   「조회만, 천천히」를 정면으로 위반한다(실측 추정 58분/1일치). 실제 규모는 3페이지다.
+    total_pages = min(max(total_pages, 1), _VI_MAX_PAGES)
+    rows: list[dict] = []
+    for it in data.get("vendorItems") or []:
+        if not isinstance(it, dict):
+            continue
+        d = it.get("vendorItemDetails") or {}
+        m = it.get("businessInsightsMetricsResponse") or {}
+        vid = d.get("vendorItemId")
+        rt = d.get("registrationType")
+        if vid is None or rt not in ("NORMAL", "RFM"):
+            continue  # 조인축·등록유형이 없으면 쓸 수 없다(스키마 방어)
+        # ★행 단위 방어(적대 리뷰 P2-4): 쿠팡이 `totalGmv: "34,300"`처럼 타입을 바꾸면 종전엔
+        #   ValueError가 `_fetch_vi_detail` 밖으로 나가 **그 회차에 이미 모은 날짜까지 전부**
+        #   폐기됐다. 한 행의 형태 변화가 여러 날의 수집을 죽이면 안 된다.
+        try:
+            gmv = int(round(float(m.get("totalGmv") or 0)))
+            units = int(round(float(m.get("totalUnitsSold") or 0)))
+            orders = int(round(float(m.get("totalOrders") or 0)))
+        except (TypeError, ValueError):
+            log.warning("옵션 지표 파싱 실패 %s vid=%s — 이 행만 건너뜀(응답 형태 변경 의심)",
+                        day, vid)
+            continue
+        rows.append({
+            "date": day.isoformat(),
+            "vendor_item_id": str(vid),
+            "registration_type": rt,
+            "gmv": gmv,
+            "units_sold": units,
+            "total_orders": orders,
+            "item_name": d.get("itemName"),
+            "product_id": (str(d["productId"]) if d.get("productId") is not None else None),
+            # 원본 보존 — UV/PV/검색량은 이번 범위가 아니지만 재조회가 봇 감지 때문에 비싸다.
+            "raw_metrics": m if isinstance(m, dict) else None,
+        })
+    return rows, total_pages
+
+
+def _fetch_vi_detail(page, cfg: dict) -> list[dict]:
+    """열린 page에서 옵션축을 일자별로 순회 수집. best-effort — 실패한 날은 건너뛴다.
+
+    ★best-effort인 이유: 옵션축은 «있으면 더 좋은» 축이고, 한 날짜가 실패했다고 요약축 push까지
+      죽이면 정본 매출 축 전체가 멈춘다(요약축은 이미 검증된 경로다). 다음 회차의 겹치는 창이
+      실패한 날을 덮는다. 단 **조용히 넘어가지 않는다** — 각 실패를 WARNING으로 남긴다.
+    """
+    out: list[dict] = []
+    for day in _vi_days(cfg):
+        page_number, total_pages = 0, 1
+        while page_number < total_pages:
+            try:
+                page.wait_for_timeout(_VI_PAGE_DELAY_MS)  # 연속 POST 완화(봇감지)
+                res = page.evaluate(_POST_JSON_JS, [_vi_payload(day, page_number), VI_DETAIL_PATH])
+            except Exception as e:  # noqa: BLE001 — 봇감지 순간차단
+                log.warning("옵션축 fetch 오류 %s p%d: %s", day, page_number, str(e)[:80])
+                break
+            if not res or res.get("status") != 200:
+                if _is_auth_expired(res):
+                    log.warning("옵션축 fetch 중 세션 만료 신호 — 남은 날짜 중단(%s)", day)
+                    return out
+                log.warning("옵션축 fetch 실패 %s p%d status=%s",
+                            day, page_number, res.get("status") if res else None)
+                break
+            parsed = _parse_vi_page(res.get("body") or "", day)
+            if parsed is None:
+                log.warning("옵션축 파싱 실패 %s p%d — 응답 형태 변경 의심: %s",
+                            day, page_number, (res.get("body") or "")[:160])
+                break
+            rows, total_pages = parsed
+            out.extend(rows)
+            page_number += 1
+        page.wait_for_timeout(_VI_DAY_DELAY_MS)
+    return out
+
+
+def _push_vendor_item_sales(cfg: dict, rows: list[dict], last_refresh: str | None) -> int:
+    """옵션축 행 → prod ingest push. 0=성공, 1=실패(best-effort — 요약축 결과를 덮지 않는다)."""
+    if not rows:
+        log.warning("옵션축 push할 행 없음 — 건너뜀")
+        return 1
+    payload = [{**r, "last_refresh": last_refresh} for r in rows]
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-item-sales/ingest",
+            json={"account_key": cfg["account_key"], "rows": payload},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=60,  # 요약축(20s)보다 길게 — 행 수가 수백~수천이다
+        )
+    except requests.RequestException as e:
+        log.error("옵션축 push 네트워크 오류: %s", e)
+        return 1
+    if pr.status_code != 200:
+        log.error("옵션축 push 실패 HTTP %s — %s", pr.status_code, pr.text[:200])
+        return 1
+    log.info("옵션축 push 성공: account=%s rows=%d → %s",
+             cfg["account_key"], len(rows), pr.text[:160])
+    return 0
 
 
 def _is_logged_out(url: str) -> bool:
@@ -970,6 +1139,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
     res = None
     older_bodies: list[str] = []   # 과거 청크들(자가치유 창) — 최신 청크 성공 후에만 채워진다
+    vi_rows: list[dict] = []       # 옵션축(D-CPP-36) — 요약축 성공 후 같은 세션에서 채워진다
     # 창은 실행 시작 시점에 한 번만 계산한다 — 실행 중 KST 자정을 넘겨도 청크가 하루 밀려
     # 겹치거나(중복) 새 어제가 빠지지(누락) 않게.
     windows = _vs_windows(cfg)
@@ -1004,6 +1174,16 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                 # 최신 청크가 살아있을 때만 과거 청크를 이어 받는다(자가치유 — 버튼 공백 메우기).
                 if _is_success(res):
                     older_bodies = _fetch_older_windows(page, cfg, windows[1:])
+                    # 옵션축(D-CPP-36)을 **같은 페이지·같은 회차**에서 이어 받는다.
+                    # ★같은 세션에서 받아야 보존식(Σ옵션 == 요약)이 같은 시점을 비교한다. 별도
+                    #   회차로 나누면 그 사이 쿠팡 lastRefresh가 돌아 두 축이 다른 순간을 담는다.
+                    # ★요약축 push를 막지 않는다 — 예외를 여기서 삼킨다(옵션축은 요약축의
+                    #   부가축이고, 요약축은 이미 검증된 정본 경로다).
+                    try:
+                        vi_rows = _fetch_vi_detail(page, cfg)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("옵션축 수집 중단(요약축은 계속): %s", str(e)[:120])
+                        vi_rows = []
     except Exception as e:  # noqa: BLE001
         log.error("브라우저 fetch 오류: %s", e)
         return 1
@@ -1024,7 +1204,15 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
             _merge_summary(summ, older)
     _log_summary("[run]", summ, _observed_span(summ, cfg))
     if _push_configured(cfg):
-        return _push(cfg, summ)   # push 성공이 heartbeat(prod staleness 기준)
+        rc = _push(cfg, summ)   # push 성공이 heartbeat(prod staleness 기준)
+        # 옵션축은 요약축 push **뒤에** 보낸다. 반환코드는 요약축이 진다 — 옵션축 실패로
+        # 회차를 «실패»로 오보하면 lease가 요청을 되살려 창이 반복해서 뜬다(부가축이 정본축의
+        # 성공 판정을 뒤집으면 안 된다). 옵션축 결과는 로그와 헬스 신선도가 표면화한다.
+        vi_sold = sum(1 for r in vi_rows if r["units_sold"] != 0)
+        log.info("[run] 옵션축 %d행(판매발생 %d) — 날짜 %d일",
+                 len(vi_rows), vi_sold, len({r["date"] for r in vi_rows}))
+        _push_vendor_item_sales(cfg, vi_rows, summ.get("last_refresh"))
+        return rc
     return 0
 
 

@@ -83,7 +83,26 @@ export function buildPipelineHealthBanner(
     parts.push(`디스크 여유 부족 ${d.used_percent.toFixed(1)}% — ${d.impact}`);
   }
 
-  // 6) 잡 문제 (disabled 제외 — 정상)
+  // 6) 판매분석 보존식 어긋남 — Σ옵션 GMV ≠ 요약축 GMV (D-CPP-36).
+  //    ★cost_drift와 같은 종류다: 파이프라인은 살아 있는데 «값»이 틀렸다. 화면이 비지 않으니
+  //      아무 데도 안 뜬다 — 그래서 백엔드 판정과 **같은 커밋에** 이 분기를 넣는다
+  //      (disk_low가 판정에만 있고 표시가 없어 통째로 숨었던 것이 바로 이 실패다).
+  //    ★summary_only는 여기서 안 쓴다 — 그건 «옵션 수집이 아직 안 온 날»이고 신선도가 본다.
+  //      뭉치면 «아직»이 «틀렸다»로 보인다.
+  const mismatches = health.vendor_item_conservation?.mismatch ?? [];
+  if (mismatches.length > 0) {
+    // 가장 큰 차액 한 건을 붙인다 — 어느 날짜·어느 유형인지가 원인 추정의 첫 단서다.
+    const worst = mismatches.reduce((a, b) =>
+      Math.abs(b.diff) > Math.abs(a.diff) ? b : a,
+    );
+    parts.push(
+      `판매분석 옵션↔요약 합 불일치 ${mismatches.length}건` +
+        ` (최대 ${worst.date} ${worst.registration_type} ${worst.diff.toLocaleString()}원)` +
+        " — 옵션별 3P 손익을 신뢰할 수 없음",
+    );
+  }
+
+  // 7) 잡 문제 (disabled 제외 — 정상)
   const jobNames: string[] = [
     ...(health.failed ?? []).map((j) => j.job_name),
     ...(health.stale ?? []).map((j) => j.job_name),

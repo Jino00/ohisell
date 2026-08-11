@@ -145,7 +145,7 @@ class DataSnapshot(TypedDict, total=False):
 class DataVerdict(TypedDict):
     name: str
     account_key: str
-    state: str  # 'no_data' | 'stale'
+    state: str  # 'no_data' | 'stale' | 'check_failed'
     age_days: Optional[float]  # no_data면 None
     max_age_days: float
     impact: str
@@ -167,6 +167,27 @@ def evaluate_data_freshness(
         account_key = s.get("account_key", "")
         max_age = float(s.get("max_age_days") or 0)
         impact = s.get("impact", "")
+
+        # ★«이 규칙을 볼 수 없었다»는 «이상 없음»이 아니다 (적대 리뷰 P1-2, 2026-08-10).
+        #   종전엔 Harness의 try/except가 **for 루프 전체**를 감싸 규칙 하나가 예외를 내면
+        #   나머지까지 통째로 사라졌고(`data_stale: []`), 그건 정상과 구별되지 않았다.
+        #   실제 도달 경로: 마이그레이션 전에 코드가 배포되면 새 테이블이 없어 RG 정산 감시까지
+        #   함께 침묵한다 — 13일 침묵을 막으려는 변경이 같은 실패 모드를 새 트리거로 되살린다.
+        #   이제 실패한 규칙만 `check_failed`로 여기 남는다. 별도 필드를 만들지 않는 이유:
+        #   `data_stale`는 이미 healthy를 깨고 배너가 impact를 렌더한다 — 새 필드를 만들면
+        #   표시 분기를 또 붙여야 하고, 그걸 빼먹는 것이 이 리포의 반복 실패다(교훈 #223).
+        if s.get("error"):
+            out.append({
+                "name": name,
+                "account_key": account_key,
+                "state": "check_failed",
+                "age_days": None,
+                "max_age_days": max_age,
+                "impact": impact or "이 파이프라인의 신선도를 확인할 수 없다",
+                "reason": f"신선도 조회 실패: {str(s['error'])[:120]}",
+            })
+            continue
+
         latest_n = _to_naive(_date_to_datetime(s.get("latest")))
 
         if latest_n is None:

@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdChangeLog, CoupangAdCostDaily, CoupangAdEntitySnapshot, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_file_sync, rocket_promo_sync, rocket_shipment_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_file_sync, rocket_promo_sync, rocket_shipment_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_item_sales_sync, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -2189,6 +2189,83 @@ def ingest_wing_vendor_summary(
             "last_refresh": str(last_refresh) if last_refresh is not None else None,
         })
     return vendor_summary_sync.ingest_vendor_summary(db, account_key, rows)
+
+
+# 옵션축 ingest 방어 상한 — 옵션 1개/1일 값이라 요약축(계정 일 합계)보다 훨씬 작게 잡는다.
+# 음수는 정상(GMV = 판매액 − 환불액). 이 절대값을 넘으면 파싱 깨짐(json Infinity 등)으로 본다.
+_VI_GMV_ABS_MAX = 1_000_000_000  # 10억 원/옵션/일
+_VI_UNITS_ABS_MAX = 100_000      # 10만 개/옵션/일
+# 한 회차 batch 상한 — 실측 규모는 «하루 최대 146옵션 × 수십 일». 여유 있게 두되 무한은 아니게.
+_VI_MAX_ROWS = 20_000
+
+
+@router.post("/wing/vendor-item-sales/ingest")
+def ingest_wing_vendor_item_sales(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Wing 페처 → 쿠팡 판매분석 «일자×옵션» 정본 매출 인제스트 (D-CPP-36).
+
+    요약축(`/wing/vendor-summary/ingest`)과 **같은 회차·같은 브라우저 세션**에서 push된다 —
+    그래야 보존식(Σ옵션 == 요약)이 같은 시점을 비교한다.
+
+    인증: X-Ingest-Token == AD_INGEST_TOKEN.
+    body {account_key, rows:[{date, vendor_item_id, registration_type, gmv, units_sold,
+          total_orders?, item_name?, product_id?, raw_metrics?, last_refresh?}]}
+    """
+    _require_ingest_token(x_ingest_token)
+
+    account_key = str(body.get("account_key") or "").strip()
+    if account_key not in _VS_ACCOUNTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"account_key는 {', '.join(sorted(_VS_ACCOUNTS))} 중 하나여야 함",
+        )
+    rows_raw = body.get("rows")
+    if not isinstance(rows_raw, list) or not rows_raw:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    if len(rows_raw) > _VI_MAX_ROWS:
+        raise HTTPException(status_code=400, detail=f"rows[]는 {_VI_MAX_ROWS}건 이하")
+
+    rows: list[dict] = []
+    for r in rows_raw:
+        if not isinstance(r, dict):
+            raise HTTPException(status_code=400, detail="rows[] 항목은 객체여야 함")
+        try:
+            sale_date = date.fromisoformat(str(r.get("date")))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="rows[].date(YYYY-MM-DD) 필요")
+        rt = str(r.get("registration_type") or "")
+        if rt not in _VS_TYPES:
+            raise HTTPException(status_code=400, detail="registration_type은 NORMAL/RFM")
+        vendor_item_id = str(r.get("vendor_item_id") or "").strip()
+        if not vendor_item_id:
+            raise HTTPException(status_code=400, detail="rows[].vendor_item_id 필요")
+        try:
+            gmv = int(r.get("gmv") or 0)
+            units_sold = int(r.get("units_sold") or 0)
+            total_orders = int(r.get("total_orders") or 0)
+        except (TypeError, ValueError, OverflowError):  # OverflowError: json은 Infinity를 허용한다
+            raise HTTPException(status_code=400, detail="gmv/units_sold/total_orders는 정수여야 함")
+        # total_orders도 같은 상한을 받는다(적대 리뷰 P2-7) — 셋 다 같은 소스의 수량축인데
+        # 둘만 막으면 한 필드로 파싱 깨짐이 통과한다.
+        if (abs(gmv) > _VI_GMV_ABS_MAX or abs(units_sold) > _VI_UNITS_ABS_MAX
+                or abs(total_orders) > _VI_UNITS_ABS_MAX):
+            raise HTTPException(status_code=400, detail="gmv/units_sold/total_orders 값이 비정상 범위")
+        rows.append({
+            "date": sale_date,
+            "vendor_item_id": vendor_item_id,
+            "registration_type": rt,
+            "gmv": gmv,
+            "units_sold": units_sold,
+            "total_orders": total_orders,
+            "item_name": r.get("item_name"),
+            "product_id": r.get("product_id"),
+            "raw_metrics": r.get("raw_metrics"),
+            "last_refresh": r.get("last_refresh"),
+        })
+    return vendor_item_sales_sync.ingest_vendor_item_sales(db, account_key, rows)
 
 
 # ── 버튼 큐 계정 파라미터 (2026-07-27, WING2 데몬 편입) ──
