@@ -313,6 +313,54 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     expect(text).toContain("「우리 매출(전량)」은 그날 전부");
   });
 
+  it("★광고 대사 문장이 **방향**을 말로 못 박는다 (2026-08-11 QA — 부호가 거꾸로 읽혔다)", async () => {
+    // 라이브에서 본 것: "계정 확정 광고비(report/SALES)는 19,057,661원이고 원장과의 차는
+    // −7,467원입니다". 백엔드의 diff는 **원장 − 계정**인데(rocket_1p_revenue.py:918) 문장이
+    // 「계정」을 먼저 놓아, 읽는 사람은 계정 − 원장(=+7,467)을 기대한다 → 같은 사실이
+    // **반대 방향으로 읽힌다.** 절댓값 + 「많다/적다」로 고쳤고, 그 방향을 여기서 잠근다.
+    mount({
+      ...withPnl({
+        basis: "full", ad_spend: "19050194", ad_uncosted: "0",
+        ad_no_sales_days: "1850221", ad_no_sales: "557356",
+        ad_unattributed: "2407577", ad_no_sales_included: true, cost_coverage: "1.0000",
+        ad_account_total: "19057661.00", ad_option_total: "19050194",
+      }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }),
+      ad_reconciliation: { option_sum: "19050194", account_total: "19057661.00",
+                           diff: "-7467.00", basis: "" },
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("계정 확정 광고비"));
+    const text = note.textContent ?? "";
+    // ★원장이 계정보다 **적다**(diff 음수) — 방향을 말로 말한다.
+    expect(text).toContain("원장은 그보다");
+    expect(text).toContain("적습니다");
+    expect(text).not.toContain("많습니다");
+    // ★부호 붙은 날숫자를 그대로 흘리지 않는다(그게 거꾸로 읽히던 원인).
+    expect(text).not.toContain("-7,467");
+    expect(text).not.toContain("−7,467");
+    expect(text).toContain("7,467");
+    // ★계정 금액은 그대로 보인다(과교정 방지).
+    expect(text).toContain("19,057,661");
+  });
+
+  it("★반대 부호면 「많습니다」로 뒤집힌다 (분기가 상수로 굳지 않았는지)", async () => {
+    mount({
+      ...withPnl({
+        basis: "full", ad_spend: "19050194", ad_uncosted: "0",
+        ad_no_sales_days: "1850221", ad_no_sales: "557356",
+        ad_unattributed: "2407577", ad_no_sales_included: true, cost_coverage: "1.0000",
+        ad_account_total: "19042727.00", ad_option_total: "19050194",
+      }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }),
+      ad_reconciliation: { option_sum: "19050194", account_total: "19042727.00",
+                           diff: "7467.00", basis: "" },
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("계정 확정 광고비"));
+    const text = note.textContent ?? "";
+    expect(text).toContain("많습니다");
+    expect(text).not.toContain("적습니다");
+  });
+
   it("M-D 세 통이 **어느 하루라도** 있으면 각주가 뜬다 (some이지 every가 아니다)", async () => {
     // ★픽스처가 하루뿐이면 `some`을 `every`로 바꿔도 안 잡힌다 — 이틀 이상으로 만든다.
     mount({
