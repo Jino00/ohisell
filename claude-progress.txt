@@ -1,3 +1,47 @@
+[2026-08-10 21:24~2026-08-11 05:5x] 쿠팡 Wing 판매분석 옵션축 신설 — 새 테이블·보존식·신선도
+크론화 (D-CPP-36, PR #281, prod 배포·라이브 합격, 워크트리 `wing-option-axis`)
+  · 계기: HANDOFF_ohitech-3p-engine-unified §6 ③ 「정본 매출 축」— WING2 판매분석이 요약
+    총액만 받고 옵션 목록은 아예 안 받는다는 이월. Jino 승인(계약 승인 + 「신선도 표면 먼저
+    묶어서」 선택).
+  · 정찰: `POST /tenants/rfm-ss/api/business-insight/vi-detail-search`(m-wing same-origin).
+    자체 fetch는 Akamai가 막아 페처의 `_POST_JSON_JS` 재사용 필수. startDate/endDate **창
+    집계**(일별 값 없음)라 일자별 호출 필요. `externalSkuIds` 전건 빈 배열 → SKU 조인 불가,
+    `vendorItemId`로 조인. 대조 3회 전부 차 0(08-01~09 450,700 / 08-05 188,800 / 08-07 86,500).
+  · ★결정: 옵션축은 요약축 확장이 아니라 **새 테이블**(「일자×옵션」grain) — 요약축이 독립된
+    대조 상대로 남아야 Σ옵션==요약 보존식이 자기 대조가 안 된다.
+  · 구현: 마이그 `vi1s2a3x4b5c`(`coupang_vendor_item_sales_daily`) · SA
+    `vendor_item_sales_sync`(멱등 upsert+배치내 dedupe+conservation_check) · 라우터
+    `POST /api/coupang/ops/wing/vendor-item-sales/ingest` · 페처 `_vi_*`(요약축 성공 직후
+    같은 회차, 창 7일) · 스케줄러 05:20 KST 크론(사람 버튼 없던 자리 대체) ·
+    `SchedulerHealthOut.vendor_item_conservation` + 배너 + `check_failed`.
+  · `DATA_FRESHNESS_RULES`에 `source` 지시 신설 + 판매분석 두 축 추가(WING2만, 임계 3.0일 —
+    WING1은 3P가 RG 이관돼 영구 빨강 방지로 의도적 제외). 검사창=수집창=7일로 양방향 테스트 고정.
+  · ★적대 리뷰 1R FAIL(P1 3건, 전건 수용)→2R PASS: P1-1 배치내 중복이 UNIQUE 위반→500+전량
+    롤백인데 테스트 픽스처의 autoflush 의미론이 prod와 달라 완전히 가려짐 · P1-2 마이그
+    미적용 시 RG 정산 감시까지 소실(fail-soft가 루프 전체를 감쌈) · P1-3 D+1이 두 창에서
+    동시에 빠져 「고칠 수 있는 동안만 울림」→검사창=수집창 확정으로 흡수.
+  · ★검증 도구 자체 결함 발견: 변이 배터리가 `cp`/`mv` 복원으로 mtime을 되돌려 stale
+    `.pyc` 재사용 — 「12/12 KILLED」가 이전 변이 잔재였다. `PYTHONDONTWRITEBYTECODE=1`+
+    `__pycache__` 강제 제거로 재측정하니 **18 KILLED/3 SURVIVED**. 최종은 격리 사본
+    (`git archive HEAD`)에서 재측정.
+  · ★사고: 리뷰어가 같은 워크트리에서 변이 배터리를 돌리는 중 커밋(`f1408e1`)돼 변이
+    잔재(`row.registration_type` 미갱신)가 섞임 — `safe_deploy.sh`의 커밋 미검증 거부로
+    **prod 무피해**. 즉시 정정 커밋(`a92aca7`)으로 복원.
+  · ★번호 재부여: D-CPP-35로 시작했으나 병행 세션이 커밋 `053a83c`로 선점 → D-CPP-36으로
+    이동(참조 20곳, main이 트렁크). 커밋 `0d3826c`·`914718f`의 옛 번호는 고칠 수 없어 기록.
+  · 라이브 합격(prod 23:10 KST, 무중단 `a92aca7` :8011): 옵션축 469행·14일, ingest
+    received=469=ingested, 403 0건, 3P GMV 옵션축==요약축(450,700, 차 0), 보존식 어긋난
+    칸 0(compared=14·mismatch=0), health body에 `vendor_item_conservation` 실존, 배너
+    문자열 번들 실존(`index-BdiAJ7g_.js`).
+  · ★오진 정정 3건(다음 세션용): ①nginx IP 허용목록 수정 불필요(15:50:59 KST에 이미 정상화,
+    무중단 배포도 복구) ②WING1 정산 「13일 정체」는 완주였다(9일 인식 지연 + 07-19 단 1건
+    뿐) ③CDP 포트 WING1=9222·WING2=9223(9224는 광고 데몬).
+  · 검증: 전체 5325 passed · 변이 21/21 KILLED(격리 사본) · 신규 테스트 2파일(61건) · tsc/eslint 0.
+  · 이월: `option_only`가 판정·배너에서 버려짐(요약축 신선도가 max(date)만 봄) · 설치 스크립트
+    `install_local_runtime.sh` 미실행 시 옵션축 3일 뒤 stale · `check_failed`가 배너엔
+    impact만 노출.
+  · 문서 4건 작성(트랙 D-CPP-36 · 교훈 #234~#239 · 본 로그 · HANDOFF_wing-option-axis_20260811).
+
 [2026-08-10 22:4x] D-NAO-172 P1 종결 — 적대 리뷰 2R·prod 배포·라이브 합격 (커밋 5cf0e55)
   · 인계(HANDOFF_adaptive-guardrail-envelope-P1)대로 적대 리뷰를 **재실행**했다(미완주 리뷰는
     발견 0건이 아니라 INCONCLUSIVE, 교훈 #123). 판정 FAIL — P1 2건.
