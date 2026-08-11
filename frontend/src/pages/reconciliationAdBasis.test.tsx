@@ -74,7 +74,8 @@ describe("정합성 카드 — 광고 블록", () => {
     expect(screen.getByText(/광고센터 값이 없어 산출 불가/)).toBeTruthy();
     // 라벨이 출처를 밝힌다(「광고센터」라고 하지 않는다)
     expect(screen.getByText(/광고센터 미태깅 계정/)).toBeTruthy();
-    expect(screen.getByText(/옵션축 실집행/)).toBeTruthy();
+    // 행 힌트와 각주 둘 다 출처를 말한다(둘 다 있어야 한다 — 하나만이면 나머지가 거짓말한다)
+    expect(screen.getAllByText(/옵션축 실집행/).length).toBeGreaterThanOrEqual(2);
   });
 
   it("★미적용 계정: 「집행(DELIVERED)」 행을 그리지 않는다 — 광고센터 값이 없으니 분해가 불가능하다", () => {
@@ -124,6 +125,21 @@ describe("정합성 카드 — 광고 블록", () => {
     })} />);
     expect(screen.getByText(/광고 \(쿠팡 \[광고센터\]\)/)).toBeTruthy();
     expect(screen.getByText("5,166,137원")).toBeTruthy();
+  });
+
+  it("★각주도 계정에 따라 갈린다 — 미적용 계정에 「ALL로 차감·분해」라 적으면 거짓이 되살아난다", () => {
+    render(<ReconciliationCard data={makeData({ ad_confirmed_applies: false })} />);
+    expect(screen.getByText(/광고센터 보고서에 광고주로 잡히지 않아/)).toBeTruthy();
+    expect(screen.queryByText(/집행\(상품검색광고\)\+비-PA/)).toBeNull();
+  });
+
+  it("적용 계정의 각주는 종전 문구를 유지한다", () => {
+    render(<ReconciliationCard data={makeData({
+      ad_confirmed_applies: true, ad_confirmed_total: "5166137",
+      ad_confirmed_pa: "4612681", ad_confirmed_nonpa: "553456",
+    })} />);
+    expect(screen.getByText(/집행\(상품검색광고\)\+비-PA/)).toBeTruthy();
+    expect(screen.queryByText(/광고주로 잡히지 않아/)).toBeNull();
   });
 
   it("매출 행은 이 수정에 영향받지 않는다(회귀 가드)", () => {

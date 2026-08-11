@@ -489,9 +489,16 @@ export function ReconciliationCard({ data }: { data: OverviewResponse }) {
           )}
         </div>
       </div>
+      {/* ★각주도 계정에 따라 갈라야 한다 — 미적용 계정에 「ALL로 차감 · 집행+비-PA로 분해」라
+          적으면 위에서 고친 거짓 단정이 각주로 되살아난다(둘 다 그 계정엔 사실이 아니다). */}
       <p className="text-xs text-indigo-600 mt-2 bg-indigo-100 rounded px-2 py-1">
         RG 매출은 주문 API 기준 <b>gross(취소 미차감)</b> — 쿠팡 판매분석의 net과 ~5% 차이는 기준 차이이며 계산 오류 아님(D-11).
-        광고비는 쿠팡 <b>"전체 광고비"(ALL)</b>로 순이익에서 차감 — 집행(상품검색광고)+비-PA(브랜드/디스플레이)로 분해 표시(D-15).
+        {a.ad_confirmed_applies === false ? (
+          <> 이 계정은 쿠팡 <b>광고센터 보고서에 광고주로 잡히지 않아</b> 「전체 광고비(ALL)」·비-PA 분해가 없다 —
+          순이익에서 차감되는 값은 <b>옵션축 실집행(PA)</b>이다(D-CPP-38).</>
+        ) : (
+          <> 광고비는 쿠팡 <b>"전체 광고비"(ALL)</b>로 순이익에서 차감 — 집행(상품검색광고)+비-PA(브랜드/디스플레이)로 분해 표시(D-15).</>
+        )}
       </p>
     </div>
   );
