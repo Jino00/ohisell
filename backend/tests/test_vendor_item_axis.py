@@ -688,6 +688,49 @@ def test_wing1_sales_analysis_is_now_watched_on_both_axes():
     assert len(pairs) == len(set(pairs)), f"(name, account_key)가 중복이다: {pairs}"
 
 
+def test_freshness_query_is_scoped_to_its_own_account(db):
+    """★★적대 리뷰 P1-1(2026-08-12): `_latest_for_rule`의 **계정 필터**를 고정한다.
+
+    D-CPP-40 전에는 `source`당 계정이 하나뿐이라 이 필터가 사실상 무의미했다. 두 계정으로
+    늘리면서 **계정 필터가 두 규칙을 가르는 유일한 장치**가 됐는데, 그때 넣은 테스트들은
+    «규칙 튜플의 모양»만 고정하고 «쿼리의 계정 축»은 고정하지 않았다.
+
+    변이 실증: `scheduler_health._latest_for_rule`의 요약축/옵션축에서
+    `.filter(...account_key == rule["account_key"])`를 **지워도 137건이 전부 통과**했다.
+    라이브 영향은 이렇다 — WING2가 신선하고 WING1만 8일 정체일 때, 필터가 없으면
+    `max(summary_date)`가 두 계정을 섞어 WING2의 신선함이 WING1의 정체를 **가린다**.
+    즉 13일 침묵 사고와 같은 형태가 «규칙은 있는데» 재발한다.
+
+    ★두 계정을 **서로 다른 날짜**로 심는 것이 이 테스트의 전부다. 같은 날짜로 심으면
+    계정 교차에 불변이라 필터가 없어도 통과한다(기존 테스트들이 그랬다).
+    """
+    from app.services.scheduler_health import _latest_for_rule
+
+    _seed_summary(db, "2026-08-09", 1000, account="COUPANG_WING2")
+    _seed_summary(db, "2026-08-02", 1000, account="COUPANG_WING1")
+    vis.ingest_vendor_item_sales(db, "COUPANG_WING2", [_row("2026-08-08", "111", 1000)])
+    vis.ingest_vendor_item_sales(db, "COUPANG_WING1", [_row("2026-08-01", "222", 1000)])
+
+    expected = {
+        ("vendor_summary", "COUPANG_WING2"): date(2026, 8, 9),
+        ("vendor_summary", "COUPANG_WING1"): date(2026, 8, 2),
+        ("vendor_item_sales", "COUPANG_WING2"): date(2026, 8, 8),
+        ("vendor_item_sales", "COUPANG_WING1"): date(2026, 8, 1),
+    }
+    for rule in DATA_FRESHNESS_RULES:
+        key = (rule.get("source"), rule["account_key"])
+        if key in expected:
+            assert _latest_for_rule(db, rule) == expected[key], (
+                f"{key}가 자기 계정 날짜를 안 읽는다 — 계정 필터가 빠졌다"
+            )
+
+    # ★그리고 그 결과가 실제 판정까지 도달하는지: WING1만 정체(08-02, NOW=08-10 → 8일)
+    h = compute_scheduler_health(db, _FakeScheduler(), NOW)
+    stale = {(d["name"], d["account_key"]) for d in h["data_stale"]}
+    assert ("wing_vendor_summary", "COUPANG_WING1") in stale, "WING1 정체가 WING2에 가려졌다"
+    assert ("wing_vendor_summary", "COUPANG_WING2") not in stale, "WING2는 신선한데 울렸다"
+
+
 def test_sales_analysis_thresholds_are_pinned_not_just_present():
     """★임계값 자체를 못 박는다 — «규칙이 있다»와 «규칙이 판정한다»는 다르다.
 

@@ -455,8 +455,16 @@ def _latest_for_rule(db, rule: dict):
 # ★검사창을 넓히려면 **페처 `vi_days`를 같이 넓혀야 한다.** 서버는 Mac config를 볼 수 없으므로
 #   이 상수가 그 계약의 유일한 기록이다. 한쪽만 늘리면 위 실패가 그대로 돌아온다.
 CONSERVATION_WINDOW_DAYS = 7
-# 보존식을 볼 계정 — 옵션축을 수집하는 계정만. WING1은 옵션축 자체가 없으므로 대조 대상이 아니다
-# (넣으면 `summary_only`가 매일 쌓여 노이즈가 된다).
+# 보존식을 볼 계정 — 옵션축을 **실제로 받고 있는** 계정만.
+#
+# ★WING1은 아직 빠져 있다(D-CPP-40, 적대 리뷰 P2-1 채택하되 조건부). 종전 주석은 「WING1은
+#   옵션축 자체가 없으므로 대조 대상이 아니다」였는데, D-CPP-40으로 WING1이 일일 트리거에
+#   들어갔으므로 그 문장은 **더 이상 참이 아니다**. 그런데도 지금 넣지 않는 이유는 다르다:
+#   `coupang_vendor_item_sales_daily`의 WING1 행이 **아직 0건**이라, 넣으면 대조할 것이 없는
+#   상태에서 `summary_only`가 매일 쌓여 정확히 그 노이즈가 난다.
+# ★편입 조건(다음 세션용): WING1 옵션축이 한 번이라도 들어오면 여기에 추가한다. 그때
+#   `CONSERVATION_WINDOW_DAYS`(7)와 Mac 페처 `vi_days`(config 미지정 → 기본 7)가 이미
+#   맞아 있는지 같이 확인할 것 — 한쪽만 넓히면 영구 빨강이 된다(바로 위 주석 참조).
 CONSERVATION_ACCOUNTS: tuple[str, ...] = ("COUPANG_WING2",)
 
 
