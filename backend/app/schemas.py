@@ -494,4 +494,9 @@ class SchedulerHealthOut(BaseModel):
     # 서비스층이 판정을 내도 이 줄이 없으면 response_model이 응답에서 지운다. 짝이 되는 테스트는
     # `test_vendor_item_axis.py::test_health_route_actually_returns_conservation`.
     vendor_item_conservation: dict | None = None
+    # 조치 생존 — 우리가 건 검색어 제외가 라이브에 아직 걸려 있나(D-NAO-173 P1-①). 정상이면
+    # healthy=true·breached=[], 대조 자체를 못 했으면 None. ★위 두 필드와 같은 이유로 여기
+    # 선언이 필수다(선언 없으면 서비스층 판정을 response_model이 지운다). 짝이 되는 테스트는
+    # `test_exclusion_survival.py::test_health_route_actually_returns_exclusion_survival`.
+    exclusion_survival: dict | None = None
     as_of: str

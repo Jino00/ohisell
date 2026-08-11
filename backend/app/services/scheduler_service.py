@@ -1027,6 +1027,32 @@ def run_naver_probe_learning_job():
         db.close()
 
 
+def verify_search_term_exclusions_job():
+    """조치 생존 감시 — 우리가 건 검색어 제외가 라이브에 아직 걸려 있나 (08:25 KST, D-NAO-173 P1-①).
+
+    광고그룹당 GET 1회(제외키워드 재조회)로 대조하고 결과를 naver_search_term_exclusion 행에
+    적는다. 네이버에 쓰지 않는다(읽기 전용) — 어긋남을 발견해도 자동 복구는 하지 않고 헬스
+    배너로 사람에게 올린다(이번 스프린트는 실행 주체가 사람이다, PLAN §3).
+
+    fail-open(관찰 전용 — 실패가 catch-up 하류를 막지 않게 예외를 다시 던지지 않는다). 대조가
+    멈춘 사실 자체는 요약의 `stale`이 표면화하므로 실패가 조용해지지 않는다."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad import exclusion_survival
+
+        result = exclusion_survival.check_survival(db)
+        log.info(
+            "[스케줄러] 제외 생존 대조: checked=%s groups=%s alive=%s missing=%s deleted=%s "
+            "unknown=%s errors=%s",
+            result["checked"], result["groups"], result["alive"], result["missing"],
+            result["deleted"], result["unknown"], len(result["errors"]),
+        )
+    except Exception as e:  # noqa: BLE001 — fail-open(re-raise 안 함 — catch-up 하류 비블록)
+        log.exception("[스케줄러] verify_search_term_exclusions_job 에러(무시): %s", e)
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -1611,6 +1637,11 @@ def _ensure_default_states(db):
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
+        # 조치 생존 감시(D-NAO-173 P1-①) — 우리가 건 제외가 아직 걸려 있나. 08:25인 이유:
+        # 광고그룹당 GET 1회로 가볍고 상류 의존이 없으며, :20(auto_operator_hourly)·:30(retro)
+        # 사이에서 비어 있는 유일한 분 슬롯이다. ★_CATCHUP_ORDER 제외 — 관측 전용이고 매일
+        # 전량을 다시 대조하므로 하루 유실이 구멍을 남기지 않는다(요약의 stale이 그 사실을 띄운다).
+        ("verify_search_term_exclusions", "25 8 * * *"),
         ("run_naver_diary_reflection", "35 8 * * *"),  # 운영 일기 해석층(결과 소급 기입+해석문, D-NAO-54 P2)
         ("run_naver_profit_scorecard", "40 8 * * *"),  # P7 일일 이익 스코어카드(목적함수 표면화, D-NAO-85/ref39 P7, 관찰 전용)
         ("run_naver_wisdom", "45 8 * * *"),  # 운영 일기 지혜 승격·망각층(후보→판사→지혜+보고→망각, D-NAO-54 P3)
@@ -1942,6 +1973,9 @@ def job_func_for(job_name: str):
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
         "run_naver_probe_learning": run_naver_probe_learning_job,
         "generate_expert_desk": generate_expert_desk_job,
+        # 조치 생존 감시(D-NAO-173 P1-①). catch-up 목록엔 없다 — 매일 전량 재대조라 하루 유실이
+        # 구멍을 남기지 않고, 대조가 멈춘 사실은 요약의 stale이 배너로 띄운다.
+        "verify_search_term_exclusions": verify_search_term_exclusions_job,
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,
         "sync_naver_case_settlement": sync_naver_case_settlement_job,

@@ -123,7 +123,12 @@ export default function NaverAdCommandCenter() {
       {/* ② 우리 MOP 캠페인 리스트 — 오늘 1행, 나중 N행(D-47-c) */}
       <Card
         title="스마트스토어 캠페인 — 누구에게 맡길지"
-        right={<Link to="/naver-ad/console" className="text-xs text-blue-600 hover:underline">모드·공격성 설정 →</Link>}
+        right={
+          <div className="flex items-center gap-3">
+            <Link to="/naver-ad/console" className="text-xs text-blue-600 hover:underline">모드·공격성 설정 →</Link>
+            <Link to="/naver-ad/exclusion-list" className="text-xs text-blue-600 hover:underline">제외 후보 리스트 →</Link>
+          </div>
+        }
       >
         <CampaignRoster />
       </Card>

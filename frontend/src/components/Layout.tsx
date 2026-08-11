@@ -102,7 +102,34 @@ export function buildPipelineHealthBanner(
     );
   }
 
-  // 7) 잡 문제 (disabled 제외 — 정상)
+  // 7) 검색어 제외 조치 생존 — 우리가 네이버 콘솔에 건 제외가 아직 걸려 있는가(D-NAO-173 P1-①).
+  //    ★이 분기가 없으면 disk_low와 같은 방식으로 통째로 숨는다: 백엔드는 healthy=false를
+  //      만드는데(breached·stale·never_checked 중 하나라도 있으면) 여기에 분기가 없으면 parts가
+  //      비어 배너가 뜨지 않는다 — 2026-08-10 disk_low가 정확히 그 상태였다(교훈 #223).
+  //    ★대행사가 우리 제외 조치를 되돌린 사례가 2회이고, 그중 1회(2026-08-10 userLock 해제)는
+  //      우리 change_log에 흔적이 아예 없었다 — 사건 탐지가 이미 한 번 조용히 실패했으므로
+  //      여기서는 "사건"이 아니라 "지금 상태"를 매일 대조한다(exclusion_survival.py 설계 그대로).
+  const es = health.exclusion_survival;
+  if (es && es.healthy === false) {
+    if (es.breached.length > 0) {
+      const b = es.breached[0];
+      const stateLabel: Record<string, string> = {
+        alive: "걸려 있음", missing: "사라짐", deleted: "삭제됨(delFlag)", unknown: "확인 실패",
+      };
+      const label = b.live_state ? (stateLabel[b.live_state] ?? b.live_state) : "확인 실패";
+      parts.push(
+        `우리가 건 검색어 제외 ${es.breached.length}건이 라이브에서 사라짐` +
+          (b.search_term ? ` (예: "${b.search_term}" ${label})` : ""),
+      );
+    } else if (es.stale) {
+      const lastDate = es.last_checked_at ? es.last_checked_at.slice(0, 10) : "없음";
+      parts.push(`제외 생존 대조가 멈춤 (마지막 대조 ${lastDate})`);
+    } else if (es.never_checked > 0) {
+      parts.push(`제외 ${es.never_checked}건이 한 번도 대조되지 않음`);
+    }
+  }
+
+  // 8) 잡 문제 (disabled 제외 — 정상)
   const jobNames: string[] = [
     ...(health.failed ?? []).map((j) => j.job_name),
     ...(health.stale ?? []).map((j) => j.job_name),

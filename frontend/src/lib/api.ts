@@ -634,6 +634,31 @@ export interface SchedulerHealthConservation {
   summary_only: { account_key: string; date: string; registration_type: string; summary_gmv: number }[];
   option_only: { account_key: string; date: string; registration_type: string; option_gmv: number }[];
 }
+// exclusion_survival: 검색어 제외 조치가 아직 걸려 있는가(D-NAO-173 P1-①, exclusion_survival.py의
+//   survival_summary 반환 그대로). ★다른 항목과 또 다르다 — 나머지는 «우리 파이프라인»의 상태고,
+//   이건 **네이버 콘솔에 우리가 건 조치**가 사라졌는가다. 대행사가 되돌린 사례가 2회 있었고
+//   그중 1회는 change_log에 흔적조차 없었다(라이브 재조회로만 발견) — 그래서 배너가 유일한 감시망이다.
+export interface SchedulerHealthExclusionSurvival {
+  monitored: number;
+  alive: number;
+  breached: {
+    campaign_id: string | null;
+    adgroup_id: string | null;
+    search_term: string | null;
+    live_state: string | null; // alive | missing | deleted | unknown
+    live_note: string | null;
+    excluded_at: string | null;
+    cost_at_exclusion: number | null;
+  }[];
+  never_checked: number;
+  last_checked_at: string | null;
+  stale_hours: number;
+  stale: boolean;
+  healthy: boolean;
+  revert_howto: string;
+  impact: string;
+  as_of: string;
+}
 export interface SchedulerHealth {
   healthy: boolean;
   scheduler_running: boolean;
@@ -648,6 +673,8 @@ export interface SchedulerHealth {
   cost_drift?: SchedulerHealthCostDrift | null; // 구백엔드 안전을 위해 optional · 정상이면 null
   // 구백엔드 안전을 위해 optional · 대조 불가면 null · 정상이면 mismatch=[]
   vendor_item_conservation?: SchedulerHealthConservation | null;
+  // 구백엔드 안전을 위해 optional · monitored=0(대상 없음)이어도 healthy=true로 온다
+  exclusion_survival?: SchedulerHealthExclusionSurvival;
   as_of: string;
 }
 
@@ -2873,6 +2900,127 @@ export function fetchNaverAdDiagnosis(params?: {
   if (params?.dateTo) q.set("date_to", params.dateTo);
   const qs = q.toString();
   return fetchApi<NaverAdDiagnosis>(`/api/naver/ad/diagnosis${qs ? `?${qs}` : ""}`);
+}
+
+// ── 검색어 제외 «후보 리스트» + 조치 생존 감시 (D-NAO-173 P1, docs/PLAN_search-term-exclusion-list.md) ──
+// 둘 다 읽기 전용 — 실행은 사람이 네이버 콘솔에서 한다(PLAN §3 금지선). 이 화면은
+// 「왜 이걸 자르라는가」와 「어떻게 되돌리나」를 보여주는 것이 전부다.
+
+/** 광고그룹에 상품이 여럿 붙었을 때 각 상품의 BEP(가장 낮은 값을 적용 — search_term_exclusion_list.py). */
+export interface NaverExclusionCandidateBepProduct {
+  channel_product_id: string;
+  product_name: string | null;
+  bep_roas: number;
+}
+
+export interface NaverExclusionCandidate {
+  campaign_id: string;
+  adgroup_id: string;
+  search_term: string;
+  source: string;
+  imp: number;
+  clk: number;
+  cost: number;
+  conv_purchase_cnt: number;
+  conv_purchase_amt: number;
+  roas: number;
+  applied_bep: number;
+  bep_source: string; // "product_bep_min" | "product_bep"
+  bep_product_count: number;
+  bep_products: NaverExclusionCandidateBepProduct[];
+  min_cost: number;
+  /** 상품 핵심어(화이트리스트) — 자동 발사에서는 걸러지지만 이 리스트에서는 **표시만** 한다. */
+  whitelisted: boolean;
+  loss_estimate: number | null;
+  /** 백엔드 문장 그대로 렌더 — 프론트에서 새로 짓지 않는다. */
+  reason: string;
+  revert_howto: string;
+  // 라우터가 붙이는 표시용 이름(SA는 순수, 이름 해석은 라우터 몫) — 매핑 없으면 null.
+  campaign_name: string | null;
+  adgroup_name: string | null;
+}
+
+export interface NaverExclusionBucket {
+  terms: number;
+  cost: number;
+  why?: string;
+}
+
+export interface NaverExclusionListResponse {
+  window: { from: string; to: string; days: number };
+  maturity: {
+    lag_days: number;
+    excluded_from: string;
+    excluded_to: string;
+    excluded_terms: number;
+    excluded_cost: number;
+    why: string;
+  };
+  freshness: {
+    latest_ad_date: string | null;
+    latest_synced_at: string | null;
+    as_of: string;
+    lag_days: number | null;
+  };
+  totals: { terms: number; cost: number; conv_amt: number };
+  gates: { min_click: number; round_cap: number };
+  candidates: NaverExclusionCandidate[];
+  candidate_cost: number;
+  buckets: {
+    insufficient_sample: NaverExclusionBucket;
+    bep_unknown: NaverExclusionBucket;
+    powerlink_undecidable: NaverExclusionBucket;
+    profitable: NaverExclusionBucket;
+    capped_out: NaverExclusionBucket;
+    maturity_excluded: NaverExclusionBucket;
+  };
+  revert_howto: string;
+  generated_at: string;
+}
+
+export function getSearchTermExclusionList(params?: {
+  days?: number;
+  campaignId?: string;
+  roundCap?: number;
+  minClick?: number;
+}): Promise<NaverExclusionListResponse> {
+  const q = new URLSearchParams();
+  if (params?.days != null) q.set("days", String(params.days));
+  if (params?.campaignId) q.set("campaign_id", params.campaignId);
+  if (params?.roundCap != null) q.set("round_cap", String(params.roundCap));
+  if (params?.minClick != null) q.set("min_click", String(params.minClick));
+  const qs = q.toString();
+  return fetchApi<NaverExclusionListResponse>(
+    `/api/naver/ad/search-term/exclusion-list${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export interface NaverExclusionSurvivalBreachRow {
+  campaign_id: string | null;
+  adgroup_id: string | null;
+  search_term: string | null;
+  live_state: string | null; // alive | missing | deleted | unknown
+  live_note: string | null;
+  excluded_at: string | null;
+  cost_at_exclusion: number | null;
+}
+
+export interface NaverExclusionSurvival {
+  monitored: number;
+  alive: number;
+  breached: NaverExclusionSurvivalBreachRow[];
+  never_checked: number;
+  last_checked_at: string | null;
+  stale_hours: number;
+  stale: boolean;
+  healthy: boolean;
+  revert_howto: string;
+  impact: string;
+  as_of: string;
+}
+
+export function getSearchTermExclusionSurvival(): Promise<NaverExclusionSurvival> {
+  return fetchApi<NaverExclusionSurvival>("/api/naver/ad/search-term/exclusion-survival");
 }
 
 // ── 네이버 SA 광고 최적화 콘솔 (P2-S3b, track_naver-ad-optimization) ──

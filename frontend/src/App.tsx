@@ -25,6 +25,7 @@ import NaverAdRawExplorer from "./pages/NaverAdRawExplorer";
 import NaverAdPerformance from "./pages/NaverAdPerformance";
 import NaverAdCreatives from "./pages/NaverAdCreatives";
 import NaverAdModifications from "./pages/NaverAdModifications";
+import NaverAdExclusionList from "./pages/NaverAdExclusionList";
 
 export default function App() {
   return (
@@ -54,6 +55,7 @@ export default function App() {
           <Route path="naver-ad/console" element={<NaverAdOptimizationConsole />} />
           <Route path="naver-ad/creatives" element={<NaverAdCreatives />} />
           <Route path="naver-ad/modifications" element={<NaverAdModifications />} />
+          <Route path="naver-ad/exclusion-list" element={<NaverAdExclusionList />} />
           <Route path="naver-ad/raw" element={<NaverAdRawExplorer />} />
         </Route>
       </Routes>

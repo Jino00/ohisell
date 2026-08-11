@@ -198,6 +198,7 @@ def build_health(
     disk_snapshots: Iterable[dict] = (),
     cost_drift: dict | None = None,
     vendor_item_conservation: dict | None = None,
+    exclusion_survival: dict | None = None,
 ) -> dict:
     """워치독 판정 코어(순수: DB/스케줄러 미접촉 — 인자로 받은 스냅샷만 사용).
 
@@ -292,6 +293,13 @@ def build_health(
     # 신선도 규칙이 이미 본다. 둘을 한 신호로 뭉치면 «아직»이 «틀렸다»로 보인다(교훈 #123).
     conservation_mismatch = list((vendor_item_conservation or {}).get("mismatch") or [])
 
+    # 조치 생존 — «우리가 건 제외가 아직 걸려 있나»(D-NAO-173 P1-①). 위 어느 감시와도 종류가
+    # 다르다: 파이프라인도 값도 아니고 **우리가 바깥 세계에 한 조치**를 본다. 대행사가 우리
+    # 조치를 되돌린 2회 중 1회는 change_log에 흔적조차 없었다 — 사건 로그로는 못 잡는다.
+    # ★어긋남뿐 아니라 «대조가 멈춤»(stale)·«한 번도 대조 안 함»도 이상으로 센다. SA가 그 셋을
+    #   healthy 한 칸으로 합쳐 주므로 빌더는 그 결론만 읽는다(판정 규칙이 두 벌이 되지 않게).
+    exclusion_survival_bad = bool(exclusion_survival) and not exclusion_survival.get("healthy", True)
+
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
         scheduler_running
@@ -307,6 +315,8 @@ def build_health(
         and not cost_drift
         # ★보존식 어긋남도 cost_drift와 같은 종류다 — 파이프라인은 살아 있는데 «값»이 틀렸다.
         and not conservation_mismatch
+        # ★조치 생존 — 파이프라인도 값도 정상인데 **우리가 한 조치만** 사라질 수 있다.
+        and not exclusion_survival_bad
     )
 
     return {
@@ -327,6 +337,9 @@ def build_health(
         # None이다(키는 항상 있다 — cost_drift와 같은 이유: 없는 키와 0건이 같아 보이면
         # «판정 안 함»이 «이상 없음»으로 읽힌다).
         "vendor_item_conservation": vendor_item_conservation,
+        # 조치 생존 대조 결과. 대조 자체를 못 했으면 None이다(위 둘과 같은 이유 — 없는 키와
+        # 0건이 같아 보이면 «판정 안 함»이 «이상 없음»으로 읽힌다).
+        "exclusion_survival": exclusion_survival,
         "as_of": now.isoformat(),
     }
 
@@ -531,9 +544,24 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 판매분석 보존식 대조 실패 — 이 감시만 생략(헬스 API는 유지)")
         vendor_item_conservation = None
 
+    # 조치 생존 — 우리가 건 검색어 제외가 아직 걸려 있나(D-NAO-173 P1-①).
+    # ★여기서는 **DB만 읽는다.** 라이브 대조는 하루 1회 잡(verify_search_term_exclusions)이 하고
+    #   그 결과가 행에 적혀 있다. 헬스 요청마다 네이버 API를 부르면 배너가 외부 지연·한도에
+    #   묶이고, 그 순간 감시가 감시 대상보다 먼저 죽는다.
+    # ★try/except: 위 넷과 같은 이유 — 이 조회가 실패해도 헬스 API 전체를 죽이지 않는다.
+    exclusion_survival: dict | None = None
+    try:
+        from app.services.naver_ad import exclusion_survival as _es  # noqa: PLC0415
+
+        exclusion_survival = _es.survival_summary(db, now=now)
+    except Exception:
+        log.exception("[워치독] 제외 생존 요약 실패 — 이 감시만 생략(헬스 API는 유지)")
+        exclusion_survival = None
+
     return build_health(
         WATCHDOG_JOBS, states, registered, running, now,
         cookies=cookies, data_snapshots=data_snapshots, disk_snapshots=disk_snapshots,
         cost_drift=cost_drift,
         vendor_item_conservation=vendor_item_conservation,
+        exclusion_survival=exclusion_survival,
     )

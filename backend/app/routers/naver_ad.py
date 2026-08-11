@@ -99,6 +99,8 @@ from app.services.naver_ad import change_actor
 from app.services.naver_ad import creative_scorecard
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
+from app.services.naver_ad import exclusion_survival
+from app.services.naver_ad import search_term_exclusion_list
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import modification_feed
 from app.services.naver_ad import naver_execution_harness
@@ -1920,6 +1922,48 @@ def get_search_term_exclusions(
             for r in rows
         ],
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 검색어 제외 «후보 리스트» + 조치 생존 감시 (D-NAO-173 P1,
+#   docs/PLAN_search-term-exclusion-list.md). 둘 다 **읽기 전용**이다 —
+#   이 스프린트에서 시스템은 리스트만 만들고 제외 실행은 Jino가 콘솔에서 한다(PLAN §3 금지선).
+#   여기에 쓰기 엔드포인트를 추가하지 말 것.
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.get("/search-term/exclusion-list")
+def get_search_term_exclusion_list(
+    days: int = Query(search_term_exclusion_list.WINDOW_DAYS, ge=7, le=90),
+    campaign_id: str | None = Query(None),
+    round_cap: int = Query(search_term_exclusion_list.DEFAULT_ROUND_CAP, ge=1, le=500),
+    min_click: int = Query(search_term_exclusion_list.MIN_CLICK, ge=0, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    """연속 ROAS × 상품별 BEP로 뽑은 제외 후보 리스트(읽기 전용, PLAN §4 P1-②).
+
+    후보에서 빠진 것은 전부 buckets로 세어 나온다(조용한 절단 없음). 캠페인·광고그룹 이름은
+    여기서 붙인다 — SA는 순수하게 두고 표시용 이름 해석은 라우터 몫(기존 관례)."""
+    result = search_term_exclusion_list.build_exclusion_list(
+        db, window_days=days, campaign_id=campaign_id, round_cap=round_cap, min_click=min_click,
+    )
+
+    camp_ids = {c["campaign_id"] for c in result["candidates"] if c["campaign_id"]}
+    ent_keys = {("adgroup", c["adgroup_id"]) for c in result["candidates"] if c["adgroup_id"]}
+    ent_names, camp_names = _batch_entity_names(db, ent_keys, camp_ids)
+    for c in result["candidates"]:
+        c["campaign_name"] = camp_names.get(c["campaign_id"])
+        c["adgroup_name"] = ent_names.get(("adgroup", c["adgroup_id"]))
+    return result
+
+
+@router.get("/search-term/exclusion-survival")
+def get_search_term_exclusion_survival(db: Session = Depends(get_db)) -> dict:
+    """조치 생존 감시 요약(읽기 전용, PLAN §4 P1-①) — DB에 적힌 마지막 대조 결과.
+
+    라이브 재조회는 하루 1회 잡(verify_search_term_exclusions, 08:25 KST)이 한다. 이 창구는
+    그 결과를 읽기만 한다 — 화면을 열 때마다 네이버 API를 부르면 감시가 외부 지연에 묶인다."""
+    return exclusion_survival.survival_summary(db)
 
 
 # ══════════════════════════════════════════════════════════════════

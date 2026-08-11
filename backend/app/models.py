@@ -3206,6 +3206,17 @@ class NaverSearchTermExclusion(Base):
     cost_at_exclusion: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")  # 제외 시점 30d cost(감사)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC(server_default)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())  # ⚠️UTC
+    # ── 조치 생존 감시(D-NAO-173 P1-①, docs/PLAN_search-term-exclusion-list.md §2-6) ──
+    # ★이 세 칸이 없던 동안 «우리가 건 것이 아직 걸려 있는가»를 아무도 안 봤다. 대행사가 우리
+    #   조치를 되돌린 게 2회(07-30 캠페인 재개 · 08-10 그룹 userLock 해제)이고 그중 한 번은
+    #   우리 change_log에 흔적조차 없었다 — 즉 «되돌림 탐지»에 기대면 안 되고 **현재 상태를
+    #   매일 대조**해야 한다. 대조 결과를 여기 적어 두면 헬스 배너가 라이브 API 없이 읽는다.
+    # live_state: alive(라이브에 걸려 있음) / missing(사라짐) / deleted(delFlag=true 소프트삭제)
+    #   / unknown(조회 실패·판별 불가 — fail-closed로 «이상»에 센다).
+    # ★delFlag까지 봐야 한다: 존재 여부만 보면 소프트 삭제된 행을 «살아 있음»으로 오독한다.
+    live_state: Mapped[Optional[str]] = mapped_column(String(12), nullable=True, index=True)
+    live_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # ★kst_now 주입
+    live_note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)  # unknown 사유·발견 경위
 
 
 # ══════════════════════════════════════════════════════════════════
