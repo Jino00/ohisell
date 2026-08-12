@@ -499,11 +499,22 @@ def test_adgroup_type_lookup_failure_is_unknown_not_missing(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(naver_sa_writer, "_get_adgroup",
                         lambda a: (_ for _ in ()).throw(RuntimeError("500 Server Error")))
-    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords",
-                        lambda a: (_ for _ in ()).throw(AssertionError(
-                            "유형을 모르면 제외목록을 조회조차 하지 않는다")))
+
+    # ★트립와이어를 예외로 두지 않는다(2R 참고 채택). check_survival의 광범위 except가
+    #   그 예외를 삼켜 결국 같은 UNKNOWN으로 착지시키므로, 예외 트립와이어는 「조회조차
+    #   안 한다」를 증명하지 못한다. 대신 **호출 사실을 기록하는 스파이**를 두고, 반환값은
+    #   쇼핑의 실거동(200/**0건**)을 그대로 흉내낸다 — 그래야 수정 전 코드가 이 데이터로
+    #   실제로 missing을 찍고 첫 단언이 발화한다.
+    called: list[str] = []
+
+    def _spy(adgroup_id):
+        called.append(adgroup_id)
+        return []  # 쇼핑에서 이 API가 돌려주는 것(= 「없다」는 거짓말)
+
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", _spy)
 
     result = es.check_survival(db, now=NOW)
+    assert called == [], "유형을 모르면 제외목록을 조회조차 하지 않는다"
     assert result["missing"] == 0, "모르는 것을 «사라졌다»로 신고하면 안 된다"
     assert result["unknown"] == 1
 
