@@ -464,20 +464,45 @@ def test_ingest_route_rejects_an_oversized_batch(db):
         app.dependency_overrides.clear()
 
 
-def test_conservation_accounts_excludes_wing1(db):
-    """★보존식 대상에서 WING1 제외는 **의도** (변이 M9 생존 → 추가).
+def test_conservation_covers_both_wing_accounts(db):
+    """★두 계정 다 본다 (D-CPP-44 — 종전엔 WING1이 빠져 있었다).
 
-    WING1은 옵션축을 수집하지 않으므로 넣으면 `summary_only`가 매일 쌓여 노이즈가 된다.
-    (신선도 규칙에서 WING1을 뺀 것과 같은 이유 — 영구 빨강이 이 감시선을 죽인다.)
+    빠져 있던 이유는 「WING1 옵션축이 0건이라 summary_only만 쌓인다」였고, 2026-08-12
+    옵션축 최초 적재로 그 이유가 사라졌다. 지금 이 목록이 WING2 하나로 되돌아가면
+    **WING1의 Σ옵션 ≠ 요약축이 아무 소리 없이 지나간다** — 옵션별 3P/RG 손익이 조용히 틀린다.
     """
     from app.services.scheduler_health import CONSERVATION_ACCOUNTS
 
-    assert CONSERVATION_ACCOUNTS == ("COUPANG_WING2",)
+    assert set(CONSERVATION_ACCOUNTS) == {"COUPANG_WING1", "COUPANG_WING2"}
 
-    # 라이브 재현: WING1 요약축만 있어도 헬스가 그걸 근거로 아무 말도 하지 않는다.
+
+def test_conservation_surfaces_a_wing1_mismatch_with_its_account_key(db):
+    """★WING1의 불일치가 **WING1이라는 이름을 달고** 표면에 나온다.
+
+    계정을 목록에 넣기만 하고 평탄화에서 출처를 잃으면 운영자는 어느 계정을 고쳐야 할지
+    모른다. 그래서 «잡히는가»와 «누구 것인지 아는가»를 같이 못 박는다.
+    """
     _seed_summary(db, "2026-08-09", 59400, account="COUPANG_WING1")
+    vis.ingest_vendor_item_sales(db, "COUPANG_WING1", [_row("2026-08-09", "111", 19800)])
+
     c = compute_scheduler_health(db, _FakeScheduler(), NOW)["vendor_item_conservation"]
-    assert c["summary_only"] == [], "WING1 요약축이 보존식 노이즈로 들어왔다"
+    w1 = [m for m in c["mismatch"] if m["account_key"] == "COUPANG_WING1"]
+    assert len(w1) == 1, "WING1 불일치가 보존식에 안 잡혔다"
+    assert w1[0]["diff"] == 19800 - 59400
+    assert c["compared"] >= 1
+
+
+def test_conservation_window_and_fetcher_window_are_one_contract():
+    """★검사창(7일)은 페처 수집창과 같은 계약의 반대쪽이다 — 한쪽만 넓히면 영구 빨강.
+
+    WING1을 넣으면서 이 계약이 두 계정에 걸리게 됐다. `test_wing_vi_detail.py`가
+    `CONSERVATION_WINDOW_DAYS == wing._VI_DEFAULT_DAYS`를 지키고, 여기서는 그 값이
+    **7에서 조용히 바뀌지 않는지**를 본다(양쪽을 같이 14로 올려도 여기서 운다 —
+    그때는 Mac config의 `vi_days`를 실제로 넣었는지 확인하고 이 숫자를 고칠 것).
+    """
+    from app.services.scheduler_health import CONSERVATION_WINDOW_DAYS
+
+    assert CONSERVATION_WINDOW_DAYS == 7
 
 
 def test_conservation_failure_does_not_kill_the_health_api(db, monkeypatch):
