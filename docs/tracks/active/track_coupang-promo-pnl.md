@@ -18,7 +18,7 @@
 
 ## 확정 결정 (D-CPP-N)
 
-### D-CPP-45 — 쿠팡 오픽스 광고비 갱신을 일일 자동 트리거에 편입 (2026-08-12)
+### D-CPP-45 — 쿠팡 오픽스 광고비 갱신을 일일 자동 트리거에 편입 (2026-08-12, PR #290 · prod 라이브 합격)
 
 > Jino 승인(2026-08-12 오후): 「편입한다」 — 선택지 3안(편입 / 지금은 안 함 / 오하이테크 제외) 중 1안.
 
@@ -55,6 +55,10 @@
 
 **안 건드린 것**: `sync_coupang_ad_cost`(00:10) 행 · 신선도 규칙 `coupang_ad_cost_sales`
 (max_age_days=3.0, **자동화가 감시를 대체하지 않는다**) · 오하이테크 광고(`ohitech_ad_sync`, 범위 밖).
+
+**라이브 합격**(prod `scheduler_state` + 헬스 API HTTP body): `request_coupang_ad_cost_daily` =
+`25 5 * * *` · `is_enabled=1` · `never_succeeded` **0건**(신규 잡 유예 작동 — 헛알림 없음) ·
+`sync_coupang_ad_cost`는 `is_enabled=0` 그대로. 첫 발화는 2026-08-13 05:25.
 
 **테스트** 5건 + 변이 **7/7 KILLED**(크론값 변경 / defaults 등록 삭제 / `request_refresh` 호출 삭제 /
 `raise` 삭제 / 신선도 규칙 삭제 / `job_func_for` 매핑 삭제 / `WATCHDOG_JOBS` 등록 삭제).
