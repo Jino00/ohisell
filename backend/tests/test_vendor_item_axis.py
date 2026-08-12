@@ -774,3 +774,120 @@ def test_sales_analysis_thresholds_are_pinned_not_just_present():
                 f"{src}/{r['account_key']} 임계 {r['max_age_days']} — 3.0이어야 한다"
             )
             assert r["impact"], f"{src}/{r['account_key']}에 impact 문구가 없다"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 쿠팡 오픽스 광고비 일일 요청 트리거 (D-CPP-45, 2026-08-12)
+#   request_wing_vendor_summary_daily_job과 완전히 같은 패턴 — «UI 버튼-only»였던 갱신을
+#   서버 크론이 요청만 대신 만들게 한다. 이 판매분석 파일에 함께 두는 이유: 위
+#   test_daily_trigger_job_* 테스트들이 이미 같은 계약(요청만 만들고 성공을 기다리지 않는다·
+#   신선도 규칙은 그대로 둔다)을 이 파일에서 지키고 있고, coupang_ad_cost_sales 신선도 규칙도
+#   이미 DATA_FRESHNESS_RULES 안에서 이 파일이 import해 쓰고 있다(§4 근거).
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_ad_cost_daily_trigger_job_calls_request_refresh_exactly_once(db, monkeypatch):
+    """①이 잡이 실제로 ad_cost_sync.request_refresh를 부른다(호출 인자·횟수 검증).
+
+    ★변이 실측 대상: `request_coupang_ad_cost_daily_job` 안의 `ad_cost_sync.request_refresh(db)`
+    호출을 지우면 이 테스트가 죽는다 — 그게 «잡은 등록됐는데 아무것도 요청 안 한다» 상태다.
+    """
+    import app.services.scheduler_service as ss
+    from app.services.coupang import ad_cost_sync
+
+    calls: list = []
+    monkeypatch.setattr(ad_cost_sync, "request_refresh",
+                         lambda _db: calls.append(_db) or {"ok": True})
+    monkeypatch.setattr(ss, "_get_own_db_session", lambda: db)
+
+    ss.request_coupang_ad_cost_daily_job()
+
+    assert len(calls) == 1, f"request_refresh가 정확히 1회 불려야 하는데 {len(calls)}회: {calls}"
+    assert calls[0] is db, "request_refresh가 이 잡의 DB 세션을 그대로 받아야 한다"
+
+
+def test_ad_cost_daily_trigger_is_registered_in_defaults_with_its_cron():
+    """②defaults 목록에 request_coupang_ad_cost_daily가 «25 5 * * *»로 등록돼 있다.
+
+    ★단순 문자열 포함 검사가 아니라 defaults 튜플에서 실제로 뽑아 비교한다(문자열이 다른
+    맥락에 우연히 등장해도 안 속게). `_ensure_default_states`의 목록은 함수 지역 변수라
+    import로 못 읽으므로(test_collection_watchdog.py와 같은 이유) 소스에서 정규식으로 뽑는다.
+    변이 실측 대상: 튜플을 지우거나 크론을 "25 6 * * *"로 바꾸면 이 테스트가 죽는다.
+    """
+    import inspect
+    import re
+
+    from app.services import scheduler_service as ss
+
+    src = inspect.getsource(ss._ensure_default_states)
+    m = re.search(r'\("request_coupang_ad_cost_daily",\s*"([^"]+)"\)', src)
+    assert m, "defaults 목록에 request_coupang_ad_cost_daily가 없다"
+    assert m.group(1) == "25 5 * * *", f"크론이 다르다: {m.group(1)!r}"
+    assert ss.job_func_for("request_coupang_ad_cost_daily") is ss.request_coupang_ad_cost_daily_job, (
+        "job_func_for가 새 잡 함수와 연결돼 있지 않다 — 등록만 있고 실행 경로가 없는 상태"
+    )
+
+
+def test_ad_cost_daily_trigger_is_itself_watched():
+    """★자동 트리거 자신도 감시 대상이다 — 안 그러면 실패 모드가 «옮겨갈» 뿐이다.
+
+    이 잡을 만든 동기가 «사람이 버튼을 안 누른다»인데, 그 대체물을 감시 없이 두면 실패가
+    «사람이 안 누른다»에서 **«크론이 조용히 죽는다»**로 이동한다. 게다가 광고비 데이터 나이
+    규칙도 `max_age_days=3.0`이라 잡이 죽어도 «정체»로 울리기까지 3일이 걸린다 — 원인을
+    바로 보려면 잡 자체를 봐야 한다(판매분석 트리거를 WATCHDOG_JOBS에 넣은 것과 같은 근거).
+
+    이 목록에서 빠지면 «자동화했는데 감시는 안 했다»가 되고, 그건 이 리포가 반복해 온 실패다.
+    """
+    from app.services.scheduler_health import WATCHDOG_JOBS
+
+    assert "request_coupang_ad_cost_daily" in WATCHDOG_JOBS
+    # 짝이 되는 판매분석 트리거도 같이 남아 있어야 한다(한쪽만 지우는 회귀 차단).
+    assert "request_wing_vendor_summary_daily" in WATCHDOG_JOBS
+
+
+def test_ad_cost_daily_trigger_job_raises_but_still_closes_the_session(db, monkeypatch):
+    """③예외가 나면 삼키지 않고 raise 하되 db.close()는 반드시 불린다(원본 잡과 같은 계약).
+
+    ★변이 실측 대상: `raise`를 지우면(예외를 삼키면) 이 테스트가 죽는다. `finally: db.close()`를
+    지워도(세션 누수) 이 테스트가 죽는다 — 둘 다 각자 독립적으로 잡아낸다.
+    """
+    import app.services.scheduler_service as ss
+    from app.services.coupang import ad_cost_sync
+
+    closed: list = []
+    real_close = db.close
+
+    def _tracking_close():
+        closed.append(True)
+        real_close()
+
+    monkeypatch.setattr(db, "close", _tracking_close)
+    monkeypatch.setattr(ss, "_get_own_db_session", lambda: db)
+
+    def _boom(_db):
+        raise RuntimeError("갱신 요청 실패(테스트 주입)")
+
+    monkeypatch.setattr(ad_cost_sync, "request_refresh", _boom)
+
+    with pytest.raises(RuntimeError, match="갱신 요청 실패"):
+        ss.request_coupang_ad_cost_daily_job()
+
+    assert closed == [True], "예외 경로에서도 db.close()가 불려야 한다(세션 누수 방지)"
+
+
+def test_ad_cost_freshness_rule_still_covers_the_sales_axis_after_the_trigger_lands():
+    """④이 잡이 «신선도 규칙을 대체하지 않는다» — coupang_ad_cost_sales(max_age_days=3.0)가
+    DATA_FRESHNESS_RULES에 여전히 있다.
+
+    ★자동 트리거가 생겼다고 감시선을 꺼도 된다는 뜻이 아니다(계약 판단기준 3번째 줄).
+    로그인 만료·Akamai 차단으로 요청이 안 먹힐 수 있는 한, 배너가 유일한 실토 경로다.
+    변이 실측 대상: 이 규칙을 DATA_FRESHNESS_RULES에서 지우거나 max_age_days를 바꾸면 죽는다.
+    """
+    rules = [r for r in DATA_FRESHNESS_RULES
+             if r.get("source") == "ad_cost" and r.get("name") == "coupang_ad_cost_sales"]
+    assert len(rules) == 1, f"coupang_ad_cost_sales 규칙 개수가 이상하다: {rules}"
+    assert rules[0]["account_key"] == "COUPANG_WING1"
+    assert rules[0]["max_age_days"] == 3.0, (
+        f"신선도 임계가 바뀌었다: {rules[0]['max_age_days']} — 자동화가 감시를 무디게 하면 안 된다"
+    )
+    assert rules[0]["impact"], "impact 문구가 없다 — 배너가 무엇이 문제인지 말 못 한다"

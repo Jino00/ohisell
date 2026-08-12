@@ -1226,6 +1226,40 @@ def request_wing_vendor_summary_daily_job():
         db.close()
 
 
+def request_coupang_ad_cost_daily_job():
+    """쿠팡 오픽스 광고비(COUPANG_ADS1) 갱신을 **매일 자동으로 요청**한다 (D-CPP-45, 05:25 KST).
+
+    ★왜 이 잡이 필요한가: 유일한 트리거가 UI 「광고비 갱신」 버튼이었다. 서버 크론
+      `sync_coupang_ad_cost`(00:10)는 `is_enabled=0`이고, Akamai가 prod IP를 막아 직접 fetch가
+      원리적으로 불가하다(Mac 페처를 거쳐야만 한다). 워치독(09:20)의 `RESCUE_STREAMS`은
+      `frozenset({"supplier_hub"})`뿐이라 광고비는 **알림만** 가고 자동 복구는 안 된다.
+      광고비를 자동 구조에서 뺀 근거는 「소급 창 30일이라 자가 복구된다」였고 그건 지금도
+      참이다 — 그래서 이 잡이 막는 건 «영구 소실»이 아니라 **«며칠 동안 손익 화면이 낡은
+      광고비로 구르는 것»**이다.
+
+    ★실측(2026-08-12): push 기준 공백이 06-24→07-04 **10일**, 08-10→08-12에 **29일치가
+      한꺼번에** 적재됐다. cost_date 결측은 0건 — 늦게 눌러도 30일 창이 메웠다. 즉 「사람이
+      배너를 보고 누른다」가 반복적으로 안 지켜졌다는 뜻이다.
+
+    ★신선도 배너(`coupang_ad_cost_sales`, max_age_days=3.0)는 **그대로 둔다** — 자동 트리거가
+      감시를 대체하지 않는다. 로그인/Akamai로 실패하면 배너가 여전히 유일한 실토다.
+
+    ★창(어느 날짜를 받을지)은 여기서 정하지 않는다 — 페처가 정한다. 이 잡의 산출물은
+      «요청 set» 자체다(request_wing_vendor_summary_daily_job과 동일한 계약).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang import ad_cost_sync
+
+        result = ad_cost_sync.request_refresh(db)
+        log.info("[스케줄러] 쿠팡 광고비(오픽스) 갱신 요청: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] request_coupang_ad_cost_daily_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def _coupang_failed(results: list[dict]) -> list[dict]:
     """RG 동기화 결과에서 하드 실패 추출 — config_missing(error)·읽기 실패(read_error) 모두.
 
@@ -1688,6 +1722,9 @@ def _ensure_default_states(db):
         ("sync_coupang_settlement", "50 5 * * *"),
         # 판매분석 갱신 요청(D-CPP-36) — 쿠팡 수집대(05:30~) 앞에 걸어 그날 손익 전에 정본이 들어오게.
         ("request_wing_vendor_summary_daily", "20 5 * * *"),
+        # 오픽스 광고비 갱신 요청(D-CPP-45) — 05:25인 이유: 쿠팡 수집대(05:30~)보다 앞이면서
+        # 판매분석 요청(05:20)과는 1분 이상 벌려 SQLite 라이터 경합을 피한다.
+        ("request_coupang_ad_cost_daily", "25 5 * * *"),
         ("sync_coupang_rg_orders", "0 */2 * * *"),
         ("sync_coupang_coupons", "0 6 * * *"),
         ("sync_coupang_cs", "5 6 * * *"),
@@ -1695,8 +1732,11 @@ def _ensure_default_states(db):
         # 쿠팡 브라우저 수집 신선도 워치독 — 하루 1회(09:20). 알림 + 위급 시 자동 갱신.
         # 하루 1회인 것이 곧 알림 쿨다운이다(별도 상태 저장 없음).
         ("coupang_collection_watchdog", "20 9 * * *"),
-        # ofix 광고비 장중 자동 갱신 크론은 제거됨 — 순수 on-demand 전환.
-        # 창을 스스로 띄우던 자동 트리거를 없애고, 갱신은 UI '광고비 갱신' 버튼으로만 한다.
+        # ofix 광고비 «자동 fetch» 크론은 여전히 제거된 채다 — 이 문장의 그 부분은 아직 참이다.
+        # 다만 D-CPP-45로 **«요청 트리거»만** 되살렸다(defaults 위쪽 request_coupang_ad_cost_daily
+        # 참조). 옛 크론은 서버가 창을 스스로 띄워 fetch까지 했지만, 새 잡은 request_refresh로
+        # «요청 set»만 만들 뿐 실제 수집(fetch)은 여전히 Mac 페처가 한다 — 사람이 버튼을
+        # 누르는 대신 크론이 같은 요청을 만드는 것뿐, 창을 스스로 띄우던 옛 자동 fetch와는 다르다.
         # 낡음/실패는 GET /collection-status → 전역 신선도 배너로 가시화(잊어버림 방지).
     ]
     # 폐지된 잡(retired) — defaults에서 빼는 것만으로는 prod에서 안 죽는다: 스케줄링의 단일
@@ -1998,6 +2038,7 @@ def job_func_for(job_name: str):
         "sync_coupang_returns": sync_coupang_returns_job,
         "sync_coupang_settlement": sync_coupang_settlement_job,
         "request_wing_vendor_summary_daily": request_wing_vendor_summary_daily_job,
+        "request_coupang_ad_cost_daily": request_coupang_ad_cost_daily_job,
         "sync_coupang_rg_sizes": sync_coupang_rg_sizes_job,
         "sync_coupang_rg_inventory": sync_coupang_rg_inventory_job,
         "sync_coupang_rg_orders": sync_coupang_rg_orders_job,
