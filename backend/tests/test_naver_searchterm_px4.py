@@ -82,6 +82,31 @@ def test_exclusion_briefing_fires_on_new_exclusion(db):
     assert "[복귀" not in entry.rationale  # 복귀 0건이면 그 섹션 자체를 안 만든다
 
 
+def test_exclusion_briefing_never_lists_console_imports(db):
+    """★43건 편입이 Slack에 「오늘 파워링크 자동 제외」로 나가면 안 된다(D-NAO-177,
+    D-NAO-176 리뷰 P2-3). 편입분의 last_transition_at은 편입 시각이라 그냥 조회하면 전건이
+    이 목록에 실린다 — 일기로 나가는 것만 막고 이 문을 안 막으면 같은 거짓 표상이 그대로 나간다.
+
+    ss dict의 카운트(=그 레인이 실제로 실행한 건수)는 1인데 목록에 2건이 실리는 상태가
+    바로 그 증상이다. 편입분은 애초에 쇼핑이라 파워링크 브리핑의 대상도 아니다.
+    """
+    _excl_row(db, term="레인이_자른것", status="excluded", last_transition_at=_NOW, cost=15000)
+    imported = _excl_row(db, term="콘솔편입분", status="excluded", last_transition_at=_NOW, cost=99000)
+    imported.source = "console_import"
+    db.commit()
+
+    res = briefing.run_exclusion_exception_briefing(db, {**_zero_ss(), "powerlink_fired": 1},
+                                                    now=_NOW)
+
+    assert res["briefed"] is True
+    entry = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == briefing.ACTION_EXCLUSION_BRIEFING).one()
+    assert "레인이_자른것" in entry.rationale
+    assert "콘솔편입분" not in entry.rationale, (
+        "편입분이 브리핑에 실리면 「오늘 잘랐다」는 거짓 표상이 Slack으로 나간다"
+    )
+
+
 def test_exclusion_briefing_counts_reexcluded_as_excluded(db):
     # PX3 재제외(probation→excluded)도 "제외" 카운트에 합산된다(§4 1 "제외 또는 복귀" 중 제외).
     _excl_row(db, term="재제외된것", status="excluded", last_transition_at=_NOW, cost=9000, cycle=2)

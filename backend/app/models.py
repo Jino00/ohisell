@@ -3225,6 +3225,13 @@ class NaverSearchTermExclusion(Base):
     # 이 구분이 없으면 편입 43건이 「오늘 실행한 조치 43건」으로 보이고, 13일 만의 진짜 표본
     # 1건(「골프」)이 그 안에 익사한다.
     source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    # ★콘솔이 보여준 «실제 제외 등록시각» (D-NAO-177). NULL = **모른다**(콘솔이 안 알려줬거나
+    #   사람이 안 적었다) — 추정해서 채우지 않는다.
+    #   `excluded_at`과 뜻이 다르다: 그쪽은 «장부가 이 행을 제외로 세운 시각»(편입분은 편입 시각)
+    #   이고 void_execution의 일기 매칭 하한·생존 감시의 방치 판정이 그 뜻에 기대어 있다.
+    #   실제 시각을 그 칸에 넣으면 2024년 날짜 하나로 일기 매칭 창이 1년 반으로 벌어지고
+    #   편입 직후 전역 배너가 거짓 빨강이 된다. 그래서 칸을 나눈다.
+    console_excluded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 # ══════════════════════════════════════════════════════════════════

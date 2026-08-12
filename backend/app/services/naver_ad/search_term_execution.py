@@ -23,12 +23,13 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func as sqlfunc
+from sqlalchemy import func as sqlfunc, or_
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import NaverSearchTermDaily, NaverSearchTermExclusion, OpsDiaryEntry
 from app.services.naver_ad import diary
-from app.utils.kst import kst_now
+from app.utils.kst import KST, kst_now
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,77 @@ def _require(value: str | None, field: str, *, max_len: int) -> str:
     if len(v) > max_len:
         raise ExclusionInputError(f"{field}가 너무 길다({len(v)}자 > {max_len}자)")
     return v
+
+
+# 콘솔 「제외 검색어」 탭의 등록시각 표기는 `2026.08.11 22:26`이다. 사람이 옮겨 적는 경로라
+# ISO(`2026-08-11T22:26:00`)나 날짜만(`2024-12-26`)으로도 온다 — 전부 받는다. 파싱 못 하는
+# 값은 **조용히 버리지 않고 그 행만 거부**한다(형식을 몰라 날짜가 사라지면 「모른다」와
+# 「안 적었다」가 구분되지 않는다).
+_CONSOLE_DT_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M",
+    "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M",
+    "%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d",
+)
+# 미래 시각 허용 여유 — 콘솔 시계와 우리 시계의 차이만 흡수한다(그 이상은 오타로 본다).
+_CONSOLE_DT_FUTURE_SLACK = timedelta(minutes=10)
+# 네이버 검색광고 이전 연도는 오타로 본다(연도 한 자 오타가 1900년대를 만든다).
+_CONSOLE_DT_MIN_YEAR = 2010
+
+
+def _parse_console_excluded_at(value: object, *, now: datetime) -> datetime | None:
+    """콘솔이 보여준 «실제 제외 등록시각»을 KST naive로 정규화한다. 없으면 None(=모른다).
+
+    ★None을 「지금」으로 메우지 않는 것이 이 함수의 전부다. 콘솔 화면에 등록시각이 있다는 걸
+      알기 전(D-NAO-176)엔 편입분 전건이 「시점 미상」이었는데, 이제 아는 행과 모르는 행이
+      섞인다. 모르는 행을 편입 시각으로 채우면 그 값이 **아는 값과 구분되지 않아** 나중에
+      누구도 신뢰도를 되짚을 수 없다 — 이 리포가 세 번 연속 당한 「모르는 것을 아는 것으로
+      센다」의 네 번째가 된다.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        # tz-aware면 KST로 옮겨 naive화(이 원장의 시각 칸은 전부 KST naive다).
+        dt = value.astimezone(KST).replace(tzinfo=None) if value.tzinfo else value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        dt = None
+        for fmt in _CONSOLE_DT_FORMATS:
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            raise ExclusionInputError(
+                f"console_excluded_at을 못 읽었다({raw!r}) — 콘솔 표기 그대로(2026.08.11 22:26) 또는 "
+                f"ISO(2026-08-11T22:26:00)로 주거나, 모르면 아예 빼라"
+            )
+    if dt.year < _CONSOLE_DT_MIN_YEAR:
+        raise ExclusionInputError(
+            f"console_excluded_at이 너무 과거다({dt.isoformat()}) — 연도 오타로 본다"
+        )
+    if dt > now + _CONSOLE_DT_FUTURE_SLACK:
+        raise ExclusionInputError(
+            f"console_excluded_at이 미래다({dt.isoformat()}) — 이미 걸려 있는 제외의 등록시각이"
+            f" 미래일 수 없다"
+        )
+    return dt
+
+
+def not_console_import() -> ColumnElement[bool]:
+    """SQL에서 «편입분이 **아닌** 행»을 고르는 술어 — ★NULL 안전.
+
+    `source != 'console_import'` 한 줄로 쓰고 싶어지지만, **우리가 실행한 행의 `source`는
+    NULL**이다. SQL에서 `NULL != '...'`은 참이 아니라 NULL(=거짓)이므로 그 한 줄은 편입분이
+    아니라 **정상 행을 통째로 지운다.** 파이썬 쪽 필터(`r.source != CONSOLE_IMPORT_SOURCE`)와
+    같은 모양인데 결과가 정반대라 특히 위험해서 함수로 못 박는다.
+    """
+    return or_(
+        NaverSearchTermExclusion.source.is_(None),
+        NaverSearchTermExclusion.source != CONSOLE_IMPORT_SOURCE,
+    )
 
 
 def _cost_last_30d(db: Session, adgroup_id: str, search_term: str, as_of: date) -> int:
@@ -198,6 +270,11 @@ def record_execution(
         row.cost_at_exclusion = cost
         if restrict_kwd_id:
             row.restrict_kwd_id = restrict_kwd_id
+        # ★출처를 «우리»로 되돌린다(D-NAO-177 적대 리뷰 P2). 편입분을 void한 뒤 우리가 진짜로
+        #   실행하면 이 행은 이제 우리 조치인데, `source='console_import'`가 남아 있으면
+        #   **일기는 써서 wisdom이 먹는데** 성적표·오늘 집계·Slack 브리핑에선 통째로 빠진다 —
+        #   측정에서만 사라지는 조치가 생긴다. 이 함수가 곧 「우리가 했다」의 정의다.
+        row.source = None
         # 재제외이므로 생존 상태는 «아직 안 봄»으로 되돌린다(옛 판정이 새 조치를 덮지 않게).
         row.live_state = None
         row.live_checked_at = None
@@ -252,29 +329,42 @@ def import_console_exclusions(
     그래서 검증(`_require`)만 공유하고 **일기 경로는 공유하지 않는다.**
 
     ## 무엇을 하고 무엇을 안 하나
-    - 한다: 원장 upsert(`source='console_import'`) · 행 단위 성공/거부 보고
+    - 한다: 원장 upsert(`source='console_import'`) · 행 단위 성공/거부 보고 ·
+      콘솔이 알려준 실제 등록시각을 **`console_excluded_at`에** 보존(D-NAO-177)
     - 안 한다: 일기 · 네이버 쓰기 · `cost_at_exclusion` 추정(콘솔이 안 주면 0) ·
-      실행 시점 추정(`excluded_at`은 **편입 시각**이고 실제 제외 시각이 아니다 —
-      그래서 성적표가 이 행을 판정하지 않는다)
+      **실행 시점 추정** — 시각을 안 주면 `console_excluded_at`은 **NULL로 둔다.**
+      `excluded_at`은 예나 지금이나 **편입 시각**이고(장부가 이 행을 세운 시각), 그래서
+      성적표는 편입분을 판정하지 않는다(`source`로 가른다).
+
+    ## 왜 시각을 `excluded_at`에 안 넣나 (D-NAO-177)
+    D-NAO-176은 「콘솔이 제외 시점을 안 알려준다」를 전제로 만들었는데 그 전제가 틀렸다 —
+    「제외 검색어」 탭에 `등록시각`이 있다. 그렇다고 그 값을 `excluded_at`에 넣으면
+    ①`void_execution`의 일기 매칭 하한이 1년 반 벌어져 무관한 옛 일기를 붙잡고
+    ②`exclusion_survival`이 편입 직후 전건을 「방치」로 세어 전역 배너가 거짓 빨강이 된다.
+    뜻이 다른 값이므로 칸을 나눈다. **모르면 NULL** — 편입 시각으로 메우지 않는다.
 
     ## 왜 전체 롤백이 아니라 행 단위인가
     43건 중 1건이 오타라고 42건이 죽으면 사람이 그 1건을 찾느라 전체를 다시 붙여넣는다.
     거부는 **그 행만** 하고 사유를 돌려준다(어느 행이 왜 거부됐는지가 응답에 있다).
 
     Args:
-        rows: [{campaign_id, adgroup_id, search_term, restrict_kwd_id?, note?}, ...]
+        rows: [{campaign_id, adgroup_id, search_term, restrict_kwd_id?, note?,
+                console_excluded_at?(콘솔이 보여준 등록시각 — 모르면 생략. `excluded_at`과
+                이름이 다른 이유는 뜻이 다르기 때문이다: 그쪽은 장부가 세운 시각이다)}, ...]
 
-    반환: {imported, skipped, rejected, results:[행별 결과], as_of}
+    반환: {imported, skipped, rejected, dated, undated, results:[행별 결과], as_of}
     """
     now = now or kst_now()
     results: list[dict] = []
     imported = skipped = rejected = 0
+    dated = 0  # 콘솔 등록시각을 «아는» 편입분. 나머지는 모르는 채로 들어간 것이다.
 
     for idx, raw in enumerate(rows):
         try:
             campaign_id = _require(raw.get("campaign_id"), "campaign_id", max_len=50)
             adgroup_id = _require(raw.get("adgroup_id"), "adgroup_id", max_len=50)
             search_term = _require(raw.get("search_term"), "search_term", max_len=300)
+            console_at = _parse_console_excluded_at(raw.get("console_excluded_at"), now=now)
         except ExclusionInputError as e:
             rejected += 1
             results.append({"row": idx, "result": "rejected", "reason": str(e),
@@ -290,11 +380,29 @@ def import_console_exclusions(
             .first()
         )
         if existing is not None and existing.status == "excluded":
-            # 이미 아는 제외 — 덮지 않는다. 특히 `source`를 덮으면 우리가 실행한 행이
-            # 「편입분」으로 뒤바뀌어 성적표에서 조용히 사라진다.
+            # 이미 아는 제외 — 상태·출처는 덮지 않는다. 특히 `source`를 덮으면 우리가 실행한
+            # 행이 「편입분」으로 뒤바뀌어 성적표에서 조용히 사라진다.
+            # ★단 **콘솔 등록시각은 비어 있으면 채운다**(D-NAO-177 적대 리뷰 P1-2). 종전엔
+            #   이 분기가 준 값을 아무 신호 없이 버렸고, 이 칸을 채울 다른 입구가 아예 없어
+            #   («한 번 already_known이면 영영 미상») 계약 목표 ①이 무력화됐다. 실제로 prod의
+            #   「골프」가 이 케이스다 — 우리가 8/11 23:27에 보고한 행이고 콘솔 43건 목록에도
+            #   들어 있어, 첫 붓기에서 콘솔 시각 22:26이 그대로 버려질 참이었다.
+            #   ⚠️`excluded_at`·`source`·`status`는 그대로다 — 이건 «장부가 세운 시각»이 아니라
+            #   «콘솔에 걸린 시각»을 적는 것이고, 그래서 성적표 판정 대상 여부도 안 바뀐다.
+            filled = False
+            if console_at is not None and existing.console_excluded_at is None:
+                existing.console_excluded_at = console_at
+                db.commit()
+                filled = True
             skipped += 1
             results.append({"row": idx, "result": "already_known", "search_term": search_term,
-                            "exclusion_id": existing.id, "source": existing.source})
+                            "exclusion_id": existing.id, "source": existing.source,
+                            # 준 값이 어떻게 처리됐는지 행마다 말한다(조용한 폐기 금지).
+                            "console_excluded_at": (
+                                existing.console_excluded_at.isoformat()
+                                if existing.console_excluded_at else None
+                            ),
+                            "console_time_filled": filled})
             continue
 
         note = (raw.get("note") or "콘솔에 이미 걸려 있던 제외를 장부에 편입")[:200]
@@ -303,9 +411,12 @@ def import_console_exclusions(
                 campaign_id=campaign_id, adgroup_id=adgroup_id, search_term=search_term,
                 restrict_kwd_id=(raw.get("restrict_kwd_id") or None),
                 status="excluded", cycle=1,
-                # ★편입 시각이지 실제 제외 시각이 아니다(콘솔이 안 알려준다). 추정 금지 —
-                #   그래서 이 행은 성적표 판정 대상에서 빠진다(source로 가른다).
+                # ★`excluded_at`은 편입 시각이지 실제 제외 시각이 아니다 — 이 칸의 뜻은
+                #   「장부가 이 행을 제외로 세운 시각」이고 일기 매칭·방치 판정이 거기 기대어
+                #   있다. 실제 시각은 옆 칸(`console_excluded_at`)에 넣고, 모르면 **NULL**이다.
+                #   어느 쪽이든 이 행은 성적표 판정 대상에서 빠진다(source로 가른다).
                 excluded_at=now, last_transition_at=now, next_review_at=None,
+                console_excluded_at=console_at,
                 cost_at_exclusion=0, source=CONSOLE_IMPORT_SOURCE, live_note=note,
             )
             db.add(row)
@@ -321,18 +432,33 @@ def import_console_exclusions(
             row.live_state = None
             row.live_checked_at = None
             row.live_note = note
+            # ★아는 값을 모르는 값으로 덮지 않는다: 시각 없이 다시 편입해도 전에 받아 둔
+            #   콘솔 등록시각은 그대로 둔다(재편입이 정보를 «잃는» 방향으로 가면 안 된다).
+            if console_at is not None:
+                row.console_excluded_at = console_at
             if raw.get("restrict_kwd_id"):
                 row.restrict_kwd_id = raw["restrict_kwd_id"]
             outcome = "imported"
 
         db.commit()
         imported += 1
+        if row.console_excluded_at is not None:
+            dated += 1
         results.append({"row": idx, "result": outcome, "search_term": search_term,
-                        "exclusion_id": row.id})
+                        "exclusion_id": row.id,
+                        "console_excluded_at": (
+                            row.console_excluded_at.isoformat() if row.console_excluded_at else None
+                        )})
 
-    log.info("[콘솔편입] 편입 %d · 이미앎 %d · 거부 %d (일기 0건)", imported, skipped, rejected)
+    log.info(
+        "[콘솔편입] 편입 %d(시각 아는 것 %d) · 이미앎 %d · 거부 %d (일기 0건)",
+        imported, dated, skipped, rejected,
+    )
     return {
         "imported": imported, "skipped": skipped, "rejected": rejected,
+        # ★편입분 중 «실제 제외 시각을 아는 것»과 모르는 것을 갈라 낸다. 합쳐 세면 나중에
+        #   「43건 다 시각이 있다」는 착시가 생기고, 그 착시 위에서 창을 자르면 거짓 판정이 된다.
+        "dated": dated, "undated": imported - dated,
         "results": results, "as_of": now.isoformat(),
         # ★계약 금지선의 자기 증명 — 이 경로는 학습 사슬에 아무것도 넣지 않는다.
         "diary_written": 0,

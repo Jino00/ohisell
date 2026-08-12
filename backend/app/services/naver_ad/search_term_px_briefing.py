@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.models import NaverSearchTermExclusion
-from app.services.naver_ad import search_term_judge
+from app.services.naver_ad import search_term_execution, search_term_judge
 from app.services.naver_ad.diary import ACTOR_DAILY, write_diary_entry
 from app.services.naver_ad.slack_notifier import notify_text
 from app.utils.kst import kst_now
@@ -45,13 +45,21 @@ def _today_bounds(now: datetime) -> tuple[datetime, datetime]:
 def _rows_transitioned_today(
     db: Session, status: str, start: datetime, end: datetime,
 ) -> list[NaverSearchTermExclusion]:
-    """오늘(KST) 그 상태로 전이된 행 — cost_at_exclusion 내림차순(브리핑 상위 나열용)."""
+    """오늘(KST) 그 상태로 전이된 행 — cost_at_exclusion 내림차순(브리핑 상위 나열용).
+
+    ★콘솔 편입분은 뺀다(D-NAO-177). 편입분의 `last_transition_at`은 편입 시각이라 43건을
+      부은 날 이 목록에 통째로 실리고, 그러면 Slack에 「오늘 파워링크 자동 제외 43건」이
+      나간다 — D-NAO-176의 1번 금지선이 일기에 대해 막은 거짓 표상이 **다른 문으로 나가는**
+      것이다(그 계약의 리뷰 P2-3). 게다가 편입분은 쇼핑이라 이 브리핑의 대상(파워링크
+      자동 제외)이 애초에 아니다.
+    """
     return (
         db.query(NaverSearchTermExclusion)
         .filter(
             NaverSearchTermExclusion.status == status,
             NaverSearchTermExclusion.last_transition_at >= start,
             NaverSearchTermExclusion.last_transition_at < end,
+            search_term_execution.not_console_import(),
         )
         .order_by(NaverSearchTermExclusion.cost_at_exclusion.desc())
         .all()

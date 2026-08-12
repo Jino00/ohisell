@@ -88,6 +88,36 @@ def test_exclusions_summary_and_today_counts(client, db):
     assert names["오늘제외"] == "04.아이폰_지문방지필름"
 
 
+def test_today_counts_exclude_console_imports(client, db):
+    """★콘솔 편입분은 「오늘 자른 조치」가 아니다(D-NAO-177, D-NAO-176 리뷰 P2-3).
+
+    편입분의 `last_transition_at`은 편입 시각(=오늘)이라 그냥 세면 43건을 부은 날 이 API가
+    「오늘 43건 제외」라고 답한다. D-NAO-176의 1번 금지선은 그 거짓 표상이 **일기**로 나가는
+    것을 막았는데, 같은 표상이 이 문으로도 나가면 막은 의미가 없다.
+
+    ★그리고 이 단언은 NULL 안전성을 같이 지킨다: `source != 'console_import'`로 짜면 우리
+    행(source IS NULL)이 SQL에서 전부 탈락해 today_excluded가 0이 된다.
+    """
+    _row(db, term="오늘_우리가잘랐다", status="excluded")
+    _row(db, term="오늘_편입분", status="excluded", source="console_import",
+         console_excluded_at=datetime(2024, 12, 26, 0, 0))
+    # ★출처가 셋 이상이 될 때를 같이 지킨다: 라우터가 `source IS NULL`로만 좁히면 이 행이
+    #   조용히 사라지는데 위 두 줄만으로는 그 변이가 안 잡힌다(적대 리뷰 변이 생존 M11).
+    _row(db, term="오늘_자동발견", status="excluded", source="detected")
+
+    body = client.get("/api/naver/ad/search-term/exclusions").json()
+
+    assert body["today_excluded"] == 2, "편입분«만» 빠진다 — 우리 행과 다른 출처는 남아야 한다"
+    assert body["summary_by_status"] == {"excluded": 3}, "장부에는 셋 다 있다(숨기는 게 아니다)"
+    rows = {r["search_term"]: r for r in body["rows"]}
+    assert rows["오늘_편입분"]["source"] == "console_import"
+    assert rows["오늘_편입분"]["console_excluded_at"] == "2024-12-26T00:00:00", (
+        "콘솔이 알려준 실제 시각이 화면까지 가야 편입분의 excluded_at을 오늘 자른 것으로 안 읽는다"
+    )
+    assert rows["오늘_우리가잘랐다"]["source"] is None
+    assert rows["오늘_우리가잘랐다"]["console_excluded_at"] is None, "우리 행엔 콘솔 시각이 없다"
+
+
 def test_exclusions_filters_by_status_and_campaign(client, db):
     _row(db, term="A", status="excluded", campaign_id="cmp-1")
     _row(db, term="B", status="probation", campaign_id="cmp-1")

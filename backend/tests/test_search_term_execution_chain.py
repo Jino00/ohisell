@@ -890,7 +890,14 @@ def test_scorecard_counts_imported_rows_instead_of_judging_or_hiding_them(db):
     assert out["total"] == 1, "편입분은 판정 대상이 아니다"
     assert all("편입된것" != i["search_term"] for i in out["items"])
     assert out["imported_unjudgeable_count"] == 1, "판정 안 한 몫이 숫자로 나와야 한다"
-    assert "실행 시점을 모르므로" in out["imported_unjudgeable_note"]
+    # ★설명문은 «왜 판정 안 하나»를 말한다. 종전 문구 「실행 시점을 모르므로」는 콘솔에
+    #   등록시각이 있다는 사실이 확인되면서 거짓이 됐다(D-NAO-177 적대 리뷰 P1-1) —
+    #   같은 응답이 dated>0을 내면서 「시점을 모른다」고 말하는 상태를 여기서 막는다.
+    note = out["imported_unjudgeable_note"]
+    assert "사전 검색어 데이터가 없어" in note
+    assert "실행 시점을 모르므로" not in note, (
+        "콘솔이 등록시각을 준다는 사실이 확인된 뒤로 이 문장은 거짓이다"
+    )
 
 
 def test_candidate_list_stops_recommending_what_we_already_cut(db):
@@ -1033,3 +1040,236 @@ def test_voiding_an_imported_row_can_prove_no_learning_happened(db):
         "편입 경로는 일기를 만들지 않으므로 «안 셌다»를 단언할 수 있다 — 여기서만 False가 정직하다"
     )
     assert "편입" in out["diary_note"]
+
+
+# ═══ 콘솔이 알려준 «실제 제외 시각» — 아는 것과 모르는 것을 갈라 둔다 (D-NAO-177) ═══
+
+
+def test_console_time_lands_in_its_own_column_and_never_moves_excluded_at(db):
+    """★이 슬라이스의 핵심 단언 — 콘솔 등록시각은 `console_excluded_at`에만 들어간다.
+
+    `excluded_at`은 「장부가 이 행을 제외로 세운 시각」이고 두 소비자가 그 뜻에 기대어 있다:
+    `void_execution`의 일기 매칭 시간 하한과 `exclusion_survival`의 방치 판정. 2024년 날짜를
+    그 칸에 넣으면 매칭 창이 1년 반으로 벌어지고 편입 직후 배너가 거짓 빨강이 된다.
+    """
+    # prod 실제 순서 그대로: 8/11 22:26에 콘솔에서 잘렸고 다음 날 장부에 편입한다.
+    imported_at = datetime(2026, 8, 12, 21, 0, 0)
+    out = ste.import_console_exclusions(db, rows=[
+        # 콘솔 화면 실물 표기 그대로(2026-08-12 Jino 확인: 「골프」 2026.08.11 22:26)
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "골프",
+         "console_excluded_at": "2026.08.11 22:26"},
+    ], now=imported_at)
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.console_excluded_at == datetime(2026, 8, 11, 22, 26)
+    assert row.excluded_at == imported_at, "장부가 세운 시각은 편입 시각 그대로여야 한다"
+    assert out["dated"] == 1 and out["undated"] == 0
+    assert out["results"][0]["console_excluded_at"] == "2026-08-11T22:26:00"
+
+
+def test_unknown_console_time_stays_null_instead_of_being_filled_with_now(db):
+    """★모르는 것은 NULL이다. 편입 시각으로 메우면 «아는 값»과 구분이 사라진다 —
+    이 리포가 세 번 연속 당한 「모르는 것을 아는 것으로 센다」의 네 번째가 된다."""
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "시각모름"},
+    ], now=NOW)
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.console_excluded_at is None
+    assert out["dated"] == 0 and out["undated"] == 1
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026.08.11 22:26", datetime(2026, 8, 11, 22, 26)),      # 콘솔 실물
+    ("2026-08-11T22:26:00", datetime(2026, 8, 11, 22, 26)),   # ISO
+    ("2026-08-11 22:26", datetime(2026, 8, 11, 22, 26)),
+    ("2024-12-26", datetime(2024, 12, 26, 0, 0)),             # 날짜만(가장 오래된 실물)
+    ("2024.12.26", datetime(2024, 12, 26, 0, 0)),
+])
+def test_console_time_accepts_the_shapes_a_human_actually_pastes(db, raw, expected):
+    """사람이 콘솔에서 옮겨 적는 경로다 — 형식 하나만 받으면 실제 입력의 대부분이 거부된다."""
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": f"검색어{raw}",
+         "console_excluded_at": raw},
+    ], now=datetime(2026, 8, 12, 21, 0, 0))
+    assert db.query(NaverSearchTermExclusion).one().console_excluded_at == expected
+
+
+def test_unreadable_or_future_time_rejects_that_row_only(db):
+    """★못 읽은 시각을 조용히 버리면 「모른다」와 「안 적었다」가 구분되지 않는다. 그 행만 거부한다.
+
+    미래 시각도 거부한다 — **이미 걸려 있는** 제외의 등록시각이 미래일 수 없으므로 오타다.
+    """
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "정상",
+         "console_excluded_at": "2026.08.01 09:00"},
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "형식깨짐",
+         "console_excluded_at": "어제쯤"},
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "미래",
+         "console_excluded_at": "2027-01-01T00:00:00"},
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "연도오타",
+         "console_excluded_at": "0226-08-11 22:26"},
+    ], now=NOW)
+
+    assert out["imported"] == 1 and out["rejected"] == 3
+    reasons = {r["search_term"]: r.get("reason", "") for r in out["results"]}
+    # ★거부 메시지는 **요청에 실제로 있는 필드명**을 안내해야 한다(2R P2) — 개명 후에도
+    #   옛 이름을 말하면 사람이 없는 칸을 찾는다.
+    assert "console_excluded_at" in reasons["형식깨짐"]
+    assert "미래" in reasons["미래"]
+    assert "과거" in reasons["연도오타"]
+    terms = {r.search_term for r in db.query(NaverSearchTermExclusion).all()}
+    assert terms == {"정상"}, "거부된 행은 장부에 안 들어간다"
+
+
+def test_reimport_without_a_time_keeps_the_time_we_already_knew(db):
+    """★재편입이 정보를 «잃는» 방향으로 가면 안 된다 — 아는 값을 모르는 값으로 덮지 않는다."""
+    imported_at = datetime(2026, 8, 12, 21, 0, 0)
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM,
+         "console_excluded_at": "2026.08.11 22:26"},
+    ], now=imported_at)
+    row = db.query(NaverSearchTermExclusion).one()
+    ste.void_execution(db, exclusion_id=row.id, reason="테스트", now=imported_at)
+
+    out2 = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM},
+    ], now=imported_at + timedelta(days=1))
+
+    db.refresh(row)
+    assert row.console_excluded_at == datetime(2026, 8, 11, 22, 26)
+    # dated는 «편입 후 이 행이 시각을 아는가»로 센다 — 이번 붓기에 시각을 안 줬어도 안다.
+    assert out2["dated"] == 1 and out2["undated"] == 0
+
+
+def test_not_console_import_predicate_is_null_safe(db):
+    """★`source != 'console_import'` 한 줄이면 될 것 같지만 우리 행의 source는 **NULL**이라
+    SQL에서 그 비교가 NULL(=거짓)이 된다 — 편입분이 아니라 **정상 행이 통째로 사라진다.**
+    파이썬 필터와 같은 모양인데 결과가 정반대라 술어를 함수로 못 박고 여기서 지킨다."""
+    _spend(db, day=date(2026, 8, 1), cost=5_000)
+    db.commit()
+    ste.record_execution(db, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM,
+                         rationale="우리가 잘랐다", now=NOW)
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "편입분"},
+    ], now=NOW)
+
+    kept = db.query(NaverSearchTermExclusion).filter(ste.not_console_import()).all()
+
+    assert [r.search_term for r in kept] == [TERM], (
+        "우리가 실행한 행(source IS NULL)이 남고 편입분만 빠져야 한다"
+    )
+
+
+def test_console_time_can_be_attached_later_to_a_row_we_already_know(db):
+    """★적대 리뷰 P1-2 — 이미 아는 행에 시각을 나중에 붙일 수 있어야 한다.
+
+    종전엔 `already_known` 분기가 준 값을 **아무 신호 없이 버렸고**, 이 칸을 채울 다른 입구가
+    없어 한 번 미상이면 영영 미상이었다. prod의 「골프」가 정확히 이 케이스다 — 우리가 8/11에
+    보고한 행인데 콘솔 43건 목록에도 들어 있어 첫 붓기에서 22:26이 버려질 참이었다.
+    상태·출처는 그대로 두고 **시각만** 채운다.
+    """
+    _spend(db, day=date(2026, 8, 1), cost=5_000)
+    db.commit()
+    ste.record_execution(db, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM,
+                         rationale="우리가 잘랐다", now=NOW)
+
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM,
+         "console_excluded_at": "2026.08.11 10:00"},
+    ], now=datetime(2026, 8, 12, 21, 0, 0))
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.console_excluded_at == datetime(2026, 8, 11, 10, 0), "준 시각이 버려지면 안 된다"
+    assert row.source is None and row.excluded_at == NOW, (
+        "시각만 채운다 — 출처·장부 시각이 바뀌면 그 행이 성적표에서 사라진다"
+    )
+    res = out["results"][0]
+    assert res["result"] == "already_known" and res["console_time_filled"] is True, (
+        "무엇이 어떻게 처리됐는지 행마다 말해야 한다(조용한 폐기 금지)"
+    )
+
+
+def test_reexecuting_a_voided_import_makes_the_row_ours_again(db):
+    """★적대 리뷰 P2 — 편입행을 void한 뒤 우리가 진짜 실행하면 그 행은 이제 **우리 조치**다.
+
+    `source='console_import'`가 남으면 **일기는 써서 wisdom이 먹는데** 성적표·오늘 집계·
+    Slack 브리핑에선 통째로 빠진다 — 측정에서만 사라지는 조치가 생긴다.
+    """
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM},
+    ], now=NOW)
+    row = db.query(NaverSearchTermExclusion).one()
+    ste.void_execution(db, exclusion_id=row.id, reason="편입이 틀렸다", now=NOW)
+
+    ste.record_execution(db, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM,
+                         rationale="이번엔 우리가 잘랐다", now=NOW)
+
+    db.refresh(row)
+    assert row.source is None, "우리가 실행한 행이 편입분으로 남으면 측정에서만 사라진다"
+    assert db.query(NaverSearchTermExclusion).filter(ste.not_console_import()).count() == 1
+    out = scorecard.build_scorecard(db, now=NOW)
+    assert out["total"] == 1 and out["imported_unjudgeable_count"] == 0
+
+
+def test_predicate_keeps_rows_from_a_third_source_not_just_null(db):
+    """★변이 생존이 드러낸 구멍(적대 리뷰): 술어의 `!=` 절이 아무 테스트에도 안 걸려 있었다.
+
+    지금은 `source`가 NULL/`console_import` 둘뿐이라 `is_(None)`만으로도 통과한다 — 세 번째
+    출처가 생기는 순간 그 행들이 오늘 집계·Slack에서 통째로 사라지는데 테스트는 초록이다.
+    """
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "편입분"},
+    ], now=NOW)
+    db.add(NaverSearchTermExclusion(
+        campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term="다른출처", status="excluded",
+        cycle=1, excluded_at=NOW, last_transition_at=NOW, cost_at_exclusion=0, source="detected",
+    ))
+    db.commit()
+
+    kept = {r.search_term for r in
+            db.query(NaverSearchTermExclusion).filter(ste.not_console_import()).all()}
+
+    assert kept == {"다른출처"}, "편입분«만» 빠져야 한다 — 술어가 NULL만 보면 이 행이 사라진다"
+
+
+@pytest.mark.parametrize("raw,ok", [
+    ("2026-08-12 20:50", True),    # 편입 5분 전 — 통과
+    ("2026-08-12 21:05", True),    # 여유 10분 안 — 시계 차이로 본다
+    ("2026-08-12 21:30", False),   # 여유 밖 — 오타로 본다
+    ("2010-01-01", True),          # 연도 하한 경계
+    ("2009-12-31", False),
+])
+def test_time_bounds_are_pinned_not_just_roughly_right(db, raw, ok):
+    """★경계값이 아무 테스트에도 안 걸려 있어 「미래 여유 30일」·「하한 1900년」 변이가 생존했다.
+
+    성긴 표본(2027년·226년)만 쓰면 경계가 사실상 무근이 된다.
+    """
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": f"경계{raw}",
+         "console_excluded_at": raw},
+    ], now=datetime(2026, 8, 12, 21, 0, 0))
+
+    assert (out["imported"] == 1) is ok, f"{raw} 판정이 뒤집혔다"
+
+
+def test_console_time_survives_whitespace_and_timezone_shapes(db):
+    """★사람이 콘솔에서 복사하면 탭·후행 공백이 붙는다 — `.strip()`이 깨지면 **전건 거부**다.
+
+    tz-aware datetime 분기도 여기서만 지켜진다(라우터는 str만 넘기므로 SA 직접 호출 경로).
+    """
+    from zoneinfo import ZoneInfo
+
+    imported_at = datetime(2026, 8, 12, 21, 0, 0)
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "공백붙음",
+         "console_excluded_at": "\t2026.08.11 22:26  "},
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "UTC로들어옴",
+         "console_excluded_at": datetime(2026, 8, 11, 13, 26, tzinfo=ZoneInfo("UTC"))},
+    ], now=imported_at)
+
+    got = {r.search_term: r.console_excluded_at for r in db.query(NaverSearchTermExclusion).all()}
+    assert got["공백붙음"] == datetime(2026, 8, 11, 22, 26)
+    assert got["UTC로들어옴"] == datetime(2026, 8, 11, 22, 26), (
+        "tz-aware는 KST로 옮겨 naive화한다 — 안 그러면 벽시계가 9시간 틀어진다"
+    )

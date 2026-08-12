@@ -49,9 +49,12 @@ const BASE = {
   as_of: "2026-08-12T20:30:00",
 };
 
+// ★백엔드 note 원문 그대로(정본은 search_term_scorecard). 2026-08-12 D-NAO-177에서
+//   「실행 시점을 모르므로」가 거짓이 되어 교체됐다 — 콘솔에 등록시각이 실제로 있다.
 const NOTE =
-  "콘솔에 이미 걸려 있던 제외를 장부에 편입한 행이다. 실행 시점을 모르므로 전후 창을 잡을 수" +
-  " 없어 성적표가 판정하지 않는다 — 조치 생존 감시에는 포함된다.";
+  "콘솔에 이미 걸려 있던 제외를 장부에 편입한 행이다. 등록시각을 아는 행도 있지만, 편입 시점" +
+  " 기준으로는 사후 대조에 쓸 사전 검색어 데이터가 없어 성적표가 판정하지 않는다 —" +
+  " 조치 생존 감시에는 포함된다.";
 
 afterEach(() => cleanup());
 
@@ -64,6 +67,10 @@ describe("성적표 — 콘솔 편입분", () => {
 
     expect(await screen.findByText(/43건/)).toBeTruthy();
     expect(screen.queryByText(/아직 실행된 제외가 없습니다/)).toBeNull();
+    // ★빈 화면 문구는 TSX 하드코딩 사본이라 백엔드 note를 고쳐도 같이 안 바뀐다
+    //   (D-NAO-177 적대 리뷰 P1-1: 같은 사실의 형제 문장이 두 벌이었다).
+    expect(screen.queryByText(/실행 시점을 몰라/)).toBeNull();
+    expect(screen.getByText(/사전 데이터가 없어/)).toBeTruthy();
   });
 
   it("판정 대상이 있으면 헤더에 «편입분 N건은 판정 대상 아님»을 함께 적는다", async () => {
@@ -73,7 +80,7 @@ describe("성적표 — 콘솔 편입분", () => {
     renderPage();
 
     expect(await screen.findByText(/편입분 43건은 판정 대상 아님/)).toBeTruthy();
-    expect(screen.getByText(new RegExp("실행 시점을 모르므로"))).toBeTruthy();
+    expect(screen.getByText(new RegExp("사전 검색어 데이터가 없어"))).toBeTruthy();
   });
 
   it("편입분이 0이면 그 줄을 만들지 않는다 — 없는 것을 있는 것처럼 적지 않는다", async () => {

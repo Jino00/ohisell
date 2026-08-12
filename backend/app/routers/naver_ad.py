@@ -1885,10 +1885,18 @@ def get_search_term_exclusions(
     }
 
     def _today_count(target_status: str) -> int:
+        """오늘 «우리가 전이시킨» 건수 — ★콘솔 편입분은 뺀다(D-NAO-177).
+
+        편입분의 `last_transition_at`은 편입 시각(=오늘)이라 그냥 세면 43건을 부은 날
+        「오늘 43건을 잘랐다」가 된다. 그건 D-NAO-176의 1번 금지선(편입분이 오늘 실행한
+        조치로 보이면 안 된다)이 일기에 대해 막은 것과 **같은 거짓 표상이 다른 문으로
+        나가는** 것이다. 편입 자체는 편입 API 응답과 목록의 `source`로 보인다.
+        """
         return db.query(NaverSearchTermExclusion).filter(
             NaverSearchTermExclusion.status == target_status,
             NaverSearchTermExclusion.last_transition_at >= today_start,
             NaverSearchTermExclusion.last_transition_at < tomorrow_start,
+            search_term_execution.not_console_import(),
         ).count()
 
     q = db.query(NaverSearchTermExclusion)
@@ -1917,6 +1925,15 @@ def get_search_term_exclusions(
                 "adgroup_id": r.adgroup_id, "search_term": r.search_term,
                 "restrict_kwd_id": r.restrict_kwd_id, "status": r.status, "cycle": r.cycle,
                 "excluded_at": r.excluded_at.isoformat() if r.excluded_at else None,
+                # ★행의 출처와 «콘솔이 알려준 실제 제외 시각»(D-NAO-177). 둘 다 화면이 읽는다 —
+                #   `source=console_import`면 `excluded_at`은 편입 시각이므로 그대로 보여 주면
+                #   「오늘 자른 것」으로 읽힌다. NULL인 console_excluded_at은 「모른다」이고,
+                #   화면이 그 상태를 «모름»으로 그려야 추정이 안 생긴다(교훈 #283 — 세는 것을
+                #   화면까지 잇는다).
+                "source": r.source,
+                "console_excluded_at": (
+                    r.console_excluded_at.isoformat() if r.console_excluded_at else None
+                ),
                 "last_transition_at": r.last_transition_at.isoformat() if r.last_transition_at else None,
                 "next_review_at": r.next_review_at.isoformat() if r.next_review_at else None,
                 "probation_until": r.probation_until.isoformat() if r.probation_until else None,
@@ -2031,6 +2048,15 @@ class ConsoleExclusionRow(BaseModel):
     search_term: str = Field(min_length=1, max_length=300)
     restrict_kwd_id: str | None = Field(default=None, max_length=50)
     note: str | None = Field(default=None, max_length=200)
+    # ★콘솔 「제외 검색어」 탭의 등록시각(D-NAO-177). **모르면 생략한다** — 여기를 비우면
+    #   `console_excluded_at`이 NULL로 남아 「모른다」가 그대로 보존된다.
+    #   타입을 datetime이 아니라 str로 받는 이유: 콘솔 실물 표기가 `2026.08.11 22:26`이라
+    #   pydantic의 datetime 파서가 통째로 거부한다. 형식 판정은 SA(search_term_execution)가
+    #   정본이고 라우터는 그 예외를 옮기기만 한다(이 리포의 검증 정본 규칙).
+    #   ★이름이 `excluded_at`이 아닌 이유(적대 리뷰 P2): GET 응답의 `excluded_at`은 **장부가
+    #   이 행을 세운 시각**이라 뜻이 다르다. 같은 이름이면 GET 결과를 그대로 되먹였을 때
+    #   「모른다」가 편입 시각으로 굳는다 — 이름으로 원천 차단한다.
+    console_excluded_at: str | None = Field(default=None, max_length=40)
 
 
 class ConsoleExclusionImportIn(BaseModel):
