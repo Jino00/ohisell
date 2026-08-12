@@ -584,7 +584,8 @@ def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date,
 # ★D-16(S7): RG 광고비는 RG 정산(totalAdSalesDeductionAmount)에만 있고, 업로드되는 광고 XLSX
 # (CoupangAdOptionDaily, 광고센터 PA 보고서 pa_daily)에는 안 잡힌다 — 광고센터는 마켓플레이스(3P/윙)
 # 검색·디스플레이 광고 플랫폼이고 RG 광고는 별개 청구(prod 광고 XLSX 2P 0행 라이브 실증). 따라서
-# net_profit 플립(S7)은 광고 포함 rg_total을 전액 차감한다(D-16). settlement ad_sales는 표시·검산용.
+# net_profit 플립은 **광고 제외** 정산액을 차감한다(D-CPP-43). settlement ad_sales는 표시·검산용
+# — 광고센터 PA의 «공제»라 PA(ad_spend)에서 이미 빠졌다.
 # 아래 RG(2P) 합산 헬퍼는 광고센터에서 RG상품 검색광고를 돌릴 경우의 미래 겹침 감시용일 뿐(현재 0).
 # sell_type 코드: 3P=윙·2P=RG·Retail=로켓배송(ad_costs 확정).
 RG_AD_SELL_TYPE = "2P"  # 광고 XLSX 판매방식 코드: 2P=로켓그로스(RG)
@@ -675,7 +676,8 @@ def _agg_rg_ad_overlap(db: Session, dfrom: date, dto: date,
     """기간 내 광고비 XLSX의 RG(2P) 광고비 합 — 미래 이중계상 겹침 감시용.
 
     ★D-16(S7): RG 광고는 광고센터 PA 보고서(이 XLSX)에 안 잡히고 RG 정산에만 있어(라이브 실증)
-    플립은 rg_total을 전액 차감한다. 이 값은 정상=0 — 광고센터에서 RG상품 검색광고를 돌려 PA 2P가
+    ★D-CPP-43 이후 이 감시는 무력하다(2P 라벨을 보는데 실제 RG 광고는 3P로 실린다). 이 값이 0이라는
+    것을 «이중계상 없음»의 근거로 쓰지 말 것. 필드는 하위호환으로만 남긴다. 이 값은 정상=0 — PA 2P가
     생기면 정산 ad_sales와 겹쳐 이중계상 위험이 되므로 그 신호를 감시한다(0이 아니면 호출부에서 경고).
 
     S1: vendor_id 주면 해당 계정만(계정 분리). None이면 전체(기존 동작 불변).
@@ -990,7 +992,8 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # 윈도우 RG 순이익은 낙관적(매출 전액 인식·정산 일부만 차감), 장기·정산완료 구간에서 수렴.
     account_sum["net_profit_basis"] = (
         "mixed: revenue=order-date(paid_at), commission=order-date(net_revenue x option rate, D-CPP-32), "
-        "rg_settlement_deduction=recognition-date(lags). "
+        "rg_settlement_deduction=recognition-date(lags, **광고 제외** — D-CPP-43), "
+        "ad=report-date(PA; RG 광고비도 여기 한 곳에서만 차감된다). "
         "RG net_profit optimistic on short windows; converges over closed periods (D-9)."
     )
     ad_spend_total = sum((x["ad_spend"] for x in ad_rows), _Z)
@@ -1066,26 +1069,29 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # RG 정산 비용 집계 + 계정별 대조(reconciliation) 브레이크다운.
     # ★D-10 라이브 확정(2026-06-09): 풀필먼트(J) = 배송비(delivery)+입출고비(warehousing)+보관비(storage).
     #   세 컴포넌트를 fulfillment 한 그룹으로 묶어 표시(레퍼런스 17 §7 검산 일치). 라인 합 = total로 reconcile.
-    #   ad_sales(광고비 d)는 D-16에서 net_profit 전액 차감에 포함됨(RG 광고는 정산 전용, 광고센터 미포함).
+    #   ★ad_sales(광고비 d)는 **차감에서 제외**된다(D-CPP-43) — 광고센터 PA 광고비의 «공제»이고
+    #     PA는 이미 ad_spend로 차감됐다. 1차 출처: 윙 「광고비 내역」(광고유형 전부 PA·캠페인 동일).
     rg_total = sum((v["total"] for v in rg_fees.values()), _Z)
     rg_by_account = [_rg_account_breakdown(ak, v) for ak, v in sorted(rg_fees.items())]
     rg_ad_settlement = sum((v.get("ad_sales", _Z) for v in rg_fees.values()), _Z)
-    # D-16 미래 겹침 감시(Codex S7): 정상=0. 0이 아니면 광고센터에서 RG상품 검색광고를 돌려 PA 2P가
-    #   생긴 것 → rg_total 전액 차감(정산 광고 포함)과 XLSX 2P(net_profit에 이미 반영)가 이중계상될 수 있음.
+    # ★이 감시는 사실상 무력화됐다(D-CPP-43): 2P 라벨을 보는데 실제 RG 광고는 3P 라벨로 실린다.
+    #   더구나 이제 정산 광고비를 차감하지 않으므로 이 축의 이중계상 위험 자체가 사라졌다.
+    #   필드는 하위호환으로 남기되 **이 값이 0이라는 것을 안전의 근거로 쓰지 말 것**(교훈 #261).
     rg_ad_xlsx_overlap = _agg_rg_ad_overlap(db, dfrom, dto, acc["vendor_id"])
     if rg_ad_xlsx_overlap != _Z:
         log.warning(
             "RG 광고 이중계상 위험(D-16): 광고 XLSX 2P=%s 발생 — 정산 ad_sales=%s와 겹칠 수 있음. "
-            "D-16(전액 차감)은 2P=0 전제 → 재검토 필요(트랙 D-16 잔존 리스크).",
+            "(D-CPP-43 이후 정산 광고비는 차감하지 않으므로 이 축의 이중계상 위험은 사라졌다 — 참고 로그.)",
             rg_ad_xlsx_overlap, rg_ad_settlement,
         )
 
-    # ─── S7(D-14/D-16): net_profit 플립 — 계정 단위 RG 정산 총액 전액 차감 ───
-    # ★D-16(D-15 개정, /browse 라이브 조사 2026-06-09): RG 광고비는 광고센터 PA 보고서(pa_daily XLSX,
-    #   advertising.coupang.com /reports/pa = 마켓플레이스 광고)에 안 잡히고 RG 정산에만 존재
-    #   (prod 광고 XLSX 2P 0행 실증) → 광고 포함 rg_total 전액 차감해야 net_profit에 반영된다.
-    #   rg_total은 전부 정산 basis라 basis 불일치 없음(D-15 non-ad 차감보다 단순·정확). 2P=0이라
-    #   이중계상 없음. (구 D-15 "광고 제외 차감"은 RG 광고가 XLSX 2P에 있다는 틀린 전제 → 폐기.)
+    # ─── S7(D-14/D-CPP-43): net_profit 플립 — 계정 단위 RG 정산액 차감(**광고 제외**) ───
+    # ★D-CPP-43(2026-08-12): **D-16 폐기**, 구 D-15의 「광고 제외 차감」으로 복귀.
+    #   D-16은 `sell_type=2P` 0행을 근거로 광고 포함 전액을 뺐으나 **라벨이 판매경로가 아니다**
+    #   (오픽스 PA의 97.28%가 RG 옵션에 쓰이고 상위 5옵션의 3P 주문은 0건).
+    #   1차 출처(윙 「광고비 내역」)가 정산 광고비 = 광고센터 PA의 «공제»임을 확정했다 →
+    #   PA는 ad_spend로 이미 차감되므로 여기서 또 빼면 이중계상. ref 04 §2·ref 17 §7이 이미
+    #   같은 말을 했었다(D-16이 하루 뒤 라벨 증거로 덮었다).
     # D-14: 차감은 summary(account_sum) 레벨만. by_option net_profit은 운영지표로 불변.
     # 회귀 가드: RG 데이터 0이면 rg_total=0 → 플립 no-op(불변).
     # 대조 기준선(RG 플립 전). ★주의(codex P2-1): 이 값은 '비-PA 차감 후·RG 차감 전'이다

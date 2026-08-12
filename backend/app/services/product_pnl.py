@@ -327,7 +327,13 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
             "unmapped_coupang": unmapped_np,
             "settlement_revenue_adjustment": cc_sum["settlement_revenue_adjustment"],
             "account_only_ad_nonpa": -cc_sum["ad_nonpa_deducted"],
-            "rg_settlement_flip": -cc_sum["rg_settlement_total"],
+            # ★D-CPP-43 적대 리뷰 P1-1: **실제 차감액**을 신고해야 한다. 플립이 광고를 빼고
+            #   차감(rg_total − ad_sales)하는데 여기서 rg_total을 신고하면 보존식이 정확히
+            #   ad_sales만큼 깨진다 → `trustworthy=false` → SKU 손익 표가 **렌더링 자체가 안 된다**
+            #   (ProductConnectionMap.tsx의 `trustworthy &&` 가드). 라이브에서 실제로 그랬다.
+            #   (아래 :369의 `coupang_rg/settlement_fee`는 «정산 원장 권위값»이라 rg_total이 맞다 —
+            #    같은 이름이 층에 따라 다른 것을 가리킨다.)
+            "rg_settlement_flip": -cc_sum["rg_settlement_deducted"],
             "seller_shipping_3p": -cc_sum["seller_shipping_3p"],
             # D-CPP-33에서 새로 계정 단위로 붙은 둘. 원장에 안 실으면 보존식이 깨진다
             # (실제로 test_whole_ledger_conservation이 이 누락을 잡았다).
