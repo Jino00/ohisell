@@ -1,3 +1,28 @@
+[2026-08-12] D-NAO-176 — 콘솔 제외를 장부에 편입하는 입구 (학습 사슬 밖으로)
+  · 장부 prod 2건 vs 콘솔 실물 약 45건(쇼핑 그룹은 API가 200/0건이라 자동 발견 원리적 불가).
+  · ★1번 금지선: 편입분에 diary execute 행 생성 금지 — 그 경로로 43건을 부으면
+    13일 만의 진짜 표본 1건(diary 4371 「골프」)이 거짓 일기 43건에 익사한다.
+    검증만 공유하는 별도 함수 `import_console_exclusions`(record_execution과 분리).
+  · source 컬럼 신설(NULL=우리 실행, console_import=편입분). 성적표는 편입분을 판정 안 하고
+    imported_unjudgeable_count로만 센다. 후보 리스트에 already_excluded 버킷 신설 —
+    prod 실측 63건 중 1건이 「골프」(8/11 Jino가 직접 자른 검색어가 재추천되고 있었다).
+  · 적대 리뷰 1R FAIL(P1 1건) → 2R PASS. P1 = 「세는 것이 화면에 없다」 —
+    **사흘 새 세 번째 같은 모양**(D-NAO-174 unverifiable · D-NAO-175 type_unknown_groups ·
+    이번 already_excluded). 근본 원인: 화면이 BUCKET_ORDER 하드코딩 배열을 돌고 고정 키
+    Record라 키가 늘어도 TS가 침묵 → bucketKeysToRender()로 구조 변경(교훈 #283).
+  · 2R 변이 M2 생존 — 헬퍼는 테스트되는데 화면이 그걸 쓰는지는 안 지킴(호출부 되돌려도
+    전건 초록). jsdom 렌더 테스트로 결합 층을 묶었다 — 위키 부채 write-to-the-binding-layer
+    (B-4) 실증 사례(교훈 #284).
+  · 검증: 변이 백엔드8/8·프론트6/6 KILLED, backend 5,470 passed, frontend 31파일 전건 실행,
+    tsc clean, 마이그 up/down/up 왕복 정상.
+  · 라이브 합격 prod b1e9117: 벌크 imported:2/rejected:1(사유표시) · ★일기 총건 4376→4376
+    불변(1번 금지선 라이브 증거) · 성적표 total=2+imported_unjudgeable_count=2 · 생존감시
+    monitored 2→4·healthy=True · 후보 63→62(골프 빠지고 already_excluded로 재분류) ·
+    검증행 2건 무효화 → wisdom_may_have_counted:False(편입 경로가 일기 안 만드는 게 증명됨).
+  · ⚠️prod 원장에 void 행 3개 잔존(id=3·4·5) — 하드 삭제 경로 없음이 설계, 감사 흔적.
+  · ★다음 세션 1순위는 여전히 D-NAO-174 합격기준②(8/13 08:40 이후 사슬 실관측) —
+    이번 작업은 그걸 대체하지 않는다.
+
 [2026-08-12 15:4x~17:2x] D-NAO-175 — 검색어 제외 장부의 «입구» 가드 (콘솔 42건 넣기 전에)
   · 이 세션의 1순위(직전 계약 D-NAO-174 합격기준 ②, 사슬 실관측)는 `age>=2` 게이트 때문에
     **8/13 08:40 이후에만 가능** — 오늘 실측도 outcome_json=None. 억지 충족 안 했다.

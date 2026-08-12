@@ -85,6 +85,12 @@ D-NAO-174 합격기준 ②가 미완인 이유가 **사슬 고장**인지 **PAO 
 
 ## 6. 남은 일 / 이월
 
+> ★2026-08-12 후속(D-NAO-176, 커밋 `b1e9117`, 마이그 `im1port2src3`)이 항목 4를 닫았다 —
+> 콘솔 제외 43건을 `import_console_exclusions`로 원장에 편입(diary execute 행은 안 만듦).
+> 라이브 합격: 일기 총건 4376→4376 불변, 후보 63→62(「골프」 재추천 해소). 상세는
+> `docs/tracks/active/track_naver-ad-optimization.md`의 D-NAO-176 항목. 교훈 #283·#284.
+> **이 후속도 다음 세션 1순위(8/13 08:40 사슬 실관측)를 대체하지 않는다** — §2·아래 그대로 유효.
+
 ### 앵커 파일 이월 4건 (`.claude/anchors/93268404-a2c4-4478-9623-e5d7dd368a77.md`)
 1. 직전 계약 D-NAO-174 합격기준 ②: 8/13 08:40 이후 diary 4371 `outcome_json` d1 실관측 (§2 1순위와 동일 항목)
 2. 오늘 QA 발견(사슬 채움 이력 7/25~7/30 2,593건 / 7/31~8/10 공백=PAO 정지로 무입력 / 4371=13일 만의 첫 소급대상 행) — §5에 반영 완료
@@ -103,7 +109,7 @@ D-NAO-174 합격기준 ②가 미완인 이유가 **사슬 고장**인지 **PAO 
 1. **8/17 첫 성적표 판정** → 그 결과로 09 나머지 6건 결정
 2. **d1이 캠페인 grain이라 신호대잡음비 낮음**(검색어 grain을 사슬에 넣는 설계는 별건)
 3. **리뷰어 P2 7건**: `POST /search-term/executions` 입력 검증 없음 · **원장 DELETE 라우트 부재**(잘못 들어온 행이 영구히 배너·성적표에 남는다) · `detect_new_exclusions` 그룹당 API 2회 무상한 · `camp_of` 미매핑 시 `campaign_id=""`가 원장·diary에 들어가 **wisdom 시그니처 오염** · `margin_lost` 음수 가능 · `build_scorecard` N+1(20~50건이면 200쿼리) · `record_execution` docstring 반환값 불일치
-4. **콘솔 제외 42건이 원장 밖** — 쇼핑은 자동 발견 불가라 수동 입력 경로 필요
+4. ~~콘솔 제외 42건이 원장 밖~~ → ✅2026-08-12 D-NAO-176에서 편입 경로 신설·라이브 합격(위 후속 안내 참조)
 5. prod 디스크 **88%**(직전 인계 86.3%보다 악화) · `.pm2/logs` 로테이션 없음
 6. 앞 세션 이월 유지: `update_keyword_bid`의 `useGroupBidAmt:False` 상시 전송 · `[LEVER_MISMATCH]` 상시 표면 없음 · 01 갤럭시_지문방지_TPU 미조치 · 03 일예산 원복 · 대행사 통보
 
@@ -111,12 +117,12 @@ D-NAO-174 합격기준 ②가 미완인 이유가 **사슬 고장**인지 **PAO 
 **`id=3`(`__배포검증_D-NAO-175__`, `status=void`)가 prod DB에 남아 있다.** 합격기준 ②(정정 경로가 라이브에서 실제로 동작한다)의 라이브 증거이며, 하드 삭제 경로가 없는 것이 이번 설계다(§ 정정 경로 부재 수리 참조 — 소프트 삭제만 존재, 일기와의 학습 사슬 감사 흔적 보존이 이유). 소비자 전건이 `status`를 좁혀 읽으므로 **무해**(배너·성적표·SS레인 어디에도 안 뜬다).
 
 ## 8. 상태·환경
-- prod: `sellc.ohitech.co.kr` · pm2 `ohisell-backend-8001` · 백엔드 커밋 **`dd3cb61`** · 프론트 번들 **`index-K9T3nnIP.js`**(스탬프 `dd3cb61`)
+- prod: `sellc.ohitech.co.kr` · pm2 `ohisell-backend-8001` · 백엔드 커밋 **`b1e9117`**(D-NAO-176 반영, 직전 `dd3cb61`에서 갱신) · 마이그 head **`im1port2src3`** · 프론트 번들 **배포됨**(D-NAO-176 라이브 합격에 프론트 신규 문구 3종 확인 포함 — 구체 파일명·스탬프는 이 인계 작성 시점 원자료에 없으므로 필요 시 prod `.deploy-stamp` 직접 조회)
 - ⚠️**Mac 나가는 IP가 대만(`125.227.60.86`)으로 전환된 채 nginx 허용목록 밖**이라 무중단 배포가 원리적으로 불가 — **`--restart-legacy`만 가능**(다운타임 약 50초). 허용목록 추가는 2026-07-17 무인증 공개 사고의 처방이라 임의로 안 넓힌다. IP 대만 전환 원상복구 여부는 Jino 결정대기.
 - ⚠️**GitHub Actions가 결제 정지**로 리포 전체에서 CI가 안 돈다("job was not started because recent account payments have failed"). CI 빨강/회색은 코드 신호가 아니다 — PR 경계 의무는 적대 리뷰(서브에이전트)가 대신 진다.
-- 테스트:
-  - backend: `cd backend && python3 -m pytest -q` → **5,460 passed**
-  - frontend: `cd frontend && npm test` → 28파일 「전부 실행됨 ✓」(D-CPP-44 인구조사 가드). **`npx vitest run` 직접 호출 금지** — iCloud `node_modules` dataless eviction으로 조용히 파일이 빠져도 vitest 자체는 초록을 찍는다(교훈 #272).
+- 테스트(D-NAO-176 기준, 이 인계 시점 최신):
+  - backend: `cd backend && python3 -m pytest -q` → **5,470 passed**
+  - frontend: `cd frontend && npm test` → 31파일 「전부 실행됨 ✓」(D-CPP-44 인구조사 가드). **`npx vitest run` 직접 호출 금지** — iCloud `node_modules` dataless eviction으로 조용히 파일이 빠져도 vitest 자체는 초록을 찍는다(교훈 #272).
 - 원격 조회 관용구: `ssh -o BatchMode=yes sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python -" < 스크립트.py`(scp로 절대경로 실행하면 `app` 모듈을 못 찾는다 — stdin 방식이어야 cwd가 backend가 된다. 원격 스크립트는 `load_dotenv("/home/ubuntu/ohisell/backend/.env")`를 첫 줄에)
 - ★**변이 주입 원복에 `git checkout --`를 쓰지 마라** — 커밋 안 한 수정이 같이 날아간다(직전 세션 실사고, P1 수정 3건을 잃고 재작업). `cp <파일> /tmp/x.orig` → 변이 주입 → 테스트 → `cp /tmp/x.orig <파일>`로 원복.
 
