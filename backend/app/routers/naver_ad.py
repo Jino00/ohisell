@@ -2023,6 +2023,44 @@ def delete_search_term_execution(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
+class ConsoleExclusionRow(BaseModel):
+    """콘솔에 이미 걸려 있는 제외 1건(편입용)."""
+
+    campaign_id: str = Field(min_length=1, max_length=50)
+    adgroup_id: str = Field(min_length=1, max_length=50)
+    search_term: str = Field(min_length=1, max_length=300)
+    restrict_kwd_id: str | None = Field(default=None, max_length=50)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class ConsoleExclusionImportIn(BaseModel):
+    """일괄 편입 요청. 상한 200건 — 콘솔 실물이 약 45건이라 그 4배면 충분하고,
+    무제한이면 한 번의 붙여넣기 실수가 원장을 통째로 덮는다."""
+
+    rows: list[ConsoleExclusionRow] = Field(min_length=1, max_length=200)
+
+
+@router.post("/search-term/executions/import")
+def post_import_console_exclusions(
+    payload: ConsoleExclusionImportIn, db: Session = Depends(get_db)
+) -> dict:
+    """콘솔에 **이미 걸려 있는** 제외를 장부에 일괄 편입한다(원장 전용 — 일기 0건, D-NAO-176).
+
+    ★단건 POST(`/executions`)와 다른 점이 이 라우트의 전부다: 그쪽은 **방금 실행한** 조치를
+      학습 사슬에 태우려고 일기를 쓴다. 여기 들어오는 것은 **시점을 모르는 과거 조치**라
+      일기를 쓰면 「오늘 실행된 조치 N건」이라는 거짓 표본이 생기고, 13일 만의 진짜 표본
+      1건을 그 안에 익사시킨다. 그래서 검증만 공유하고 일기 경로는 공유하지 않는다.
+
+    성적표는 이 행들을 **판정하지 않는다**(실행 시점을 모르면 전후 창을 못 자른다) —
+    대신 `imported_unjudgeable_count`로 세어 낸다. 조치 생존 감시에는 포함된다.
+
+    거부는 **행 단위**다 — 200건 중 1건이 오타라고 199건이 죽으면 사람이 전체를 다시 붙여넣는다.
+    """
+    return search_term_execution.import_console_exclusions(
+        db, rows=[r.model_dump() for r in payload.rows]
+    )
+
+
 @router.post("/search-term/executions/detect")
 def post_detect_search_term_executions(
     campaign_id: str | None = Query(None),

@@ -3217,6 +3217,14 @@ class NaverSearchTermExclusion(Base):
     live_state: Mapped[Optional[str]] = mapped_column(String(12), nullable=True, index=True)
     live_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # ★kst_now 주입
     live_note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)  # unknown 사유·발견 경위
+    # ── 이 행이 어디서 왔는가 (D-NAO-176) ──
+    # ★NULL = 우리가 실행했거나 보고받은 조치(record_execution) — 일기가 있고 성적표가 판정한다.
+    #   'console_import' = **콘솔에 이미 걸려 있던 것을 일괄 편입**한 행. 실행 시점을 모르므로
+    #   전후 창을 잡을 수 없다 → 성적표가 판정하지 않고, 일기도 만들지 않는다(학습 입력 아님).
+    #   감시 대상에는 들어간다 — 「우리가 아는 제외」의 목록이 현실과 같아야 하기 때문이다.
+    # 이 구분이 없으면 편입 43건이 「오늘 실행한 조치 43건」으로 보이고, 13일 만의 진짜 표본
+    # 1건(「골프」)이 그 안에 익사한다.
+    source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
 
 
 # ══════════════════════════════════════════════════════════════════

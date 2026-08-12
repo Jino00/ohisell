@@ -235,6 +235,110 @@ def record_execution(
     }
 
 
+CONSOLE_IMPORT_SOURCE = "console_import"
+
+
+def import_console_exclusions(
+    db: Session, *, rows: list[dict], now: datetime | None = None
+) -> dict:
+    """콘솔에 **이미 걸려 있는** 제외를 장부에 일괄 편입한다(원장 전용 — 일기 없음).
+
+    ## 왜 `record_execution`을 재사용하지 않나 (이 함수의 존재 이유 전부)
+    `record_execution`은 원장 행과 **diary `execute` 행을 동시에** 만든다. 그게 그 함수의
+    목적이다 — 사람이 **방금** 실행한 조치를 학습 사슬에 태우는 것.
+    그런데 여기 들어오는 것은 **시점을 모르는 과거 조치**다. 그 경로로 43건을 부으면
+    「오늘 실행된 조치 43건」이라는 거짓 일기가 생기고, 각각 D+1 소급 대상이 되어
+    **13일 만의 진짜 표본 1건(「골프」)이 쓰레기 43건에 익사한다.**
+    그래서 검증(`_require`)만 공유하고 **일기 경로는 공유하지 않는다.**
+
+    ## 무엇을 하고 무엇을 안 하나
+    - 한다: 원장 upsert(`source='console_import'`) · 행 단위 성공/거부 보고
+    - 안 한다: 일기 · 네이버 쓰기 · `cost_at_exclusion` 추정(콘솔이 안 주면 0) ·
+      실행 시점 추정(`excluded_at`은 **편입 시각**이고 실제 제외 시각이 아니다 —
+      그래서 성적표가 이 행을 판정하지 않는다)
+
+    ## 왜 전체 롤백이 아니라 행 단위인가
+    43건 중 1건이 오타라고 42건이 죽으면 사람이 그 1건을 찾느라 전체를 다시 붙여넣는다.
+    거부는 **그 행만** 하고 사유를 돌려준다(어느 행이 왜 거부됐는지가 응답에 있다).
+
+    Args:
+        rows: [{campaign_id, adgroup_id, search_term, restrict_kwd_id?, note?}, ...]
+
+    반환: {imported, skipped, rejected, results:[행별 결과], as_of}
+    """
+    now = now or kst_now()
+    results: list[dict] = []
+    imported = skipped = rejected = 0
+
+    for idx, raw in enumerate(rows):
+        try:
+            campaign_id = _require(raw.get("campaign_id"), "campaign_id", max_len=50)
+            adgroup_id = _require(raw.get("adgroup_id"), "adgroup_id", max_len=50)
+            search_term = _require(raw.get("search_term"), "search_term", max_len=300)
+        except ExclusionInputError as e:
+            rejected += 1
+            results.append({"row": idx, "result": "rejected", "reason": str(e),
+                            "search_term": (raw.get("search_term") or "")[:300]})
+            continue
+
+        existing = (
+            db.query(NaverSearchTermExclusion)
+            .filter(
+                NaverSearchTermExclusion.adgroup_id == adgroup_id,
+                NaverSearchTermExclusion.search_term == search_term,
+            )
+            .first()
+        )
+        if existing is not None and existing.status == "excluded":
+            # 이미 아는 제외 — 덮지 않는다. 특히 `source`를 덮으면 우리가 실행한 행이
+            # 「편입분」으로 뒤바뀌어 성적표에서 조용히 사라진다.
+            skipped += 1
+            results.append({"row": idx, "result": "already_known", "search_term": search_term,
+                            "exclusion_id": existing.id, "source": existing.source})
+            continue
+
+        note = (raw.get("note") or "콘솔에 이미 걸려 있던 제외를 장부에 편입")[:200]
+        if existing is None:
+            row = NaverSearchTermExclusion(
+                campaign_id=campaign_id, adgroup_id=adgroup_id, search_term=search_term,
+                restrict_kwd_id=(raw.get("restrict_kwd_id") or None),
+                status="excluded", cycle=1,
+                # ★편입 시각이지 실제 제외 시각이 아니다(콘솔이 안 알려준다). 추정 금지 —
+                #   그래서 이 행은 성적표 판정 대상에서 빠진다(source로 가른다).
+                excluded_at=now, last_transition_at=now, next_review_at=None,
+                cost_at_exclusion=0, source=CONSOLE_IMPORT_SOURCE, live_note=note,
+            )
+            db.add(row)
+            outcome = "imported"
+        else:
+            # restored/probation/void 행의 재편입 — 상태만 되돌리고 출처를 편입으로 바꾼다.
+            row = existing
+            row.status = "excluded"
+            row.last_transition_at = now
+            row.excluded_at = now
+            row.next_review_at = None
+            row.source = CONSOLE_IMPORT_SOURCE
+            row.live_state = None
+            row.live_checked_at = None
+            row.live_note = note
+            if raw.get("restrict_kwd_id"):
+                row.restrict_kwd_id = raw["restrict_kwd_id"]
+            outcome = "imported"
+
+        db.commit()
+        imported += 1
+        results.append({"row": idx, "result": outcome, "search_term": search_term,
+                        "exclusion_id": row.id})
+
+    log.info("[콘솔편입] 편입 %d · 이미앎 %d · 거부 %d (일기 0건)", imported, skipped, rejected)
+    return {
+        "imported": imported, "skipped": skipped, "rejected": rejected,
+        "results": results, "as_of": now.isoformat(),
+        # ★계약 금지선의 자기 증명 — 이 경로는 학습 사슬에 아무것도 넣지 않는다.
+        "diary_written": 0,
+    }
+
+
 def void_execution(
     db: Session, *, exclusion_id: int, reason: str, now: datetime | None = None
 ) -> dict:
@@ -324,6 +428,13 @@ def void_execution(
         entries = []
         counted = None
         note = "앞 50자가 같은 다른 검색어가 있어 일기를 구분할 수 없다 — 중화하지 않았다"
+    elif prev_status is not None and row.source == CONSOLE_IMPORT_SOURCE:
+        # ★여기서만 «안 셌다»를 단언할 수 있다: 편입 경로(import_console_exclusions)는 애초에
+        #   일기를 만들지 않는다(그 함수의 존재 이유이자 계약 금지선이고, 테스트가 지킨다).
+        #   즉 이건 «못 찾음»이 아니라 «없음이 증명됨»이다. 43건 전부에 「확인하지 못했다」가
+        #   붙으면 3상 설계의 의미가 희석된다.
+        counted = False
+        note = "콘솔 편입 행이라 애초에 일기가 없다 — 학습에 셌을 여지가 없다"
     elif not entries:
         # ★«일기가 없다»와 «일기를 못 찾았다»는 같은 0이다(교훈 #123). 확인하지 않은 것을
         #   False로 단언하지 않는다 — 모르면 None으로 내보내고 사유를 붙인다.

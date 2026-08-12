@@ -815,3 +815,221 @@ def test_void_finds_the_untruncated_target_id_the_harness_stored(db):
 
     assert out["diary_voided"] == 1, "전문 target_id를 안 보면 긴 검색어의 일기를 영영 못 찾는다"
     assert db.query(OpsDiaryEntry).one().event_type == ste.VOIDED_EVENT_TYPE
+
+
+# ═══ 콘솔 일괄 편입 — 장부에는 넣되 학습에는 안 넣는다 (D-NAO-176) ═══
+
+
+def test_console_import_writes_the_ledger_but_never_the_diary(db):
+    """★이 계약의 1번 금지선. 편입은 **시점을 모르는 과거 조치**라 학습 입력이 되면 안 된다.
+
+    `record_execution`을 재사용하면 「오늘 실행된 조치 N건」이라는 거짓 일기가 생기고, 각각
+    D+1 소급 대상이 되어 **13일 만의 진짜 표본 1건(「골프」)이 그 안에 익사한다.**
+    그래서 검증(`_require`)만 공유하고 일기 경로는 공유하지 않는다.
+    """
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "골프장"},
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "골프공"},
+    ], now=NOW)
+
+    assert out["imported"] == 2 and out["rejected"] == 0
+    assert out["diary_written"] == 0
+    assert db.query(OpsDiaryEntry).count() == 0, (
+        "편입이 일기를 만들면 진짜 표본이 편입분에 익사한다 — 이 단언이 이 파일에서 제일 중요하다"
+    )
+    rows = db.query(NaverSearchTermExclusion).all()
+    assert len(rows) == 2
+    assert all(r.source == ste.CONSOLE_IMPORT_SOURCE for r in rows)
+    assert all(r.status == "excluded" and r.next_review_at is None for r in rows), (
+        "실행 시점을 모르니 재심사 예정일도 정할 수 없다 — 추정하지 않는다"
+    )
+
+
+def test_console_import_rejects_per_row_not_the_whole_batch(db):
+    """★43건 중 1건이 오타라고 42건이 죽으면 사람이 전체를 다시 붙여넣는다."""
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "정상1"},
+        {"campaign_id": "", "adgroup_id": ADGROUP, "search_term": "캠페인없음"},
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "정상2"},
+    ], now=NOW)
+
+    assert out["imported"] == 2 and out["rejected"] == 1
+    bad = [r for r in out["results"] if r["result"] == "rejected"][0]
+    assert bad["row"] == 1 and "campaign_id" in bad["reason"], "어느 행이 왜 거부됐는지 나와야 한다"
+    assert db.query(NaverSearchTermExclusion).count() == 2
+
+
+def test_console_import_does_not_relabel_a_row_we_executed_ourselves(db):
+    """★우리가 실행한 행을 편입분으로 덮으면 그 행이 성적표에서 **조용히 사라진다.**"""
+    _spend(db, day=date(2026, 8, 1), cost=5_000)
+    db.commit()
+    ste.record_execution(db, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM,
+                         rationale="우리가 잘랐다", now=NOW)
+
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM},
+    ], now=NOW)
+
+    assert out["skipped"] == 1 and out["imported"] == 0
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.source is None, "우리가 실행한 행의 출처가 편입으로 바뀌면 안 된다"
+    assert db.query(OpsDiaryEntry).count() == 1, "기존 일기도 그대로여야 한다"
+
+
+def test_scorecard_counts_imported_rows_instead_of_judging_or_hiding_them(db):
+    """★편입분을 판정하면 거짓 판정이 나오고, 조용히 버리면 43건이 화면에서 증발한다."""
+    _spend(db, day=date(2026, 8, 1), cost=5_000)
+    db.commit()
+    ste.record_execution(db, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM,
+                         rationale="우리가 잘랐다", now=NOW)
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "편입된것"},
+    ], now=NOW)
+
+    out = scorecard.build_scorecard(db, now=NOW)
+    assert out["total"] == 1, "편입분은 판정 대상이 아니다"
+    assert all("편입된것" != i["search_term"] for i in out["items"])
+    assert out["imported_unjudgeable_count"] == 1, "판정 안 한 몫이 숫자로 나와야 한다"
+    assert "실행 시점을 모르므로" in out["imported_unjudgeable_note"]
+
+
+def test_candidate_list_stops_recommending_what_we_already_cut(db):
+    """★prod 실측(2026-08-12): 후보 63건 중 1건이 「골프」였다 — Jino가 8/11에 **직접 자른**
+    바로 그 검색어가 30일 비용 31,411원을 달고 「자르세요」 목록에 다시 떠 있었다.
+
+    창이 30일이라 방금 자른 것은 당분간 계속 뜬다. 43건을 편입하면 그만큼 늘어나고, 그러면
+    이 목록은 「이미 한 일을 또 하라」고 말하는 목록이 된다. 조용히 빼지 않고 버킷으로 센다.
+    """
+    from app.services.naver_ad import search_term_exclusion_list as cl
+
+    _product(db)
+    for i in range(20):  # 손해 검색어 — 원래대로면 후보로 뜬다
+        _spend(db, day=date(2026, 7, 20) + timedelta(days=i), cost=3_000, clk=10, conv=0, amt=0)
+    db.commit()
+
+    before = cl.build_exclusion_list(db, now=NOW)
+    assert any(c["search_term"] == TERM for c in before["candidates"]), "표본 전제 — 원래 후보다"
+    assert before["buckets"]["already_excluded"]["terms"] == 0
+
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM},
+    ], now=NOW)
+
+    after = cl.build_exclusion_list(db, now=NOW)
+    assert all(c["search_term"] != TERM for c in after["candidates"]), "이미 자른 걸 또 추천하지 않는다"
+    assert after["buckets"]["already_excluded"]["terms"] == 1, "조용히 빼지 않고 세어야 한다"
+    assert after["buckets"]["already_excluded"]["cost"] > 0
+
+
+def test_probation_terms_come_back_as_candidates(db):
+    """★`probation`은 재심사로 **일부러 다시 연** 상태다 — 그건 후보가 맞다.
+    `excluded`만 막지 않으면 상태기계의 in-out 생태계가 죽는다."""
+    from app.services.naver_ad import search_term_exclusion_list as cl
+
+    _product(db)
+    for i in range(20):
+        _spend(db, day=date(2026, 7, 20) + timedelta(days=i), cost=3_000, clk=10, conv=0, amt=0)
+    db.add(NaverSearchTermExclusion(
+        campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM, status="probation", cycle=1,
+        excluded_at=datetime(2026, 6, 1), last_transition_at=datetime(2026, 7, 1),
+    ))
+    db.commit()
+
+    out = cl.build_exclusion_list(db, now=NOW)
+    assert any(c["search_term"] == TERM for c in out["candidates"])
+    assert out["buckets"]["already_excluded"]["terms"] == 0
+
+
+def test_import_route_is_wired_and_caps_the_batch(db):
+    from fastapi.testclient import TestClient
+
+    from app.database import get_db
+    from app.main import app
+
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        client = TestClient(app)
+        r = client.post("/api/naver/ad/search-term/executions/import", json={"rows": [
+            {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": "라우터편입"},
+        ]})
+        assert r.status_code == 200
+        assert r.json()["imported"] == 1 and r.json()["diary_written"] == 0
+        assert db.query(OpsDiaryEntry).count() == 0, "라우터 경유로도 일기가 생기면 안 된다"
+
+        empty = client.post("/api/naver/ad/search-term/executions/import", json={"rows": []})
+        assert empty.status_code == 422
+
+        too_many = client.post("/api/naver/ad/search-term/executions/import", json={"rows": [
+            {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": f"t{i}"}
+            for i in range(201)
+        ]})
+        assert too_many.status_code == 422, "한 번의 붙여넣기 실수가 원장을 덮으면 안 된다"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_console_import_of_an_existing_row_still_marks_it_as_imported(db):
+    """★적대 리뷰 P2-1 상환 — 재편입 분기(restored/probation/void)에 테스트가 한 줄도 없어
+    변이 3개가 살아남았다.
+
+    그중 제일 나쁜 것: 이 분기에서 `source`가 안 붙으면 편입 행이 **가짜 excluded_at으로
+    성적표에 판정당한다** — 계약이 금지한 바로 그 결과인데 아무 테스트도 안 겨눴다.
+    """
+    db.add(NaverSearchTermExclusion(
+        campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM, status="restored", cycle=2,
+        excluded_at=datetime(2026, 6, 1), last_transition_at=datetime(2026, 7, 1),
+        next_review_at=date(2026, 9, 1), cost_at_exclusion=99_999,
+        live_state="alive", live_checked_at=datetime(2026, 7, 1),
+    ))
+    _spend(db, day=date(2026, 8, 1), cost=5_000)
+    db.commit()
+
+    out = ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM},
+    ], now=NOW)
+
+    assert out["imported"] == 1
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.status == "excluded"
+    assert row.source == ste.CONSOLE_IMPORT_SOURCE, (
+        "출처가 안 붙으면 이 행이 가짜 excluded_at으로 성적표에 판정당한다"
+    )
+    assert row.next_review_at is None, (
+        "실행 시점을 모르니 재심사 예정일도 못 정한다 — 옛 값을 그대로 두면 그게 추정이 된다"
+    )
+    assert row.live_state is None and row.live_checked_at is None, "옛 대조 결과가 새 상태를 덮지 않는다"
+    assert db.query(OpsDiaryEntry).count() == 0, "재편입도 일기를 만들지 않는다"
+    assert scorecard.build_scorecard(db, now=NOW)["total"] == 0, "편입분은 판정 대상이 아니다"
+
+
+def test_console_import_does_not_guess_the_cost_it_never_saw(db):
+    """★`cost_at_exclusion`은 «제외 시점의 30일 비용» 스냅샷이다. 편입분은 그 시점을 모르므로
+    지금 시점의 비용을 넣으면 그건 추정이고, 나중에 성적표가 그 값을 근거로 되짚는다."""
+    for i in range(20):
+        _spend(db, day=date(2026, 7, 25) + timedelta(days=i), cost=4_000)
+    db.commit()
+
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM},
+    ], now=NOW)
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.cost_at_exclusion == 0, "안 본 값을 지금 값으로 메우지 않는다(추정 금지)"
+
+
+def test_voiding_an_imported_row_can_prove_no_learning_happened(db):
+    """★적대 리뷰 P2-8 — 편입분은 **일기가 없다는 것을 증명할 수 있다.** 그러니
+    「확인 못 함(None)」이 아니라 「안 셌음(False)」이 맞다. 43건 전부에 「확인하지 못했다」가
+    붙으면 3상 설계의 의미가 희석된다."""
+    ste.import_console_exclusions(db, rows=[
+        {"campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM},
+    ], now=NOW)
+    row = db.query(NaverSearchTermExclusion).one()
+
+    out = ste.void_execution(db, exclusion_id=row.id, reason="잘못 편입했다", now=NOW)
+
+    assert out["diary_voided"] == 0
+    assert out["wisdom_may_have_counted"] is False, (
+        "편입 경로는 일기를 만들지 않으므로 «안 셌다»를 단언할 수 있다 — 여기서만 False가 정직하다"
+    )
+    assert "편입" in out["diary_note"]

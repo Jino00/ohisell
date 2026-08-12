@@ -60,6 +60,7 @@ type BucketKey = keyof NaverExclusionListResponse["buckets"];
 // 버킷 라벨 — «후보에서 빠진 것도 전부 세어 보여준다»는 이 화면의 계약이다(백엔드 docstring).
 // 이 라벨 자체는 새 문구가 아니라 버킷 키의 한글 이름표일 뿐이고, 근거 문장(why)은 백엔드 것을 쓴다.
 const BUCKET_LABEL: Record<BucketKey, string> = {
+  already_excluded: "이미 제외됨(우리 장부에 있음)",
   insufficient_sample: "표본 부족",
   bep_unknown: "BEP 미확인",
   powerlink_undecidable: "파워링크 판정 불가",
@@ -69,9 +70,24 @@ const BUCKET_LABEL: Record<BucketKey, string> = {
 };
 
 const BUCKET_ORDER: BucketKey[] = [
-  "insufficient_sample", "bep_unknown", "powerlink_undecidable",
+  "already_excluded", "insufficient_sample", "bep_unknown", "powerlink_undecidable",
   "profitable", "capped_out", "maturity_excluded",
 ];
+
+/** 그릴 버킷 키 = **응답에 있는 키 전부**(알려진 것 먼저, 모르는 것은 뒤에).
+ *
+ * ★왜 응답 기준인가(D-NAO-176 적대 리뷰 P1): 종전엔 `BUCKET_ORDER` 하드코딩 배열만 돌았고
+ *   타입이 고정 키 Record라 **백엔드가 버킷을 늘려도 TS가 침묵**했다. 그 침묵으로 같은 결함이
+ *   사흘 새 세 번 났다(`unverifiable` · `type_unknown_groups` · `already_excluded`).
+ *   카드 제목이 「후보에서 빠진 것도 **전부** 세어 보여준다」인데 화면이 «전부»를 모르면
+ *   그 약속은 매번 조용히 깨진다. 라벨이 없는 새 키는 키 이름 그대로라도 그린다 —
+ *   못생긴 줄 하나가 안 보이는 손실보다 낫다.
+ */
+export function bucketKeysToRender(buckets: Record<string, unknown>): string[] {
+  const known = BUCKET_ORDER.filter((k) => k in buckets);
+  const unknown = Object.keys(buckets).filter((k) => !(BUCKET_ORDER as string[]).includes(k));
+  return [...known, ...unknown.sort()];
+}
 
 export default function NaverAdExclusionList() {
   const [days, setDays] = useState(30);
@@ -329,7 +345,17 @@ function ScorecardSection({
       ) : scorecard === null ? (
         <Loading rows={3} />
       ) : scorecard.total === 0 ? (
-        <EmptyState reason="아직 실행된 제외가 없습니다 — 아래 후보에서 콘솔 실행 후 기록하세요" />
+        <EmptyState
+          reason={
+            // ★«판정할 것이 없다»와 «아는 제외가 없다»는 다르다(D-NAO-176). 편입분만 있는
+            //   구성에서 「제외가 없습니다」는 거짓말이고, 43건이 화면에서 통째로 증발한다.
+            (scorecard.imported_unjudgeable_count ?? 0) > 0
+              ? `판정할 제외가 없습니다 — 장부의 ${num(scorecard.imported_unjudgeable_count ?? 0)}건은`
+                + " 콘솔에서 편입한 것이라 실행 시점을 몰라 성적표가 판정하지 않습니다"
+                + "(조치 생존 감시에는 포함됩니다)"
+              : "아직 실행된 제외가 없습니다 — 아래 후보에서 콘솔 실행 후 기록하세요"
+          }
+        />
       ) : (
         <>
           <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
@@ -340,8 +366,15 @@ function ScorecardSection({
                 안 적으면 「회수액이 적다」와 「회수액을 못 잰다」가 화면에서 같아 보인다. */}
             {(scorecard.profit_unknown_count ?? 0) > 0 &&
               ` 그중 BEP 없어 미산출 ${num(scorecard.profit_unknown_count ?? 0)}건 ·`}
+            {/* ★편입분은 판정 «대상이 아니다» — 위 total에 안 들어가므로 여기 안 적으면
+                장부 45건 중 43건이 이 화면에서 통째로 사라진다(D-NAO-176 적대 리뷰 P1). */}
+            {(scorecard.imported_unjudgeable_count ?? 0) > 0 &&
+              ` 콘솔 편입분 ${num(scorecard.imported_unjudgeable_count ?? 0)}건은 판정 대상 아님 ·`}
             성숙 기준일 {scorecard.mature_through}
           </p>
+          {(scorecard.imported_unjudgeable_count ?? 0) > 0 && scorecard.imported_unjudgeable_note && (
+            <p className="px-4 pb-2 text-xs text-gray-400">{scorecard.imported_unjudgeable_note}</p>
+          )}
           <div className="flex flex-wrap gap-3 px-4 py-2 text-sm border-b border-gray-100">
             {VERDICT_ORDER.map((v) => (
               <span key={v} className="flex items-center gap-1.5">
@@ -428,12 +461,18 @@ function BucketSummary({ data }: { data: NaverExclusionListResponse }) {
   return (
     <Card title="버킷 요약 — 후보에서 빠진 것도 전부 세어 보여준다">
       <div className="divide-y divide-gray-100">
-        {BUCKET_ORDER.map((key) => {
+        {bucketKeysToRender(data.buckets).map((key) => {
           const b = data.buckets[key];
+          if (!b) return null;
           return (
             <div key={key} className="flex items-center justify-between px-4 py-2 text-sm">
               <div>
-                <span className="text-gray-700">{BUCKET_LABEL[key]}</span>
+                <span className="text-gray-700">{BUCKET_LABEL[key as BucketKey] ?? key}</span>
+                {key === "already_excluded" && (
+                  <span className="ml-2 text-xs text-gray-400">
+                    이미 잘라 둔 검색어 — 30일 창이라 당분간 계속 집계된다(다시 자를 필요 없음)
+                  </span>
+                )}
                 {key === "powerlink_undecidable" && (
                   <span className="ml-2 text-xs text-gray-400">
                     네이버 API가 파워링크 검색어에 전환을 주지 않아 판정 불가

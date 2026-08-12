@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverSearchTermDaily, NaverSearchTermExclusion
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
+from app.services.naver_ad.search_term_execution import CONSOLE_IMPORT_SOURCE
 from app.services.naver_ad.search_term_exclusion_list import (
     MATURITY_LAG_DAYS,
     _bep_for_adgroups,
@@ -143,6 +144,12 @@ def build_scorecard(
         .order_by(NaverSearchTermExclusion.excluded_at.desc())
         .all()
     )
+    # ★콘솔 일괄 편입 행은 **판정하지 않는다**(D-NAO-176). 이 표의 전부는 「실행 전 창 vs
+    #   실행 후 창」인데 편입분은 **실행 시점을 모른다** — `excluded_at`이 편입 시각이라
+    #   그걸 기준으로 창을 자르면 「제외 전에 이미 0원이었다」 같은 거짓 판정이 나온다.
+    #   조용히 버리지 않고 건수로 낸다(이 파일의 「판정 불가는 판정하지 않는다」와 같은 규율).
+    imported_rows = [r for r in rows if r.source == CONSOLE_IMPORT_SOURCE]
+    rows = [r for r in rows if r.source != CONSOLE_IMPORT_SOURCE]
     bep_map = _bep_for_adgroups(db, {r.adgroup_id for r in rows if r.adgroup_id})
 
     items: list[dict] = []
@@ -237,6 +244,13 @@ def build_scorecard(
         #   0원으로 세므로, 이 숫자 없이는 «회수액이 적다»와 «회수액을 못 잰다»가 구분되지
         #   않는다 — pending_count를 따로 내보내는 것과 같은 이유다.
         "profit_unknown_count": sum(1 for i in judged if i["profit_recovered"] is None),
+        # ★콘솔 편입분 — 감시는 하되 판정은 못 하는 몫. 이 숫자가 없으면 「total 2건」이
+        #   「우리가 아는 제외가 2건뿐」으로 읽히고, 편입한 43건이 화면에서 통째로 증발한다.
+        "imported_unjudgeable_count": len(imported_rows),
+        "imported_unjudgeable_note": (
+            "콘솔에 이미 걸려 있던 제외를 장부에 편입한 행이다. 실행 시점을 모르므로 전후 창을"
+            " 잡을 수 없어 성적표가 판정하지 않는다 — 조치 생존 감시에는 포함된다."
+        ) if imported_rows else None,
         "pending_count": sum(1 for i in items if i["verdict"] == "pending"),
         "items": items,
         "as_of": now.isoformat(),

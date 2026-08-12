@@ -23,7 +23,7 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdgroupProduct, NaverProductBep, NaverSearchTermDaily
+from app.models import NaverAdgroupProduct, NaverProductBep, NaverSearchTermDaily, NaverSearchTermExclusion
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.exclusion_survival import REVERT_HOWTO
 from app.services.naver_ad.search_term_judge import (
@@ -131,6 +131,9 @@ def build_exclusion_list(
     낮으면 후보. 광고비 큰 순으로 정렬하고 라운드 상한까지만 «후보»로, 나머지는 세어서 내보낸다.
 
     후보에서 빠지는 모든 경로는 버킷으로 표면화된다:
+      already_excluded        — 우리 장부에 이미 «제외됨»으로 있는 검색어(다른 판정보다 앞선다).
+                                창이 30일이라 방금 자른 것도 당분간 계속 뜬다 — 조용히 빼지
+                                않고 세어서, 「이미 한 일을 또 하라」는 목록이 되지 않게 한다.
       insufficient_sample     — 클릭 표본 부족(자를 근거가 아니라 표본이 없는 것)
       bep_unknown             — 상품 매핑/BEP 미확인(fail-closed — 기준선 없이 자르지 않는다)
       powerlink_undecidable   — 파워링크. **네이버가 검색어에 전환을 안 준다**(근본 한계, 실측
@@ -181,12 +184,27 @@ def build_exclusion_list(
 
     candidates: list[dict] = []
     buckets: dict[str, dict] = {
+        "already_excluded": {"terms": 0, "cost": 0},
         "insufficient_sample": {"terms": 0, "cost": 0},
         "bep_unknown": {"terms": 0, "cost": 0},
         "powerlink_undecidable": {"terms": 0, "cost": 0},
         "profitable": {"terms": 0, "cost": 0},
     }
     totals = {"terms": 0, "cost": 0, "conv_amt": 0}
+
+    # ★이미 우리 장부에 «제외됨»으로 있는 검색어 — 후보로 다시 올리지 않는다(D-NAO-176).
+    #   실측(2026-08-12 prod): 후보 63건 중 1건이 「골프」였다 — Jino가 8/11에 **직접 자른**
+    #   바로 그 검색어가 30일 비용 31,411원을 달고 「자르세요」 목록에 다시 떠 있었다.
+    #   창이 30일이라 방금 자른 것은 당분간 계속 뜬다. 43건을 편입하면 그만큼 늘어나고,
+    #   그러면 이 목록은 「이미 한 일을 또 하라」고 말하는 목록이 된다.
+    #   ⚠️`excluded`만 막는다 — `probation`은 재심사로 **일부러 다시 연** 상태라 후보가 맞고,
+    #   `restored`/`void`는 제외 상태가 아니다.
+    already_excluded = {
+        (r.adgroup_id, r.search_term)
+        for r in db.query(
+            NaverSearchTermExclusion.adgroup_id, NaverSearchTermExclusion.search_term
+        ).filter(NaverSearchTermExclusion.status == "excluded").all()
+    }
 
     for source, cmp_id, adg_id, term, imp, clk, cost, conv, amt in rows:
         imp, clk, cost, conv, amt = int(imp), int(clk), int(cost), int(conv), int(amt)
@@ -195,6 +213,12 @@ def build_exclusion_list(
         totals["terms"] += 1
         totals["cost"] += cost
         totals["conv_amt"] += amt
+
+        if (adg_id, term) in already_excluded:
+            # 다른 어떤 판정보다 앞선다 — 이미 잘랐으면 «자를까»는 물을 필요가 없는 질문이다.
+            buckets["already_excluded"]["terms"] += 1
+            buckets["already_excluded"]["cost"] += cost
+            continue
 
         if source != _SHOPPING_SOURCE:
             # 파워링크 — 네이버 API가 검색어에 전환을 붙이지 않는다. 조용히 빼지 않고 세어 둔다.

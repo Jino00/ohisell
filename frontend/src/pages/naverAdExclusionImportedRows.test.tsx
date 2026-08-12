@@ -1,0 +1,93 @@
+// @vitest-environment jsdom
+//
+// naverAdExclusionImportedRows.test.tsx — 편입분이 화면에서 증발하지 않는지 지킨다
+//   (D-NAO-176 적대 리뷰 P1).
+//
+// ★백엔드는 콘솔 편입 행을 성적표에서 **판정하지 않되 `imported_unjudgeable_count`로 센다.**
+//   그 저자(나)는 주석에 이렇게 적어 뒀다:
+//   *"이 숫자가 없으면 「total 2건」이 「우리가 아는 제외가 2건뿐」으로 읽히고, 편입한 43건이
+//     화면에서 통째로 증발한다."*
+//   그리고 화면에 그 숫자를 안 이었다 — 예고한 피해를 그대로 남긴 것이다.
+//
+//   이게 사흘 새 **세 번째** 같은 모양이다(unverifiable · type_unknown_groups · 이것).
+//   그래서 여기서는 렌더로 단언한다 — 타입에 필드가 있는지가 아니라 **화면에 글자가 나오는지**.
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, cleanup } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+
+const h = vi.hoisted(() => {
+  const pending = () => new Promise<never>(() => {});
+  return { pending, scorecard: null as unknown };
+});
+
+vi.mock("../lib/api", () => ({
+  getSearchTermExclusionList: () => h.pending(),
+  getSearchTermExclusionSurvival: () => h.pending(),
+  getSearchTermExclusionScorecard: () => Promise.resolve(h.scorecard),
+  postSearchTermExecution: () => h.pending(),
+  postSearchTermExecutionDetect: () => h.pending(),
+}));
+
+import NaverAdExclusionList from "./NaverAdExclusionList";
+
+const renderPage = () =>
+  render(
+    <MemoryRouter>
+      <NaverAdExclusionList />
+    </MemoryRouter>,
+  );
+
+const BASE = {
+  window_days: 14,
+  maturity_lag_days: 3,
+  mature_through: "2026-08-09",
+  by_verdict: { stopped: 0, still_spending: 0, pending: 0, no_baseline: 0 },
+  profit_recovered_judged: 0,
+  judged_count: 0,
+  pending_count: 0,
+  items: [],
+  as_of: "2026-08-12T20:30:00",
+};
+
+const NOTE =
+  "콘솔에 이미 걸려 있던 제외를 장부에 편입한 행이다. 실행 시점을 모르므로 전후 창을 잡을 수" +
+  " 없어 성적표가 판정하지 않는다 — 조치 생존 감시에는 포함된다.";
+
+afterEach(() => cleanup());
+
+describe("성적표 — 콘솔 편입분", () => {
+  it("★판정 대상이 하나도 없어도 «제외가 없습니다»라고 말하지 않는다", async () => {
+    // 편입 43건만 있는 구성 — 장부에는 43건이 있는데 판정할 것은 0건이다.
+    h.scorecard = { ...BASE, total: 0, imported_unjudgeable_count: 43,
+                    imported_unjudgeable_note: NOTE };
+    renderPage();
+
+    expect(await screen.findByText(/43건/)).toBeTruthy();
+    expect(screen.queryByText(/아직 실행된 제외가 없습니다/)).toBeNull();
+  });
+
+  it("판정 대상이 있으면 헤더에 «편입분 N건은 판정 대상 아님»을 함께 적는다", async () => {
+    h.scorecard = { ...BASE, total: 2, judged_count: 1, pending_count: 1,
+                    by_verdict: { stopped: 1, still_spending: 0, pending: 1, no_baseline: 0 },
+                    imported_unjudgeable_count: 43, imported_unjudgeable_note: NOTE };
+    renderPage();
+
+    expect(await screen.findByText(/편입분 43건은 판정 대상 아님/)).toBeTruthy();
+    expect(screen.getByText(new RegExp("실행 시점을 모르므로"))).toBeTruthy();
+  });
+
+  it("편입분이 0이면 그 줄을 만들지 않는다 — 없는 것을 있는 것처럼 적지 않는다", async () => {
+    h.scorecard = { ...BASE, total: 2, judged_count: 1, pending_count: 1,
+                    by_verdict: { stopped: 1, still_spending: 0, pending: 1, no_baseline: 0 } };
+    renderPage();
+
+    expect(await screen.findByText(/총 2건/)).toBeTruthy();
+    expect(screen.queryByText(/판정 대상 아님/)).toBeNull();
+  });
+
+  it("옛 응답(편입 필드 없음)에도 터지지 않는다", async () => {
+    h.scorecard = { ...BASE, total: 0 };
+    renderPage();
+    expect(await screen.findByText(/아직 실행된 제외가 없습니다/)).toBeTruthy();
+  });
+});

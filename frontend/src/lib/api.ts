@@ -3007,14 +3007,19 @@ export interface NaverExclusionListResponse {
   gates: { min_click: number; round_cap: number };
   candidates: NaverExclusionCandidate[];
   candidate_cost: number;
+  /** ★인덱스 시그니처가 붙어 있는 이유(D-NAO-176 적대 리뷰 P1): 종전엔 키가 고정 목록이고
+   *  화면이 `BUCKET_ORDER` 하드코딩 배열로 돌아서, **백엔드가 버킷을 늘려도 TS가 침묵**했다.
+   *  그 침묵으로 같은 결함이 세 번 났다(unverifiable · type_unknown_groups · already_excluded).
+   *  이제 화면은 «응답에 있는 키 전부»를 그리고, 라벨 없는 키는 키 이름 그대로라도 보인다. */
   buckets: {
+    already_excluded: NaverExclusionBucket;
     insufficient_sample: NaverExclusionBucket;
     bep_unknown: NaverExclusionBucket;
     powerlink_undecidable: NaverExclusionBucket;
     profitable: NaverExclusionBucket;
     capped_out: NaverExclusionBucket;
     maturity_excluded: NaverExclusionBucket;
-  };
+  } & Record<string, NaverExclusionBucket | undefined>;
   revert_howto: string;
   generated_at: string;
 }
@@ -3204,6 +3209,11 @@ export interface NaverSearchTermScorecard {
   // 없이는 「회수액이 적다」와 「회수액을 못 잰다」가 화면에서 같아 보인다.
   profit_unknown_count?: number;
   pending_count: number;
+  /** 콘솔에 이미 걸려 있던 것을 장부에 편입한 행 — 실행 시점을 몰라 전후 창을 못 잡으므로
+   *  성적표가 판정하지 않는다. ★이 숫자가 없으면 「총 2건」이 「우리가 아는 제외가 2건뿐」으로
+   *  읽히고 편입한 43건이 화면에서 통째로 증발한다(D-NAO-176). */
+  imported_unjudgeable_count?: number;
+  imported_unjudgeable_note?: string | null;
   items: NaverSearchTermScorecardItem[];
   as_of: string;
 }
