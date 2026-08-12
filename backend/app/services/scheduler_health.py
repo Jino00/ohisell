@@ -457,15 +457,17 @@ def _latest_for_rule(db, rule: dict):
 CONSERVATION_WINDOW_DAYS = 7
 # 보존식을 볼 계정 — 옵션축을 **실제로 받고 있는** 계정만.
 #
-# ★WING1은 아직 빠져 있다(D-CPP-40, 적대 리뷰 P2-1 채택하되 조건부). 종전 주석은 「WING1은
-#   옵션축 자체가 없으므로 대조 대상이 아니다」였는데, D-CPP-40으로 WING1이 일일 트리거에
-#   들어갔으므로 그 문장은 **더 이상 참이 아니다**. 그런데도 지금 넣지 않는 이유는 다르다:
-#   `coupang_vendor_item_sales_daily`의 WING1 행이 **아직 0건**이라, 넣으면 대조할 것이 없는
-#   상태에서 `summary_only`가 매일 쌓여 정확히 그 노이즈가 난다.
-# ★편입 조건(다음 세션용): WING1 옵션축이 한 번이라도 들어오면 여기에 추가한다. 그때
-#   `CONSERVATION_WINDOW_DAYS`(7)와 Mac 페처 `vi_days`(config 미지정 → 기본 7)가 이미
-#   맞아 있는지 같이 확인할 것 — 한쪽만 넓히면 영구 빨강이 된다(바로 위 주석 참조).
-CONSERVATION_ACCOUNTS: tuple[str, ...] = ("COUPANG_WING2",)
+# ★WING1 편입 완료 (D-CPP-44, 2026-08-12). D-CPP-40이 WING1을 일일 트리거에 넣었지만
+#   그때는 `coupang_vendor_item_sales_daily`의 WING1 행이 0건이라 넣으면 대조할 것이 없는
+#   상태에서 `summary_only`만 매일 쌓였다 — 그래서 **조건부 보류**였다.
+#   2026-08-12 08:44 Jino가 쿠팡 Wing에 로그인하자 옵션축이 처음 적재됐고, 편입 조건이
+#   충족됐다. 편입 직전 prod 실측(창 08-05~08-12):
+#       compared 13칸 · mismatch 0 · summary_only 0 · option_only 0
+#   즉 편입해도 노이즈가 0이다 — 보류 사유가 사라진 것을 **관측으로** 확인하고 넣었다.
+# ★같이 확인한 계약: `CONSERVATION_WINDOW_DAYS`(7) == Mac 페처 `vi_days`.
+#   `~/.ohisell_wing_fetcher.json`(WING1)에 `vi_days` 키가 없어 기본 7이 적용된다(실측:
+#   적재된 WING1 행이 08-05~08-11 정확히 7일). 한쪽만 넓히면 영구 빨강이 된다(위 주석 참조).
+CONSERVATION_ACCOUNTS: tuple[str, ...] = ("COUPANG_WING1", "COUPANG_WING2")
 
 
 def compute_scheduler_health(db, scheduler, now: datetime) -> dict:

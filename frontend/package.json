@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build && node scripts/stamp-build.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "node scripts/run-tests.mjs",
+    "test:raw": "vitest run",
+    "heal": "node scripts/heal-node-modules.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
