@@ -203,7 +203,27 @@ Jino가 정본을 줬다: `GoogleDrive/Ohi/41. 빈티지/빈티지 총괄표_v1.
 ## 8. 새 세션 시작 프롬프트
 
 ```
-docs/references/56_ofix_ad_double_count_investigation_20260812.md 읽고 §9(D-16 재검토)부터.
-세션 맥락은 .claude/memory/HANDOFF_ofix-rg-close_20260812.md 참조.
-먼저 §4(Jino가 할 일 2건)가 처리됐는지 라이브로 확인할 것 — 안 됐으면 그것부터다.
+.claude/memory/HANDOFF_ofix-rg-close_20260812.md 읽고 §6 이월부터 진행하자.
+트랙은 docs/tracks/active/track_coupang-promo-pnl.md (D-CPP-40~43이 이번 세션 것).
+
+우선순위:
+1) ★프론트 테스트 5개가 «실행조차 안 되면서» vitest가 「19 passed (19)」로 초록 보고한다
+   (css-tree `matchGraph.buildMatchGraph is not a function`). 이걸 먼저 고쳐야 RG 정산 카드
+   표시 계약 테스트(적대 리뷰 변이 M9~M11 생존)를 새로 써도 조용히 안 도는 일을 막는다.
+2) CONSERVATION_ACCOUNTS에 WING1 편입 — 2026-08-12 옵션축 184행이 들어와 편입 조건이 충족됐다.
+   넣을 때 CONSERVATION_WINDOW_DAYS(7)와 Mac 페처 vi_days(기본 7)가 맞는지 같이 확인할 것.
+3) 쿠팡 광고비가 여전히 「버튼-only」다 — D-CPP-40이 Wing에 한 것(일일 자동 트리거)을
+   광고비에도 할지는 Jino 결정. 지금은 신선도 배너가 잊어버림을 막는 유일한 장치다.
+4) PA 수집 개시(2026-05-15) 이전 창은 광고비가 어디서도 안 빠진다 → rg_ad_settlement vs
+   창내 ad_spend 괴리 감시 신설 검토.
+
+시작 전 반드시:
+- 인계 목록을 그대로 믿지 말고 라이브로 실측할 것(§6 항목마다 숫자가 붙어 있다).
+  2026-08-11 세션에서 §6 8건 중 4건이 «유령»이었다.
+- scripts/next_ids.sh를 돌려 D-CPP·교훈 번호를 받을 것. 교훈을 «추가할 때마다» 돌린다 —
+  세션 시작 때 받은 값은 몇 시간 뒤엔 낡는다(2026-08-12에 #265·#266 충돌 실사고).
+- 작업은 워크트리에서. 공유 메인 폴더는 main 고정이다.
+
+함정 5개는 §3에 있다. 특히 created_at은 UTC이고, 원가 조인은 channel_id가 아니라
+Channel.platform='coupang' 전체이며, 커버리지는 창을 밝혀야 한다.
 ```
