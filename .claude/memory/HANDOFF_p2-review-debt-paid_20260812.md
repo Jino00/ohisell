@@ -9,8 +9,61 @@
 ## 1. 한 줄
 직전 세션이 남긴 **P2 적대 리뷰 부채**를 갚았다. **FAIL — P1 3건**이 나왔고 전건 수리·배포·라이브 합격. 셋 다 같은 모양이었다: **모르는 것을 아는 것으로 센다.**
 
+## 1-a. ⚖️ 계약 결산 — 합격기준 2개 중 **1개만 완결**했다
+
+| 합격기준 | 판정 |
+|---|---|
+| ① 적대 리뷰 P1=0 PASS + 변이 주입 | ✅ **완결** — 2R PASS, 변이 5/5 KILLED, prod 배포·라이브 확인 |
+| ② prod 라이브에서 사슬 2단계가 4371을 집는 증거 | ❌ **미완** — 세션 종료 시각(08-12 15:4x) 기준 아직 아무것도 안 집었다 |
+
+세션 종료 시점 실측:
+```
+diary 4371 outcome_json = None
+wisdom 후보(cmp-…|search_term_exclude|weekday|summer|normal) = None
+naver_ad_daily 최신 = 2026-08-11
+```
+
+★**한 것은 «집을 수 있다»의 확증이지 «집었다»가 아니다.** prod DB를 읽어 실제 데이터로 태워
+봤지만 `_backfill_row`를 직접 호출하고 rollback한 것이라 하네스 §2 기준으로는 **격리 호출**이다
+— *격리 성공은 필요조건이지 충분조건이 아니다*라고 못 박아 둔 바로 그 경우다.
+**이 인계를 「사슬 검증 완료」로 읽지 마라.**
+
+★**합격기준을 잘못 잡았다**(교훈 #274): 착수 시점에 `age >= 2` 조건을 아직 안 읽은 채
+「prod 라이브에서 4371을 집는 증거」를 오늘의 합격선으로 못 박았다. 그 기준은 **8/13 아침
+전에는 원리적으로 관측 불가능**했다.
+
 ## 2. ⚠️ 새 세션이 가장 먼저 할 일
-1. **8/13 오늘, 사슬 2단계가 닫힌다.** `ops_diary_entries` id=4371의 `outcome_json`에 `d1`이 생겼는지 확인하라. 안 생겼으면 08:35 잡을 의심하라 — **배선 자체는 이미 검증했다**(§4-③).
+
+### ★1순위 — 미완 합격기준 ②를 닫는다 (8/13 08:40 이후에만 가능)
+순서: 07:50~08:10 광고 수집이 **08-12**를 채움 → 08:35 `diary_outcome`이 `d1` 기입 → 그 뒤 wisdom 수확.
+
+```bash
+ssh -o BatchMode=yes sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python -" <<'PY'
+from dotenv import load_dotenv
+load_dotenv("/home/ubuntu/ohisell/backend/.env")
+from app.database import SessionLocal
+from app.models import OpsDiaryEntry, OpsWisdomCandidate
+from sqlalchemy import text
+db = SessionLocal()
+e = db.get(OpsDiaryEntry, 4371)
+print("① diary 4371 outcome_json =", e.outcome_json)
+sig = "cmp-a001-02-000000008902804|search_term_exclude|weekday|summer|normal"
+c = db.query(OpsWisdomCandidate).filter(OpsWisdomCandidate.signature == sig).first()
+print("② wisdom 후보 =", (c.id, c.good_count, c.bad_count, c.status) if c else None)
+print("③ naver_ad_daily 최신 =", [dict(r._mapping) for r in db.execute(text("select max(ad_date) m from naver_ad_daily"))])
+PY
+```
+
+판정:
+- ①에 `d1`이 있고 ②에 후보가 있으면 → **합격기준 ② 종결.** 트랙에 D-NAO-174 후속으로 적어라.
+- ①이 여전히 `None`인데 ③이 `2026-08-12`이면 → **08:35 `diary_outcome` 잡을 의심하라**(배선은 검증됐으므로 잡 실행 자체가 문제다).
+- ③이 여전히 `2026-08-11`이면 → 광고 수집이 멈춘 것이다(사슬 문제 아님).
+- ①에 `d1`이 있는데 `cost: 0`이면 → **그 0이 굳는다**(`"d1" not in outcome` 조건이라 재기입 안 됨). 첫 학습 입력이 거짓값이 된 것이니 그 사실을 기록하라.
+
+⚠️**억지로 채우지 마라.** `backfill_outcomes`를 미래 시각으로 강제 실행하면 지금도 채울 수는
+있지만, `naver_ad_daily`에 그날 행이 없으면 `cost:0`으로 채워지고 **그 0이 영구히 굳는다.**
+
+### 그다음
 2. **8/17 첫 성적표 판정.** 그 전까지 「골프」가 `pending`인 것은 정상이다.
 3. `git fetch` — 병행 세션이 매우 활발하다(이 세션 중 PR #288이 병합됐고, 그게 내 발견 하나를 이미 구조로 막아 놨다).
 4. 이 인계 목록도 **실측 전엔 믿지 마라** — 직전 인계의 「prod 디스크 86.3%」는 실제로 88%였다.
@@ -50,8 +103,9 @@ prod 11:45  API  → {monitored: 2, alive: 1, unverifiable: 1, healthy: true}
 
 ## 5. ★이 세션이 «측정»한 것
 
-### ① 사슬 2·3단계는 배선돼 있다 — 8/13을 기다리지 않고 확인했다
-prod **읽기전용 시뮬**(commit 없이 rollback)로 4371을 태워 봤다:
+### ① 사슬 2·3단계는 **배선돼 있다**(≠ 집었다 — §1-a 참조)
+prod **읽기전용 시뮬**(commit 없이 rollback)로 4371을 태워 봤다. ⚠️이건 격리 호출이다 —
+실제 08:35 잡이 실제 행을 채우는 것은 **아직 못 봤다**:
 - `age >= 2` 조건이라 **d1은 8/13에 채워지는 게 맞다**(인계 정확).
 - 데이터가 있는 창(08-11)을 넣으니 `d1 = {cost: 42971, clk: 36, conv: 122000, roas_c: 3.6463}` → `direction = good` → 시그니처 **`cmp-a001-02-000000008902804|search_term_exclude|weekday|summer|normal`**로 후보 생성 성립. **사슬 완주 가능.**
 - 아침 수집(07:50~08:10)이 **전날**을 채우고 08:35 `diary_outcome`이 읽는 순서라 타이밍도 맞는다.
@@ -75,7 +129,8 @@ prod **읽기전용 시뮬**(commit 없이 rollback)로 4371을 태워 봤다:
 - **P2 트리아지**: 트립와이어→스파이 **채택**(`f9f3119`) · `profit_unknown_count` optional 주석 **기각**(`unverifiable`과 동일 관례) · 나머지 7건 **이월**(§7).
 
 ## 7. 남은 일 / 이월
-1. **8/13 사슬 2단계 확인** · **8/17 첫 성적표 판정** → 그 결과로 09 나머지 6건 결정
+0. ★**미완 합격기준 ② — 8/13 08:40 이후 사슬 2단계 실관측**(§2 1순위에 명령까지 적어 뒀다). 이게 이 세션의 유일한 미완결 항목이다.
+1. **8/17 첫 성적표 판정** → 그 결과로 09 나머지 6건 결정
 2. **d1이 캠페인 grain이라 신호대잡음비 낮음** — 검색어 grain을 사슬에 넣는 설계는 별건
 3. **리뷰어 P2 7건**: `POST /search-term/executions` 입력 검증 없음 · **원장 DELETE 라우트 부재**(잘못 들어온 행이 영구히 배너·성적표에 남는다) · `detect_new_exclusions` 그룹당 API 2회 무상한 · `camp_of` 미매핑 시 `campaign_id=""`가 원장·diary에 들어가 **wisdom 시그니처 오염** · `margin_lost` 음수 가능 · `build_scorecard` N+1(20~50건이면 200쿼리) · `record_execution` docstring 반환값 불일치
 4. **콘솔 제외 42건이 원장 밖** — 쇼핑은 자동 발견 불가라 수동 입력 경로 필요
