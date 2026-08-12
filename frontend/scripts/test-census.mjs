@@ -75,6 +75,25 @@ export function isDataless(stat) {
 }
 
 /**
+ * `npm test`의 최종 exit 코드. **판정을 여기 한 곳에 모은다.**
+ *
+ * ★적대 리뷰 변이 M8·M9(2026-08-12)가 드러낸 것: 판정 로직은 테스트가 덮는데 그 판정을
+ *   exit 코드로 바꾸는 «분기»가 껍데기 스크립트에 흩어져 있으면 거기가 통째로 사각지대가 된다.
+ *   실제로 `if (ok)`를 무력화해도(M8), vitest 실패 전파를 지워도(M9) 아무 테스트도 안 죽었다.
+ *   → 분기를 순수 함수 하나로 모으고 껍데기에는 `process.exit(exitCodeFor(...))` **한 줄만** 남긴다.
+ *     그래야 «판정»은 유닛테스트가, «전파»는 통합테스트 하나가 전부 덮는다.
+ *
+ * @param {{censusOk: boolean, vitestStatus: number|null}} x
+ */
+export function exitCodeFor({ censusOk, vitestStatus }) {
+  // 미실행이 있으면 vitest가 뭐라 하든 실패다 — 통과도 실패도 아닌 것은 초록일 수 없다.
+  if (!censusOk) return 1;
+  // vitest가 죽어서 코드를 못 주면(null) «성공»으로 읽지 않는다.
+  if (vitestStatus === null || vitestStatus === undefined) return 1;
+  return vitestStatus;
+}
+
+/**
  * 복구가 끝났는가 — **재스캔 결과만** 본다.
  *
  * ★첫 판의 실사고(2026-08-12): 판정을 «읽은 개수»로 했더니 읽기 실패 373건이 catch에서

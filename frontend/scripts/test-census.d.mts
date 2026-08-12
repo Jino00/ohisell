@@ -8,6 +8,10 @@ export declare function censusVerdict(
   expected: string[],
   reported: string[],
 ): { missing: string[]; unexpected: string[]; ok: boolean };
+export declare function exitCodeFor(x: {
+  censusOk: boolean;
+  vitestStatus: number | null | undefined;
+}): number;
 export declare function isDataless(stat: { size: number; blocks: number }): boolean;
 export declare function healIsComplete(counts: {
   read?: number;

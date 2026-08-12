@@ -9,6 +9,7 @@ import {
   includeMatchesKnown,
   KNOWN_INCLUDE,
   censusVerdict,
+  exitCodeFor,
   isDataless,
   healIsComplete,
   describeDatalessRemedy,
@@ -40,6 +41,27 @@ describe("censusVerdict — «통과»가 아니라 «돌았나»를 본다", ()
     const v = censusVerdict(["a.test.ts", "b.test.ts"], []);
     expect(v.ok).toBe(false);
     expect(v.missing).toEqual(["a.test.ts", "b.test.ts"]);
+  });
+});
+
+describe("exitCodeFor — 판정을 한 곳에 모은 곳 (적대 리뷰 M8·M9)", () => {
+  it("★미실행이 있으면 vitest가 통과라 해도 실패다", () => {
+    expect(exitCodeFor({ censusOk: false, vitestStatus: 0 })).toBe(1);
+  });
+
+  it("★전부 돌았어도 vitest가 실패면 그 코드를 그대로 내보낸다 (변이 M9의 자리)", () => {
+    // 이 줄이 사라지면 «실패한 테스트»가 통째로 초록이 된다 — 원래 버그보다 나쁘다.
+    expect(exitCodeFor({ censusOk: true, vitestStatus: 1 })).toBe(1);
+    expect(exitCodeFor({ censusOk: true, vitestStatus: 2 })).toBe(2);
+  });
+
+  it("전부 돌았고 vitest도 통과면 0", () => {
+    expect(exitCodeFor({ censusOk: true, vitestStatus: 0 })).toBe(0);
+  });
+
+  it("★vitest가 죽어 코드를 못 주면(null) 초록이라 말하지 않는다", () => {
+    expect(exitCodeFor({ censusOk: true, vitestStatus: null })).toBe(1);
+    expect(exitCodeFor({ censusOk: true, vitestStatus: undefined })).toBe(1);
   });
 });
 

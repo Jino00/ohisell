@@ -18,6 +18,7 @@ import {
   includeMatchesKnown,
   KNOWN_INCLUDE,
   censusVerdict,
+  exitCodeFor,
   isDataless,
   describeDatalessRemedy,
 } from "./test-census.mjs";
@@ -25,10 +26,15 @@ import {
 const root = fileURLToPath(new URL("..", import.meta.url)); // frontend/
 const rel = (p) => relative(root, p).split(sep).join("/");
 
-function die(...lines) {
+function printBox(...lines) {
   console.error("\n" + "━".repeat(72));
   for (const l of lines) console.error(l);
   console.error("━".repeat(72) + "\n");
+}
+
+/** 인구조사에 도달하기 «전»에 죽는 경우들 — 여기선 판정할 재료 자체가 없다. */
+function die(...lines) {
+  printBox(...lines);
   process.exit(1);
 }
 
@@ -96,37 +102,39 @@ console.log(
 );
 
 if (ok) {
-  if (res.status !== 0) process.exit(res.status); // 전부 돌았지만 실패가 있다 — vitest 판정 존중
   console.log("전부 실행됨 ✓");
-  process.exit(0);
-}
-
-const lines = ["테스트 파일이 «실행조차 되지 않았습니다» — 통과도 실패도 아닙니다."];
-if (missing.length) {
-  lines.push("", `결과를 못 낸 파일 ${missing.length}개:`);
-  for (const f of missing) lines.push(`  · ${f}`);
-}
-if (unexpected.length) {
-  lines.push("", `분모 밖에서 돈 파일 ${unexpected.length}개(수집 경로 불일치):`);
-  for (const f of unexpected) lines.push(`  · ${f}`);
-}
-
-// 이 repo에서 실제로 이 증상을 만든 원인을 같이 진단해 준다(2026-08-12).
-try {
-  const nm = join(root, "node_modules");
-  let dataless = 0;
-  const stack = [nm];
-  while (stack.length) {
-    const dir = stack.pop();
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) stack.push(p);
-      else if (e.isFile() && isDataless(statSync(p))) dataless++;
-    }
+} else {
+  const lines = ["테스트 파일이 «실행조차 되지 않았습니다» — 통과도 실패도 아닙니다."];
+  if (missing.length) {
+    lines.push("", `결과를 못 낸 파일 ${missing.length}개:`);
+    for (const f of missing) lines.push(`  · ${f}`);
   }
-  if (dataless > 0) lines.push("", describeDatalessRemedy(dataless, rel(nm)));
-} catch {
-  // 진단 실패는 판정을 바꾸지 않는다 — 위의 미실행 목록이 이미 판정이다.
+  if (unexpected.length) {
+    lines.push("", `분모 밖에서 돈 파일 ${unexpected.length}개(수집 경로 불일치):`);
+    for (const f of unexpected) lines.push(`  · ${f}`);
+  }
+
+  // 이 repo에서 실제로 이 증상을 만든 원인을 같이 진단해 준다(2026-08-12).
+  try {
+    const nm = join(root, "node_modules");
+    let dataless = 0;
+    const stack = [nm];
+    while (stack.length) {
+      const dir = stack.pop();
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) stack.push(p);
+        else if (e.isFile() && isDataless(statSync(p))) dataless++;
+      }
+    }
+    if (dataless > 0) lines.push("", describeDatalessRemedy(dataless, rel(nm)));
+  } catch {
+    // 진단 실패는 판정을 바꾸지 않는다 — 위의 미실행 목록이 이미 판정이다.
+  }
+  printBox(...lines);
 }
 
-die(...lines);
+// ★★이 파일에 판정 분기는 없다. 종료 코드는 `exitCodeFor` 하나가 정하고 여기 **한 줄**로 나간다.
+//   (적대 리뷰 M8·M9: 분기가 껍데기에 흩어져 있으면 그 분기가 통째로 테스트 사각지대가 된다.
+//    출구가 하나면 «미실행 → exit≠0» 통합테스트 하나가 이 줄까지 같이 지킨다.)
+process.exit(exitCodeFor({ censusOk: ok, vitestStatus: res.status }));
