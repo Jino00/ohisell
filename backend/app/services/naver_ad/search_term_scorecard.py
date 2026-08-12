@@ -176,7 +176,22 @@ def build_scorecard(
             #   생성기도 BEP 없는 그룹을 bep_unknown으로 후보에서 뺀다. 판정층이 「모르면 안
             #   자른다」인데 채점층만 「모르면 전액이 이익」이면 확대 판단의 근거가 부풀려진다.
             cost_saved = (before["cost_per_day"] - after["cost_per_day"]) * after_days
-            margin_lost = (before["amt_per_day"] - after["amt_per_day"]) / float(bep) * after_days
+            # ★margin_lost는 «우리 조치 때문에 같이 사라진 공헌이익»이다. 그런데 사후 매출이
+            #   사전보다 크면 이 값이 **음수**가 되고 saved가 비용 절감분보다 커진다 — 즉 우리가
+            #   만들지도 않은 매출 증가를 **우리 회수액으로 신고**하게 된다. 제외한 검색어의
+            #   사후 매출이 오히려 늘었다면 그건 성과가 아니라 «제외가 안 걸렸다»는 신호다
+            #   (verdict still_spending이 그걸 따로 말한다).
+            #   ⚠️가설이 아니다: 「골프」(exclusion_id=2)는 사전 매출이 0원이라 이 식이
+            #   **구조적으로 음수만 낼 수 있는** 행이고, 8/17 첫 성적표 판정 대상이다.
+            #   0에서 끊고 그 사실을 why에 남긴다 — 같은 파일이 BEP를 모를 때 «모르면 신고하지
+            #   않는다»로 가는 것과 같은 규율이다(조용한 보정 금지).
+            margin_lost_raw = (before["amt_per_day"] - after["amt_per_day"]) / float(bep) * after_days
+            margin_lost = max(margin_lost_raw, 0.0)
+            if margin_lost_raw < 0:
+                why += (
+                    f" (사후 매출이 사전보다 커서 공헌이익 손실을 0으로 끊었다 — 우리 조치가"
+                    f" 만들지 않은 증가분 {int(-margin_lost_raw):,}원을 회수액에 넣지 않는다)"
+                )
             saved = int(cost_saved - margin_lost)
 
         items.append({

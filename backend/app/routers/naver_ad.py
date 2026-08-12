@@ -67,7 +67,7 @@ from decimal import Decimal
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, tuple_
 from sqlalchemy.orm import Session
 
@@ -1861,7 +1861,8 @@ def get_bm_benchmark(
 
 @router.get("/search-term/exclusions")
 def get_search_term_exclusions(
-    status: str | None = Query(None, pattern="^(excluded|probation|restored)$"),
+    # void = 무효화된 행. 조회할 수 있어야 «지운 것»이 어디로 갔는지 확인 가능하다(사후 가시성).
+    status: str | None = Query(None, pattern="^(excluded|probation|restored|void)$"),
     campaign_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=_MAX_BM_LIMIT),
     offset: int = Query(0, ge=0),
@@ -1960,12 +1961,23 @@ def get_search_term_exclusion_list(
 
 
 class SearchTermExecutionIn(BaseModel):
-    """사람이 콘솔에서 실행한 제외 1건의 보고(D-NAO-173 P2-①)."""
+    """사람이 콘솔에서 실행한 제외 1건의 보고(D-NAO-173 P2-①).
 
-    campaign_id: str
-    adgroup_id: str
-    search_term: str
-    rationale: str
+    ★값 검증의 정본은 여기가 아니라 `search_term_execution._require`다. 화면 말고 자동 발견
+      경로도 같은 문을 지나야 하므로 SA에 두고, 여기서는 «어차피 거부될 것»을 일찍 끊을 뿐이다
+      (min_length=1). 두 곳에 서로 다른 규칙을 쓰면 어느 쪽이 정본인지 곧 갈린다.
+    """
+
+    campaign_id: str = Field(min_length=1, max_length=50)
+    adgroup_id: str = Field(min_length=1, max_length=50)
+    search_term: str = Field(min_length=1, max_length=300)
+    rationale: str = Field(min_length=1, max_length=1000)
+
+
+class SearchTermVoidIn(BaseModel):
+    """장부 행 무효화 요청 — 사유는 필수다(왜 지웠는지 없는 삭제는 감사 불가)."""
+
+    reason: str = Field(min_length=1, max_length=200)
 
 
 @router.post("/search-term/executions")
@@ -1979,13 +1991,36 @@ def post_search_term_execution(
       기록이 없으면 diary→outcome→wisdom 사슬의 입력이 0이라 **열 번을 잘라도 아무것도
       배우지 않는다.** 실행과 기록을 같은 것으로 취급하면 그 상태가 금지선의 이름으로 굳는다.
     """
-    return search_term_execution.record_execution(
-        db,
-        campaign_id=payload.campaign_id,
-        adgroup_id=payload.adgroup_id,
-        search_term=payload.search_term,
-        rationale=payload.rationale,
-    )
+    try:
+        return search_term_execution.record_execution(
+            db,
+            campaign_id=payload.campaign_id,
+            adgroup_id=payload.adgroup_id,
+            search_term=payload.search_term,
+            rationale=payload.rationale,
+        )
+    except search_term_execution.ExclusionInputError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.delete("/search-term/executions/{exclusion_id}")
+def delete_search_term_execution(
+    exclusion_id: int, payload: SearchTermVoidIn, db: Session = Depends(get_db)
+) -> dict:
+    """잘못 들어온 장부 행을 무효화한다(원장 status=void + 짝인 일기 행 중화).
+
+    ★하드 삭제가 아니다 — 행은 감사용으로 남고 모든 소비자(성적표·생존 감시 배너·SS레인·자동
+      발견)에서 빠진다. **되돌릴 수 있으므로** 승인 게이트가 아니라 자동 진행 대상이고, 대신
+      사유를 필수로 받아 근거를 보존한다(전역 §1: 사후 가시성·정정 경로·근거 보존).
+
+    ⚠️이미 학습에 반영된 몫은 되돌리지 못한다 — 반환값 `wisdom_may_have_counted`로 표면화한다.
+    """
+    try:
+        return search_term_execution.void_execution(
+            db, exclusion_id=exclusion_id, reason=payload.reason
+        )
+    except search_term_execution.ExclusionInputError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @router.post("/search-term/executions/detect")

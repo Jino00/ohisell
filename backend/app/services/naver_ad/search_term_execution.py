@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverSearchTermDaily, NaverSearchTermExclusion
+from app.models import NaverSearchTermDaily, NaverSearchTermExclusion, OpsDiaryEntry
 from app.services.naver_ad import diary
 from app.utils.kst import kst_now
 
@@ -35,8 +35,31 @@ log = logging.getLogger(__name__)
 # diary `action` 값 — ★wisdom_candidates의 시그니처가 `campaign_id|action|환경`이므로
 # 이 문자열이 곧 **학습 단위의 이름**이다. 바꾸면 과거 시그니처와 갈라져 승률이 리셋된다.
 DIARY_ACTION = "search_term_exclude"
+# ★이 원장에는 쓰기 주체가 **둘**이고 둘이 일기를 서로 다른 모양으로 쓴다:
+#     record_execution(이 파일) : action="search_term_exclude" · target_id=검색어[:50]
+#     SS레인/하네스             : action="exclude_search_term" · target_id=검색어 전문
+#       (naver_execution_harness._ACTION_BY_PROPOSAL_TYPE[SEARCH_TERM_EXCLUDE_TYPE])
+#   한쪽 모양만 보면 다른 쪽이 만든 행을 무효화할 때 일기가 살아남아 **학습이 계속 그 조치를
+#   먹는다.** 가설이 아니다 — prod exclusion_id=1(아이패드종이필름)이 하네스 산 행이다
+#   (2026-07-22 `_autofire_exclude`). 표기 분열 자체는 선행 결함이고 여기서 통합하지 않는다
+#   (시그니처를 바꾸면 과거 승률이 리셋된다) — 무효화만 양쪽을 다 본다.
+DIARY_ACTIONS = (DIARY_ACTION, "exclude_search_term")
+# 일기 매칭의 시간 하한 여유 — 원장 커밋과 일기 쓰기 사이의 순서·시계 차이를 흡수한다.
+# 주기(cycle) 간격은 최소 30일이라 1시간 여유로도 주기끼리는 확실히 갈린다.
+_DIARY_MATCH_SLACK = timedelta(hours=1)
 # actor — diary 모델 주석의 허용값(daily/hourly/console/delegation/system) 중 «사람이 콘솔에서».
 DIARY_ACTOR = "console"
+
+# ── 무효화(잘못 들어온 장부 행의 정정 경로, D-NAO-174 이월 P2) ──
+# ★하드 삭제가 아니라 상태 전이인 이유: 이 행에는 짝인 일기 행이 있고 그게 학습 사슬의 입력이다.
+#   행을 지우면 일기만 고아로 남아 «누가 왜 이 조치를 기록했나»를 영영 복원할 수 없다.
+#   기존 소비자(성적표·생존 감시·SS레인·자동 발견)는 전부 status를 명시적으로 좁혀 읽으므로
+#   (`== "excluded"` / `in ("excluded","probation")`) 새 상태는 자동으로 전부에서 빠진다 —
+#   즉 «지워진 것처럼» 보이면서 감사 흔적은 남는다.
+VOID_STATUS = "void"
+# 일기 쪽 중화 — diary_outcome.EVENT_TYPES( execute/blocked/reject/kill_switch ) 밖의 값이라
+# 소급 기입 대상에서 빠지고, 따라서 wisdom 후보로도 안 올라간다. 행 자체는 지우지 않는다.
+VOIDED_EVENT_TYPE = "voided"
 
 # 재심사 백오프 — 기존 PX 상태기계 관례(cycle당 30일, 상한 90일)를 그대로 따른다.
 # 여기서 새 정책을 만들지 않는다(같은 테이블에 두 가지 주기가 섞이면 재심사가 예측 불가해진다).
@@ -45,6 +68,26 @@ _REVIEW_BACKOFF_MAX = 90
 
 # 근거 수치를 붙일 조회 창(제외 시점 비용 = 감사용 스냅샷). 리스트 생성기의 창과 같은 30일.
 _COST_WINDOW_DAYS = 30
+
+
+class ExclusionInputError(ValueError):
+    """장부 입구에서 거부된 입력. 라우터가 422로 옮긴다.
+
+    ★왜 예외인가(조용한 저장 금지): 이 원장에는 **삭제 라우트가 없었고**(D-NAO-174 이월 P2),
+      한 번 들어간 행은 배너·성적표·SS레인·학습 사슬에 영구히 남았다. 빈 값을 «기본값»으로
+      받아 저장하면 그 행을 나중에 사람이 알아볼 수도, 지울 수도 없다. 입구에서 막는 것이
+      들어온 뒤 지우는 것보다 싸다.
+    """
+
+
+def _require(value: str | None, field: str, *, max_len: int) -> str:
+    """장부에 넣기 전 필수 문자열 1칸 검사 — 공백만 있는 값도 «없음»으로 친다."""
+    v = (value or "").strip()
+    if not v:
+        raise ExclusionInputError(f"{field}가 비어 있다 — 장부에 넣을 수 없다")
+    if len(v) > max_len:
+        raise ExclusionInputError(f"{field}가 너무 길다({len(v)}자 > {max_len}자)")
+    return v
 
 
 def _cost_last_30d(db: Session, adgroup_id: str, search_term: str, as_of: date) -> int:
@@ -86,12 +129,26 @@ def record_execution(
         discovered: True면 **라이브 대조가 스스로 발견**한 것(사람이 화면에서 알린 게 아니라).
             근거 문장에 그 출처를 남긴다 — 나중에 「누가 이 행을 만들었나」가 감사 대상이 된다.
 
-    반환: {created|updated, exclusion_id, cost_at_exclusion, cycle, diary: bool}
+    반환: {result, exclusion_id, cost_at_exclusion, cycle, next_review_at, diary: bool}
+      result ∈ {created, re_excluded, already_recorded}
+
+    Raises:
+        ExclusionInputError: campaign_id·adgroup_id·search_term·rationale 중 빈 값이 있을 때.
+            ★fail-closed다: 빈 campaign_id로 저장되면 그 행의 학습 시그니처가
+            `|search_term_exclude|…`로 시작해 캠페인 축을 잃고, 원장·일기 어디서도 어느
+            캠페인의 조치였는지 복원할 수 없다. 종전엔 detect 경로가 `camp_of.get(id, "")`로
+            바로 그 빈 값을 넣을 수 있었다(D-NAO-174 이월 P2).
 
     ★멱등: 같은 (adgroup_id, search_term)이 이미 excluded면 **일기를 또 쓰지 않는다**. 화면에서
       두 번 눌렀다고 학습 표본이 두 배가 되면 승률이 조작된다(wisdom_candidates는 entry 단위로
       센다). 재제외(restored/probation → excluded)만 cycle을 올리고 새 일기를 쓴다.
     """
+    # ★입구 검증 — 조회·쓰기 어느 것보다 먼저. 뒤에서 하면 «검사는 있는데 이미 저장된» 꼴이 된다.
+    campaign_id = _require(campaign_id, "campaign_id", max_len=50)
+    adgroup_id = _require(adgroup_id, "adgroup_id", max_len=50)
+    search_term = _require(search_term, "search_term", max_len=300)
+    rationale = _require(rationale, "rationale", max_len=1000)
+
     now = now or kst_now()
     today = now.date()
 
@@ -115,7 +172,12 @@ def record_execution(
         }
 
     cost = _cost_last_30d(db, adgroup_id, search_term, today)
-    cycle = (row.cycle + 1) if row is not None else 1
+    # ★무효화된 행을 되살릴 땐 cycle을 승계하지 않는다. void는 «잘못 들어온 행»이라 애초에
+    #   일어나지 않은 조치이고, 그 횟수를 세면 재심사 백오프(30일×cycle)가 실수 때문에 늘어난다.
+    if row is not None and row.status == VOID_STATUS:
+        cycle = 1
+    else:
+        cycle = (row.cycle + 1) if row is not None else 1
     review_at = today + timedelta(days=min(_REVIEW_BACKOFF_DAYS * cycle, _REVIEW_BACKOFF_MAX))
 
     if row is None:
@@ -173,6 +235,121 @@ def record_execution(
     }
 
 
+def void_execution(
+    db: Session, *, exclusion_id: int, reason: str, now: datetime | None = None
+) -> dict:
+    """잘못 들어온 장부 행 1건을 무효화한다(원장 상태 전이 + 짝인 일기 행 중화).
+
+    ★왜 이 경로가 필요한가: 종전엔 이 원장에 **정정 경로가 아예 없었다**. 오타 하나로 들어간
+      행이 성적표·생존 감시 배너·SS레인·학습 사슬에 영구히 남았고, 남은 유일한 «수정»은 같은
+      (adgroup, term)으로 재등록하는 것뿐이었다(그건 지우는 게 아니라 덮는 것이다).
+      콘솔 제외 약 42건을 장부에 넣는 순간 이 부재가 실비용이 되므로 **넣기 전에** 만든다.
+
+    무엇을 하나:
+      ① 원장 행 → status=void. 모든 소비자가 status를 명시적으로 좁혀 읽으므로 배너·성적표
+         ·SS레인·자동 발견 대조에서 전부 빠진다(행은 감사용으로 남는다).
+      ② 짝인 일기 행 → event_type=voided. diary_outcome.EVENT_TYPES 밖이라 결과 소급 대상에서
+         빠지고, 따라서 wisdom 후보로도 안 올라간다. **①만 하면 장부에선 사라졌는데 학습은
+         계속 그 조치를 먹는다** — 「보이는 곳에서만 지운다」가 이 리포의 반복 실패 유형이다.
+
+    ⚠️**이미 학습에 반영된 것은 되돌리지 못한다**: 일기 행에 outcome_json이 이미 채워졌다면
+      wisdom 후보 승률에 이미 셈이 들어갔을 수 있다. 그건 이 함수가 못 지우므로 숨기지 않고
+      `wisdom_may_have_counted`로 표면화한다(조용한 부분 실패 금지).
+      ★그 값은 **3상**이다: True(셌을 수 있음) / False(아직 아님) / **None(확인 못 함)**.
+      일기를 못 찾았거나 구분할 수 없을 때 False로 단언하면 «확인 안 함»이 «안 셌음»으로
+      둔갑한다 — 이 리포가 반복해서 당한 모양이다(교훈 #123).
+
+    반환: {result, exclusion_id, status, previous_status, diary_voided(int),
+           wisdom_may_have_counted(bool|None), diary_note(str|None)}
+
+    Raises:
+        ExclusionInputError: 대상 행이 없거나 사유가 비었을 때.
+    """
+    reason = _require(reason, "reason", max_len=200)
+    now = now or kst_now()
+
+    row = db.get(NaverSearchTermExclusion, exclusion_id)
+    if row is None:
+        raise ExclusionInputError(f"장부에 exclusion_id={exclusion_id} 행이 없다")
+    if row.status == VOID_STATUS:
+        # 멱등 — 두 번 눌러도 같은 결과. 일기 중화는 이미 끝났으므로 다시 세지 않는다.
+        # wisdom 여부는 **이번 호출이 확인한 것이 아니므로** False가 아니라 None이다.
+        return {
+            "result": "already_void", "exclusion_id": row.id, "status": row.status,
+            "diary_voided": 0, "wisdom_may_have_counted": None,
+            "diary_note": "이미 무효화된 행이다 — 이번 호출은 일기를 다시 확인하지 않았다",
+        }
+
+    prev_status = row.status
+    row.status = VOID_STATUS
+    row.last_transition_at = now
+    # 생존 감시의 옛 판정이 무효 행에 남아 있으면 나중에 되살릴 때 그 판정이 새 조치를 덮는다.
+    row.live_state = None
+    row.live_checked_at = None
+    row.live_note = f"무효화({prev_status}→{VOID_STATUS}): {reason}"[:200]
+
+    # ── 짝인 일기 행 중화 ──
+    # ①두 쓰기 주체의 표기를 모두 본다(DIARY_ACTIONS·전문/절단 target_id 양쪽).
+    # ②**이번 주기의 일기만** 건드린다. excluded_at은 KST naive이고 created_at은 UTC이므로
+    #   9시간을 빼고 비교한다([[sqlite-server-default-now-is-utc]]). 이게 없으면 1주기의
+    #   «정당했던» 학습 표본까지 2주기 오등록 때문에 같이 죽는다.
+    trunc = row.search_term[:50]
+    since_utc = row.excluded_at - timedelta(hours=9) - _DIARY_MATCH_SLACK
+    entries = (
+        db.query(OpsDiaryEntry)
+        .filter(
+            OpsDiaryEntry.event_type == "execute",
+            OpsDiaryEntry.action.in_(DIARY_ACTIONS),
+            OpsDiaryEntry.adgroup_id == row.adgroup_id,
+            OpsDiaryEntry.target_id.in_({trunc, row.search_term}),
+            OpsDiaryEntry.created_at >= since_utc,
+        )
+        .all()
+    )
+
+    # ★target_id는 [:50]으로 잘려 저장되므로 앞 50자가 같은 두 검색어를 **구분할 수 없다.**
+    #   그런 충돌이 있으면 남의 일기를 죽이느니 아무것도 안 건드리고 사람에게 넘긴다
+    #   (그 경우 다른 행은 excluded로 멀쩡히 남아 화면 어디에도 이상이 안 보인다).
+    ambiguous = any(
+        other.search_term[:50] == trunc
+        for other in db.query(NaverSearchTermExclusion).filter(
+            NaverSearchTermExclusion.adgroup_id == row.adgroup_id,
+            NaverSearchTermExclusion.id != row.id,
+            NaverSearchTermExclusion.status != VOID_STATUS,
+        ).all()
+    )
+
+    counted: bool | None
+    if ambiguous:
+        entries = []
+        counted = None
+        note = "앞 50자가 같은 다른 검색어가 있어 일기를 구분할 수 없다 — 중화하지 않았다"
+    elif not entries:
+        # ★«일기가 없다»와 «일기를 못 찾았다»는 같은 0이다(교훈 #123). 확인하지 않은 것을
+        #   False로 단언하지 않는다 — 모르면 None으로 내보내고 사유를 붙인다.
+        counted = None
+        note = "짝인 일기 행을 찾지 못했다 — 학습 반영 여부를 확인하지 못했다"
+    else:
+        counted = any(e.outcome_json is not None for e in entries)
+        note = None
+        for e in entries:
+            e.event_type = VOIDED_EVENT_TYPE
+            e.rationale = f"{e.rationale or ''} [무효화: {reason}]"[:1000]
+
+    db.commit()
+    log.info(
+        "[제외무효화] id=%s %s→void 일기 %d행 중화 (학습 기반영=%s, 비고=%s) 사유=%s",
+        exclusion_id, prev_status, len(entries), counted, note, reason,
+    )
+    return {
+        "result": "voided", "exclusion_id": row.id, "status": VOID_STATUS,
+        "previous_status": prev_status, "diary_voided": len(entries),
+        # True=이미 학습에 셌을 수 있음 / False=아직 아님 / **None=확인 못 함**
+        "wisdom_may_have_counted": counted,
+        "diary_note": note,
+    }
+
+
 def detect_new_exclusions(
     db: Session, *, adgroup_ids: list[str] | None = None, now: datetime | None = None
 ) -> dict:
@@ -225,11 +402,23 @@ def detect_new_exclusions(
     errors: list[str] = []
     groups_with_zero = 0
     unverifiable_groups = 0
+    type_unknown_groups = 0
+    unattributable: list[dict] = []
     for adgroup_id in adgroup_ids:
         # ★쇼핑 그룹은 이 API가 제외 목록을 돌려주지 않는다(2026-08-11 실측: 콘솔 43건 vs
         #   API 0건). 그러니 여기서 «없다»를 근거로 아무 판단도 하지 않는다 — 자동 발견은
         #   구조적으로 파워링크 전용이고, 쇼핑의 유일한 입구는 화면 수동 기록이다.
-        if naver_sa_writer.get_adgroup_type(adgroup_id) not in (None, "WEB_SITE"):
+        adgroup_type = naver_sa_writer.get_adgroup_type(adgroup_id)
+        if adgroup_type is None:
+            # ★«모른다»는 «WEB_SITE가 아니다»가 아니다(get_adgroup_type docstring이 직접 그렇게
+            #   적어 뒀다). 종전 조건 `not in (None, "WEB_SITE")`는 모름을 **대조 가능 쪽**에
+            #   넣었다 — 그러면 쇼핑 그룹이 유형 조회 500 한 번으로 restricted-keywords 경로를
+            #   타고, 그 API는 쇼핑에서 200/0건이라 «제외 0건»으로 조용히 세어진다.
+            #   exclusion_survival.py가 정확히 같은 결함으로 P1을 맞았는데(D-NAO-174) 같은
+            #   규율이 이 파일엔 안 들어와 있었다. 모르면 «못 봤다» 쪽에 센다(fail-closed).
+            type_unknown_groups += 1
+            continue
+        if adgroup_type != "WEB_SITE":
             unverifiable_groups += 1
             continue
         try:
@@ -246,18 +435,36 @@ def detect_new_exclusions(
             term = entry.get("keyword") or ""
             if not term or (adgroup_id, term) in known:
                 continue
-            out = record_execution(
-                db, campaign_id=camp_of.get(adgroup_id, ""), adgroup_id=adgroup_id,
-                search_term=term, restrict_kwd_id=entry.get("nccAdgroupRestrictKwdId"),
-                rationale="라이브 제외키워드 목록에 있는데 우리 원장에 없어 등록했다",
-                discovered=True, now=now,
-            )
+            # ★캠페인을 못 붙이면 **등록하지 않되 세어 낸다.** 종전엔 `camp_of.get(id, "")`로
+            #   빈 campaign_id가 원장·일기에 그대로 들어갔고(이월 P2), 그 행은 학습 시그니처에서
+            #   캠페인 축을 잃는다. 그렇다고 조회 전에 그룹째 건너뛰면 «거기 제외가 있는데 우리가
+            #   못 적었다»는 사실 자체가 안 보인다 — 그건 이 리포가 반복해서 당한 형태다.
+            #   그래서 조회는 하고, 기록만 거부하고, 목록으로 표면화한다.
+            if not camp_of.get(adgroup_id):
+                unattributable.append({"adgroup_id": adgroup_id, "search_term": term})
+                continue
+            try:
+                out = record_execution(
+                    db, campaign_id=camp_of[adgroup_id], adgroup_id=adgroup_id,
+                    search_term=term, restrict_kwd_id=entry.get("nccAdgroupRestrictKwdId"),
+                    rationale="라이브 제외키워드 목록에 있는데 우리 원장에 없어 등록했다",
+                    discovered=True, now=now,
+                )
+            except ExclusionInputError as e:  # 입구 검증 거부 — 한 건이 스윕을 못 죽인다
+                errors.append(f"{adgroup_id}/{term}: {e}")
+                continue
             recorded.append({"adgroup_id": adgroup_id, "search_term": term, **out})
 
     return {
         "scanned_groups": len(adgroup_ids),
         # 쇼핑이라 애초에 대조가 불가능해 건너뛴 그룹 — «찾은 게 없다»와 «볼 수 없다»를 가른다.
         "unverifiable_groups": unverifiable_groups,
+        # 유형 조회 자체가 실패한 그룹 — 쇼핑(위)과도 다르다. «모름»을 0건에 섞지 않는다.
+        "type_unknown_groups": type_unknown_groups,
+        # 라이브엔 있는데 캠페인을 못 붙여 **등록을 보류한** 제외. 빈 campaign_id로 넣느니 안
+        # 넣되, «못 적은 것이 있다»를 목록으로 남긴다(조용한 누락 금지).
+        "unattributable": unattributable,
+        "unattributable_count": len(unattributable),
         "groups_with_zero": groups_with_zero,
         "recorded": recorded,
         "errors": errors,

@@ -3097,6 +3097,13 @@ export interface NaverSearchTermDetectRecorded extends NaverSearchTermExecutionR
 export interface NaverSearchTermDetectResult {
   scanned_groups: number;
   groups_with_zero: number;
+  /** 쇼핑이라 애초에 API로 대조가 불가능한 그룹 — «찾은 게 없다»와 다르다. */
+  unverifiable_groups?: number;
+  /** 광고그룹 유형 조회 자체가 실패한 그룹 — 쇼핑(위)과도 «0건»과도 다르다. */
+  type_unknown_groups?: number;
+  /** 라이브엔 있는데 캠페인을 못 붙여 기록을 보류한 제외. */
+  unattributable?: { adgroup_id: string; search_term: string }[];
+  unattributable_count?: number;
   recorded: NaverSearchTermDetectRecorded[];
   errors: string[];
   as_of: string;

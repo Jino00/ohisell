@@ -17,7 +17,33 @@ import {
   getSearchTermExclusionScorecard, postSearchTermExecution, postSearchTermExecutionDetect,
   type NaverExclusionListResponse, type NaverExclusionCandidate, type NaverExclusionSurvival,
   type NaverSearchTermScorecard, type NaverExclusionVerdict, type NaverSearchTermExecutionResultKind,
+  type NaverSearchTermDetectResult,
 } from "../lib/api";
+
+/** 「라이브에서 자동 발견」 실행 결과 한 줄.
+ *
+ * ★«못 본 몫»을 항상 찍는다(D-NAO-174 후속 P1). 이 버튼의 존재 이유는 «보고에 없던 제외를
+ *   찾는 것»인데, 아무것도 대조하지 못한 실행과 「찾을 게 없었다」가 같은 문장으로 보이면
+ *   버튼이 거짓말을 한다. 백엔드가 통(unverifiable/type_unknown/unattributable)을 나눠 내는데
+ *   화면이 안 읽으면 그 구분은 없는 것과 같다 — 어제 P1으로 처분된 것과 같은 모양이다.
+ */
+export function detectResultText(r: NaverSearchTermDetectResult): string {
+  const shopping = r.unverifiable_groups ?? 0;
+  const unknownType = r.type_unknown_groups ?? 0;
+  const uncompared = shopping + unknownType;
+  const held = r.unattributable_count ?? 0;
+
+  const head = uncompared > 0 && uncompared >= r.scanned_groups
+    ? `⚠️ ${num(r.scanned_groups)}개 그룹 중 대조된 그룹이 없다 — 「등록 0건」은 «없다»가 아니라 «못 봤다»다`
+    : `${num(r.scanned_groups)}개 그룹 조회 · 새로 등록 ${num(r.recorded.length)}건`;
+
+  const parts = [head];
+  parts.push(`대조 못 함 ${num(uncompared)}개(쇼핑 ${num(shopping)} · 유형 미상 ${num(unknownType)})`);
+  parts.push(`빈 응답 ${num(r.groups_with_zero)}개(실패 ${num(r.errors.length)}건)`);
+  if (held > 0) parts.push(`⚠️ 캠페인을 못 붙여 기록 보류 ${num(held)}건`);
+  return parts.join(" · ");
+}
+
 
 const DAYS_OPTIONS = [14, 30, 60];
 const ROUND_CAP_OPTIONS = [20, 50, 100];
@@ -275,10 +301,7 @@ function ScorecardSection({
     setDetectMsg(null);
     try {
       const r = await postSearchTermExecutionDetect(campaignId || undefined);
-      setDetectMsg(
-        `${num(r.scanned_groups)}개 그룹 조회 · 새로 등록 ${num(r.recorded.length)}건 · `
-        + `빈 응답 그룹 ${num(r.groups_with_zero)}개(실패 ${num(r.errors.length)}건)`,
-      );
+      setDetectMsg(detectResultText(r));
       onChanged();
     } catch (e) {
       setDetectErr(e instanceof Error ? e.message : String(e));
