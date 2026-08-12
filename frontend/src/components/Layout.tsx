@@ -135,7 +135,35 @@ export function buildPipelineHealthBanner(
     }
   }
 
-  // 8) 잡 문제 (disabled 제외 — 정상)
+  // 8) 광고비 괴리 — 쿠팡이 정산에서 뗀 광고비가 우리가 뺀 광고비를 넘는다(D-CPP-46).
+  //    ★이 분기가 없으면 disk_low와 같은 방식으로 통째로 숨는다(교훈 #223): 백엔드는
+  //      healthy=false를 만드는데 화면엔 아무 말이 없다. **판정과 같은 커밋에** 넣는다.
+  //    ★막으려는 사고: D-CPP-43으로 정산 ad_sales 차감을 뺀 뒤, PA 수집이 멈추면 `ad_spend`가
+  //      조용히 0이 되고 순이익이 그만큼 **과대계상**된다 — 화면이 비지 않으니 티가 안 난다.
+  //    ★`insufficient_data`는 여기서 안 쓴다 — 그건 «못 쟀다»이고 healthy도 안 깬다.
+  //      뭉치면 «못 쟀다»가 «어긋났다»로 보인다(보존식의 summary_only와 같은 규율).
+  const adiv = health.ad_cost_divergence;
+  if (adiv && (adiv.verdict === "diverged" || adiv.verdict === "pipe_stopped")) {
+    const win = adiv.window?.start
+      ? ` [${adiv.window.start}~${adiv.window.end ?? "?"}]`
+      : "";
+    if (adiv.verdict === "pipe_stopped") {
+      parts.push(
+        `광고비 수집이 비었는데 정산에서는 ${adiv.settled.toLocaleString()}원이 공제됨${win}` +
+          " — 순이익이 그만큼 과대계상됨",
+      );
+    } else {
+      // 배율과 «얼마나»를 같이 준다 — 배율만으론 규모를 모르고, 금액만으론 임계를 모른다.
+      const gap = adiv.settled - adiv.deducted;
+      parts.push(
+        `광고비 괴리 ${adiv.ratio?.toFixed(3)}배 (정산 ${adiv.settled.toLocaleString()}원 vs` +
+          ` 차감 ${adiv.deducted.toLocaleString()}원, 차 ${gap.toLocaleString()}원)${win}` +
+          " — PA 수집 누락 의심",
+      );
+    }
+  }
+
+  // 9) 잡 문제 (disabled 제외 — 정상)
   const jobNames: string[] = [
     ...(health.failed ?? []).map((j) => j.job_name),
     ...(health.stale ?? []).map((j) => j.job_name),

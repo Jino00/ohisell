@@ -370,3 +370,71 @@ describe("buildPipelineHealthBanner", () => {
     expect(buildPipelineHealthBanner(makeHealth({ exclusion_survival: null }))).toBeNull();
   });
 });
+
+describe("광고비 괴리 (D-CPP-46)", () => {
+  // ★이 분기가 없으면 백엔드가 healthy=false를 만드는데 화면은 조용하다 — disk_low가
+  //   정확히 그 상태로 있었다(교훈 #223). 그래서 판정과 «같은 커밋»에 표시를 넣고,
+  //   그게 실제로 문장이 되는지를 여기서 못 박는다.
+  const div = (
+    over: Partial<NonNullable<SchedulerHealth["ad_cost_divergence"]>> = {},
+  ): NonNullable<SchedulerHealth["ad_cost_divergence"]> => ({
+    window: { start: "2026-05-15", end: "2026-08-09" },
+    pa_spend: 16_565_714,
+    nonpa_spend: 1_648_923,
+    deducted: 18_214_637,
+    settled: 17_160_142,
+    ratio: 0.9421,
+    max_ratio: 1.1,
+    account_key: "COUPANG_WING1",
+    verdict: "ok",
+    ...over,
+  });
+
+  it("★파이프 정지 — 우리가 하나도 안 뺐는데 쿠팡은 뗐다", () => {
+    const b = buildPipelineHealthBanner(
+      makeHealth({
+        ad_cost_divergence: div({
+          verdict: "pipe_stopped", pa_spend: 0, nonpa_spend: 0, deducted: 0, ratio: null,
+        }),
+      }),
+    );
+    expect(b).not.toBeNull();
+    expect(b!.summary).toContain("광고비 수집이 비었는데");
+    expect(b!.summary).toContain("17,160,142");
+    // «왜 문제인가»를 말해야 운영자가 손을 댄다.
+    expect(b!.summary).toContain("과대계상");
+  });
+
+  it("★괴리 — 배율과 금액을 같이 준다(배율만으론 규모를, 금액만으론 임계를 모른다)", () => {
+    const b = buildPipelineHealthBanner(
+      makeHealth({
+        ad_cost_divergence: div({ verdict: "diverged", ratio: 1.35, settled: 24_589_760 }),
+      }),
+    );
+    expect(b).not.toBeNull();
+    expect(b!.summary).toContain("1.350배");
+    expect(b!.summary).toContain("24,589,760");
+    expect(b!.summary).toContain("18,214,637");
+    // 창을 밝힌다 — 창 없는 비율은 거짓말이 된다(교훈 #263).
+    expect(b!.summary).toContain("2026-05-15~2026-08-09");
+  });
+
+  it("★verdict가 ok면 침묵 — 정상인데 배너에 숫자를 흘리면 배너가 무뎌진다", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ ad_cost_divergence: div() }))).toBeNull();
+  });
+
+  it("★★insufficient_data는 «어긋남»이 아니다 — 뭉치면 «못 쟀다»가 «틀렸다»로 보인다", () => {
+    expect(
+      buildPipelineHealthBanner(
+        makeHealth({
+          ad_cost_divergence: div({ verdict: "insufficient_data", ratio: null, settled: 0 }),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("★null/undefined면 침묵 — 구백엔드에서도 배너가 깨지지 않는다", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ ad_cost_divergence: null }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({}))).toBeNull();
+  });
+});

@@ -499,4 +499,11 @@ class SchedulerHealthOut(BaseModel):
     # 선언이 필수다(선언 없으면 서비스층 판정을 response_model이 지운다). 짝이 되는 테스트는
     # `test_exclusion_survival.py::test_health_route_actually_returns_exclusion_survival`.
     exclusion_survival: dict | None = None
+    # 광고비 괴리 — 쿠팡이 정산에서 뗀 광고비 ↔ 우리가 손익에서 뺀 광고비(D-CPP-46).
+    # `verdict`가 ok/diverged/pipe_stopped/insufficient_data. 대조 자체를 못 했으면 None.
+    # ★위 세 필드와 **같은 이유로** 이 줄이 필수다: 선언이 없으면 서비스층이 판정을 내도
+    #   response_model이 HTTP 응답에서 조용히 지운다(2026-08-10 적대 리뷰 P1-1이 잡은 사고,
+    #   그때는 서비스층 dict까지만 보는 배선 테스트 6건이 전부 살아 있었다). 짝이 되는 테스트는
+    #   `test_ad_cost_divergence.py::test_health_route_actually_returns_ad_cost_divergence`.
+    ad_cost_divergence: dict | None = None
     as_of: str
