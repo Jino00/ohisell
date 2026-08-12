@@ -197,7 +197,10 @@ def test_coupang_net_profit_conservation_with_adjustments(db):
     assert _conserved(comp)
     assert comp["conservation_ok"] is True
     # 계정 조정 버킷이 권위 값과 정확 일치(부호 포함)
-    assert comp["residuals"]["rg_settlement_flip"] == -ccs["rg_settlement_total"]
+    # ★D-CPP-43: 잔차는 **실제 차감액**(광고 제외)이다. 종전엔 rg_settlement_total을 못 박았는데
+    #   이 픽스처엔 ad_sales가 없어 **어느 쪽으로 고쳐도 통과했다** — 통과하는데 아무것도 안 지키는
+    #   테스트였다(적대 리뷰 P1-1). 아래 전용 테스트가 ad_sales를 넣어 그 구멍을 막는다.
+    assert comp["residuals"]["rg_settlement_flip"] == -ccs["rg_settlement_deducted"]
     assert comp["residuals"]["seller_shipping_3p"] == -ccs["seller_shipping_3p"]
     assert comp["residuals"]["settlement_revenue_adjustment"] == ccs["settlement_revenue_adjustment"]
     assert comp["residuals"]["account_only_ad_nonpa"] == -ccs["ad_nonpa_deducted"]
@@ -297,6 +300,42 @@ def _rg_fee(db, acct, ft, vid, amount, frm=date(2026, 6, 1), to=date(2026, 6, 30
     db.add(CoupangRgSettlementFee(
         account_key=acct, recognition_date_from=frm, recognition_date_to=to,
         fee_type=ft, vendor_item_id=vid, amount=Decimal(amount)))
+
+
+def test_coupang_net_profit_conservation_survives_rg_ad_sales(db):
+    """★★D-CPP-43 적대 리뷰 P1-1 회귀 — **ad_sales가 있을 때** 원장 보존식이 유지되는가.
+
+    라이브 실사고(2026-08-12): 플립이 `rg_total − ad_sales`를 차감하도록 바뀌었는데 잔차 버킷
+    `rg_settlement_flip`은 여전히 `rg_settlement_total`을 신고했다 → 보존식이 **정확히 ad_sales
+    만큼** 깨지고 `trustworthy=false`가 되어, prod에서 **SKU 손익 표가 렌더링 자체가 안 됐다**
+    (`ProductConnectionMap.tsx`의 `trustworthy &&` 가드). 숫자가 틀린 게 아니라 탭이 죽었다.
+
+    ★기존 테스트가 왜 못 잡았나: `test_coupang_net_profit_conservation_with_adjustments`는
+      픽스처에 `ad_sales`가 **없어서** rg_total이든 rg_deducted든 **어느 쪽으로 고쳐도 통과**했다.
+      「통과하는데 아무것도 안 지키는 테스트」다(교훈 #181). ad_sales를 넣는 것이 이 테스트의 전부다.
+    """
+    _ch(db, 1, "COUPANG_WING1")
+    _pm(db, 10, "OHI-0001", cost=Decimal("3000"))
+    _map(db, 10, 1, "V1")
+    _prod(db, "V1")
+    db.add(Order(channel_id=1, order_number="O1", platform_product_id="V1",
+                 quantity=2, selling_price=Decimal("33800"), order_date=OD, status="delivered"))
+    _rg_fee(db, "COUPANG_WING1", "sale_fee", "", "50000")
+    _rg_fee(db, "COUPANG_WING1", "ad_sales", "", "40000")   # ← 이 한 줄이 P1-1을 재현한다
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    ccs = compute_command_center(db, *WIN, account="COUPANG_WING1")["account"]["summary"]
+    comp = _component(result, "coupang", "net_profit")
+
+    # 차감은 광고 제외분(50000)이고 정산 총액은 90000이다 — 둘을 혼동하면 40000이 샌다.
+    assert ccs["rg_settlement_total"] == Decimal("90000")
+    assert ccs["rg_settlement_deducted"] == Decimal("50000")
+    assert comp["residuals"]["rg_settlement_flip"] == Decimal("-50000")
+    assert _conserved(comp), f"보존식 파손: diff={comp.get('conservation_diff')}"
+    assert comp["conservation_ok"] is True
+    # 화면 가드가 살아 있어야 SKU 표가 뜬다
+    assert result["summary"]["trustworthy"] is True
 
 
 def test_rg_settlement_fee_vat_grossup_conservation(db):

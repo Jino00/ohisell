@@ -819,10 +819,11 @@ export interface OverviewResponse {
       net_profit_basis?: string;      // 순이익 날짜축 설명(D-9 투명화)
       // S7(D-14/D-16): RG 정산 비용 net_profit 플립 브리지 필드(계정 단위, 전액 차감)
       net_profit_pre_rg?: string;     // 플립 전 순이익
-      rg_settlement_total?: string;   // ★net_profit에서 실제 차감된 RG 총액(VAT後, 광고 포함)
+      rg_settlement_total?: string;   // RG 정산 총액(VAT後, 광고 포함) — 표시·검산용
+      rg_settlement_deducted?: string; // ★net_profit에서 실제 차감된 값(= 총액 − 광고비, D-CPP-43)
       rg_ad_settlement?: string;      // 표시: 전액 중 광고분(D-16 라이브 조사)
       rg_non_ad_deducted?: string;    // 표시: 전액 중 광고 제외 브레이크다운
-      rg_flip_status?: 'applied_full' | 'not_applied_no_data';
+      rg_flip_status?: 'applied_ex_ad' | 'applied_full' | 'not_applied_no_data';  // D-CPP-43: ex_ad가 현재값
       ad_nonpa_deducted?: string;     // S5a/D-15: 비-PA(전체−집행) net_profit 추가 차감분
     };
     by_option: OverviewAccountRow[];
@@ -853,10 +854,11 @@ export interface OverviewResponse {
   rg_settlement?: {
     summary: {
       total: string; has_data: boolean; note: string;
-      flip_status?: 'applied_full' | 'not_applied_no_data';  // S7 플립 상태(D-16)
-      deducted?: string;             // ★S7 net_profit에서 실제 차감된 RG 총액(광고 포함)
-      non_ad_deducted?: string;      // 표시: 전액 중 광고 제외 브레이크다운
-      ad_settlement?: string;        // D-16 RG정산 광고비(전액 중 광고분)
+      // D-CPP-43: 'applied_full'(광고 포함 전액 차감)은 폐기됐다. 옛 응답 호환으로 유니온엔 남긴다.
+      flip_status?: 'applied_ex_ad' | 'applied_full' | 'not_applied_no_data';
+      deducted?: string;             // ★net_profit에서 실제 차감된 값(= 광고 제외분, D-CPP-43)
+      non_ad_deducted?: string;      // deducted와 동일값(하위호환)
+      ad_settlement?: string;        // 정산 광고비 = 광고센터 PA의 «공제». **차감 안 함**(표시 전용)
       ad_xlsx_rg_overlap?: string;   // 광고비 XLSX RG(2P)분(현재 0, 미래 겹침 감시용)
     };
     by_account: RgSettlementByAccount[];

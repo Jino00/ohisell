@@ -678,17 +678,17 @@ function RgSettlementCard({
         <div className="text-xs text-orange-700 bg-orange-100 rounded px-2 py-1 mb-2">{msg}</div>
       )}
       <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-semibold text-orange-800">✅ RG 정산 비용 — 순이익 반영됨 (계정 단위, 전액 차감)</span>
+        <span className="text-sm font-semibold text-orange-800">✅ RG 정산 비용 — 순이익 반영됨 (계정 단위, <span className="underline decoration-dotted">광고 제외</span> 차감)</span>
         <div className="flex items-center gap-2">
           {RefreshButton}
           <span className="text-right">
-          {/* 헤드라인 = 실제 순이익 차감액 = RG 정산 총액(광고 포함, D-16). 부호 인식(Codex): 양수=차감(−), 음수=환급(+). */}
+          {/* 헤드라인 = 실제 순이익 차감액 = 정산 총액 − 광고비(D-CPP-43). 부호 인식(Codex): 양수=차감(−), 음수=환급(+). */}
           {(() => {
             const d = Number(rg.summary.deducted ?? rg.summary.total);
             const sign = d < 0 ? "+" : "−";
             return <span className="text-base font-bold text-orange-900">{sign}{won(String(Math.abs(d)))}{d < 0 ? " (환급)" : ""}</span>;
           })()}
-          <span className="block text-xs text-orange-500">광고 {won(rg.summary.ad_settlement ?? '0')} 포함 · 광고제외 {won(rg.summary.non_ad_deducted ?? '0')}</span>
+          <span className="block text-xs text-orange-500">정산총액 {won(rg.summary.total)} 중 광고 {won(rg.summary.ad_settlement ?? '0')}는 <b>차감 제외</b></span>
           </span>
         </div>
       </div>
@@ -699,20 +699,21 @@ function RgSettlementCard({
             <div className="flex justify-between"><span className="text-gray-500">판매수수료</span><span>{won(a.sale_fee)}</span></div>
             <div className="flex justify-between"><span className="text-gray-500">풀필먼트(배송·입출고·보관)</span><span>{won(a.fulfillment)}</span></div>
             <div className="flex justify-between"><span className="text-gray-500">반품비</span><span>{won(a.return_fee)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">광고비<span className="text-orange-400">*</span></span><span>{won(a.ad_sales)}</span></div>
+            <div className="flex justify-between text-gray-400"><span>광고비<span className="text-orange-400">*</span> <span className="text-[10px]">(차감 안 함)</span></span><span className="line-through">{won(a.ad_sales)}</span></div>
             {Number(a.other) !== 0 && (
               <div className="flex justify-between text-red-600"><span>기타(미매핑)</span><span>{won(a.other)}</span></div>
             )}
-            <div className="flex justify-between font-semibold border-t border-orange-100 mt-1 pt-1"><span>합계</span><span>{won(a.total)}</span></div>
+            <div className="flex justify-between border-t border-orange-100 mt-1 pt-1 text-gray-400"><span>정산 총액</span><span>{won(a.total)}</span></div>
+            <div className="flex justify-between font-semibold"><span>순이익 차감액</span><span>{won(String(Number(a.total) - Number(a.ad_sales)))}</span></div>
           </div>
         ))}
       </div>
       <div className="text-xs text-orange-700 mt-2 bg-orange-100 rounded px-2 py-1">
-        정산주기 기준(부분 윈도우도 주기 전액). RG 광고비 {won(rg.summary.ad_settlement ?? '0')}는 광고센터 보고서에 없고 정산에만 있어 전액 차감에 포함(D-16, 라이브 조사).
+        정산주기 기준(부분 윈도우도 주기 전액). <b>RG 광고비 {won(rg.summary.ad_settlement ?? '0')}는 차감하지 않는다</b> — 광고센터 PA 광고비를 정산에서 «공제»하는 것이라 PA(광고비 항목)에서 이미 빠졌다(D-CPP-43).
       </div>
       <p className="text-xs text-orange-600 mt-2">
-        ✅ 순이익에 반영됨(계정 단위, RG 정산 총액 전액 차감, D-14/D-16).
-        <span className="text-orange-400"> *</span>RG 광고비는 광고센터 PA 보고서에 잡히지 않고 RG 정산에만 존재(라이브 조사) → 전액 차감에 포함.
+        ✅ 순이익에 반영됨(계정 단위, RG 정산 총액 − 광고비, D-14/D-CPP-43).
+        <span className="text-orange-400"> *</span>1차 출처: 윙 &gt; 정산 &gt; 로켓그로스 정산현황 &gt; 「광고비 내역」 — 광고유형이 전부 <b>PA</b>이고 캠페인 이름이 광고센터와 같다. 미공제분은 다음 정산으로 이월된다.
       </p>
     </div>
   );
@@ -894,8 +895,8 @@ function AccountView({
             // D-CPP-33: 배송수입·납부세액이 순이익에 들어왔다. 옛 문구("매출−반품−수수료−광고−원가")는
             // 이제 사실이 아니라 그대로 두면 화면이 거짓말을 한다.
             [
-              s.rg_flip_status === "applied_full"
-                ? `RG정산 −${won(s.rg_settlement_total ?? "0")}(전액)`
+              s.rg_flip_status === "applied_ex_ad" || s.rg_flip_status === "applied_full"
+                ? `RG정산 −${won(s.rg_settlement_deducted ?? s.rg_non_ad_deducted ?? "0")}(광고 제외)`
                 : "RG 정산 데이터 없음",
               `배송 수입 +${won(s.shipping_income_3p ?? "0")} / 비용 −${won(s.seller_shipping_3p ?? "0")}`,
               // ★납부세액은 «음수»(매입세액 환급)가 될 수 있다 — 매출이 없고 비용만 있는 창에서
