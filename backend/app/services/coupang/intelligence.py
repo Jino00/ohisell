@@ -638,14 +638,34 @@ def _rg_account_breakdown(account_key: str, v: dict) -> dict:
 def apply_rg_net_profit_flip(
     net_profit_pre_rg: Decimal, rg_deducted: Decimal
 ) -> Decimal:
-    """D-16(S7): 종합조망 순이익에 RG 정산 비용을 반영(플립). 정산 총액을 전액 차감한다.
+    """종합조망 순이익에 RG 정산 비용을 반영(플립). **광고비를 뺀** 정산액을 차감한다.
 
-    공식: net_profit_new = net_profit_pre_rg − rg_deducted (= rg_total, 광고 포함).
+    공식: net_profit_new = net_profit_pre_rg − rg_deducted (호출부가 rg_total − ad_sales를 넘긴다).
 
-    D-16(/browse 라이브 조사): RG 광고비는 광고센터 PA 보고서에 안 잡히고 RG 정산에만 존재하므로
-    (prod 2P 0행 실증), 광고 포함 rg_total을 전액 차감해야 net_profit에 반영된다. rg_total은
-    전부 정산 basis라 basis 불일치 없음. 음수 환급주기(rg_deducted<0)도 부호 그대로 가산되어
-    환급이 정확히 반영된다. 순수 함수라 DB 없이 fixture 테스트 가능(D-12).
+    ★D-CPP-43(2026-08-12) — **D-16 폐기**, 구 D-15의 「광고 제외 차감」으로 복귀.
+      D-16은 *"RG 광고비는 광고센터 PA 보고서에 안 잡히고 RG 정산에만 존재"*를 근거로 광고 포함
+      전액을 차감했다. 그 근거는 `sell_type=2P` 0행 실증이었는데 **라벨이 판매경로를 뜻하지
+      않는다**(오픽스 PA 광고비의 97.28%가 RG로 팔리는 옵션에 쓰이고, 광고비 상위 5개 옵션의
+      3P 주문은 0건 — ref 56 §3).
+
+      **1차 출처로 확정**(2026-08-12, 윙 > 정산 > 로켓그로스 정산현황 > 「광고비 내역」
+      `/tenants/rfm-portal-2/cmg/settlement`):
+        · 화면 안내문 — *"로켓그로스 상품의 광고비는 해당 월 말에 계산되어 매입세금계산서 1건이
+          발행되며 … 정산시 지급액보다 공제할 금액(광고비)이 큰 경우 공제하지 못한 남은 광고비는
+          다음 정산으로 이월됩니다."*
+        · 상세내역의 **광고유형이 전부 `PA`**이고 **캠페인 이름이 광고센터 캠페인과 그대로 일치**
+          (AI스마트광고 · [매.최] 골프필름 · [매.최] 카드케이스 · [매.최] 사생활 지문방지필름 ·
+           [매.최] 플립, 폴드 지문방지 내부+사생활외부 · 〃_8 시리즈).
+      → 정산의 `ad_sales`는 별개 비용이 아니라 **광고센터 PA 광고비를 정산에서 «공제»**하는 것이다.
+        PA는 이미 `ad_spend`로 차감되므로 여기서 또 빼면 **이중계상**이다.
+      → 「이월」 규칙이 주간비 0.44~1.98 요동과 「PA 있는데 정산 0인 주」를 설명한다(ref 56 §6-B).
+
+      ★이 결론은 새 발견이 아니라 **복원**이다 — ref 04 §2가 이미 *"RG 정산: 최종 판매가 −
+        판매수수료 − 추가비용(광고비 등) − RG 서비스이용비 후 지급"*이라 적었고, ref 17 §7도
+        *"우리 ad_costs와 이중계상 주의"*라고 경고했다. D-16이 라벨 증거로 그 둘을 덮었다.
+
+    ★부호: 음수 환급주기(rg_deducted<0)도 그대로 가산되어 환급이 정확히 반영된다.
+    ★순수 함수(D-12). **무엇을 넘길지는 호출부가 정한다** — 이 함수는 「넘어온 것을 뺀다」만 한다.
     """
     return net_profit_pre_rg - rg_deducted
 
@@ -1071,14 +1091,18 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # 대조 기준선(RG 플립 전). ★주의(codex P2-1): 이 값은 '비-PA 차감 후·RG 차감 전'이다
     #   (옵션합=net_profit_pre_nonpa, 비-PA 차감 후=net_profit_pre_rg). 감사 시 체인 구분.
     account_sum["net_profit_pre_rg"] = account_sum["net_profit"]
-    account_sum["rg_settlement_total"] = rg_total                 # ★전액 차감액(VAT後, 광고 포함)
-    account_sum["rg_ad_settlement"] = rg_ad_settlement            # 표시: 전액 중 광고분(D-16 라이브 조사)
-    account_sum["rg_non_ad_deducted"] = rg_total - rg_ad_settlement  # 표시: 전액 중 광고 제외분(브레이크다운)
+    # ★D-CPP-43: 차감액은 **광고 제외분**이다. 정산 ad_sales는 광고센터 PA 광고비의 «공제»이고
+    #   PA는 이미 ad_spend로 차감됐으므로 여기서 또 빼면 이중계상이다(1차 출처: 윙 「광고비 내역」).
+    rg_deducted = rg_total - rg_ad_settlement
+    account_sum["rg_settlement_total"] = rg_total                 # 정산 총액(광고 포함) — 표시·검산용
+    account_sum["rg_ad_settlement"] = rg_ad_settlement            # 표시 전용: PA 공제분(**차감 안 함**)
+    account_sum["rg_non_ad_deducted"] = rg_deducted               # 광고 제외분(= 실제 차감액)
+    account_sum["rg_settlement_deducted"] = rg_deducted           # ★순이익에서 실제로 뺀 값(명시 필드)
     account_sum["net_profit"] = apply_rg_net_profit_flip(
-        account_sum["net_profit"], rg_total
+        account_sum["net_profit"], rg_deducted
     )
     # status enum(Codex #6): money basis 명시. 불리언 안 씀.
-    account_sum["rg_flip_status"] = "applied_full" if len(rg_fees) > 0 else "not_applied_no_data"
+    account_sum["rg_flip_status"] = "applied_ex_ad" if len(rg_fees) > 0 else "not_applied_no_data"
 
     # ─── 3P 배송 손익(한진 1,900 비용 − 고객이 낸 배송비 수입) — 계정 단위 최종 반영 ───
     # 구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15).
@@ -1117,7 +1141,11 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         account_sum["cost"], account_sum["total_fee"],
         _ship["cost"], account_sum["ad_spend"],
         account_sum["ad_nonpa_deducted"],   # 비-PA 광고비도 VAT 포함 실비용이다(매입세액 대상)
-        rg_total,                           # RG 정산액(VAT 포함 매입) — P1-2
+        # ★D-CPP-43: **광고 제외분**을 넘긴다. 종전엔 rg_total(광고 포함)을 넘겨서, PA 광고비의
+        #   매입세액이 ad_spend로 한 번 + rg_total 안의 ad_sales로 또 한 번 **이중 공제**됐다.
+        #   차감의 이중계상과 같은 구조의 오류이고, 윙 「광고비 내역」이 *"광고비는 … 매입세금
+        #   계산서 **1건**이 발행"*이라 못 박으므로 매입세액도 한 번만 인정해야 한다.
+        rg_deducted,                        # RG 정산액 중 광고 제외분(VAT 포함 매입)
     ).quantize(_Q2, ROUND_HALF_UP)
     account_sum["net_profit_pre_vat"] = account_sum["net_profit"]
     account_sum["payable_vat"] = _vat
@@ -1133,15 +1161,17 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
             "total": rg_total,
             "has_data": len(rg_fees) > 0,
             "note": (
-                "RG 정산 비용 반영됨(Phase2/S7, 계정 단위 전액 차감, D-14/D-16). "
-                "RG 광고비는 광고센터 PA 보고서에 없고 정산에만 있어 전액(광고 포함) 차감(라이브 조사). "
+                "RG 정산 비용 반영됨(계정 단위, D-14/D-CPP-43). "
+                "★정산 광고비는 광고센터 PA 광고비의 «공제»이므로 여기서 차감하지 않는다 — "
+                "PA는 이미 ad_spend로 차감됐다(이중계상 방지). 1차 출처: 윙 「광고비 내역」 "
+                "(광고유형 전부 PA · 캠페인 이름이 광고센터와 동일 · 미공제분은 다음 정산으로 이월). "
                 "정산주기 기준(부분 윈도우도 주기 전액)."
             ),
-            "flip_status": "applied_full" if len(rg_fees) > 0 else "not_applied_no_data",
-            "deducted": rg_total,                    # ★net_profit에서 실제 차감된 RG 총액(광고 포함)
-            "non_ad_deducted": rg_total - rg_ad_settlement,  # 표시: 전액 중 광고 제외분(브레이크다운)
-            # D-16: RG 광고는 정산 전용(광고센터 미포함) → 전액 차감에 포함.
-            "ad_settlement": rg_ad_settlement,      # RG정산 광고비(전액 중 광고분)
+            "flip_status": "applied_ex_ad" if len(rg_fees) > 0 else "not_applied_no_data",
+            # ★D-CPP-43: 실제 차감액은 **광고 제외분**이다(광고는 PA에서 이미 차감 — 이중계상 방지).
+            "deducted": rg_total - rg_ad_settlement,        # ★net_profit에서 실제 차감된 값
+            "non_ad_deducted": rg_total - rg_ad_settlement,  # 동일값(하위호환 유지)
+            "ad_settlement": rg_ad_settlement,      # 정산 광고비 = PA 공제분. **차감 안 함**(표시 전용)
             "ad_xlsx_rg_overlap": rg_ad_xlsx_overlap,  # 광고비 XLSX의 RG(2P)분(현재 0, 미래 겹침 감시용)
         },
         "by_account": rg_by_account,

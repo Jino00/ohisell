@@ -72,20 +72,27 @@ def test_apply_flip_negative_refund():
 # ─── 2) 통합: RG 계정 row만 → 총액 전액(광고 포함) 차감 ──────────
 
 def test_integration_rg_account_only(db):
+    """★D-CPP-43: 정산 광고비는 **차감하지 않는다**(PA에서 이미 뺐다 — 이중계상 방지).
+
+    종전 이 테스트는 D-16을 못 박아 「광고 100도 차감」을 단언했다. 1차 출처(윙 「광고비 내역」:
+    광고유형 전부 PA · 캠페인 이름이 광고센터와 동일 · 미공제분은 다음 정산 이월)로
+    **정산 ad_sales = PA 광고비의 공제**임이 확정돼 결정이 뒤집혔다.
+    """
     # base net_profit_pre_rg = 0. RG 판매수수료 500 + 풀필먼트 200 + 광고 100 = 총 800.
     _seed_rg_fee(db, "A01564720", "sale_fee", 500)
     _seed_rg_fee(db, "A01564720", "warehousing", 200)
     _seed_rg_fee(db, "A01564720", "ad_sales", 100)
     db.commit()
     s = _cc(db)["account"]["summary"]
-    # rg_total=800 전액 차감 → net_profit_pre_vat = 0 − 800 = −800. (D-16: 광고 100도 차감)
     assert s["net_profit_pre_rg"] == _Z
-    assert s["rg_settlement_total"] == Decimal("800")
-    assert s["rg_ad_settlement"] == Decimal("100")           # 표시: 전액 중 광고분
-    assert s["rg_non_ad_deducted"] == Decimal("700")         # 표시: 광고 제외 브레이크다운
-    # D-CPP-33 P1-2: RG 정산액도 매입세액 대상. rg_total 800×10/110=72.73 공제 → −800+72.73=−727.27
-    assert s["net_profit"] == Decimal("-727.27")             # ★전액 차감 + RG 매입세액 환급
-    assert s["rg_flip_status"] == "applied_full"
+    assert s["rg_settlement_total"] == Decimal("800")         # 정산 총액(광고 포함) — 표시·검산용
+    assert s["rg_ad_settlement"] == Decimal("100")            # PA 공제분 — **차감 안 함**
+    assert s["rg_non_ad_deducted"] == Decimal("700")          # 실제 차감액
+    assert s["rg_settlement_deducted"] == Decimal("700")      # 명시 필드(같은 값)
+    # 매입세액도 **광고 제외분** 기준이다 — 종전엔 rg_total(광고 포함)을 넘겨 PA 광고비의
+    # 매입세액이 ad_spend와 rg_total 양쪽에서 이중 공제됐다. 700×10/110=63.64 → −700+63.64
+    assert s["net_profit"] == Decimal("-636.36")
+    assert s["rg_flip_status"] == "applied_ex_ad"
 
 
 # ─── 3) [t1] 부분 윈도우 견고 (정산주기 통째 차감, D-2 겹침) ──────
@@ -102,16 +109,21 @@ def test_t1_partial_window_full_cycle_deducted(db):
 
 # ─── 4) [t2] 광고가 큰 케이스도 광고 포함 전액 차감 ───────────────
 
-def test_t2_ad_dominant_full_deducted(db):
-    # 광고 900 + 판매수수료 100 = 1000. D-16: 광고 포함 전액 차감(RG 광고는 정산 전용).
+def test_t2_ad_dominant_is_not_deducted(db):
+    """★D-CPP-43: 광고가 정산의 90%를 차지해도 **그 90%는 차감되지 않는다.**
+
+    이 픽스처가 결정의 크기를 보여준다 — 광고 900/1000이면 옛 규칙과 새 규칙의 순이익 차이가
+    거의 정산 전액이다. 오픽스 실물이 정확히 이 모양이었다(정산 8,164,611 중 광고 4,158,578).
+    """
     _seed_rg_fee(db, "A01564720", "ad_sales", 900)
     _seed_rg_fee(db, "A01564720", "sale_fee", 100)
     db.commit()
     s = _cc(db)["account"]["summary"]
     assert s["rg_settlement_total"] == Decimal("1000")
     assert s["rg_ad_settlement"] == Decimal("900")
-    # D-CPP-33 P1-2: RG 정산 1000의 매입세액 1000×10/110=90.91이 공제된다 → −1000+90.91=−909.09
-    assert s["net_profit"] == Decimal("-909.09")             # 광고 포함 전액 + RG 매입세액 환급
+    assert s["rg_settlement_deducted"] == Decimal("100")      # 판매수수료만
+    # 매입세액도 100 기준: 100×10/110=9.09 → −100+9.09
+    assert s["net_profit"] == Decimal("-90.91")
 
 
 # ─── 5) [t3] 음수 환급주기 → 순이익 가산 ─────────────────────────
@@ -152,12 +164,12 @@ def test_t5_rg_ad_fully_deducted_no_xlsx_overlap(db):
     _seed_rg_fee(db, "A01564720", "sale_fee", 300)
     db.commit()
     s = _cc(db)["account"]["summary"]
-    assert s["net_profit_pre_rg"] == Decimal("-250")    # 윙 광고만(XLSX)
+    assert s["net_profit_pre_rg"] == Decimal("-250")    # 광고센터 광고비(이미 차감됨)
     assert s["rg_settlement_total"] == Decimal("800")   # RG 광고 500 + 수수료 300
     assert s["rg_ad_settlement"] == Decimal("500")
-    # D-CPP-33 P1-2 수용: 「RG 정산액은 VAT 계산 밖」이던 옛 전제 폐기 — 종합조망 매출이 RG를
-    # 편입하므로 매입도 같이 넣는다(편측 항 방지). 매입세액=(광고 250+RG정산 800)×10/110=95.45
-    assert s["net_profit"] == Decimal("-954.55")        # −250 − 800 + 95.45
+    assert s["rg_settlement_deducted"] == Decimal("300")  # ★광고 500은 빼지 않는다
+    # 매입세액=(광고 250 + RG 광고제외 300)×10/110=50.00 → −250 −300 +50
+    assert s["net_profit"] == Decimal("-500.00")
 
 
 # ─── 8) [D3] 브리지 필드 + 등식 ──────────────────────────────
@@ -174,13 +186,17 @@ def test_d3_bridge_fields_and_equation(db):
     # D-CPP-33으로 RG 플립 «뒤»에 배송 손익 층과 납부세액 층이 차례로 끼었다. 그래서 등식은
     # 플립 직후 체크포인트에서 확인해야 한다 — net_profit_pre_vat로 재면 배송 층까지 지난 값이라
     # 이 픽스처처럼 배송이 0일 때만 우연히 통과하고 배송 배선이 깨져도 안 잡힌다.
-    assert s["net_profit_pre_rg"] - s["rg_settlement_total"] == s["net_profit_pre_shipping"]
-    # 브레이크다운: non_ad == total − ad
+    # ★D-CPP-43: 등식의 차감항이 **rg_settlement_deducted**(광고 제외)로 바뀌었다.
+    #   rg_settlement_total로 재면 광고분만큼 어긋난다 — 그게 이 결정의 전부다.
+    assert s["net_profit_pre_rg"] - s["rg_settlement_deducted"] == s["net_profit_pre_shipping"]
+    assert s["rg_settlement_deducted"] == Decimal("600")   # 판매수수료만(광고 150 제외)
+    # 브레이크다운: non_ad == total − ad (표시 계약 유지)
     assert s["rg_non_ad_deducted"] == s["rg_settlement_total"] - s["rg_ad_settlement"]
     # rg_settlement 섹션 summary에도 flip_status·deducted 노출
     rg = _cc(db)["rg_settlement"]["summary"]
-    assert rg["flip_status"] == "applied_full"
-    assert rg["deducted"] == Decimal("750")   # 전액(600+150)
+    assert rg["flip_status"] == "applied_ex_ad"
+    assert rg["deducted"] == Decimal("600")   # ★실제 차감액(광고 제외)
+    assert rg["ad_settlement"] == Decimal("150")  # 표시만
 
 
 # ─── 9) [회귀 가드 CRITICAL] RG 데이터 0 → net_profit 불변 ─────────
