@@ -52,7 +52,7 @@ PA 2,870,522원). 주별 대조는 원리적으로 무의미하다.
 **배선은 판정·스키마·화면을 한 커밋에** 넣었다 — 이 리포가 두 번 겪은 실패(판정에만 있고
 `response_model`이 지움 / 판정에만 있고 배너 분기가 없어 통째로 숨음)를 되풀이하지 않으려고.
 
-**테스트** 17건(backend) + 6건(frontend) · **변이 13/13 KILLED**(분모에서 비-PA 제거 ·
+**테스트** 23건(backend) + 5건(frontend) · **변이 13/13 KILLED**(분모에서 비-PA 제거 ·
 `pipe_stopped` 제거 · 임계 비교 · `insufficient_data`→ok · sentinel 필터 · 창 하한 ·
 vendor 필터 · 창 정보 · healthy 판정 · 응답 키 · `response_model` 필드 · 배너 분기 2종).
 

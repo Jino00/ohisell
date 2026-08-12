@@ -86,7 +86,8 @@ def judge(
     settled: int,
     window_start: date | None,
     window_end: date | None,
-    max_ratio: float = MAX_RATIO,
+    settled_rows: int | None = None,
+    max_ratio: float | None = None,
 ) -> dict:
     """순수 판정 — I/O 없음. 반환 dict가 그대로 헬스 API에 실린다.
 
@@ -98,7 +99,13 @@ def judge(
 
     ★`ratio`는 **초록일 때도** 싣는다 — 숫자를 안 보여주면 «0.94»와 «0.99»가 화면에서 같아지고,
       임계에 다가가는 과정을 아무도 못 본다(경보가 켜지는 날에야 처음 본다).
+
+    ★`settled_rows`가 필요한 이유(적대 리뷰 P1-2): 「정산 행이 아직 없다」와 「행은 있는데
+      합이 0이거나 음수다」는 **다른 사실**이다. 후자는 환급·취소가 많았다는 실제 정보이고
+      (모델 docstring D-9: 취소/환급은 음수 허용), 그걸 「못 쟀다」로 뭉치면 이 리포가
+      반복해 온 «없음과 어긋남을 한 숫자로 보는» 실패가 된다.
     """
+    max_ratio = MAX_RATIO if max_ratio is None else max_ratio  # 모듈 상수를 **호출 시점에** 읽는다
     deducted = int(pa_spend) + int(nonpa_spend)
     settled = int(settled)
     base = {
@@ -114,17 +121,32 @@ def judge(
         "account_key": _SETTLEMENT_ACCOUNT,
     }
 
-    # 창이 없거나 정산이 아직 안 왔다 — 대조할 것이 없다. 조용히 ok로 넘기지 않는다.
-    if window_start is None or window_end is None or settled <= 0:
+    # 창 자체가 없다 — 대조할 것이 없다.
+    if window_start is None or window_end is None:
         return {**base, "ratio": None, "verdict": "insufficient_data",
                 "reason": "PA 수집 창 또는 정산 광고비가 없어 대조하지 못했습니다"}
 
-    # ★분모가 0인데 분자가 있다 = 우리는 광고비를 하나도 안 뺐는데 쿠팡은 뗐다.
-    #   비율로 표현하면 0으로 나누기가 되므로 **별도 판정**으로 낸다(이게 이 감시의 존재 이유다).
-    if deducted <= 0:
+    # ★★분모가 0인데 분자가 있다 = 우리는 광고비를 하나도 안 뺐는데 쿠팡은 뗐다.
+    #   **이 검사를 «정산 없음» 검사보다 먼저 한다**(적대 리뷰 P1-2): 순서를 뒤집으면
+    #   정산 합이 우연히 음수인 순간(환급이 많은 주)에 **파이프 정지가 «못 쟀다»로 격하되고**
+    #   `insufficient_data`는 healthy를 안 깨므로 가장 중요한 신호가 조용해진다.
+    #   비율로는 0으로 나누기라 표현이 안 되므로 별도 판정이다 — 이게 이 감시의 존재 이유다.
+    if deducted <= 0 and settled > 0:
         return {**base, "ratio": None, "verdict": "pipe_stopped",
                 "reason": (f"광고비 수집이 창 전체에서 비었는데 정산에서는 {settled:,}원이 "
                            "공제됐습니다 — 순이익이 그만큼 과대계상됩니다")}
+
+    # 정산 «행»이 아직 하나도 없다 — 없는 것이지 맞는 것이 아니다.
+    # (행 수를 안 받은 하위호환 호출은 합계 0을 «없음»으로 본다.)
+    if (settled_rows == 0) or (settled_rows is None and settled == 0):
+        return {**base, "ratio": None, "verdict": "insufficient_data",
+                "reason": "PA 수집 창 또는 정산 광고비가 없어 대조하지 못했습니다"}
+
+    # 분모가 0인데 분자도 0 이하 — 양쪽 다 비었다. 괴리 신호가 아니다.
+    if deducted <= 0:
+        return {**base, "ratio": None, "verdict": "insufficient_data",
+                "reason": (f"우리 차감액이 0이고 정산 공제도 {settled:,}원이라 "
+                           "대조할 것이 없습니다")}
 
     ratio = settled / deducted
     if ratio > max_ratio:
@@ -140,6 +162,15 @@ def compute(db) -> dict:
     창: **PA 옵션축이 처음 들어온 날 ~ 정산 인식이 끝난 마지막 날**.
     ★PA 개시일 이전은 뺀다 — 그 구간은 «괴리»가 아니라 «부재»다(우리 PA 수집이 2026-05-15에
       시작했고 그전 정산 90,841원은 어디서도 안 빠진다. 그건 별도 부채이지 이 감시의 대상이 아니다).
+
+    ★★정산 행은 **창과 겹치기만 하면 센다**(`recognition_date_to >= pa_start`).
+      종전엔 `recognition_date_from >= pa_start`였는데, 그러면 **개시일을 걸치는 주가 통째로
+      빠진다**(적대 리뷰 P1-1). 정산은 월~일 주 단위인데 `pa_start`(라이브 2026-05-15)는
+      금요일이라 첫 주가 항상 스트래들이다 — 그 주 안의 «개시일 이후» 공제까지 분자에서
+      사라지고, 그건 **과소경보**(실제 괴리를 숨김) 방향이다. 이 감시가 막으려는 것과 정반대다.
+      대신 그 주의 개시일 «이전» 몫이 분자에 조금 섞이는데(분모엔 없는 지출의 공제),
+      **경보 방향이라 안전하고** 최대 1주치로 유한하며 누적이 커질수록 희석된다.
+      ※라이브 실측(2026-08-12): 그 주(05-11~05-17) amount = **0**이라 오늘 숫자는 안 바뀐다.
     """
     from sqlalchemy import func as sqlfunc
 
@@ -167,10 +198,18 @@ def compute(db) -> dict:
         return judge(pa_spend=0, nonpa_spend=0, settled=0,
                      window_start=pa_start, window_end=settle_end)
 
+    # ★`sell_type` 필터는 **엔진이 실제로 차감하는 축과 같게** 건다(적대 리뷰 P2-1).
+    #   `intelligence._agg_ads`의 기본이 `_WING_SELL_TYPES=("3P","2P")`이고 Retail(1P)은 뺀다 —
+    #   같은 vendor에 축이 둘이라, 여기만 전 판매방식을 더하면 분모가 «우리가 뺀 광고비»를
+    #   넘어 조용히 과소경보가 된다. (지금은 오픽스 vendor에 Retail 행이 0건이라 휴면이지만,
+    #   생기는 날 이 한 줄이 없으면 감시가 조용히 무뎌진다.)
+    from app.services.coupang.intelligence import _WING_SELL_TYPES  # noqa: PLC0415
+
     pa_spend = int(
         db.query(sqlfunc.coalesce(sqlfunc.sum(CoupangAdOptionDaily.ad_spend), 0))
         .filter(
             CoupangAdOptionDaily.vendor_id == vendor,
+            CoupangAdOptionDaily.sell_type.in_(_WING_SELL_TYPES),
             CoupangAdOptionDaily.report_date >= pa_start,
             CoupangAdOptionDaily.report_date <= settle_end,
         )
@@ -181,18 +220,18 @@ def compute(db) -> dict:
     # 여기서 따로 계산하면 감시와 실제 차감이 조용히 갈라진다.
     nonpa_spend = int(ad_cost_sync.get_ad_cost_totals(db, pa_start, settle_end)["nonpa"])
 
-    settled = int(
-        db.query(sqlfunc.coalesce(sqlfunc.sum(CoupangRgSettlementFee.amount), 0))
-        .filter(
-            CoupangRgSettlementFee.fee_type == "ad_sales",
-            CoupangRgSettlementFee.vendor_item_id == "",
-            CoupangRgSettlementFee.account_key == _SETTLEMENT_ACCOUNT,
-            # 창 안에서 «인식이 시작된» 정산만 — 창을 걸치는 주가 한쪽만 세지지 않게.
-            CoupangRgSettlementFee.recognition_date_from >= pa_start,
-        )
-        .scalar()
-        or 0
+    settled_q = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(CoupangRgSettlementFee.amount), 0),
+        sqlfunc.count(CoupangRgSettlementFee.id),
+    ).filter(
+        CoupangRgSettlementFee.fee_type == "ad_sales",
+        CoupangRgSettlementFee.vendor_item_id == "",
+        CoupangRgSettlementFee.account_key == _SETTLEMENT_ACCOUNT,
+        # 창과 **겹치는** 정산 — 위 docstring의 스트래들 설명 참조.
+        CoupangRgSettlementFee.recognition_date_to >= pa_start,
     )
+    settled_sum, settled_rows = settled_q.one()
 
-    return judge(pa_spend=pa_spend, nonpa_spend=nonpa_spend, settled=settled,
+    return judge(pa_spend=pa_spend, nonpa_spend=nonpa_spend, settled=int(settled_sum or 0),
+                 settled_rows=int(settled_rows or 0),
                  window_start=pa_start, window_end=settle_end)

@@ -8,7 +8,9 @@
 #   (2026-08-10 적대 리뷰 P1-1: `response_model`에 필드가 없어 FastAPI가 조용히 지웠다)
 # ④**PA 개시일 이전**을 창에서 빼는가 — 그건 괴리가 아니라 부재다
 #
-# 라이브 근거(2026-08-12 prod 실측, 창 06-01~08-09):
+# 라이브 근거(2026-08-12 prod 실측). ★두 날짜를 헷갈리지 말 것:
+#   · PA 옵션축 **최초 적재일** = 2026-05-15 (= `compute`가 잡는 창의 시작)
+#   · 아래 숫자를 **잰 창** = 06-01~08-09 (양쪽 축이 다 채워진 구간만 골라 손으로 검산한 것)
 #   PA 16,565,714 + 비-PA 1,648,923 = 18,214,637 · 정산 17,160,142 · 비율 0.9421
 from __future__ import annotations
 
@@ -308,3 +310,101 @@ def test_health_route_actually_returns_ad_cost_divergence(db):
             assert k in d, f"HTTP body에 {k}가 없다"
     finally:
         app.dependency_overrides.clear()
+
+
+# ═══ ④ 적대 리뷰 P1 2건 — 조용히 틀리는 두 경로 ═══
+
+
+def test_settlement_week_straddling_pa_start_is_not_dropped(db):
+    """★★P1-1: 개시일을 걸치는 정산 주가 통째로 빠지면 **실제 괴리가 숨는다**.
+
+    정산은 월~일 주 단위인데 PA 개시일은 아무 요일이나 될 수 있다(라이브 2026-05-15 = 금).
+    종전 필터(`recognition_date_from >= pa_start`)는 그 주를 통째로 버렸다 — 그 주의
+    «개시일 이후» 공제까지 분자에서 사라지고, 그건 **과소경보** 방향이다(이 감시의 목적과 정반대).
+
+    재현: PA 개시 06-03(수) · 정산 1주차 06-01~06-07에 900,000원 · 우리 차감 12,000원.
+    종전 동작이면 그 900,000이 사라져 `ok`. 지금은 잡혀야 한다.
+    """
+    for day in range(3, 15):
+        _pa(db, f"2026-06-{day:02d}", 1000, opt=str(day))
+    _acct(db, "2026-06-03", day_cost=12000, all_day_cost=12000)
+    _settle(db, "2026-06-01", "2026-06-07", 900_000)   # 개시일(06-03)을 걸치는 주
+
+    r = acd.compute(db)
+    assert r["settled"] == 900_000, "스트래들 주가 통째로 빠졌다 — 실제 괴리가 숨는다"
+    assert r["verdict"] == "diverged"
+
+
+def test_settlement_fully_before_pa_start_is_still_excluded(db):
+    """★스트래들을 살리면서 «완전히 이전인 주»까지 들이면 영구 빨강이 된다 — 그건 여전히 뺀다."""
+    _pa(db, "2026-06-03", 1000)
+    _acct(db, "2026-06-03", day_cost=1000, all_day_cost=1000)
+    _settle(db, "2026-05-25", "2026-05-31", 90_841)   # 완전히 개시 이전 — 제외
+    _settle(db, "2026-06-08", "2026-06-14", 900)
+
+    r = acd.compute(db)
+    assert r["settled"] == 900
+    assert r["verdict"] == "ok"
+
+
+def test_pipe_stopped_wins_over_a_negative_settlement_sum(db):
+    """★★P1-2: 정산 합이 음수여도 **파이프 정지가 먼저다**.
+
+    정산 amount는 취소·환급으로 음수가 될 수 있다(모델 docstring D-9). 종전엔 `settled <= 0`
+    검사가 앞서서, 우리가 광고비를 하나도 안 뺀 상태(=이 감시의 존재 이유)가 «못 쟀다»로
+    격하됐고 `insufficient_data`는 healthy를 안 깨므로 **가장 중요한 신호가 조용해졌다**.
+    """
+    r = acd.judge(pa_spend=0, nonpa_spend=0, settled=1, settled_rows=2,
+                  window_start=date(2026, 6, 1), window_end=date(2026, 8, 9))
+    assert r["verdict"] == "pipe_stopped"
+
+    # 합이 음수(환급 우세)인데 우리 차감도 0 — 과대계상은 아니므로 경보가 아니다. 단 «없음»과는 다르다.
+    neg = acd.judge(pa_spend=0, nonpa_spend=0, settled=-5000, settled_rows=3,
+                    window_start=date(2026, 6, 1), window_end=date(2026, 8, 9))
+    assert neg["verdict"] == "insufficient_data"
+    assert "-5,000원" in neg["reason"], "«행은 있는데 음수»와 «행이 없다»가 같은 문장이면 안 된다"
+
+
+def test_no_settlement_rows_is_distinct_from_a_zero_sum(db):
+    """★«정산 행이 아직 없다»와 «행은 있는데 합이 0»을 가른다 — 뭉치면 없음과 어긋남이 같아진다."""
+    none_yet = acd.judge(pa_spend=1000, nonpa_spend=0, settled=0, settled_rows=0,
+                         window_start=date(2026, 6, 1), window_end=date(2026, 8, 9))
+    assert none_yet["verdict"] == "insufficient_data"
+
+    # 행은 있고 합이 0 → 비율 0.0으로 정상 판정된다(«없다»가 아니다).
+    zero_sum = acd.judge(pa_spend=1000, nonpa_spend=0, settled=0, settled_rows=4,
+                         window_start=date(2026, 6, 1), window_end=date(2026, 8, 9))
+    assert zero_sum["verdict"] == "ok" and zero_sum["ratio"] == 0.0
+
+
+def test_pa_sum_uses_the_same_sell_type_axis_the_engine_deducts(db):
+    """★P2-1: Retail(1P)은 분모에서 뺀다 — 엔진(`_agg_ads`)이 빼는 축과 같아야 한다.
+
+    같은 vendor에 축이 둘이라, 여기만 전 판매방식을 더하면 분모가 «우리가 뺀 광고비»를 넘어
+    조용히 과소경보가 된다. (지금은 오픽스에 Retail 행이 0건이라 휴면이지만, 생기는 날
+    이 테스트가 없으면 감시가 조용히 무뎌진다.)
+    """
+    from app.models import CoupangAdOptionDaily
+
+    _pa(db, "2026-06-01", 1000)                       # 3P — 분모에 들어간다
+    db.add(CoupangAdOptionDaily(
+        report_date=date(2026, 6, 1), vendor_id=VENDOR, sell_type="Retail",
+        ad_option_id="r1", conv_option_id="r1", impressions=0, clicks=0,
+        ad_spend=9_000_000, orders=0, sales_qty=0, conversion_revenue=0,
+    ))
+    db.commit()
+    _acct(db, "2026-06-01", day_cost=1000, all_day_cost=1000)
+    _settle(db, "2026-06-01", "2026-06-07", 900)
+
+    assert acd.compute(db)["pa_spend"] == 1000, "Retail이 분모에 섞였다 — 엔진 차감축과 다르다"
+
+
+def test_max_ratio_is_read_at_call_time(monkeypatch):
+    """★P2-2: 임계 상수를 런타임에 바꿔도 반영된다 — 기본값이 정의 시점에 굳지 않게.
+
+    (정상 경로는 소스를 고쳐 재배포하는 것이지만, 조용히 무시되는 손잡이를 남기지 않는다.)
+    """
+    monkeypatch.setattr(acd, "MAX_RATIO", 1.0)
+    r = acd.judge(pa_spend=1000, nonpa_spend=0, settled=1050, settled_rows=1,
+                  window_start=date(2026, 6, 1), window_end=date(2026, 8, 9))
+    assert r["max_ratio"] == 1.0 and r["verdict"] == "diverged"
