@@ -8,7 +8,10 @@
     "build": "tsc -b && vite build && node scripts/stamp-build.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run"
+    "// test": "raw vitest가 아니라 인구조사 껍데기다 — 이유는 scripts/test-census.mjs 상단",
+    "test": "node scripts/run-tests.mjs",
+    "test:raw": "vitest run",
+    "heal": "node scripts/heal-node-modules.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
