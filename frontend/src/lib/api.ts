@@ -681,7 +681,25 @@ export interface SchedulerHealth {
   // 구백엔드 안전을 위해 optional · monitored=0(대상 없음)이어도 healthy=true로 온다
   // 백엔드는 요약 자체를 못 했을 때 명시적으로 null을 준다(cost_drift·vendor_item_conservation과 같은 관례).
   exclusion_survival?: SchedulerHealthExclusionSurvival | null;
+  // 광고비 괴리(D-CPP-46) — 구백엔드 안전을 위해 optional · 대조 불가면 null.
+  ad_cost_divergence?: SchedulerHealthAdCostDivergence | null;
   as_of: string;
+}
+
+// 쿠팡이 정산에서 뗀 광고비 ↔ 우리가 손익에서 뺀 광고비(D-CPP-46).
+// ★`ratio`는 verdict가 ok일 때도 온다 — 임계에 다가가는 과정을 볼 수 있어야 한다.
+//   `pipe_stopped`·`insufficient_data`에서는 분모가 없어 null이다.
+export interface SchedulerHealthAdCostDivergence {
+  window: { start: string | null; end: string | null };
+  pa_spend: number;      // 옵션축 PA
+  nonpa_spend: number;   // 계정축 비-PA(all_day_cost − day_cost)
+  deducted: number;      // pa_spend + nonpa_spend = 우리가 손익에서 뺀 광고비
+  settled: number;       // 쿠팡이 정산에서 공제한 광고비(sentinel 행)
+  ratio: number | null;  // settled / deducted
+  max_ratio: number;
+  account_key: string;
+  verdict: "ok" | "diverged" | "pipe_stopped" | "insufficient_data";
+  reason?: string;
 }
 
 export function getSchedulerHealth(): Promise<SchedulerHealth> {
