@@ -174,11 +174,26 @@ function SurvivalPanel({ survival }: { survival: NaverExclusionSurvival }) {
     ? survival.last_checked_at.slice(0, 16).replace("T", " ")
     : NO_DATA;
 
+  // ★«못 보는 몫»을 초록 문장 안에 함께 적는다(적대 리뷰 P1-3). 백엔드는 쇼핑 제외를
+  //   unverifiable로 갈라 배너를 안 켜지만(어긋남이 아니므로 옳다), 화면이 alive만 세면
+  //   감시 2건 중 1건이 미지인데 「모두 걸려 있음」이 뜬다 — 되돌림을 못 보는 상태가
+  //   «확인됨»으로 읽힌다. 대행사가 우리 조치를 되돌린 전례가 2회 있고 1회는 로그에 흔적이
+  //   없었으므로, 이 착시는 그대로 감시 실패다.
+  const unverifiable = survival.unverifiable ?? 0;
+
   if (survival.healthy) {
     return (
-      <p className="px-4 py-3 text-sm text-emerald-700">
-        우리가 건 제외 {num(survival.alive)}건 모두 걸려 있음 · 마지막 대조 {lastChecked}
-      </p>
+      <div className="px-4 py-3">
+        <p className="text-sm text-emerald-700">
+          {unverifiable > 0
+            ? `대조 가능한 제외 ${num(survival.alive)}건 걸려 있음 · 대조 불가 ${num(unverifiable)}건 (감시 대상 ${num(survival.monitored)}건)`
+            : `우리가 건 제외 ${num(survival.alive)}건 모두 걸려 있음`}
+          {` · 마지막 대조 ${lastChecked}`}
+        </p>
+        {unverifiable > 0 && survival.unverifiable_note && (
+          <p className="pt-1 text-xs text-gray-500">{survival.unverifiable_note}</p>
+        )}
+      </div>
     );
   }
 
@@ -188,6 +203,7 @@ function SurvivalPanel({ survival }: { survival: NaverExclusionSurvival }) {
         감시 대상 {num(survival.monitored)}건 중 어긋남 {num(survival.breached.length)}건
         {survival.stale && " · 대조 자체가 멈춤"}
         {survival.never_checked > 0 && ` · 한 번도 대조 안 됨 ${num(survival.never_checked)}건`}
+        {unverifiable > 0 && ` · 대조 불가 ${num(unverifiable)}건`}
       </p>
       <p className="px-4 pb-1 text-xs text-gray-500">{survival.impact}</p>
       <p className="px-4 pb-3 text-xs text-gray-500">{survival.revert_howto}</p>
@@ -297,6 +313,10 @@ function ScorecardSection({
             총 {num(scorecard.total)}건 · 판정됨 {num(scorecard.judged_count)}건 ·
             판정 대기 {num(scorecard.pending_count)}건 ·
             회수한 총이익(판정분) {won(scorecard.profit_recovered_judged)} ·
+            {/* ★합계가 «못 잰 건»을 0원으로 세므로 그 건수를 같이 적는다(적대 리뷰 P1-2).
+                안 적으면 「회수액이 적다」와 「회수액을 못 잰다」가 화면에서 같아 보인다. */}
+            {(scorecard.profit_unknown_count ?? 0) > 0 &&
+              ` 그중 BEP 없어 미산출 ${num(scorecard.profit_unknown_count ?? 0)}건 ·`}
             성숙 기준일 {scorecard.mature_through}
           </p>
           <div className="flex flex-wrap gap-3 px-4 py-2 text-sm border-b border-gray-100">

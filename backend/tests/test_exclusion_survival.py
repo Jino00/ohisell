@@ -477,3 +477,36 @@ def test_powerlink_group_is_still_verified_normally(db, monkeypatch):
 
     result = es.check_survival(db, now=NOW)
     assert result["alive"] == 1 and result["unverifiable"] == 0
+
+
+def test_adgroup_type_lookup_failure_is_unknown_not_missing(db, monkeypatch):
+    """★적대 리뷰 P1-1 회귀: 유형 조회가 **실패**하면 대조를 보류한다(fail-closed).
+
+    `get_adgroup_type`은 조회 실패도 None으로 돌려준다(그 docstring: ««모름»이지 «WEB_SITE
+    아님»이 아니다»). 종전 조건 `adgroup_type is not None and != WEB_SITE`는 그 None을
+    **대조 가능** 쪽에 넣어 restricted-keywords를 불렀고, 그 API는 쇼핑에서 200/0건을
+    돌려주므로 **유형 조회 500 한 번이면 쇼핑 제외가 다시 missing으로 뒤집힌다** —
+    `fcf7b33`이 막으려던 바로 그 거짓 「사라졌다」가 되살아난다.
+
+    ★이 테스트는 `get_adgroup_type`을 몽키패치하지 **않는다**. 기존 두 테스트가 그걸
+    패치해서(`lambda a: "SHOPPING"`) 실패 경로를 영원히 통과시켰기 때문이다 — 진짜 이음매인
+    `_get_adgroup`을 터뜨려 공개 함수의 예외 처리까지 함께 태운다.
+    """
+    from app.services.naver_ad import naver_sa_writer
+
+    db.add(_row(adgroup_id="grp-shopping", search_term="골프", restrict_kwd_id=None,
+                excluded_at=NOW - timedelta(days=5)))
+    db.commit()
+    monkeypatch.setattr(naver_sa_writer, "_get_adgroup",
+                        lambda a: (_ for _ in ()).throw(RuntimeError("500 Server Error")))
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords",
+                        lambda a: (_ for _ in ()).throw(AssertionError(
+                            "유형을 모르면 제외목록을 조회조차 하지 않는다")))
+
+    result = es.check_survival(db, now=NOW)
+    assert result["missing"] == 0, "모르는 것을 «사라졌다»로 신고하면 안 된다"
+    assert result["unknown"] == 1
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.live_state == es.STATE_UNKNOWN
+    assert "유형 조회 실패" in row.live_note

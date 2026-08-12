@@ -3031,6 +3031,11 @@ export interface NaverExclusionSurvivalBreachRow {
 export interface NaverExclusionSurvival {
   monitored: number;
   alive: number;
+  // ★라이브 대조가 **원리적으로 불가능한** 조치(쇼핑 광고그룹) 건수. 어긋남이 아니므로 배너를
+  //   켜지 않지만, 이걸 화면이 안 그리면 감시 2건 중 1건이 미지인데 「모두 걸려 있음」이 뜬다.
+  //   백엔드가 이 숫자를 따로 내보내는 이유가 그것이다(exclusion_survival.py 주석).
+  unverifiable?: number;
+  unverifiable_note?: string;
   breached: NaverExclusionSurvivalBreachRow[];
   // 잘린 목록의 총계 — breached는 상한(20건)까지만 실린다. 구버전 백엔드 안전을 위해 optional.
   breached_total?: number;
@@ -3170,6 +3175,9 @@ export interface NaverSearchTermScorecard {
   // ★판정된 것만 합산 — pending을 0원으로 세면 성과가 희석되고, 빼고 세면 부풀려진다.
   profit_recovered_judged: number;
   judged_count: number;
+  // 판정은 났지만 BEP가 없어 회수액을 «못 낸» 건수. 합계가 이들을 0원으로 세므로, 이 숫자
+  // 없이는 「회수액이 적다」와 「회수액을 못 잰다」가 화면에서 같아 보인다.
+  profit_unknown_count?: number;
   pending_count: number;
   items: NaverSearchTermScorecardItem[];
   as_of: string;

@@ -348,6 +348,41 @@ def test_recovered_profit_subtracts_the_margin_that_died_with_it(db):
     assert item["profit_recovered"] == 1_000 * days
 
 
+def test_no_bep_means_no_recovered_profit_not_full_cost_saving(db):
+    """★적대 리뷰 P1-2 회귀: BEP가 없으면 **회수액을 내지 않는다**(fail-closed).
+
+    종전에는 `margin_lost = 0.0`으로 두고 **비용 절감 전액**을 회수액이라 신고했다. 그러면
+    이 파일 위 테스트가 막겠다고 선언한 바로 그것 — 「매출이 딸려 나간 컷」이 초록으로 —
+    이 BEP 없는 그룹에서만 조용히 일어난다. 같은 데이터인데 BEP 유무로 부호가 뒤집힌다.
+
+    판정층은 이미 fail-closed다: `_campaign_window`는 `profit = None if not bep`이고,
+    리스트 생성기는 BEP 없는 그룹을 `bep_unknown`으로 후보에서 뺀다. 채점층만 fail-open이면
+    그 총계(`profit_recovered_judged`)가 다음 라운드 확대 판단의 근거로 부풀려진다.
+    """
+    ex_date = date(2026, 8, 1)
+    for i in range(14):  # 전: 하루 3,000원 쓰고 40,000원 팔던 검색어(= 매출이 큰 컷)
+        _spend(db, day=ex_date - timedelta(days=14 - i), cost=3_000, conv=1, amt=40_000)
+    db.add(NaverSearchTermExclusion(
+        campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM, status="excluded", cycle=1,
+        excluded_at=datetime(2026, 8, 1, 10, 0, 0), last_transition_at=datetime(2026, 8, 1, 10, 0, 0),
+        cost_at_exclusion=42_000,
+    ))
+    db.commit()  # ★_product()를 부르지 않는다 — 이 그룹엔 BEP가 없다
+
+    out = scorecard.build_scorecard(db, now=NOW)
+    item = out["items"][0]
+    assert item["applied_bep"] is None
+    assert item["verdict"] == "stopped", "판정 자체는 나온다 — 못 내는 건 회수액뿐이다"
+    assert item["profit_recovered"] is None, (
+        "BEP 없이 비용 절감 전액을 이익이라 신고하면 매출이 죽은 컷이 성과가 된다"
+    )
+    assert "BEP" in item["why"], "왜 회수액이 없는지 그 행이 스스로 밝혀야 한다"
+    assert out["profit_recovered_judged"] == 0
+    assert out["profit_unknown_count"] == 1, (
+        "합계가 0원인 이유가 «회수액이 적다»인지 «못 잰다»인지 화면이 구분할 수 있어야 한다"
+    )
+
+
 def test_scorecard_carries_the_campaign_side_for_volume_collapse(db):
     """부작용 축 — 캠페인 전환매출이 같이 죽었는지 같은 표에서 보여야 한다."""
     _product(db)

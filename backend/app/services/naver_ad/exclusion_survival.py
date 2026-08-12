@@ -185,7 +185,21 @@ def check_survival(db: Session, *, now: datetime | None = None) -> dict:
         #   (2026-08-11 실측: 콘솔 43건 vs API 0건). 그 거짓말을 missing으로 받으면 우리가
         #   실제로 자른 검색어가 매일 「사라졌다」로 뜬다.
         adgroup_type = naver_sa_writer.get_adgroup_type(adgroup_id)
-        if adgroup_type is not None and adgroup_type != _VERIFIABLE_ADGROUP_TYPE:
+        if adgroup_type is None:
+            # ★유형을 모르면 대조하지 않는다(적대 리뷰 P1-1, fail-closed). get_adgroup_type은
+            #   조회 실패도 None으로 돌려주는데(그 docstring이 ««모름»이지 «WEB_SITE 아님»이
+            #   아니다»라고 적고 있다), 종전 조건은 그 None을 **대조 가능** 쪽에 넣어 아래
+            #   restricted-keywords를 불렀다. 그 API는 쇼핑에서 200/0건을 돌려주므로
+            #   **유형 조회 500 한 번이면 쇼핑 제외가 다시 missing으로 뒤집힌다** — 이 커밋이
+            #   막으려던 바로 그 거짓 「사라졌다」다. 12줄 아래 restricted-keywords 실패를
+            #   unknown으로 덮는 것과 같은 규율을 쓴다.
+            for r in group_rows:
+                r.live_state = STATE_UNKNOWN
+                r.live_checked_at = now
+                r.live_note = "광고그룹 유형 조회 실패 — 쇼핑 여부를 몰라 대조 보류"
+                counts[STATE_UNKNOWN] += 1
+            continue
+        if adgroup_type != _VERIFIABLE_ADGROUP_TYPE:
             for r in group_rows:
                 r.live_state = STATE_UNVERIFIABLE
                 r.live_checked_at = now
