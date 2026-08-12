@@ -5328,6 +5328,13 @@ Drive)에 있고, `node_modules`의 **487개 파일이 `compressed,dataless`** �
   확인: `find node_modules -type f -exec ls -lO {} + | grep -c dataless` → 0.
 - 이 리포에서 **테스트가 갑자기 줄면 iCloud를 먼저 의심한다.** 재발하며, 조용하다.
 
+★**후속(같은 날, 병행 세션)**: D-CPP-44(PR #288)가 이걸 **구조로 막았다** —
+`frontend/scripts/test-census.mjs`가 「실패 0건」이 아니라 **「디스크의 테스트 파일 전부가
+결과를 냈는가」**로 판정하고(분모를 `vite.config.ts`의 include에서 읽어 온다),
+`heal-node-modules.mjs`가 dataless 파일을 실체화한다. `npm test`가 그 래퍼다.
+즉 이 교훈의 집행 지점은 **`npm test`**다 — 이제 `npx vitest run`을 직접 부르면 가드를
+우회한다. 두 세션이 같은 사고를 독립적으로 만났다는 것 자체가 재발률의 증거다.
+
 ---
 
 ## #273 — 변이 원복에 `git checkout --`를 쓰면 커밋 안 한 수정이 같이 죽는다 (2026-08-12)
