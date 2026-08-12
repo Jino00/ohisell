@@ -163,14 +163,20 @@ def build_scorecard(
 
         verdict, why = _verdict(before, after, after_days)
         bep = (bep_map.get(r.adgroup_id) or {}).get("bep_roas")
+        if verdict in ("stopped", "still_spending") and not bep:
+            why += " (이 그룹은 BEP가 없어 회수액은 산출하지 않는다 — 같이 사라진 공헌이익을 뺄 수 없다)"
         # 회수액 = (전 일평균 비용 − 후 일평균 비용) × 사후 일수. 매출이 같이 줄었다면 그만큼
         # 공헌이익도 빠지므로 함께 뺀다 — 「비용만 줄었다」를 이익으로 읽지 않기 위해서다.
         saved = None
-        if verdict in ("stopped", "still_spending"):
+        if verdict in ("stopped", "still_spending") and bep:
+            # ★BEP가 없으면 회수액을 내지 않는다(적대 리뷰 P1-2, fail-closed). 종전에는
+            #   margin_lost를 0으로 두고 «비용 절감 전액»을 이익이라 신고했는데, 그건 이 파일
+            #   상단 정직 규칙이 막겠다고 선언한 바로 그것이다 — 매출이 같이 죽은 컷이 초록으로
+            #   집계된다. 같은 파일 _campaign_window가 `profit = None if not bep`이고, 리스트
+            #   생성기도 BEP 없는 그룹을 bep_unknown으로 후보에서 뺀다. 판정층이 「모르면 안
+            #   자른다」인데 채점층만 「모르면 전액이 이익」이면 확대 판단의 근거가 부풀려진다.
             cost_saved = (before["cost_per_day"] - after["cost_per_day"]) * after_days
-            margin_lost = 0.0
-            if bep:
-                margin_lost = (before["amt_per_day"] - after["amt_per_day"]) / float(bep) * after_days
+            margin_lost = (before["amt_per_day"] - after["amt_per_day"]) / float(bep) * after_days
             saved = int(cost_saved - margin_lost)
 
         items.append({
@@ -212,6 +218,10 @@ def build_scorecard(
         #   둘 다 피하려면 «몇 건이 아직 판정 밖인지»를 함께 내보내는 수밖에 없다.
         "profit_recovered_judged": sum(i["profit_recovered"] or 0 for i in judged),
         "judged_count": len(judged),
+        # ★판정은 났지만 BEP가 없어 «회수액을 못 낸» 건수(적대 리뷰 P1-2). 위 합계는 이들을
+        #   0원으로 세므로, 이 숫자 없이는 «회수액이 적다»와 «회수액을 못 잰다»가 구분되지
+        #   않는다 — pending_count를 따로 내보내는 것과 같은 이유다.
+        "profit_unknown_count": sum(1 for i in judged if i["profit_recovered"] is None),
         "pending_count": sum(1 for i in items if i["verdict"] == "pending"),
         "items": items,
         "as_of": now.isoformat(),
