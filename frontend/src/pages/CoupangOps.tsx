@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
-import { fetchSalesSummary, getCoupangAdCostDaily, requestAdCostRefresh, getAdCostRefreshStatus, type SalesSummary, type SalesProductRow } from "../lib/api";
+import { fetchSalesSummary, getCoupangAdCostDaily, requestAdCostRefresh, getAdCostRefreshStatus, type SalesSummary, type SalesProductRow, type SalesSellTypeRow, type SalesSummaryData } from "../lib/api";
 
 // 오늘 날짜(KST) YYYY-MM-DD
 function isoKSTDate(): string {
@@ -47,6 +47,86 @@ function profitColor(s: string | null | undefined) {
   const n = Number(s);
   return n > 0 ? "text-blue-700" : n < 0 ? "text-red-600" : "text-gray-500";
 }
+/** 판매유형(2P/3P) 분해 — 쿠팡이 가져가는 몫이 두 배 넘게 다르므로 뭉치면 어느 쪽이
+ *  버는지 안 보인다. 3P(Wing)=판매수수료+VAT ≈8.58% / 2P(로켓그로스)=매출의 ~19.5%+
+ *  (판매수수료·입출고·배송·보관·RG광고, D-18).
+ *
+ *  ★1P(로켓배송)는 이 표에 없다 — 쿠팡이 우리에게서 매입하는 구조라 매출이 주문 테이블에
+ *    아예 없어서 같은 잣대로 셀 수 없기 때문이다. 그래서 광고비만 있고 매출이 없다.
+ *    빼되 숨기지는 않는다: 뺀 금액을 아래 각주로 항상 보인다. */
+export function SellTypeBreakdown({ rows, summary }: {
+  rows: SalesSellTypeRow[] | undefined;
+  summary: SalesSummaryData | undefined;
+}) {
+  if (!rows || rows.length === 0) return null;
+  const excluded = Number(summary?.excluded_ad_spend ?? 0);
+  const unassigned = Number(summary?.ad_spend_unassigned ?? 0);
+  const label = (r: SalesSellTypeRow) =>
+    r.sell_type === "3P" ? "3P · Wing" : r.sell_type === "2P" ? "2P · 로켓그로스" : r.sell_type;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      <div className="px-3 py-2 border-b border-gray-100">
+        <span className="text-xs font-semibold text-gray-700">판매유형별</span>
+        <span className="ml-2 text-[11px] text-gray-400 break-keep">
+          쿠팡이 가져가는 몫이 다르다 — 3P는 판매수수료+VAT, 2P는 거기에 입출고·배송·보관·RG광고까지
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs sm:text-sm">
+          <thead className="bg-gray-50 text-gray-500">
+            <tr>
+              <th className="px-3 py-1.5 text-left font-medium">판매유형</th>
+              <th className="px-3 py-1.5 text-right font-medium">매출</th>
+              <th className="px-3 py-1.5 text-right font-medium">쿠팡 비용</th>
+              <th className="px-3 py-1.5 text-right font-medium">원가</th>
+              <th className="px-3 py-1.5 text-right font-medium">광고비</th>
+              <th className="px-3 py-1.5 text-right font-medium">배송·물류비</th>
+              <th className="px-3 py-1.5 text-right font-medium">이익</th>
+              <th className="px-3 py-1.5 text-right font-medium">이익률</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {rows.map((r) => (
+              <tr key={r.sell_type}>
+                <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{label(r)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{won(r.revenue)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{won(r.fee)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{won(r.cost)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{won(r.ad_spend)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{won(r.shipping)}</td>
+                <td className={`px-3 py-1.5 text-right tabular-nums font-medium ${profitColor(r.profit)}`}>
+                  {won(r.profit)}
+                </td>
+                <td className={`px-3 py-1.5 text-right tabular-nums ${profitColor(r.profit)}`}>
+                  {r.profit_rate ? pct(r.profit_rate) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {(excluded > 0 || unassigned > 0) && (
+        <div className="px-3 py-2 border-t border-gray-100 text-[11px] text-gray-500 break-keep space-y-0.5">
+          {excluded > 0 && (
+            <div>
+              ※ 로켓배송(1P) 광고비 <b className="text-gray-700">{won(summary?.excluded_ad_spend)}</b>는 위 합계에
+              들어있지 않다 — 1P는 쿠팡이 매입하는 구조라 <b>매출이 주문에 잡히지 않아</b> 같은 잣대로 셀 수 없다.
+              그 손익은 로켓배송 화면이 납품가 축으로 따로 본다.
+            </div>
+          )}
+          {unassigned > 0 && (
+            <div>
+              ※ 광고비 <b className="text-gray-700">{won(summary?.ad_spend_unassigned)}</b>는 일별 집계분이라
+              판매유형으로 가르지 못했다(옵션 분해 없는 날). 위 표의 광고비 합 + 이 값 = 상단 광고비.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function fmtVal(row: SalesProductRow, col: ColKey): string {
   if (col === "revenue") return won(row.revenue);
   if (col === "ad_spend") return won(row.ad_spend);
@@ -685,6 +765,7 @@ export default function CoupangOps() {
             <SummaryCard label="RoAS" value={roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
             <div className="hidden sm:block" />
           </div>
+          <SellTypeBreakdown rows={data?.by_sell_type} summary={s} />
         </div>
       )}
       </div>
