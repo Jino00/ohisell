@@ -54,15 +54,19 @@ function profitColor(s: string | null | undefined) {
  *  ★1P(로켓배송)는 이 표에 없다 — 쿠팡이 우리에게서 매입하는 구조라 매출이 주문 테이블에
  *    아예 없어서 같은 잣대로 셀 수 없기 때문이다. 그래서 광고비만 있고 매출이 없다.
  *    빼되 숨기지는 않는다: 뺀 금액을 아래 각주로 항상 보인다. */
-export function SellTypeBreakdown({ rows, summary }: {
+export function SellTypeBreakdown({ rows, summary, refDate }: {
   rows: SalesSellTypeRow[] | undefined;
   summary: SalesSummaryData | undefined;
+  /** 「오늘」 탭에서 광고 수치가 실제로는 이 날짜(최신 XLSX) 기준임을 밝힌다. */
+  refDate?: string | null;
 }) {
   if (!rows || rows.length === 0) return null;
   const excluded = Number(summary?.excluded_ad_spend ?? 0);
   const unassigned = Number(summary?.ad_spend_unassigned ?? 0);
   const label = (r: SalesSellTypeRow) =>
-    r.sell_type === "3P" ? "3P · Wing" : r.sell_type === "2P" ? "2P · 로켓그로스" : r.sell_type;
+    r.sell_type === "3P" ? "3P · Wing"
+      : r.sell_type === "2P" ? "2P · 로켓그로스"
+      : "미분류 · 일별 집계";
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -70,6 +74,7 @@ export function SellTypeBreakdown({ rows, summary }: {
         <span className="text-xs font-semibold text-gray-700">판매유형별</span>
         <span className="ml-2 text-[11px] text-gray-400 break-keep">
           쿠팡이 가져가는 몫이 다르다 — 3P는 판매수수료+VAT, 2P는 거기에 입출고·배송·보관·RG광고까지
+          {refDate ? ` · 광고 수치는 ${refDate} 기준(오늘치는 익일 확정)` : ""}
         </span>
       </div>
       <div className="overflow-x-auto">
@@ -88,7 +93,7 @@ export function SellTypeBreakdown({ rows, summary }: {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {rows.map((r) => (
-              <tr key={r.sell_type}>
+              <tr key={r.channel_type} className={r.sell_type === null ? "bg-amber-50/60" : undefined}>
                 <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{label(r)}</td>
                 <td className="px-3 py-1.5 text-right tabular-nums">{won(r.revenue)}</td>
                 <td className="px-3 py-1.5 text-right tabular-nums">{won(r.fee)}</td>
@@ -117,8 +122,9 @@ export function SellTypeBreakdown({ rows, summary }: {
           )}
           {unassigned > 0 && (
             <div>
-              ※ 광고비 <b className="text-gray-700">{won(summary?.ad_spend_unassigned)}</b>는 일별 집계분이라
-              판매유형으로 가르지 못했다(옵션 분해 없는 날). 위 표의 광고비 합 + 이 값 = 상단 광고비.
+              ※ 「미분류」 행의 광고비 <b className="text-gray-700">{won(summary?.ad_spend_unassigned)}</b>는
+              옵션 분해가 없는 날의 <b>계정 단위 일별 집계</b>라 판매유형으로 가를 수 없다. 버리지 않고
+              한 행으로 두었으므로 <b>위 표의 각 열 합계는 상단 카드와 정확히 일치</b>한다.
             </div>
           )}
         </div>
@@ -744,6 +750,10 @@ export default function CoupangOps() {
               />
             </div>
           </div>
+          {/* ★「오늘」 탭에도 판매유형 분해를 낸다(적대 리뷰 1R P1-1).
+              이 가지에만 없으면 **1P 광고비를 빼는 바로 그 탭에서** 뺀 금액이 화면에
+              한 줄도 안 남는다 — 은폐 금지는 «항상»이지 «어떤 탭에서만»이 아니다. */}
+          <SellTypeBreakdown rows={data?.by_sell_type} summary={s} refDate={data.ad_ref_date} />
         </div>
       ) : (
         /* 어제·7일 등 — 동일 기간 */

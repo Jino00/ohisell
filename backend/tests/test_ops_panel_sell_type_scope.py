@@ -21,7 +21,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import Channel, CoupangAdOptionDaily, Order
+from app.models import Channel, CoupangAdOptionDaily, CoupangRgOrderItem, Order
 from app.routers.coupang_ops import sales_summary
 from app.utils.kst import kst_today
 
@@ -71,8 +71,11 @@ def db():
                     platform="coupang", channel_type="marketplace")
     wing1 = Channel(name="오픽스 Wing", code="COUPANG_WING1",
                     platform="coupang", channel_type="marketplace")
-    s.add_all([wing2, wing1])
+    rocket = Channel(name="오하이테크 로켓배송", code="COUPANG_ROCKET",
+                     platform="coupang", channel_type="consignment")
+    s.add_all([wing2, wing1, rocket])
     s.flush()
+    s._chs = {"COUPANG_WING1": wing1, "COUPANG_WING2": wing2, "COUPANG_ROCKET": rocket}
     s.add_all([
         # 오하이테크 3P 주문 — 라이브와 같은 53,700원
         Order(channel_id=wing2.id, order_number="O-1", platform_product_id=WING_VID,
@@ -150,3 +153,140 @@ def test_오픽스는_값이_안_바뀐다(db):
     s = _summary(db, company="오픽스")["summary"]
     assert Decimal(s["ad_spend"]) == Decimal("116115")
     assert Decimal(s["excluded_ad_spend"]) == Decimal("0")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R가 요구한 회귀 — 생존 변이 6종(M-A·M-B·M-C·M-D·M-E·M-J)을 죽인다.
+#   원래 픽스처가 3P 주문 1건뿐이라 **RG(2P) 경로와 일별 폴백 경로가 통째로 미검증**이었다.
+#   오픽스 매출의 대부분이 RG인데도 그랬다(최근 30일 RG 13,971,550 vs Wing 1,221,210).
+# ══════════════════════════════════════════════════════════════════
+
+def _split_sum(out, field):
+    return sum((Decimal(r[field]) for r in out["by_sell_type"]), Decimal("0"))
+
+
+def test_M_A_M_E_RG매출과_비용이_2P_칸에_잡힌다(db):
+    """M-A(매출 전부 3P로)·M-E(수수료·원가·물류 전부 3P로)를 죽인다."""
+    db.add_all([
+        Order(channel_id=db._chs["COUPANG_WING1"].id, order_number="W-1",
+              platform_product_id="7001", platform_product_name="윙상품", quantity=1,
+              selling_price=Decimal("100000"),
+              order_date=datetime.combine(YESTERDAY, time(12, 0)), status="delivered"),
+        CoupangRgOrderItem(order_id="RG-1", account_key="COUPANG_WING1",
+                           vendor_item_id="7002", vendor_id=OFIX_VENDOR,
+                           product_name="RG상품", unit_sales_price=Decimal("50000"),
+                           sales_quantity=2,
+                           paid_at=datetime.combine(YESTERDAY, time(12, 0))),
+    ])
+    db.commit()
+    out = _summary(db, company="오픽스")
+    rows = {r["channel_type"]: r for r in out["by_sell_type"]}
+    assert Decimal(rows["로켓그로스"]["revenue"]) == Decimal("100000"), \
+        "RG(2P) 매출이 2P 칸에 없다 — 전부 3P로 몰렸다"
+    assert Decimal(rows["Wing"]["revenue"]) == Decimal("100000")
+    # 비용도 유형별로 갈려야 한다(Wing만 한진 물류비 1,900원)
+    assert Decimal(rows["Wing"]["shipping"]) > 0
+    assert Decimal(rows["로켓그로스"]["shipping"]) == 0
+
+
+def test_M_D_M_J_이익_분해합이_KPI와_같다(db):
+    """M-D(이익식에서 물류비 누락)·M-J(이익 2배 위조)를 죽인다.
+
+    ★1R에서 이 열을 보는 테스트가 **0건**이었다 — 표의 헤드라인 열인데도."""
+    db.add(CoupangRgOrderItem(
+        order_id="RG-2", account_key="COUPANG_WING2", vendor_item_id="8899",
+        vendor_id=OHITECH_VENDOR, product_name="RG상품", unit_sales_price=Decimal("30000"),
+        sales_quantity=1, paid_at=datetime.combine(YESTERDAY, time(12, 0))))
+    db.commit()
+    out = _summary(db)
+    assert _split_sum(out, "profit") == Decimal(out["summary"]["profit"]), \
+        "분해 이익 합이 KPI 이익과 다르다 — 같은 화면의 두 숫자가 또 갈렸다"
+
+
+def test_M_B_M_C_일별폴백은_미분류로_드러나고_이익이_어긋나지_않는다(db, monkeypatch):
+    """M-B(폴백 누락)·M-C(xlsx_dates scope 필터 제거)를 죽인다.
+
+    ★1R 라이브: 오픽스 7일 탭에서 분해 이익이 KPI보다 1,363원 높았다 — 폴백분이
+      KPI에만 들어가고 분해엔 어디에도 없었기 때문이다."""
+    db.add(Order(channel_id=db._chs["COUPANG_WING1"].id, order_number="W-4",
+                 platform_product_id="7001", platform_product_name="윙상품", quantity=1,
+                 selling_price=Decimal("100000"),
+                 order_date=datetime.combine(YESTERDAY, time(12, 0)), status="delivered"))
+    db.commit()
+    monkeypatch.setattr(
+        "app.services.coupang.ad_cost_sync.get_ad_cost_range",
+        lambda _db, a, b: [{"date": str(YESTERDAY), "day_cost": 123456,
+                            "all_day_cost": 123456, "conv_sales": 7000}])
+    out = _summary(db, company="오픽스")
+    assert Decimal(out["summary"]["ad_spend_unassigned"]) == Decimal("123456")
+    rows = {r["channel_type"]: r for r in out["by_sell_type"]}
+    assert "미분류" in rows, "가를 수 없는 광고비가 표에서 사라졌다"
+    assert Decimal(rows["미분류"]["ad_spend"]) == Decimal("123456")
+    assert Decimal(rows["미분류"]["conv_revenue"]) == Decimal("7000")
+    for f in ("revenue", "fee", "cost", "shipping", "ad_spend", "conv_revenue", "profit"):
+        assert _split_sum(out, f) == Decimal(out["summary"][f]), f"{f}: 분해합 ≠ 총계"
+
+
+def test_폴백이_없으면_미분류_행도_없다(db):
+    """늘 켜진 0원 행은 읽히지 않는다 — 값이 있을 때만 낸다."""
+    rows = {r["channel_type"] for r in _summary(db)["by_sell_type"]}
+    assert rows == {"Wing", "로켓그로스"}
+
+
+def test_P2_1_로켓배송_주문도_사라지지_않는다(db):
+    """1R P2-1: 이름 없는 채널 축의 돈이 조용히 증발하던 경로.
+
+    로켓배송 주문은 지금 prod에 0건이지만(쿠팡 매입 구조), 생기는 날 분해합이
+    총계보다 작아지면 그건 «없는 돈»이 된다."""
+    db.add(Order(channel_id=db._chs["COUPANG_ROCKET"].id, order_number="R-1",
+                 platform_product_id="9999", platform_product_name="로켓상품", quantity=1,
+                 selling_price=Decimal("1000000"),
+                 order_date=datetime.combine(YESTERDAY, time(12, 0)), status="delivered"))
+    db.commit()
+    out = _summary(db)
+    assert _split_sum(out, "revenue") == Decimal(out["summary"]["revenue"]), \
+        "로켓배송 매출이 분해에서 증발했다"
+
+
+def test_P2_7_이익이_라이브_기대값과_정확히_같다(db):
+    """1R P2-7: `> -100000`은 −99,999도 통과시킨다 — 계약 합격기준 ①을 못 박는다.
+
+    53,700 − 4,607.46(수수료 7.8%×1.1) − 0(원가) − 40,361(3P 광고) − 1,900(한진) = 6,831.54
+    ※ 라이브 −7,410원과 다른 건 원가 10,441원이 이 픽스처에 없기 때문이다."""
+    s = _summary(db)["summary"]
+    assert Decimal(s["profit"]) == Decimal("6831.54"), f"기대 6831.54, 실제 {s['profit']}"
+
+
+def test_P1_1_오늘탭_최신일이_Retail만_있는_날로_안_잡힌다(db):
+    """1R P1-1: `latest_ad`에 scope가 없으면 Retail만 있는 날이 최신으로 잡혀
+    「어제 광고비 0원」이 되고 전액이 숨는다. prod에 그런 날이 30일 연속 있었다."""
+    later = YESTERDAY + timedelta(days=1)
+    db.add(_ad(OHITECH_VENDOR, "Retail", "9912", "999999", "0"))
+    db.query(CoupangAdOptionDaily).filter_by(ad_option_id="9912").update(
+        {"report_date": later})
+    db.commit()
+    out = sales_summary(company="오하이테크", days=0, db=db)
+    assert out["ad_ref_date"] == str(YESTERDAY), (
+        f"최신일이 Retail 전용 날짜({later})로 잡혔다 — 3P/2P 광고비가 0으로 보인다")
+    assert Decimal(out["summary"]["ad_spend"]) == Decimal("40361")
+
+
+def test_M_C_Retail만_있는_날은_일별폴백이_열려야_한다(db, monkeypatch):
+    """M-C(`xlsx_dates`의 scope 필터 제거)를 죽인다.
+
+    ★이 필터가 실제로 갈리는 조건은 「그날 광고 원장에 Retail 행만 있는 경우」다.
+      필터가 없으면 그날이 «XLSX 있음»으로 세어져 일별 폴백까지 막히고, 3P/2P 광고비가
+      0인 채로 **그날 광고비가 통째로 사라진다.** prod에 그런 날이 2026-04-15~05-14
+      **30일 연속** 실재했다(적대 리뷰 1R).
+    """
+    # 그날의 3P 행을 지워 Retail만 남긴다 — 리뷰어가 prod에서 찾은 그 형태.
+    db.query(CoupangAdOptionDaily).filter_by(sell_type="3P").delete()
+    db.commit()
+    monkeypatch.setattr(
+        "app.services.coupang.ad_cost_sync.get_ad_cost_range",
+        lambda _db, a, b: [{"date": str(YESTERDAY), "day_cost": 88888,
+                            "all_day_cost": 88888, "conv_sales": 0}])
+    s = sales_summary(company="ALL", days=1, db=db)["summary"]
+    assert Decimal(s["ad_spend"]) == Decimal("88888"), (
+        "Retail만 있는 날이 «XLSX 있음»으로 세어져 폴백이 막혔다 — 그날 광고비가 사라진다")
+    assert Decimal(s["ad_spend_unassigned"]) == Decimal("88888")

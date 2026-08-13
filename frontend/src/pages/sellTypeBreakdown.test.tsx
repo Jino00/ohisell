@@ -86,7 +86,33 @@ describe("판매유형 분해", () => {
       />
     );
     expect(screen.getByText("12,345원")).toBeTruthy();
-    expect(screen.getByText(/일별 집계분이라/)).toBeTruthy();
+    expect(screen.getByText(/계정 단위 일별 집계/)).toBeTruthy();
+  });
+
+  it("미분류 행은 «가를 수 없다»고 이름 붙는다 — 빈칸이나 3P로 위장하지 않는다", () => {
+    const withUn: SalesSellTypeRow[] = [
+      ...ROWS,
+      {
+        sell_type: null, channel_type: "미분류",
+        revenue: "0", fee: "0", cost: "0",
+        ad_spend: "1363", shipping: "0",
+        profit: "-1363", profit_rate: null,
+        conv_revenue: "0", roas: null,
+      },
+    ];
+    render(
+      <SellTypeBreakdown
+        rows={withUn}
+        summary={summary({ excluded_ad_spend: "0", ad_spend_unassigned: "1363" })}
+      />
+    );
+    expect(screen.getByText("미분류 · 일별 집계")).toBeTruthy();
+    expect(screen.getByText("-1,363원")).toBeTruthy();
+  });
+
+  it("「오늘」 탭에서는 광고 수치의 기준일을 밝힌다", () => {
+    render(<SellTypeBreakdown rows={ROWS} summary={summary()} refDate="2026-08-12" />);
+    expect(screen.getByText(/2026-08-12 기준/)).toBeTruthy();
   });
 
   it("데이터가 없으면 아무것도 그리지 않는다(빈 표 대신)", () => {

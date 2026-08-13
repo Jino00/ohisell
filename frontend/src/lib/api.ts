@@ -931,8 +931,9 @@ export interface SalesSummaryData {
 
 /** 판매유형별 분해 — 3P(Wing)와 2P(로켓그로스)는 쿠팡이 가져가는 몫이 두 배 넘게 다르다. */
 export interface SalesSellTypeRow {
-  sell_type: string;      // "3P" | "2P"
-  channel_type: string;   // "Wing" | "로켓그로스"
+  /** "3P" | "2P" | null(미분류 — 일별 집계라 판매유형으로 못 가른 금액) */
+  sell_type: string | null;
+  channel_type: string;   // "Wing" | "로켓그로스" | "미분류"
   revenue: string; fee: string; cost: string;
   ad_spend: string; shipping: string;
   profit: string; profit_rate: string | null;
