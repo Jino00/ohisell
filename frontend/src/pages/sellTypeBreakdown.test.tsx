@@ -106,8 +106,16 @@ describe("판매유형 분해", () => {
         summary={summary({ excluded_ad_spend: "0", ad_spend_unassigned: "1363" })}
       />
     );
-    expect(screen.getByText("미분류 · 일별 집계")).toBeTruthy();
+    expect(screen.getByText("판매유형 미배분")).toBeTruthy();
     expect(screen.getByText("-1,363원")).toBeTruthy();
+  });
+
+  it("★광고비를 판매유형으로 안 가르는 이유가 화면에 적힌다", () => {
+    // 라벨이 판매경로가 아니라는 사실(D-CPP-43)을 각주로 못박는다 — 안 적으면
+    // 「3P 광고비 0원」이 «광고를 안 했다»로 오독된다.
+    render(<SellTypeBreakdown rows={ROWS} summary={summary()} />);
+    expect(screen.getByText(/광고비는 판매유형으로 가르지 않는다/)).toBeTruthy();
+    expect(screen.getByText(/97.28%/)).toBeTruthy();
   });
 
   it("「오늘」 탭에서는 광고 수치의 기준일을 밝힌다", () => {

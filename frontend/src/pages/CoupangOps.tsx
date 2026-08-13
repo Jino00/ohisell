@@ -66,7 +66,7 @@ export function SellTypeBreakdown({ rows, summary, refDate }: {
   const label = (r: SalesSellTypeRow) =>
     r.sell_type === "3P" ? "3P · Wing"
       : r.sell_type === "2P" ? "2P · 로켓그로스"
-      : "미분류 · 일별 집계";
+      : "판매유형 미배분";
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -87,7 +87,7 @@ export function SellTypeBreakdown({ rows, summary, refDate }: {
               <th className="px-3 py-1.5 text-right font-medium">원가</th>
               <th className="px-3 py-1.5 text-right font-medium">광고비</th>
               <th className="px-3 py-1.5 text-right font-medium">배송·물류비</th>
-              <th className="px-3 py-1.5 text-right font-medium">이익</th>
+              <th className="px-3 py-1.5 text-right font-medium">이익<span className="font-normal text-gray-400">(광고 전)</span></th>
               <th className="px-3 py-1.5 text-right font-medium">이익률</th>
             </tr>
           </thead>
@@ -111,7 +111,7 @@ export function SellTypeBreakdown({ rows, summary, refDate }: {
           </tbody>
         </table>
       </div>
-      {(excluded > 0 || unassigned > 0) && (
+      {(excluded > 0 || unassigned > 0 || rows.some((r) => Number(r.ad_spend) > 0)) && (
         <div className="px-3 py-2 border-t border-gray-100 text-[11px] text-gray-500 break-keep space-y-0.5">
           {excluded > 0 && (
             <div>
@@ -120,11 +120,17 @@ export function SellTypeBreakdown({ rows, summary, refDate }: {
               그 손익은 로켓배송 화면이 납품가 축으로 따로 본다.
             </div>
           )}
+          <div>
+            ※ <b className="text-gray-700">광고비는 판매유형으로 가르지 않는다</b> — 광고 원장의 판매방식
+            라벨이 <b>실제 판매경로를 뜻하지 않기 때문</b>이다(D-CPP-43 1차 출처: 오픽스 PA 광고비의
+            97.28%가 <b>RG로 팔리는 옵션</b>에 쓰이는데 라벨은 「3P」다). 라벨대로 가르면 매출 없는 축에
+            광고비만 쌓여 이익률이 −1000%대로 찍힌다. 그래서 <b>3P·2P 행의 이익은 「광고비 전」</b>이고,
+            광고비는 아래 「판매유형 미배분」 한 행에 모아 둔다. 각 열 합계는 상단 카드와 정확히 일치한다.
+          </div>
           {unassigned > 0 && (
             <div>
-              ※ 「미분류」 행의 광고비 <b className="text-gray-700">{won(summary?.ad_spend_unassigned)}</b>는
-              옵션 분해가 없는 날의 <b>계정 단위 일별 집계</b>라 판매유형으로 가를 수 없다. 버리지 않고
-              한 행으로 두었으므로 <b>위 표의 각 열 합계는 상단 카드와 정확히 일치</b>한다.
+              ※ 그중 <b className="text-gray-700">{won(summary?.ad_spend_unassigned)}</b>는 옵션 분해가
+              없는 날의 <b>계정 단위 일별 집계</b>다(옵션별로도 못 가른다).
             </div>
           )}
         </div>
