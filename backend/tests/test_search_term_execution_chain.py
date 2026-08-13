@@ -234,16 +234,21 @@ def test_detect_survives_one_group_failing(db, monkeypatch, powerlink_groups):
 # ═══ 사슬층 — diary_outcome → wisdom_candidates ═══
 
 
-def test_the_entry_is_actually_picked_up_by_outcome_and_wisdom(db):
+def test_the_entry_is_actually_picked_up_by_outcome_grains(db):
     """★★이 테스트가 이 파일의 존재 이유다 — 우리 일기 행을 **하류가 실제로 줍는가**.
 
     「우리가 diary를 불렀다」만 확인하면 인자 형태가 틀려 하류가 그 행을 못 줍는 상태를
-    통과시킨다. 그래서 diary_outcome과 wisdom_candidates를 진짜로 돌려 결과를 단언한다.
+    통과시킨다. 그래서 diary_outcome을 진짜로 돌려 결과를 단언한다.
+
+    ★D-NAO-178로 사슬의 종착지가 바뀌었다: 이 행의 `d1`은 `_grain_and_target`의 campaign
+    폴백이라 **그 캠페인 전체의 하루 성과**이지 이 검색어의 성적이 아니다(라이브 diary 4371:
+    d1 43,084원 vs 「골프」 30일 누적 31,411원). 그래서 ①검색어 grain 결과는 `d1_st`가 담고
+    ②wisdom 수확은 **막는다** — 거짓 승률이 쌓이던 경로였다. 아래 짝 테스트가 ②를 지킨다.
     """
-    from app.services.naver_ad import diary_outcome, wisdom_candidates
+    from app.services.naver_ad import diary_outcome
 
     _product(db)
-    # 캠페인 grain 실적(diary_outcome이 D+1 결과를 여기서 집계한다)
+    # 캠페인 grain 실적(diary_outcome이 d1을 여기서 집계한다 — 이 값은 배경 성과다)
     for i in range(20):
         d = date(2026, 8, 1) + timedelta(days=i)
         db.add(NaverAdDaily(
@@ -251,13 +256,14 @@ def test_the_entry_is_actually_picked_up_by_outcome_and_wisdom(db):
             imp=1000, clk=50, cost=20_000, conv_direct_cnt=2, conv_direct_amt=60_000,
             conv_indirect_cnt=0, conv_indirect_amt=0,
         ))
-    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    _spend(db, day=date(2026, 8, 5), cost=9_000)      # 제외 전 기왕력 → 필요 source=shopping
+    _spend(db, term="다른검색어", day=date(2026, 8, 8), cost=12_000)  # d1일 보고서 실재
     db.commit()
 
-    # ★실행 시각을 3일 전으로 둔다 — diary_outcome의 D+1 기입 조건이 `age >= 2`다(실행 다음날
-    #   실적이 확정된 뒤에 본다). 어제 실행분은 «아직» 안 채워지는 게 정상이고, 그걸 모르고
-    #   어제로 두면 이 테스트가 «사슬이 끊겼다»고 거짓 경보를 낸다.
-    executed_at = NOW - timedelta(days=3)
+    # ★실행 시각을 4일 전으로 둔다 — d1/d1_st 기입 문턱이 `age >= 4`다(D-NAO-178: 원료가 3일
+    #   창으로 delete+insert 재수집되므로 창이 닫힌 뒤에만 채점한다). 어제·그제 실행분은
+    #   «아직» 안 채워지는 게 정상이고, 그걸 모르고 앞당기면 «사슬이 끊겼다»는 거짓 경보가 난다.
+    executed_at = NOW - timedelta(days=4)
     ste.record_execution(db, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM,
                          rationale="ROAS 0.00 < BEP 1.49", now=executed_at)
     entry = db.query(OpsDiaryEntry).one()
@@ -267,16 +273,52 @@ def test_the_entry_is_actually_picked_up_by_outcome_and_wisdom(db):
 
     filled = diary_outcome.backfill_outcomes(db, now=NOW)
     assert filled["d1_filled"] >= 1, "우리 일기 행에 D+1 결과가 안 붙었다 — 사슬 1단계가 끊겼다"
+    assert filled["d1_st_filled"] >= 1, "검색어 grain 결과(d1_st)가 안 붙었다 — 조치의 성적이 없다"
+
     outcome = json.loads(db.query(OpsDiaryEntry).one().outcome_json or "{}")
-    assert outcome.get("d1"), "d1 결과가 없으면 wisdom이 이 행을 수확하지 않는다"
+    st = outcome["d1_st"]
+    assert st["status"] == "stopped", f"제외 다음날 그 검색어 비용이 0인데 stopped가 아니다: {st}"
+    assert st["cost_total"] == 0
+    assert st["required_sources"] == ["shopping"]
+    assert st["by_source"]["shopping"]["present"] is True, "보고서 실재 게이트가 안 걸렸다"
+    # 두 값이 **다른 숫자**라는 사실 자체가 오귀속 제거의 증거다.
+    assert outcome["d1"]["cost"] != st["cost_total"]
+
+
+def test_the_entry_is_no_longer_harvested_into_wisdom(db):
+    """★위 테스트의 짝 — 검색어 제외 행은 wisdom이 **줍지 않아야** 한다(D-NAO-178).
+
+    종전엔 이 행이 수확돼 캠페인 grain d1로 승률이 쌓였다(라이브 후보 27의 good 1이 그것이다).
+    수확을 막는 것은 판정 규칙 변경이 아니라 **알려진 거짓 입력의 차단**이고, S8에서 이 skip을
+    걷으면 그대로 복원된다.
+    """
+    from app.services.naver_ad import diary_outcome, wisdom_candidates
+
+    _product(db)
+    for i in range(20):
+        d = date(2026, 8, 1) + timedelta(days=i)
+        db.add(NaverAdDaily(
+            ad_date=d, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, keyword_id="",
+            imp=1000, clk=50, cost=20_000, conv_direct_cnt=2, conv_direct_amt=60_000,
+            conv_indirect_cnt=0, conv_indirect_amt=0,
+        ))
+    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    _spend(db, term="다른검색어", day=date(2026, 8, 8), cost=12_000)
+    db.commit()
+
+    executed_at = NOW - timedelta(days=4)
+    ste.record_execution(db, campaign_id=CAMPAIGN, adgroup_id=ADGROUP, search_term=TERM,
+                         rationale="ROAS 0.00 < BEP 1.49", now=executed_at)
+    entry = db.query(OpsDiaryEntry).one()
+    entry.created_at = executed_at - timedelta(hours=9)
+    db.commit()
+    diary_outcome.backfill_outcomes(db, now=NOW)
 
     harvested = wisdom_candidates.harvest_candidates(db, now=NOW)
-    assert harvested["new"] + harvested["updated"] >= 1, f"지혜 후보로 수확되지 않았다: {harvested}"
-    cand = db.query(OpsWisdomCandidate).first()
-    assert cand is not None
-    assert ste.DIARY_ACTION in cand.signature, (
-        "시그니처에 액션이 없으면 이 판단 종류의 승률이 따로 쌓이지 않는다"
-    )
+
+    assert harvested["skipped_search_term_grain"] >= 1, f"skip 카운터가 안 올랐다: {harvested}"
+    assert harvested["new"] == 0 and harvested["updated"] == 0
+    assert db.query(OpsWisdomCandidate).count() == 0, "거짓 승률이 다시 쌓이고 있다"
 
 
 # ═══ 성적표층 ═══

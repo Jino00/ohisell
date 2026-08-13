@@ -87,7 +87,12 @@ def _env_summary(e: OpsDiaryEntry) -> str:
 
 
 def _outcome_summary(e: OpsDiaryEntry) -> str:
-    """outcome_json(P2 소급 기입) 요약 — d1/d7 보정ROAS·비용 + retro 채점(있으면)."""
+    """outcome_json(P2 소급 기입) 요약 — d1/d7 보정ROAS·비용 + d1_st 검색어 판정 + retro 채점.
+
+    ★d1_st를 같이 내보내는 이유: 검색어 제외 행의 d1은 캠페인 grain이라 사람이 이것만 보면
+    조치의 성적으로 오독한다(D-NAO-178). 「백엔드는 세는데 화면이 안 읽는다」가 이 리포의 반복
+    결함이라 기입과 표시를 같은 커밋에서 잇는다.
+    """
     if not e.outcome_json:
         return "-"
     try:
@@ -99,6 +104,13 @@ def _outcome_summary(e: OpsDiaryEntry) -> str:
         w = o.get(key)
         if isinstance(w, dict):
             parts.append(f"{key}: roas {w.get('roas_c')} / 비용 {w.get('cost')}")
+    st = o.get("d1_st")
+    if isinstance(st, dict):
+        # 비용 0 = 「제외가 돈을 끊었다」(성공)이지 결측이 아니다 — status를 앞에 세운다.
+        parts.append(
+            f"d1_st({st.get('status')}): 비용 {st.get('cost_total')}"
+            f" / 검색어 {(st.get('match') or {}).get('term')}"
+        )
     retro = o.get("retro")
     if isinstance(retro, dict):
         verdict = retro.get("verdict_d7") or retro.get("verdict_d3") or "?"

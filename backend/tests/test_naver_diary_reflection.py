@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import NaverAdDaily, NaverRetroSignal, OpsDiaryEntry
+from app.models import NaverAdDaily, NaverRetroSignal, NaverSearchTermDaily, OpsDiaryEntry
 from app.services import scheduler_service
 from app.services.naver_ad import diary_outcome, diary_reflection, reflection_loop
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
@@ -48,11 +48,11 @@ def _utc_for(action_date: date) -> datetime:
 
 def _entry(db, *, action_date, event_type="execute", campaign_id="cmp1",
            target_type="keyword", target_id="nkw-1", action="bid_up",
-           outcome_json=None, actor="daily"):
+           outcome_json=None, actor="daily", adgroup_id=None):
     e = OpsDiaryEntry(
         created_at=_utc_for(action_date), event_type=event_type, campaign_id=campaign_id,
         target_type=target_type, target_id=target_id, action=action,
-        outcome_json=outcome_json, actor=actor,
+        outcome_json=outcome_json, actor=actor, adgroup_id=adgroup_id,
     )
     db.add(e)
     db.flush()
@@ -72,8 +72,9 @@ def _daily(db, ad_date, *, keyword_id="nkw-1", campaign_id="cmp1", cost, clk, co
 
 
 def test_d1_fills_next_completion_day_metrics(db):
-    _entry(db, action_date=TODAY - timedelta(days=2))  # D-2 → d1 창 = D-1(07-19)
-    _daily(db, TODAY - timedelta(days=1), cost=1000, clk=5, conv=500)
+    # 문턱 age>=4(D-NAO-178: 원료 3일 정정 창이 닫힌 뒤에만 채점) → D-4 행의 d1 창 = D-3(07-17).
+    _entry(db, action_date=TODAY - timedelta(days=4))
+    _daily(db, TODAY - timedelta(days=3), cost=1000, clk=5, conv=500)
     db.commit()
 
     res = diary_outcome.backfill_outcomes(db, now=NOW)
@@ -122,9 +123,9 @@ def test_retro_signal_linked_by_target_and_date(db):
 def test_retro_signal_direction_mismatch_not_linked(db):
     # P2 리뷰 P3-3: retro는 '제안 방향' 추적 — direction=down 신호를 action=bid_up(→up) 행에
     # 붙이면 오연결. 방향 매핑이 존재하는데 일치 신호가 없으면 붙이지 않는다.
-    action_date = TODAY - timedelta(days=2)
+    action_date = TODAY - timedelta(days=4)
     _entry(db, action_date=action_date, action="bid_up")
-    _daily(db, TODAY - timedelta(days=1), cost=1000, clk=5, conv=500)
+    _daily(db, TODAY - timedelta(days=3), cost=1000, clk=5, conv=500)
     db.add(NaverRetroSignal(
         created_at=NOW, asof_date=action_date, board="bleeding_keywords", direction="down",
         grain="keyword", target_id="nkw-1", campaign_id="cmp1", cf_asof=1.0, bep_asof=2.0,
@@ -145,14 +146,15 @@ def test_out_of_window_row_untouched(db):
 
     res = diary_outcome.backfill_outcomes(db, now=NOW)
 
-    assert res == {"d1_filled": 0, "d7_filled": 0, "retro_linked": 0, "errors": 0}
+    assert res == {"d1_filled": 0, "d7_filled": 0, "retro_linked": 0,
+                   "d1_st_filled": 0, "d1_st_no_data": 0, "errors": 0}
     assert db.query(OpsDiaryEntry).one().outcome_json is None
 
 
 def test_per_row_failure_isolated(db, monkeypatch):
-    _entry(db, action_date=TODAY - timedelta(days=2), target_id="boom")
-    _entry(db, action_date=TODAY - timedelta(days=2), target_id="nkw-ok")
-    _daily(db, TODAY - timedelta(days=1), keyword_id="nkw-ok", cost=1000, clk=5, conv=500)
+    _entry(db, action_date=TODAY - timedelta(days=4), target_id="boom")
+    _entry(db, action_date=TODAY - timedelta(days=4), target_id="nkw-ok")
+    _daily(db, TODAY - timedelta(days=3), keyword_id="nkw-ok", cost=1000, clk=5, conv=500)
     db.commit()
 
     orig = diary_outcome._window_agg
@@ -173,10 +175,10 @@ def test_per_row_failure_isolated(db, monkeypatch):
 
 def test_campaign_grain_excludes_backfill_sentinel(db):
     # 캠페인 폴백 집계는 상세행만 — sentinel 롤업 행과 이중계상하지 않는다.
-    _entry(db, action_date=TODAY - timedelta(days=2), target_type="campaign", target_id=None)
-    _daily(db, TODAY - timedelta(days=1), cost=1000, clk=5, conv=500)  # 상세행
+    _entry(db, action_date=TODAY - timedelta(days=4), target_type="campaign", target_id=None)
+    _daily(db, TODAY - timedelta(days=3), cost=1000, clk=5, conv=500)  # 상세행
     db.add(NaverAdDaily(  # sentinel 롤업(합산되면 2배)
-        ad_date=TODAY - timedelta(days=1), campaign_id="cmp1", campaign_type="WEB_SITE",
+        ad_date=TODAY - timedelta(days=3), campaign_id="cmp1", campaign_type="WEB_SITE",
         adgroup_id=BACKFILL_SENTINEL_ADGROUP, keyword_id="", imp=100, clk=99,
         cost=8888, rank_sum=0, conv_direct_amt=7777, conv_indirect_amt=0,
     ))
@@ -185,6 +187,293 @@ def test_campaign_grain_excludes_backfill_sentinel(db):
     diary_outcome.backfill_outcomes(db, now=NOW)
     d1 = json.loads(db.query(OpsDiaryEntry).one().outcome_json)["d1"]
     assert d1["cost"] == 1000 and d1["conv"] == 500  # sentinel 미포함
+
+
+# ══════════════════ d1_st — 검색어 grain D+1 (D-NAO-178) ══════════════════
+# 왜 이 블록이 있나: search_term 행의 d1은 `_grain_and_target`의 campaign 폴백 탓에 **그 캠페인
+#   전체**의 하루 성과다(라이브 diary 4371: d1 43,084원 vs 「골프」 30일 누적 31,411원). d1_st는
+#   같은 행에 검색어 grain 결과를 additive로 덧붙인다. 판정은 ROAS가 아니라 status 4값이다.
+
+ST_CAMP = "cmp-st"
+ST_ADG = "grp-st"
+
+
+def _st_entry(db, *, action_date, target_id="골프", adgroup_id=ST_ADG, outcome_json=None):
+    return _entry(db, action_date=action_date, campaign_id=ST_CAMP, adgroup_id=adgroup_id,
+                  target_type="search_term", target_id=target_id,
+                  action="search_term_exclude", actor="console", outcome_json=outcome_json)
+
+
+def _st_daily(db, ad_date, *, term, source="shopping", cost=0, clk=0, imp=0, conv=0,
+              campaign_id=ST_CAMP, adgroup_id=ST_ADG):
+    db.add(NaverSearchTermDaily(
+        ad_date=ad_date, campaign_id=campaign_id, adgroup_id=adgroup_id, search_term=term,
+        source=source, imp=imp, clk=clk, cost=cost, rank_sum=0, conv_purchase_amt=conv,
+    ))
+
+
+def _d1_st(db):
+    return json.loads(db.query(OpsDiaryEntry).one().outcome_json)["d1_st"]
+
+
+def test_d1_st_stopped_when_report_present_and_term_cost_zero(db):
+    # 제외가 돈을 끊은 성공 케이스 — 그 검색어 행은 없고 그룹의 그날 보고서는 실재한다.
+    # (라이브 「골프」가 정확히 이 모양: 8/12 그룹 shopping 352행 존재, 「골프」 행 0건.)
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    _st_daily(db, action - timedelta(days=1), term="골프", cost=31411, clk=14)  # 30일 기왕력
+    _st_daily(db, action + timedelta(days=1), term="다른검색어", cost=40535, clk=20)  # 보고서 실재
+    db.commit()
+
+    res = diary_outcome.backfill_outcomes(db, now=NOW)
+
+    assert res["d1_st_filled"] == 1 and res["d1_st_no_data"] == 0
+    st = _d1_st(db)
+    assert st["status"] == "stopped"
+    assert st["cost_total"] == 0
+    assert st["required_sources"] == ["shopping"]  # 30일 기왕력이 shopping뿐
+    assert st["by_source"]["shopping"]["present"] is True
+    assert st["by_source"]["expkeyword"]["present"] is False
+    assert st["window"] == (action + timedelta(days=1)).isoformat()
+    assert st["match"] == {"term": "골프", "mode": "exact", "matched_terms": 0}
+
+
+def test_d1_st_leaking_when_term_still_costs(db):
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    _st_daily(db, action - timedelta(days=1), term="골프", cost=31411)
+    _st_daily(db, action + timedelta(days=1), term="골프", cost=1200, clk=3, imp=90, conv=5000)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["status"] == "leaking" and st["cost_total"] == 1200
+    assert st["by_source"]["shopping"]["conv_amt"] == 5000
+
+
+def test_d1_st_has_no_roas_key(db):
+    # 금지선 4 — roas_c가 있으면 캠페인 판정 규칙(roas_c >= target)이 이 키를 실수로 먹는다.
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    _st_daily(db, action - timedelta(days=1), term="골프", cost=500)  # 기왕력 → 필요 source=shopping
+    _st_daily(db, action + timedelta(days=1), term="골프", cost=1200, conv=99999)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert "roas_c" not in st
+    assert all("roas_c" not in v for v in st["by_source"].values())
+
+
+def test_d1_st_expkeyword_carries_no_conversion_field(db):
+    # 파워링크는 전환 귀속이 원리적으로 불가(SS0 §0.5) — 0을 적으면 「전환 없었음」으로 오독된다.
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    _st_daily(db, action - timedelta(days=1), term="골프", source="expkeyword", cost=500)
+    _st_daily(db, action + timedelta(days=1), term="골프", source="expkeyword", cost=700, clk=2)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["required_sources"] == ["expkeyword"]
+    assert "conv_amt" not in st["by_source"]["expkeyword"]
+    assert st["status"] == "leaking" and st["cost_total"] == 700
+
+
+def test_d1_st_prefix50_ambiguous_when_upper_bound_positive(db):
+    # 50자 절단 다의 + 비용 > 0 → 누구 돈인지 모른다. 「0」이 아니라 「모른다」로 표면화(§6-B).
+    action = TODAY - timedelta(days=4)
+    trunc = "가" * 50
+    _st_entry(db, action_date=action, target_id=trunc)
+    _st_daily(db, action - timedelta(days=1), term=trunc + "원문A", cost=100)
+    _st_daily(db, action + timedelta(days=1), term=trunc + "원문A", cost=300)
+    _st_daily(db, action + timedelta(days=1), term=trunc + "원문B", cost=400)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["match"]["mode"] == "prefix50" and st["match"]["matched_terms"] == 2
+    assert st["status"] == "ambiguous" and st["cost_total"] == 700
+
+
+def test_d1_st_prefix50_stopped_when_upper_bound_zero(db):
+    # 매칭 집합의 비용 합은 진짜 비용의 **상한** — 상한이 0이면 다의여도 stopped가 성립한다.
+    action = TODAY - timedelta(days=4)
+    trunc = "가" * 50
+    _st_entry(db, action_date=action, target_id=trunc)
+    _st_daily(db, action - timedelta(days=1), term=trunc + "원문A", cost=100)
+    _st_daily(db, action + timedelta(days=1), term="무관한검색어", cost=5000)  # 보고서 실재
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["status"] == "stopped" and st["cost_total"] == 0
+
+
+def test_d1_st_skips_when_report_absent_then_confirms_no_data_at_deadline(db):
+    # 보고서 부재는 「비용 0」이 아니다 — 키를 안 쓰고 재시도하다가 마감(age 5)에 no_data로 확정.
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    _st_daily(db, action - timedelta(days=1), term="골프", cost=31411)  # 기왕력만, d1일 보고서 없음
+    db.commit()
+
+    res = diary_outcome.backfill_outcomes(db, now=NOW)
+    assert res["d1_st_filled"] == 0
+    assert "d1_st" not in json.loads(db.query(OpsDiaryEntry).one().outcome_json or "{}")
+
+    later = diary_outcome.backfill_outcomes(db, now=NOW + timedelta(days=1))  # age 5 = 마감
+    assert later["d1_st_filled"] == 1 and later["d1_st_no_data"] == 1
+    st = _d1_st(db)
+    assert st["status"] == "no_data" and st["by_source"]["shopping"]["present"] is False
+
+
+def test_d1_st_not_written_before_correction_window_closes(db):
+    # 문턱 age>=4 — 원료 3일 정정 창이 닫히기 전에는 쓰지 않는다(D-NAO-178).
+    action = TODAY - timedelta(days=3)
+    _st_entry(db, action_date=action)
+    _st_daily(db, action + timedelta(days=1), term="다른검색어", cost=1000)
+    db.commit()
+
+    res = diary_outcome.backfill_outcomes(db, now=NOW)
+
+    assert res["d1_st_filled"] == 0 and res["d1_filled"] == 0
+    assert db.query(OpsDiaryEntry).one().outcome_json is None
+
+
+def test_d1_st_unresolved_without_adgroup(db):
+    # 그룹을 모르면 범위를 좁힐 수 없다 — 캠페인으로 넓히는 것이 d1이 낸 오귀속 그 자체다.
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action, adgroup_id=None)
+    _st_daily(db, action + timedelta(days=1), term="골프", cost=1000)
+    db.commit()
+
+    res = diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert res["d1_st_no_data"] == 1
+    assert st["status"] == "no_data" and st["match"]["mode"] == "unresolved"
+    assert st["cost_total"] == 0
+
+
+def test_d1_st_coexists_with_d1_and_never_rewrites_it(db):
+    # 합격기준 ④ — 기존 d1은 한 글자도 안 바뀐다. 라이브 4371의 실제 값을 그대로 쓴다.
+    action = TODAY - timedelta(days=4)
+    frozen = {"cost": 43084, "clk": 29, "conv": 122000, "roas_c": 3.5753}
+    _st_entry(db, action_date=action, outcome_json=json.dumps({"d1": frozen}))
+    _st_daily(db, action - timedelta(days=1), term="골프", cost=31411)
+    _st_daily(db, action + timedelta(days=1), term="다른검색어", cost=40535)
+    db.commit()
+
+    res = diary_outcome.backfill_outcomes(db, now=NOW)
+
+    outcome = json.loads(db.query(OpsDiaryEntry).one().outcome_json)
+    assert res["d1_filled"] == 0            # 멱등 가드 — 재기입 없음
+    assert outcome["d1"] == frozen          # 값 불변
+    assert outcome["d1_st"]["status"] == "stopped"   # 다른 숫자를 담는 별도 키
+
+
+def test_d1_st_scope_excludes_other_adgroup_costs(db):
+    # 제외는 그룹 단위 장치 — 옆 그룹의 같은 검색어 비용을 끌어오면 leaking 오판이 난다.
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    _st_daily(db, action - timedelta(days=1), term="골프", cost=31411)
+    _st_daily(db, action + timedelta(days=1), term="다른검색어", cost=100)   # 내 그룹 보고서
+    _st_daily(db, action + timedelta(days=1), term="골프", cost=9999, adgroup_id="grp-남")
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    assert _d1_st(db)["status"] == "stopped"
+
+
+def test_d1_st_prefix50_single_match_is_leaking_not_ambiguous(db):
+    """적대 리뷰 살아남은 변이 — `matched_terms > 1`(다의)과 `>= 1`(단일 포함)의 경계.
+
+    50자 절단이어도 매칭이 **하나뿐**이면 누구 돈인지 안다 → `leaking`이지 `ambiguous`가 아니다.
+    이 경계가 없으면 「제외가 안 먹혔다」는 경보가 「모르겠다」로 뭉개진다.
+    """
+    action = TODAY - timedelta(days=4)
+    trunc = "가" * 50
+    _st_entry(db, action_date=action, target_id=trunc)
+    _st_daily(db, action - timedelta(days=1), term=trunc + "원문A", cost=100)
+    _st_daily(db, action + timedelta(days=1), term=trunc + "원문A", cost=600)  # 매칭 1건
+    _st_daily(db, action + timedelta(days=1), term="무관한검색어", cost=5000)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["match"]["mode"] == "prefix50" and st["match"]["matched_terms"] == 1
+    assert st["status"] == "leaking" and st["cost_total"] == 600
+
+
+def test_d1_st_like_wildcards_in_term_are_literal(db):
+    """적대 리뷰 P1 — 검색어에 든 `%`·`_`가 LIKE 와일드카드로 새면 **무관한 검색어의 비용**이
+    딸려 들어와 stopped가 leaking으로 뒤집힌다(「20%할인」류 표기는 실제로 흔하다)."""
+    action = TODAY - timedelta(days=4)
+    trunc = ("가" * 9) + "%" + ("나" * 40)  # 50자 · 리터럴 % 포함
+    _st_entry(db, action_date=action, target_id=trunc)
+    _st_daily(db, action - timedelta(days=1), term=trunc, cost=100)
+    # %가 와일드카드로 새면 이 무관한 검색어가 매칭된다(가*9 + 아무거나 + 나*40 + …).
+    _st_daily(db, action + timedelta(days=1),
+              term=("가" * 9) + "Q" + ("나" * 40) + "무관", cost=99999)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["status"] == "stopped", f"LIKE 와일드카드가 샜다: {st}"
+    assert st["cost_total"] == 0 and st["match"]["matched_terms"] == 0
+
+
+def test_d1_st_history_window_is_exactly_30_days_like_the_ledger(db):
+    """필요 source 판정 창이 원장 `cost_at_exclusion`(30일)과 **같은 날짜 집합**이어야 한다 —
+    하루라도 어긋나면 「원장이 본 기왕력」과 「판정이 본 기왕력」이 갈라진다."""
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    # 창 밖(31일 전) shopping 실적만 존재 → 기왕력 없음으로 봐야 하고, 필요 source는 둘 다.
+    _st_daily(db, action - timedelta(days=30), term="골프", cost=7777)
+    _st_daily(db, action + timedelta(days=1), term="다른검색어", cost=100)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW + timedelta(days=1))  # age 5 마감까지
+
+    assert _d1_st(db)["required_sources"] == ["shopping", "expkeyword"]
+
+
+def test_d1_st_without_history_requires_both_sources_and_lands_no_data(db):
+    # §6-C: 30일 기왕력이 비면 어느 source로 돈이 샜는지 모르므로 **두 source 모두** 필요로 본다.
+    # 그룹은 실무상 한 source만 보고서를 내므로 이 경우는 사실상 no_data로 마감된다 — 그게 맞다.
+    # 「모르는 것」을 stopped(성공)로 적지 않는 것이 이 설계의 요점이기 때문이다.
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)  # 기왕력 없음
+    _st_daily(db, action + timedelta(days=1), term="다른검색어", cost=100)  # shopping 보고서만
+    db.commit()
+
+    assert diary_outcome.backfill_outcomes(db, now=NOW)["d1_st_filled"] == 0  # 재시도
+    res = diary_outcome.backfill_outcomes(db, now=NOW + timedelta(days=1))    # age 5 마감
+
+    assert res["d1_st_no_data"] == 1
+    st = _d1_st(db)
+    assert st["required_sources"] == ["shopping", "expkeyword"]
+    assert st["status"] == "no_data"
+
+
+def test_d1_st_ignores_non_search_term_rows(db):
+    # keyword grain 행에는 d1_st를 붙이지 않는다(additive의 경계).
+    _entry(db, action_date=TODAY - timedelta(days=4))
+    _daily(db, TODAY - timedelta(days=3), cost=1000, clk=5, conv=500)
+    db.commit()
+
+    res = diary_outcome.backfill_outcomes(db, now=NOW)
+
+    assert res["d1_st_filled"] == 0
+    assert "d1_st" not in json.loads(db.query(OpsDiaryEntry).one().outcome_json)
 
 
 # ══════════════════════════ daily_reflection_sa ══════════════════════════
@@ -198,6 +487,45 @@ class _FakeLLM:
     def __call__(self, prompt, *, system, schema, model, timeout):
         self.calls.append({"prompt": prompt, "system": system, "model": model})
         return {"text": self.text, "json": None, "raw": "", "usage": {}}
+
+
+def test_reflection_prompt_carries_d1_st_and_explains_zero_cost(db):
+    """★기입만 하고 아무도 안 읽으면 「측정 정합」이 아니다 — d1_st가 실제로 LLM 프롬프트에
+    닿는지, 그리고 「비용 0 = 의도된 성공」이 시스템 프롬프트에 서 있는지 함께 지킨다."""
+    st = {"window": "2026-07-19", "match": {"term": "골프", "mode": "exact", "matched_terms": 0},
+          "by_source": {"shopping": {"present": True, "imp": 0, "clk": 0, "cost": 0, "conv_amt": 0},
+                        "expkeyword": {"present": False}},
+          "required_sources": ["shopping"], "cost_total": 0, "status": "stopped"}
+    _st_entry(db, action_date=TODAY - timedelta(days=1),
+              outcome_json=json.dumps({"d1": {"cost": 43084, "clk": 29, "conv": 122000,
+                                              "roas_c": 3.5753}, "d1_st": st}))
+    db.commit()
+
+    fake = _FakeLLM()
+    diary_reflection.build_reflection(db, now=NOW, invoke=fake)
+
+    prompt = fake.calls[0]["prompt"]
+    assert "d1_st" in prompt and "stopped" in prompt, "d1_st가 해석문 컨텍스트에 안 실렸다"
+    system = fake.calls[0]["system"]
+    assert "d1_st" in system and "stopped" in system  # 비용 0을 실패로 서술하지 않게
+
+
+def test_vault_export_shows_d1_st_status(db):
+    """같은 이유의 표시층 — 사람이 d1(캠페인 grain)만 보고 조치의 성적으로 오독하지 않게."""
+    from app.services.naver_ad import vault_export
+
+    e = _st_entry(db, action_date=TODAY - timedelta(days=1), outcome_json=json.dumps(
+        {"d1": {"cost": 43084, "clk": 29, "conv": 122000, "roas_c": 3.5753},
+         "d1_st": {"match": {"term": "골프"}, "cost_total": 0, "status": "stopped"}}))
+    db.commit()
+
+    summary = vault_export._outcome_summary(e)
+
+    assert "d1_st(stopped)" in summary and "골프" in summary
+    assert "d1: roas 3.5753" in summary  # 기존 표시 불변
+    # 결측·깨진 JSON에서 죽지 않는다
+    e.outcome_json = json.dumps({"d1_st": None})
+    assert "d1_st" not in vault_export._outcome_summary(e)
 
 
 def test_reflection_skips_llm_when_no_entries(db):

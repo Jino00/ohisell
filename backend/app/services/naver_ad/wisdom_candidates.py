@@ -7,6 +7,8 @@
 #   결측 관찰은 중립이라 tally에 안 넣고 후보 생성/갱신도 skip(리뷰 P2-3). promoted/rejected
 #   시그니처는 재수확하지 않지만, hidden은 재등장 시 pending으로 부활한다(리뷰 P2-1 — Ebbinghaus
 #   재노출 강화). 읽기(diary·campaign_target_resolver) + wisdom_candidates 쓰기만(원칙18-1).
+#   ★target_type=="search_term" 행은 수확 대상에서 제외한다(D-NAO-178) — 그 행의 d1은 검색어가
+#   아니라 캠페인 grain이라 승률이 남의 성적표로 쌓인다. 해제는 S8(d1_st 소비 전환)에서.
 from __future__ import annotations
 
 import json
@@ -117,9 +119,18 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
     )
     totals = {"scanned": 0, "new": 0, "updated": 0, "revived": 0,
               "skipped_no_outcome": 0, "skipped_no_target": 0, "skipped_neutral": 0,
-              "skipped_terminal": 0, "errors": 0}
+              "skipped_terminal": 0, "skipped_search_term_grain": 0, "errors": 0}
     for entry in rows:
         try:
+            # ★검색어 제외 행은 수확하지 않는다(D-NAO-178). 이 행들의 outcome["d1"]은
+            #   `_grain_and_target`의 campaign 폴백 탓에 **그 캠페인 전체의 하루 성과**이지
+            #   조치의 성적이 아니다(2026-08-13 라이브: d1 43,084원 vs 「골프」 30일 31,411원).
+            #   진실을 d1_st에 적으면서 거짓 d1을 계속 먹이면 「측정 정합」이 아니다.
+            #   판정 규칙(_outcome_window/_outcome_direction) 변경이 아니라 **알려진 거짓 입력의
+            #   차단**이고, S8에서 이 skip을 걷으면 그대로 복원된다(가역).
+            if entry.target_type == "search_term":
+                totals["skipped_search_term_grain"] += 1
+                continue
             outcome = json.loads(entry.outcome_json) if entry.outcome_json else {}
             window = _outcome_window(outcome) if outcome else None
             if window is None:
