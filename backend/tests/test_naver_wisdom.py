@@ -85,6 +85,39 @@ def _bad():
 # ══════════════════════════ candidate_sa ══════════════════════════
 
 
+def test_harvest_skips_search_term_grain_rows(db):
+    """D-NAO-178: 검색어 제외 행의 d1은 `_grain_and_target` 캠페인 폴백 탓에 **그 캠페인 전체**의
+    성과다 — 승률에 남의 성적표가 쌓인다. 수확 자체를 막는다(판정 규칙은 그대로, S8에서 해제)."""
+    _diary(db, target_type="search_term", target_id="골프", action="search_term_exclude",
+           outcome=_good())
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+
+    assert res["skipped_search_term_grain"] == 1
+    assert res["scanned"] == 0 and res["new"] == 0
+    assert db.query(OpsWisdomCandidate).count() == 0
+
+
+def test_harvest_skip_does_not_revive_hidden_candidate(db):
+    """순서 제약의 근거: hidden은 터미널이 아니라 같은 시그니처의 **새 행**이 오면 pending으로
+    부활한다. skip이 걸린 뒤에는 검색어 제외 행이 아무리 와도 부활 창이 열리지 않는다."""
+    sig = "cmp1|search_term_exclude|weekend|summer|unknown"
+    db.add(OpsWisdomCandidate(
+        signature=sig, campaign_id="cmp1", action="search_term_exclude",
+        env_bucket_json="{}", observation="-", occurrences=1, good_count=1, bad_count=0,
+        first_seen_at=NOW, last_seen_at=NOW, source_entry_ids_json="[999]", status="hidden",
+        importance=5, strength=7.0,
+    ))
+    db.flush()
+    _diary(db, target_type="search_term", target_id="골프2", action="search_term_exclude",
+           outcome=_good())
+
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+
+    assert res["revived"] == 0 and res["skipped_search_term_grain"] == 1
+    cand = db.query(OpsWisdomCandidate).filter_by(signature=sig).one()
+    assert cand.status == "hidden" and cand.good_count == 1  # tally 불변
+
+
 def test_harvest_creates_new_candidate_with_signature(db):
     _diary(db, outcome=_good())
     res = wisdom_candidates.harvest_candidates(db, now=NOW)
