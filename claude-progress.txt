@@ -1,3 +1,35 @@
+[2026-08-13 12:0x] ★D-NAO-178 구현·배포 완료 — d1_st(검색어 grain D+1) + wisdom 오염 차단
+  · PR #298(d717572 본체 + 3f9b774 리뷰수리) 병합 1371139. **무중단 배포 0초**(활성 :8011 pid
+    707061) — 병행 세션의 Basic Auth 전환(PR #295·#296)이 프로브를 살려 --restart-legacy 불필요.
+  · 범위 5건 중 4건 완료: ①d1_st ②wisdom skip ③d1 문턱 age>=4 ⑤_SYSTEM 1줄.
+    **④(후보 27 → hidden)만 남았다** — 순서 제약(skip 배포 먼저)이 충족돼 이제 안전. 마감 8/27.
+  · ★계약과 다르게 한 것 1건(선언함): §5-1은 d1_st를 age>=2로 뒀으나 age>=4로 통일.
+    present 게이트는 «행의 유무»만 보지 «값의 확정»을 못 본다 — d1_day 그룹 보고서는 첫
+    수집부터 있으니 present=true인데 그 검색어 행이 아직이면 cost 0=stopped가 굳는다.
+    naver_search_term_daily도 [T-3,T-1] delete+insert(search_term_ingest.py:56).
+    §5-1 자신의 no_data 마감 계산이 이미 age 4를 창 종료로 못박고 있었다. 교훈 #290.
+    대가: 4371의 자연 기입일 8/14 → **8/15**.
+  · §5-0 사전검증 전건 통과 — 「골프」 30일 31,411원이 정확 문자열 일치로 **정확히 재현**
+    (shopping 단일 31행) → 정규화 불필요 / 8/12 그룹 shopping 352행 실재·「골프」 0건 →
+    present 게이트가 의도대로 stopped 성립 / 4371 adgroup_id 있음.
+  · ★미검증 전제는 틀렸다: d1 소비자는 2곳이 아니라 **4곳**(wisdom·해석문·vault_export·
+    void_exclusion:570). 결론은 유지 — 지연 민감 소비자 없음(void_exclusion은 오히려 늦을수록
+    wisdom_may_have_counted가 정확해진다).
+  · 적대 리뷰 1R FAIL(P1 2건) → 2R PASS. P1: ⓐ**미이스케이프 LIKE** — 검색어의 리터럴 %·_가
+    와일드카드로 새면 무관한 검색어 비용이 딸려 들어와 stopped→leaking 뒤집힘. §6-B의
+    「매칭 집합 = 진짜 비용의 상한」 전제가 무너지던 경로(교훈 #291). ⓑ**살아남은 변이** —
+    prefix50 matched_terms>1 경계 테스트가 32건 중 0건. 2R 변이 재주입 5종 전건 KILLED.
+    P2 채택 3(필요source 창이 31일이었다→30일 / vault_export 회귀 / d1_st의 LLM 도달 e2e).
+  · 라이브 예행(prod 읽기전용·쓰기 0): 4371 d1_st = stopped·cost_total 0·required=[shopping]·
+    present true·matched_terms 0. **d1(43,084) ≠ d1_st(0)** — 오귀속 제거가 값으로 증명됐다.
+    425(아이패드종이필름)도 stopped(required=[expkeyword], d1은 7,696원) → **8/14 첫 기입**.
+  · 완료 QA(별도 Sonnet·읽기전용) = **부분달성**: ④달성(baseline 4,156행·8,311키 diff 0건)
+    ③부분달성(코드 sha256 prod=커밋 일치, 라이브 08:45 실행은 8/14) ①②⑤판정불능(관측일
+    미도래) **미달 0건**. 금지선 §3-1~3-8 전건 준수 확인.
+  · 다음 세션 1순위: 8/14 08:35·08:45 관측(425 d1_st 첫 기입 + wisdom skip 카운터) →
+    8/15 4371. 그 다음 후보 27 hidden.
+  · 인계: .claude/memory/HANDOFF_d1st-shipped_20260813.md
+
 [2026-08-13 10:1x] ★D-NAO-178 승인 — S4 d1_st additive 범위 확정 + 세션 인계
   · Jino 승인 원문: "그래. 이 내용을 승인하고 여기서 handoff하고 다음 세션에서 이어하자"
   · 확정 5건: ①d1_st(검색어 grain·status 4값·present 게이트) ②검색어 행 wisdom 수확 skip
