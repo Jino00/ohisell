@@ -110,7 +110,11 @@ return "campaign", None      # ← search_term은 여기로 떨어진다
 
 - prod: `sellc.ohitech.co.kr` · pm2 `ohisell-backend-8001` · 백엔드 커밋 **`03d4c12`** · alembic head **`cs1exat2when3`** · 프론트 번들 `index-DuBi9E63.js`(스탬프 `03d4c124…`).
 - 로컬 main: 이 인계 커밋. origin과 동기 확인할 것.
-- ⚠️**무중단 배포 불가** — Mac IP 대만(`125.227.60.86`), `/api/health` 403. `--restart-legacy`만(약 50초).
+- ⚠️**배포 경로 상태가 이 세션 도중에 바뀌었다 — 착수 전 반드시 다시 실측할 것.**
+  - 09:38 배포 시점: `/api/health` **403**(Mac IP 대만 `125.227.60.86`이 nginx 허용목록 밖) → `--restart-legacy`(약 50초)만 가능. 그렇게 배포했다.
+  - 10:2x 재확인: 같은 요청이 **401**로 바뀌었다. **IP 차단이 아니라 인증 요구다.** 병행 세션이 prod를 **IP 허용목록 → nginx Basic Auth**로 옮기는 중이고(5단계 중 4단계 완료, PR #295), 그 세션 메모에 **「무중단 배포가 풀렸다」**고 적혀 있다.
+  - **나는 그 주장을 검증하지 않았다.** 자격증명은 `~/.ohisell_prod_auth`. 인계 `.claude/memory/HANDOFF_prod-basic-auth-4of5_20260813.md`를 먼저 읽고, `curl`로 직접 확인한 뒤 `--restart` / `--restart-legacy`를 고를 것.
+- ⚠️**오늘 이 repo에 병행 세션이 최소 2개 더 있다** — `47d49df`(하네스 주간 감사 지표) · `2d686a6`(04 자동운영 감사 D+14) · PR #295(prod Basic Auth). 착수 전 `git fetch && git log --oneline -10`.
 - 테스트: `cd backend && python3 -m pytest -q` → 5,490 passed + 1 failed(§5) · `cd frontend && npm test`(★`npx vitest run` 직접 호출 금지 — 인구조사 가드 우회).
 - 변이 원복은 `cp`로. **`git checkout --` 금지.** 배포 락 충돌 시 `--steal-lock` 쓰지 말고 대기.
 - 번호는 `scripts/next_ids.sh`로 받는다(이번에 D-NAO-178 · 교훈 #287 수령).
