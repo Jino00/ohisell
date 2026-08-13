@@ -140,10 +140,27 @@ def test_판매유형_분해의_합이_총계와_같다(db):
 
 def test_분해가_3P와_2P_둘_다_낸다(db):
     """2P가 0원인 날에도 칸이 사라지면 «없다»와 «0»을 구분 못 한다."""
-    rows = {r["sell_type"]: r for r in _summary(db)["by_sell_type"]}
-    assert set(rows) == {"3P", "2P"}
-    assert Decimal(rows["3P"]["ad_spend"]) == Decimal("40361")
-    assert Decimal(rows["2P"]["ad_spend"]) == Decimal("0")
+    rows = {r["channel_type"]: r for r in _summary(db)["by_sell_type"]}
+    assert {"Wing", "로켓그로스"} <= set(rows)
+    assert Decimal(rows["Wing"]["revenue"]) == Decimal("53700")
+    assert Decimal(rows["로켓그로스"]["revenue"]) == Decimal("0")
+
+
+def test_광고비는_판매유형으로_가르지_않는다(db):
+    """★라벨이 판매경로가 아니다 — 라벨로 가르면 «매출 없는 비용 축»이 생긴다.
+
+    근거(D-CPP-43, 1차 출처 확정): 오픽스 PA 광고비의 **97.28%가 RG로 팔리는 옵션**에
+    쓰이는데 원장 라벨은 `3P`다. 2026-08-14 라이브: 오픽스 광고 55행 전부 `3P` 라벨인데
+    RG 주문이 붙는 옵션 15 · Wing 주문 2 → 라벨대로 가르면 「3P 매출 0원 · 광고비 94,908원
+    · 이익률 −1016%」가 찍힌다. 이 커밋이 1P에서 고친 결함과 정확히 같은 모양이다.
+
+    ⚠️라벨은 «1P냐 아니냐»는 가른다(scope 필터가 그걸 쓰고 라이브로 검증됐다).
+      못 가르는 건 «2P냐 3P냐»뿐이다."""
+    rows = {r["channel_type"]: r for r in _summary(db)["by_sell_type"]}
+    assert Decimal(rows["Wing"]["ad_spend"]) == 0, "3P 라벨을 믿고 광고비를 Wing에 붙였다"
+    assert Decimal(rows["로켓그로스"]["ad_spend"]) == 0
+    assert Decimal(rows["미분류"]["ad_spend"]) == Decimal("40361"), (
+        "가를 수 없는 광고비가 사라졌다 — 미분류로 보여야 한다")
 
 
 def test_오픽스는_값이_안_바뀐다(db):
@@ -227,8 +244,10 @@ def test_M_B_M_C_일별폴백은_미분류로_드러나고_이익이_어긋나�
         assert _split_sum(out, f) == Decimal(out["summary"][f]), f"{f}: 분해합 ≠ 총계"
 
 
-def test_폴백이_없으면_미분류_행도_없다(db):
+def test_미분류에_담을_게_없으면_행도_없다(db):
     """늘 켜진 0원 행은 읽히지 않는다 — 값이 있을 때만 낸다."""
+    db.query(CoupangAdOptionDaily).delete()   # 광고가 없으면 미분류에 담길 게 없다
+    db.commit()
     rows = {r["channel_type"] for r in _summary(db)["by_sell_type"]}
     assert rows == {"Wing", "로켓그로스"}
 

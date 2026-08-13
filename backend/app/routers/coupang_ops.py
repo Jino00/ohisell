@@ -1031,8 +1031,18 @@ def sales_summary(
         _b["fee"] += _v["fee"]
         _b["cost"] += _v["cost"]
         _b["shipping"] += _v["shipping"]
+    # ★광고비는 판매유형으로 **가르지 않는다** — 라벨이 판매경로를 뜻하지 않기 때문이다.
+    #   근거(D-CPP-43, 2026-08-12 1차 출처 확정 · intelligence.py 주석): 오픽스 PA 광고비의
+    #   **97.28%가 RG로 팔리는 옵션**에 쓰이는데 원장 라벨은 `3P`다. 2026-08-14 라이브 재확인:
+    #   오픽스 광고 55행 전부 `3P` 라벨인데 그중 RG 주문이 붙는 옵션 15 · Wing 주문 2.
+    #   라벨로 가르면 「매출 0원 · 광고비 94,908원 · 이익률 −1016%」 같은 **매출 없는 비용 축**이
+    #   생긴다 — 이 커밋이 1P에서 고친 결함과 정확히 같은 모양이다.
+    #   ⚠️라벨은 «1P냐 아니냐»는 가른다(그건 위 scope 필터로 이미 쓰고 있고 라이브로 검증됐다).
+    #     못 가르는 건 «2P냐 3P냐»뿐이다.
+    #   → 옵션 단위 귀속(그 옵션이 실제로 어디서 팔렸는가)은 새 머니 규칙이라 Jino 결정 사항.
+    #     그때까지는 미분류에 담아 **가를 수 없다는 사실 자체를 보인다.**
     for _st, _v in ad_by_sell_type.items():
-        _b = _bucket(SELL_TYPE_TO_CHANNEL_TYPE.get(_st, UNASSIGNED_CHANNEL_TYPE))
+        _b = split[UNASSIGNED_CHANNEL_TYPE]
         _b["ad_spend"] += _v["spend"]
         _b["conv_revenue"] += _v["conv_revenue"]
     # 일별 폴백분(계정 단위라 옵션·판매유형 분해가 원리적으로 없다) → 미분류
