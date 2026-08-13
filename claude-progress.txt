@@ -1,3 +1,24 @@
+[2026-08-13 09:37~09:45] ★D-NAO-177 prod 배포 + 라이브 합격 4/4 (커밋 03d4c12)
+  · 사슬 관측 종결로 금지선이 풀려 첫 순서로 배포했다. 마이그 im1port2src3 → cs1exat2when3,
+    백엔드 6파일, pid 124746 → 639059. 무중단 경로는 여전히 불가(Mac 나가는 IP 125.227.60.86
+    =대만, /api/health 403) → --restart-legacy(다운타임 약 50초, 09:38~09:39).
+  · 라이브 합격 시나리오 전건(prod localhost:8001, 검증행 id=6):
+    ①import → imported 1 · dated 1 · **diary_written 0** · console_excluded_at 2024-12-26T14:03
+    ②GET rows → console_excluded_at=2024-12-26T14:03 **그대로** · excluded_at=2026-08-13T09:39:43
+      (편입 시각) · source=console_import  ← 두 칸의 뜻이 갈라져 있다는 라이브 증거
+    ③생존감시 healthy=True · never_checked_due=0 **불변**(monitored만 2→3) — 편입분이 즉시
+      「방치」로 세어져 배너가 거짓 빨강이 되는 분기를 안 탄다
+    ④today_excluded=0 **불변** — 편입분이 「오늘 자른 조치」로 안 세어진다
+    ⑤성적표 imported_unjudgeable_count 0→1(판정은 안 하되 셈)
+  · void 원복 후 baseline 완전 복귀(monitored 3→2 · imported_unjudgeable 1→0 · excluded 3→2).
+    DELETE 응답 diary_voided=0 · wisdom_may_have_counted=false ·
+    「콘솔 편입 행이라 애초에 일기가 없다」 — D-176 1번 금지선이 무효화 시점에도 재확인됐다.
+  · 프론트도 배포(dist stamp commit=03d4c124…, 매니페스트 2건). 번들 index-DuBi9E63.js에
+    신문구 1건 · 옛문구(「실행 시점을 몰라」) 0건. ★prod dist에 .deploy-stamp가 없는 건 정상 —
+    rsync --delete가 지워 가드가 무장해제되던 것을 고쳐 스탬프를 repo 루트
+    .frontend-deploy-stamp로 옮겼다(옛 경로만 보고 「가드 없음」으로 오독하지 말 것).
+  · 이로써 **콘솔 43건을 부어도 안전하다**(S5, Jino 대기). 남은 것: S4 d1_st additive.
+
 [2026-08-13 08:44~08:5x] ★학습 사슬 실관측 종결 — D-NAO-174 합격기준②
   · 13일 만의 첫 소급 대상 행(diary 4371 「골프」)이 사슬 3단계를 완주하는 것을 라이브로 봤다.
     07:30 수집(naver_ad_daily 최신 2026-08-12) → 08:35 소급(outcome_json.d1 = cost 43,084 ·
