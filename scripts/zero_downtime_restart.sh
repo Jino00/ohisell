@@ -196,11 +196,22 @@ TARGET_PID=$(sshx "curl -fsS --max-time 5 http://127.0.0.1:$TARGET_PORT/health" 
 # 것보다 낫다: DNS·TLS·nginx·접근통제·업스트림 전 구간이 사용자와 똑같이 실행된다.
 # (서버 로컬에서 찌르면 허용목록에 127.0.0.1이 없어 403이고, 그걸 뚫으려 허용목록을 넓히는
 #  것은 이 스크립트가 건드릴 일이 아니다 — 그 목록은 2026-07-17 무인증 공개 사고의 처방이다.)
-VHOST_PID=$(curl -fsS --max-time 10 "https://$VHOST/api/health" 2>/dev/null \
+# ★자격증명(Basic Auth) — prod가 IP 허용목록에서 비밀번호로 넘어가는 중이다.
+#   `~/.ohisell_prod_auth` 파일이 있으면 `user:pass` 한 줄을 읽어 프로브에 싣는다.
+#   **없으면 지금과 똑같이 동작한다** — 그래야 이 커밋을 먼저 배포해 두고 나중에 nginx를
+#   켜는 «순서»가 성립한다(둘을 동시에 바꾸면 되돌릴 곳이 두 곳이 된다).
+#   ⚠️파일 내용은 절대 로그로 출력하지 않는다(자백 로그에도 안 남긴다).
+AUTH_FILE="${OHISELL_PROD_AUTH_FILE:-$HOME/.ohisell_prod_auth}"
+CURL_AUTH=()
+if [ -r "$AUTH_FILE" ]; then
+  CURL_AUTH=(-u "$(head -n1 "$AUTH_FILE" | tr -d '\r\n')")
+fi
+VHOST_PID=$(curl -fsS --max-time 10 "${CURL_AUTH[@]}" "https://$VHOST/api/health" 2>/dev/null \
             | sed -n 's/.*\"pid\":\([0-9]*\).*/\1/p') || true
 if [ -z "$VHOST_PID" ]; then
   echo "  ⚠️ 공개 URL(https://$VHOST/api/health) 경유 확인을 못 했습니다." >&2
-  echo "     원인 후보: 이 기계 IP가 nginx 허용목록에 없음 / 신 코드에 /api/health 없음 / 네트워크." >&2
+  echo "     원인 후보: 이 기계 IP가 nginx 허용목록에 없음 / **Basic Auth 자격증명 없음**" >&2
+  echo "                ($AUTH_FILE 에 'user:pass' 한 줄) / 신 코드에 /api/health 없음 / 네트워크." >&2
   echo "     구 프로세스를 죽이기 전이라 사용자 영향은 없습니다. upstream 원복 후 중단합니다." >&2
   sshx "sudo cp '/tmp/ohisell-upstream.bak-$STAMP' '$UPSTREAM_CONF'; sudo nginx -t >/dev/null 2>&1 && sudo systemctl reload nginx"
   sshx "pm2 delete '$TARGET_NAME' >/dev/null 2>&1 || true"
