@@ -391,6 +391,61 @@ def test_d1_st_scope_excludes_other_adgroup_costs(db):
     assert _d1_st(db)["status"] == "stopped"
 
 
+def test_d1_st_prefix50_single_match_is_leaking_not_ambiguous(db):
+    """적대 리뷰 살아남은 변이 — `matched_terms > 1`(다의)과 `>= 1`(단일 포함)의 경계.
+
+    50자 절단이어도 매칭이 **하나뿐**이면 누구 돈인지 안다 → `leaking`이지 `ambiguous`가 아니다.
+    이 경계가 없으면 「제외가 안 먹혔다」는 경보가 「모르겠다」로 뭉개진다.
+    """
+    action = TODAY - timedelta(days=4)
+    trunc = "가" * 50
+    _st_entry(db, action_date=action, target_id=trunc)
+    _st_daily(db, action - timedelta(days=1), term=trunc + "원문A", cost=100)
+    _st_daily(db, action + timedelta(days=1), term=trunc + "원문A", cost=600)  # 매칭 1건
+    _st_daily(db, action + timedelta(days=1), term="무관한검색어", cost=5000)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["match"]["mode"] == "prefix50" and st["match"]["matched_terms"] == 1
+    assert st["status"] == "leaking" and st["cost_total"] == 600
+
+
+def test_d1_st_like_wildcards_in_term_are_literal(db):
+    """적대 리뷰 P1 — 검색어에 든 `%`·`_`가 LIKE 와일드카드로 새면 **무관한 검색어의 비용**이
+    딸려 들어와 stopped가 leaking으로 뒤집힌다(「20%할인」류 표기는 실제로 흔하다)."""
+    action = TODAY - timedelta(days=4)
+    trunc = ("가" * 9) + "%" + ("나" * 40)  # 50자 · 리터럴 % 포함
+    _st_entry(db, action_date=action, target_id=trunc)
+    _st_daily(db, action - timedelta(days=1), term=trunc, cost=100)
+    # %가 와일드카드로 새면 이 무관한 검색어가 매칭된다(가*9 + 아무거나 + 나*40 + …).
+    _st_daily(db, action + timedelta(days=1),
+              term=("가" * 9) + "Q" + ("나" * 40) + "무관", cost=99999)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW)
+
+    st = _d1_st(db)
+    assert st["status"] == "stopped", f"LIKE 와일드카드가 샜다: {st}"
+    assert st["cost_total"] == 0 and st["match"]["matched_terms"] == 0
+
+
+def test_d1_st_history_window_is_exactly_30_days_like_the_ledger(db):
+    """필요 source 판정 창이 원장 `cost_at_exclusion`(30일)과 **같은 날짜 집합**이어야 한다 —
+    하루라도 어긋나면 「원장이 본 기왕력」과 「판정이 본 기왕력」이 갈라진다."""
+    action = TODAY - timedelta(days=4)
+    _st_entry(db, action_date=action)
+    # 창 밖(31일 전) shopping 실적만 존재 → 기왕력 없음으로 봐야 하고, 필요 source는 둘 다.
+    _st_daily(db, action - timedelta(days=30), term="골프", cost=7777)
+    _st_daily(db, action + timedelta(days=1), term="다른검색어", cost=100)
+    db.commit()
+
+    diary_outcome.backfill_outcomes(db, now=NOW + timedelta(days=1))  # age 5 마감까지
+
+    assert _d1_st(db)["required_sources"] == ["shopping", "expkeyword"]
+
+
 def test_d1_st_without_history_requires_both_sources_and_lands_no_data(db):
     # §6-C: 30일 기왕력이 비면 어느 source로 돈이 샜는지 모르므로 **두 source 모두** 필요로 본다.
     # 그룹은 실무상 한 source만 보고서를 내므로 이 경우는 사실상 no_data로 마감된다 — 그게 맞다.
@@ -432,6 +487,45 @@ class _FakeLLM:
     def __call__(self, prompt, *, system, schema, model, timeout):
         self.calls.append({"prompt": prompt, "system": system, "model": model})
         return {"text": self.text, "json": None, "raw": "", "usage": {}}
+
+
+def test_reflection_prompt_carries_d1_st_and_explains_zero_cost(db):
+    """★기입만 하고 아무도 안 읽으면 「측정 정합」이 아니다 — d1_st가 실제로 LLM 프롬프트에
+    닿는지, 그리고 「비용 0 = 의도된 성공」이 시스템 프롬프트에 서 있는지 함께 지킨다."""
+    st = {"window": "2026-07-19", "match": {"term": "골프", "mode": "exact", "matched_terms": 0},
+          "by_source": {"shopping": {"present": True, "imp": 0, "clk": 0, "cost": 0, "conv_amt": 0},
+                        "expkeyword": {"present": False}},
+          "required_sources": ["shopping"], "cost_total": 0, "status": "stopped"}
+    _st_entry(db, action_date=TODAY - timedelta(days=1),
+              outcome_json=json.dumps({"d1": {"cost": 43084, "clk": 29, "conv": 122000,
+                                              "roas_c": 3.5753}, "d1_st": st}))
+    db.commit()
+
+    fake = _FakeLLM()
+    diary_reflection.build_reflection(db, now=NOW, invoke=fake)
+
+    prompt = fake.calls[0]["prompt"]
+    assert "d1_st" in prompt and "stopped" in prompt, "d1_st가 해석문 컨텍스트에 안 실렸다"
+    system = fake.calls[0]["system"]
+    assert "d1_st" in system and "stopped" in system  # 비용 0을 실패로 서술하지 않게
+
+
+def test_vault_export_shows_d1_st_status(db):
+    """같은 이유의 표시층 — 사람이 d1(캠페인 grain)만 보고 조치의 성적으로 오독하지 않게."""
+    from app.services.naver_ad import vault_export
+
+    e = _st_entry(db, action_date=TODAY - timedelta(days=1), outcome_json=json.dumps(
+        {"d1": {"cost": 43084, "clk": 29, "conv": 122000, "roas_c": 3.5753},
+         "d1_st": {"match": {"term": "골프"}, "cost_total": 0, "status": "stopped"}}))
+    db.commit()
+
+    summary = vault_export._outcome_summary(e)
+
+    assert "d1_st(stopped)" in summary and "골프" in summary
+    assert "d1: roas 3.5753" in summary  # 기존 표시 불변
+    # 결측·깨진 JSON에서 죽지 않는다
+    e.outcome_json = json.dumps({"d1_st": None})
+    assert "d1_st" not in vault_export._outcome_summary(e)
 
 
 def test_reflection_skips_llm_when_no_entries(db):

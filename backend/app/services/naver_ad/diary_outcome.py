@@ -84,12 +84,20 @@ def _grain_and_target(entry: OpsDiaryEntry) -> tuple[str, str | None]:
 #   버려진다(측정 대상과 규칙이 정반대).
 
 
+def _escape_like(s: str) -> str:
+    """LIKE 패턴의 리터럴화 — 검색어에 든 `%`·`_`가 와일드카드로 해석되는 것을 막는다.
+    ★적대 리뷰 P1: 「20%할인」류 표기가 실제 검색어에 흔한데, 이스케이프가 없으면 50자 절단
+    접두 매칭에서 **무관한 검색어의 비용**이 딸려 들어와 stopped가 leaking으로 뒤집힌다
+    (§6-B의 「매칭 집합 = 진짜 비용의 상한」 전제 자체가 무너진다)."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _st_term_clause(target_id: str):
     """검색어 매칭 조건. 50자 미만이면 정확 일치, 50자면 절단됐을 수 있으므로 접두 매칭(§6-B).
     정규화(공백·대소문자)는 하지 않는다 — 제외 후보가 같은 테이블에서 나왔으므로 문자열은 동일해야
     정상이고, 추측 정규화를 넣으면 「모르는 매칭 실패」가 조용히 「0=성공」이 된다."""
     if len(target_id) >= _ST_TRUNC_LEN:
-        return NaverSearchTermDaily.search_term.like(target_id + "%")
+        return NaverSearchTermDaily.search_term.like(_escape_like(target_id) + "%", escape="\\")
     return NaverSearchTermDaily.search_term == target_id
 
 
@@ -108,7 +116,10 @@ def _st_required_sources(db: Session, entry: OpsDiaryEntry, action_date: date) -
     """필요 source = 조치 직전 30일에 이 (campaign, adgroup, term)이 실적을 낸 source 집합(§6-C).
     기왕력이 비면 어느 쪽으로 돈이 샜는지 모르므로 **두 source 모두** 필요로 본다."""
     rows = (
-        _st_scope(db, entry, action_date - timedelta(days=_ST_HISTORY_DAYS), action_date)
+        # 창의 양끝을 포함하므로 -(N-1)이 정확히 N일이다 — 원장 `_cost_last_30d`
+        # (search_term_execution.py: `as_of - (_COST_WINDOW_DAYS - 1)`)와 같은 산술을 쓴다.
+        # 두 창이 하루라도 어긋나면 「원장이 본 기왕력」과 「판정이 본 기왕력」이 갈라진다.
+        _st_scope(db, entry, action_date - timedelta(days=_ST_HISTORY_DAYS - 1), action_date)
         .filter(_st_term_clause(entry.target_id))
         .with_entities(NaverSearchTermDaily.source)
         .distinct()
