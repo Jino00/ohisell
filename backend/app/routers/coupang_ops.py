@@ -18,7 +18,7 @@ import re
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Header, HTTPException, Path, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.clients.coupang.inbound import WingReadError
@@ -27,6 +27,11 @@ from app.database import get_db
 from app.models import Channel, CoupangAdChangeLog, CoupangAdCostDaily, CoupangAdEntitySnapshot, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.coupang.ad_sell_type import (
+    ORDER_BASED_SELL_TYPES,
+    SELL_TYPE_TO_CHANNEL_TYPE,
+    UNASSIGNED_CHANNEL_TYPE,
+)
 from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_file_sync, rocket_promo_sync, rocket_shipment_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_item_sales_sync, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
@@ -603,7 +608,7 @@ def sales_summary(
         if company == "ALL" or comp == company
     ]
     if not target_codes:
-        return {"summary": {}, "by_product": []}
+        return {"summary": {}, "by_sell_type": [], "by_product": []}
 
     # paid_at은 KST naive datetime으로 저장(_parse_paid_at에서 KST 변환 후 tzinfo 제거)
     # → 날짜 범위(start/end)를 그대로 사용 (UTC 보정 불필요)
@@ -683,11 +688,26 @@ def sales_summary(
         if target_vendor_ids else []
     )
 
+    # ★판매유형(sell_type) 축 — 이 화면은 **주문 기반**이라 3P(Wing)·2P(RG)만 담는다.
+    #   1P(Retail=로켓배송)는 쿠팡이 우리에게서 매입하는 구조라 매출이 orders에 없는데,
+    #   오하이테크는 셋이 vendor_id를 공유하므로 vendor만 걸면 «매출 없는 광고비»가 얹힌다.
+    #   2026-08-12 라이브: 매출 53,700(3P)에 광고비 576,573(3P 40,361 + Retail 536,212)이
+    #   붙어 이익 −543,622원. 같은 결함을 2026-08-03에 커맨드센터에서 이미 고쳤다(교훈 #103).
+    #   정의는 ad_sell_type.py 한 곳에 있고 커맨드센터(_agg_ads)와 이 화면이 같이 읽는다.
+    ad_scope_filter = [CoupangAdOptionDaily.sell_type.in_(ORDER_BASED_SELL_TYPES)]
+
     # 오늘(days=0) 선택 시: 광고비 XLSX는 당일 업로드 전이므로 DB 최신 report_date 사용
+    #   ★scope 필터를 여기에도 건다(적대 리뷰 1R P1-1). 안 걸면 «최신일»이 Retail만 있는
+    #     날짜로 잡혀 그 탭이 「어제 광고비 0원」을 보이고 전액이 숨는다 — prod에 그런 날이
+    #     2026-04-15~05-14 **30일 연속** 실재했다(3P/2P 행 0건).
     ad_dfrom, ad_dto = dfrom, dto
     ad_ref_date: str | None = None
     if days == 0:
-        latest_ad = db.query(func.max(CoupangAdOptionDaily.report_date)).scalar()
+        latest_ad = (
+            db.query(func.max(CoupangAdOptionDaily.report_date))
+            .filter(*ad_scope_filter)
+            .scalar()
+        )
         if latest_ad:
             ad_dfrom = ad_dto = latest_ad
             ad_ref_date = str(latest_ad)
@@ -696,6 +716,7 @@ def sales_summary(
         db.query(
             CoupangAdOptionDaily.ad_option_id,
             CoupangAdOptionDaily.vendor_id,
+            CoupangAdOptionDaily.sell_type,
             func.sum(CoupangAdOptionDaily.ad_spend),
             func.sum(CoupangAdOptionDaily.conversion_revenue),
         )
@@ -703,14 +724,50 @@ def sales_summary(
             CoupangAdOptionDaily.report_date >= ad_dfrom,
             CoupangAdOptionDaily.report_date <= ad_dto,
             *ad_filter,
+            *ad_scope_filter,
         )
-        .group_by(CoupangAdOptionDaily.ad_option_id, CoupangAdOptionDaily.vendor_id)
+        .group_by(CoupangAdOptionDaily.ad_option_id, CoupangAdOptionDaily.vendor_id,
+                  CoupangAdOptionDaily.sell_type)
         .all()
     )
-    ad_by_vid: dict[str, dict] = {
-        str(vid): {"vendor_id": vendor_id, "spend": _f(spend), "conv_revenue": _f(conv)}
-        for vid, vendor_id, spend, conv in ad_rows
-    }
+    # 같은 옵션이 두 판매유형에 걸칠 수 있으므로 dict 축약이 아니라 누적으로 담는다.
+    ad_by_vid: dict[str, dict] = {}
+    ad_by_sell_type: dict[str, dict] = {}
+    for vid, vendor_id, sell_type, spend, conv in ad_rows:
+        st = (sell_type or "").strip()
+        e = ad_by_vid.setdefault(str(vid), {
+            "vendor_id": vendor_id, "spend": _Z, "conv_revenue": _Z,
+        })
+        e["spend"] += _f(spend)
+        e["conv_revenue"] += _f(conv)
+        s = ad_by_sell_type.setdefault(st, {"spend": _Z, "conv_revenue": _Z})
+        s["spend"] += _f(spend)
+        s["conv_revenue"] += _f(conv)
+
+    # ★뺀 광고비는 숨기지 않는다 — 화면에 「이 화면 범위 밖」으로 남긴다(판단기준).
+    #   오하이테크 최근 30일 Retail 광고비는 20,947,574원이다. 조용히 사라지면 은폐가 된다.
+    #   ★여집합(notin_)으로 센다(적대 리뷰 1R P2-2) — 열거형(`in_(EXCLUDED)`)이면 제4의
+    #     판매방식 코드가 생기는 날 **어느 통에도 안 잡혀 조용히 사라진다**. 여집합이면
+    #     「담은 것 + 뺀 것 = 원장 전액」이 코드 구조상 항상 참이다.
+    #     (NULL은 notin_도 못 잡으므로 `is_(None)`을 명시적으로 OR 한다.)
+    _excl_spend, _excl_conv = (
+        db.query(
+            func.sum(CoupangAdOptionDaily.ad_spend),
+            func.sum(CoupangAdOptionDaily.conversion_revenue),
+        )
+        .filter(
+            CoupangAdOptionDaily.report_date >= ad_dfrom,
+            CoupangAdOptionDaily.report_date <= ad_dto,
+            *ad_filter,
+            or_(
+                CoupangAdOptionDaily.sell_type.notin_(ORDER_BASED_SELL_TYPES),
+                CoupangAdOptionDaily.sell_type.is_(None),
+            ),
+        )
+        .one()
+    )
+    excluded_ad_spend = _f(_excl_spend)
+    excluded_ad_conv = _f(_excl_conv)
 
     # ── 3. 상품명·수수료율 조회 (coupang_product_item) ───────────────────
     all_vids = set(order_by_vid) | set(ad_by_vid)
@@ -912,13 +969,20 @@ def sales_summary(
     # 확정값(coupang_ad_cost_daily)으로 보강. XLSX 있는 날은 그대로(상품별 표와 일관).
     # days=0(오늘=최신 XLSX 특수처리)은 제외. coupang_ad_cost_daily는 오픽스 단위→오픽스/ALL만.
     # ad_ref_date는 건드리지 않는다 — 비-null이면 프론트가 today-only 레이아웃으로 분기(codex P2).
+    # 일별 폴백분은 옵션 분해가 없어 판매유형으로 못 가른다 — 분해에 «미분류»로 따로 남긴다.
+    ad_fallback_spend = _Z
+    ad_fallback_conv = _Z
     if days != 0 and company in ("ALL", "오픽스"):
+        # ★scope 필터를 여기도 건다 — "그날 XLSX가 있나"의 답은 «우리가 실제로 쓰는 축에»
+        #   있느냐여야 한다. Retail 행만 있는 날을 '있음'으로 세면 3P/2P 광고비가 0인 채로
+        #   일별 폴백까지 막혀 그날 광고비가 통째로 사라진다.
         xlsx_dates = {
             r[0] for r in db.query(CoupangAdOptionDaily.report_date)
             .filter(
                 CoupangAdOptionDaily.report_date >= ad_dfrom,
                 CoupangAdOptionDaily.report_date <= ad_dto,
                 *ad_filter,
+                *ad_scope_filter,
             ).distinct().all()
         }
         for r in ad_cost_sync.get_ad_cost_range(db, dfrom, dto):
@@ -926,12 +990,82 @@ def sales_summary(
                 continue  # 그날은 XLSX 사용(상품별 분해 보존)
             total_spend += Decimal(str(r["day_cost"]))
             total_conv += Decimal(str(r.get("conv_sales") or 0))
+            ad_fallback_spend += Decimal(str(r["day_cost"]))
+            ad_fallback_conv += Decimal(str(r.get("conv_sales") or 0))
 
     total_fee   = sum((v["fee"]      for v in merged.values()), _Z)
     total_cost  = sum((v["cost"]     for v in merged.values()), _Z)
     total_ship  = sum((v["shipping"] for v in merged.values()), _Z)
     total_profit = total_rev - total_fee - total_cost - total_spend - total_ship
     profit_rate  = (total_profit / total_rev * 100).quantize(_Q2) if total_rev else None
+
+    # ── 5-b. 판매유형 분해 (2P 로켓그로스 / 3P Wing) ─────────────────
+    # 왜: 쿠팡이 가져가는 몫이 3P는 판매수수료+VAT(≈8.58%)인데 2P는 매출의 ~19.5%+다
+    #   (판매수수료·입출고·배송·보관·RG광고 — D-18). 마진 구조가 두 배 넘게 다른 둘을 한
+    #   이익률로 뭉개면 3P가 벌어 2P 손실을 덮고 있어도 그냥 «흑자»로 보인다.
+    # ★분해의 합이 총계와 어긋나면 안 되므로 **총계와 같은 소스**에서 만든다:
+    #   매출=order_by_vid(상품명 없는 옵션 포함) · 수수료/원가/물류=merged · 광고=ad_by_sell_type.
+    #   유일하게 못 가르는 건 일별 폴백(ad_fallback_spend)이고 그건 미분류로 드러낸다.
+    # ★«가를 수 없는 것»을 버리지 않고 미분류 통에 담는다(적대 리뷰 1R P1-2·P2-1).
+    #   버리면 분해합이 총계보다 작아지는데 화면은 그걸 말하지 않아 이익이 조용히 부풀었다
+    #   (라이브: 오픽스 7일 탭에서 분해 이익이 KPI보다 1,363원 높았다). 통을 두면 항등식
+    #   «Σ분해 == 총계»가 모든 열에서 코드 구조상 참이고, 새 축이 생겨도 안 샌다.
+    def _new_split_bucket(sell_type: str | None) -> dict:
+        return {"sell_type": sell_type, "revenue": _Z, "fee": _Z, "cost": _Z,
+                "shipping": _Z, "ad_spend": _Z, "conv_revenue": _Z}
+
+    split: dict[str, dict] = {
+        SELL_TYPE_TO_CHANNEL_TYPE[st]: _new_split_bucket(st)
+        for st in ORDER_BASED_SELL_TYPES
+    }
+    split[UNASSIGNED_CHANNEL_TYPE] = _new_split_bucket(None)
+
+    def _bucket(ch_type: str) -> dict:
+        """이름 있는 축이면 그 통, 아니면 미분류. **None을 돌려주지 않는다** — 그게 누수다."""
+        return split.get(ch_type) or split[UNASSIGNED_CHANNEL_TYPE]
+
+    for _od in order_by_vid.values():
+        _bucket(_ch_type(_od["channel_code"]))["revenue"] += _f(_od["revenue"])
+    for _pk, _v in merged.items():
+        _b = _bucket(_pk[2])
+        _b["fee"] += _v["fee"]
+        _b["cost"] += _v["cost"]
+        _b["shipping"] += _v["shipping"]
+    for _st, _v in ad_by_sell_type.items():
+        _b = _bucket(SELL_TYPE_TO_CHANNEL_TYPE.get(_st, UNASSIGNED_CHANNEL_TYPE))
+        _b["ad_spend"] += _v["spend"]
+        _b["conv_revenue"] += _v["conv_revenue"]
+    # 일별 폴백분(계정 단위라 옵션·판매유형 분해가 원리적으로 없다) → 미분류
+    split[UNASSIGNED_CHANNEL_TYPE]["ad_spend"] += ad_fallback_spend
+    split[UNASSIGNED_CHANNEL_TYPE]["conv_revenue"] += ad_fallback_conv
+
+    def _split_row(ch_type: str, v: dict) -> dict:
+        _rev = v["revenue"]
+        _p = _rev - v["fee"] - v["cost"] - v["ad_spend"] - v["shipping"]
+        return {
+            "sell_type":    v["sell_type"],       # 미분류는 None
+            "channel_type": ch_type,
+            "revenue":      str(_rev.quantize(_Q2)),
+            "fee":          str(v["fee"].quantize(_Q2)),
+            "cost":         str(v["cost"].quantize(_Q2)),
+            "ad_spend":     str(v["ad_spend"].quantize(_Q2)),
+            "shipping":     str(v["shipping"].quantize(_Q2)),
+            "conv_revenue": str(v["conv_revenue"].quantize(_Q2)),
+            "profit":       str(_p.quantize(_Q2)),
+            "profit_rate":  str((_p / _rev * 100).quantize(_Q2)) if _rev else None,
+            "roas": str((v["conv_revenue"] / v["ad_spend"]).quantize(_Q2))
+                    if v["ad_spend"] else None,
+        }
+
+    # 3P·2P는 **0원이어도 항상** 낸다(칸이 사라지면 «없다»와 «0»을 구분 못 한다).
+    # 미분류는 값이 있을 때만 — 늘 켜진 0원 행은 읽히지 않는다.
+    by_sell_type = [
+        _split_row(SELL_TYPE_TO_CHANNEL_TYPE[st], split[SELL_TYPE_TO_CHANNEL_TYPE[st]])
+        for st in ORDER_BASED_SELL_TYPES
+    ]
+    _un = split[UNASSIGNED_CHANNEL_TYPE]
+    if any(_un[k] for k in ("revenue", "fee", "cost", "shipping", "ad_spend", "conv_revenue")):
+        by_sell_type.append(_split_row(UNASSIGNED_CHANNEL_TYPE, _un))
 
     # 오늘 실시간 광고비(일자 단위, coupang_ad_cost_daily=report/SALES, Mac 페처). days=0 전용.
     # 옵션별 XLSX(total_spend)는 익일만 존재하므로 '광고 현황' 카드는 오늘 총액을 메인으로 쓴다.
@@ -1019,7 +1153,14 @@ def sales_summary(
             "rg_fulfillment": "0.00",  # D-18 컷오버: 풀필먼트는 fee에 내장됨
             "conv_revenue": str(total_conv.quantize(_Q2)),
             "roas":         _roas(total_spend, total_conv),
+            # ★이 화면 범위 밖으로 «의도적으로 뺀» 광고비 — 숨기지 않는다.
+            #   1P(로켓배송)는 매출이 orders에 없어 같이 셀 수 없다. 손익은 로켓배송 화면 소관.
+            "excluded_ad_spend":    str(excluded_ad_spend.quantize(_Q2)),
+            "excluded_ad_conv":     str(excluded_ad_conv.quantize(_Q2)),
+            # 일별 폴백분(옵션 분해 없음) — by_sell_type 합과 total의 차이가 정확히 이 값이다.
+            "ad_spend_unassigned":  str(ad_fallback_spend.quantize(_Q2)),
         },
+        "by_sell_type": by_sell_type,
         "by_product": by_product,
     }
 

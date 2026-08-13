@@ -922,12 +922,29 @@ export interface SalesSummaryData {
   ad_today?: string | null; ad_today_synced_at?: string | null;
   rg_fulfillment?: string;
   conv_revenue: string; roas: string | null;
+  /** 이 화면 범위 밖으로 «의도적으로 뺀» 광고비 = 1P(로켓배송). 매출이 orders에 없어 같이 못 센다. */
+  excluded_ad_spend?: string;
+  excluded_ad_conv?: string;
+  /** 일별 폴백분(옵션 분해 없음). by_sell_type 합 + 이 값 = ad_spend. */
+  ad_spend_unassigned?: string;
+}
+
+/** 판매유형별 분해 — 3P(Wing)와 2P(로켓그로스)는 쿠팡이 가져가는 몫이 두 배 넘게 다르다. */
+export interface SalesSellTypeRow {
+  /** "3P" | "2P" | null(미분류 — 일별 집계라 판매유형으로 못 가른 금액) */
+  sell_type: string | null;
+  channel_type: string;   // "Wing" | "로켓그로스" | "미분류"
+  revenue: string; fee: string; cost: string;
+  ad_spend: string; shipping: string;
+  profit: string; profit_rate: string | null;
+  conv_revenue: string; roas: string | null;
 }
 
 export interface SalesSummary {
   period: { from: string; to: string };
   ad_ref_date: string | null;
   summary: SalesSummaryData;
+  by_sell_type?: SalesSellTypeRow[];
   by_product: SalesProductRow[];
 }
 

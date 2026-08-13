@@ -31,6 +31,10 @@ from app.models import (
     ProductMaster,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.coupang.ad_sell_type import (
+    AD_SELL_TYPE_2P,
+    ORDER_BASED_SELL_TYPES,
+)
 from app.services.coupang.option_fee_rate import (
     BASIS_DEFAULT,
     BASIS_SETTLED,
@@ -329,7 +333,10 @@ def _agg_seller_shipping_3p(db: Session, dfrom: date, dto: date,
 #   2026-08-03 실측: 옵션 광고비 적재 직후 COUPANG_WING2 뷰가 매출 160,500(3P)에 광고비
 #   5,450,601(1P)을 얹어 net_profit −5,382,780으로 뒤집혔다. 사과와 오렌지를 더한 값이다.
 #   → 판매방식으로도 잘라야 계정 분리가 완결된다.
-_WING_SELL_TYPES = ("3P", "2P")
+#   ★2026-08-13: 이 축의 정의를 `ad_sell_type.py`로 옮겼다 — 같은 결함이 운영 패널
+#   (`coupang_ops.sales_summary`)에 그대로 남아 있었기 때문이다(리터럴이 여기에만 있어서
+#   그쪽 쿼리가 참조할 곳이 없었다). 이름은 호출부 호환을 위해 유지한다.
+_WING_SELL_TYPES = ORDER_BASED_SELL_TYPES
 
 
 def _agg_ads(db: Session, dfrom: date, dto: date,
@@ -588,7 +595,7 @@ def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date,
 # — 광고센터 PA의 «공제»라 PA(ad_spend)에서 이미 빠졌다.
 # 아래 RG(2P) 합산 헬퍼는 광고센터에서 RG상품 검색광고를 돌릴 경우의 미래 겹침 감시용일 뿐(현재 0).
 # sell_type 코드: 3P=윙·2P=RG·Retail=로켓배송(ad_costs 확정).
-RG_AD_SELL_TYPE = "2P"  # 광고 XLSX 판매방식 코드: 2P=로켓그로스(RG)
+RG_AD_SELL_TYPE = AD_SELL_TYPE_2P  # 광고 XLSX 판매방식 코드: 2P=로켓그로스(RG)
 
 
 def rg_ad_spend_to_exclude(ad_rows) -> Decimal:
