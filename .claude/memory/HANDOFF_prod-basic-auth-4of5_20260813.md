@@ -1,4 +1,4 @@
-# 세션 인수인계: prod Basic Auth 전환 — **5단계 중 4단계 완료, 마지막 1단계 남음**
+# 세션 인수인계: prod Basic Auth 전환 — **4/5단계 + rate limit. 비밀번호 결정이 5단계를 막고 있다**
 
 > 저장 2026-08-13 10:1x KST · **⚠️ prod가 «중간 상태»다. 이 문서를 끝까지 읽고 이어갈 것.**
 > 선행: `HANDOFF_test-census-and-adcost-trigger_20260812.md`(D-CPP-44·45·46)
@@ -8,8 +8,12 @@
 
 ## 0. 한 줄 — 지금 뭘 해야 하나
 
-**5단계(IP 허용목록 해제)만 하면 끝난다.** Jino 승인은 **이미 5단계 전부** 받았다
-(2026-08-13 「승인 — 5단계 전부」). 4단계까지 라이브 합격했고, 5단계는 nginx 3줄을 지우는 일이다.
+**5단계(IP 허용목록 해제) 전에 «비밀번호를 무엇으로 할지»가 먼저 정해져야 한다.**
+5단계 승인은 이미 받았지만(2026-08-13 「승인 — 5단계 전부」), 그걸 하면 비밀번호가 **유일한
+방어선**이 되므로 아래 §2-B의 선택 셋 중 하나가 결정돼야 안전하게 넘어갈 수 있다.
+
+★**Jino가 `rlawlsdh5`로 바꾸겠다고 했으나 아직 적용 안 됐다**(모델이 평문 비밀번호를 대신
+넣지 않고 명령만 드렸고, Jino가 아직 안 돌렸다). **현재 비밀번호는 여전히 무작위 24자다.**
 
 ★내가 4단계 후 «5단계 해도 되냐»고 **다시 물었고 Jino가 혼란스러워했다.** 이미 승인된 것을
 다시 묻지 말 것 — 그게 이 인계가 남는 이유 중 하나다.
@@ -55,15 +59,53 @@ sudo cp /etc/nginx/sites-available/sellc.ohitech.co.kr.bak-basicauth-20260813-01
 
 | 위치 | 내용 |
 |---|---|
-| `~/.ohisell_prod_auth` (600) | `jino:<24자>` — 배포 스크립트가 읽고, **Jino가 폰 로그인할 때 여기서 본다** |
+| `~/.ohisell_prod_auth` (600) | **`dgfrty:<24자>`** (ID를 jino→dgfrty로 변경, 서버 htpasswd도 갱신·옛 jino 제거) — 배포 스크립트가 읽고, **Jino가 폰 로그인할 때 여기서 본다** |
 | `~/.ohisell_{wing,wing2,ad,rocket}_fetcher.json` (600) | `basic_auth_user`/`basic_auth_pass` |
 | 서버 `/etc/nginx/.ohisell-htpasswd` (640 root:www-data) | `$apr1$` 해시 |
 
 - **무작위 24자. 모델이 값을 보지 않았고 어디에도 출력하지 않았다.** 서버에는 stdin으로 전달해
   명령줄·프로세스 목록에도 안 남겼다.
-- 일치 검증 완료: `htpasswd -vi` → `correct`.
+- 일치 검증 완료: `htpasswd -vi` → `correct`. ID 변경 후 라이브 재확인: dgfrty→200 · jino→401 · 무인증→401.
 - ⚠️`~/.ohisell_watchdog.json`은 **존재하지 않아** 건너뛰었다. `scheduler_watchdog_poll.py`는
   `~/.ohisell_ad_fetcher.json`으로 폴백하게 돼 있으므로 동작하지만, **미검증**이다.
+
+### 2-B. ★비밀번호 결정 — 5단계의 전제조건 (미결)
+
+Jino가 처음 `1234`를 요청했고 **모델이 거부**했다(5단계 후 유일 방어선이 되는데 그 뒤에
+원가구조 706종·인증 없는 쓰기 112개·실제 네이버 입찰 변경 경로가 있고, 외부 봇이 이미
+두드리고 있다). 이어 `rlawlsdh5`를 제시했고 모델은 «훨씬 낫다, 다만 한글 이름 자판 패턴이라
+한국 대상 사전에 있다»고 알린 뒤 **명령만 전달**했다(평문 비밀번호는 대신 다루지 않는다).
+
+그래서 **속도 제한을 먼저 걸었다**(아래 §3-B). 그런데 실측해 보니 **속도 제한만으로는 부족하다**:
+
+| | 지금(속도 제한만) | fail2ban 추가 시 |
+|---|---:|---:|
+| 하루 시도 가능 | 약 170만 회 | 약 120회 |
+| `rlawlsdh5` 안전? | ❌ 며칠이면 뚫림 | ✅ 사실상 불가능 |
+
+**선택 셋 (Jino 결정 대기)**
+1. **fail2ban 설치**(nginx 401 로그 기반, 실패 5회→1시간 차단) → `rlawlsdh5`로도 안전 → 5단계 진행.
+   ⚠️prod에 **새 서비스 설치**라 모델이 임의로 안 했다. 승인만 있으면 실행 가능.
+2. **더 긴 비밀번호**(예: `rlawlsdh5-ohisell`) → 그것만으로 충분 → 5단계 진행.
+3. **5단계를 안 함** → IP 허용목록을 남기면 지금도 이중 방어라 안전. 대신 폰 접속은 못 함.
+
+★어느 쪽이든 **비밀번호 적용은 Jino가 직접** 명령을 돌려야 한다(모델은 평문을 안 다룬다).
+그 명령은 §2-C에 있다.
+
+### 2-C. 비밀번호 변경 명령 (Jino가 실행 · 히스토리에 안 남음)
+
+```bash
+read -s -p "새 비밀번호: " P; echo; printf 'dgfrty:%s\n' "$P" > ~/.ohisell_prod_auth; chmod 600 ~/.ohisell_prod_auth; P="$P" python3 -c "
+import json,pathlib,os
+p=os.environ['P']
+for f in ['.ohisell_wing_fetcher.json','.ohisell_wing2_fetcher.json','.ohisell_ad_fetcher.json','.ohisell_rocket_fetcher.json']:
+    fp=pathlib.Path.home()/f
+    if not fp.is_file(): continue
+    d=json.loads(fp.read_text()); d['basic_auth_pass']=p
+    fp.write_text(json.dumps(d,ensure_ascii=False,indent=2)); fp.chmod(0o600); print('갱신:',f)
+"; printf '%s' "$P" | ssh sellc.ohitech.co.kr 'sudo htpasswd -i /etc/nginx/.ohisell-htpasswd dgfrty' && echo "서버 갱신 완료"; unset P
+```
+바꾼 뒤 데몬·배포가 붙는지 §5 방식으로 재확인할 것.
 
 ---
 
@@ -80,6 +122,15 @@ sudo cp /etc/nginx/sites-available/sellc.ohitech.co.kr.bak-basicauth-20260813-01
 | `scripts/zero_downtime_restart.sh` | 209 (PR #295 병합) |
 
 ★백업: 각 `.py`에 `.bak-basicauth` 있음. **리포 밖 파일이라 git에 없다.**
+### 3-B. 속도 제한 (2026-08-13 추가)
+
+`/etc/nginx/conf.d/ohisell-ratelimit.conf` 신설 — `limit_req_zone ... rate=20r/s`,
+3개 location에 `limit_req zone=ohisell_auth burst=50 nodelay;`.
+**데몬 regex location에는 안 걸었다**(별도 location, 상속 없음).
+
+라이브 확인: 정상 사용 40/40 통과 ✅ · 병렬 100회 중 **29회 503 차단** ✅ · 데몬 폴링 성공 ✅
+★단 **이건 속도 제한이지 방벽이 아니다** — §2-B 표 참조.
+
 ★서브에이전트가 내 표의 오류를 잡았다 — 내가 「6곳」이라 했는데 실제 **5곳**이다
 (`rocket_supplier_fetcher`에 `ad-cost/refresh-status` 호출은 없다). 없는 걸 만들지 않고 보고한 게 옳았다.
 
@@ -145,14 +196,18 @@ wing/vendor-summary/refresh-status · wing/rg-settlement/refresh-status   → 20
 ## 8. 새 세션 시작 프롬프트
 
 ```
-.claude/memory/HANDOFF_prod-basic-auth-4of5_20260813.md 읽고 §1의 5단계를 마저 해줘.
+.claude/memory/HANDOFF_prod-basic-auth-4of5_20260813.md 읽고 이어서 하자.
 
-prod가 지금 «허용 IP 또는 비밀번호» 중간 상태다(안전하지만 미완).
-Jino 승인은 이미 5단계 전부 받아뒀다 — 다시 묻지 말 것.
+prod는 「허용 IP 또는 비밀번호」(satisfy any) + 속도 제한 상태다 — 안전하지만 미완이다.
+★막혀 있는 건 5단계가 아니라 **비밀번호 결정**이다(§2-B 선택 셋). 5단계 승인은 이미 받았으니
+그것만 다시 묻지 말고, §2-B 중 무엇으로 할지만 확인하고 진행할 것.
 
-5단계 = nginx 3개 location에서 allowlist include + satisfy any 제거 → 비밀번호만 남긴다.
-합격기준·롤백은 §1에 있다. 끝나면 §5 표와 같은 방식으로 라이브 재확인할 것
+- fail2ban을 고르면: 설치 + nginx-http-auth jail(실패 5회→1시간 차단) → 그다음 5단계
+- 더 긴 비밀번호를 고르면: §2-C 명령은 **Jino가 직접** 돌린다(모델은 평문 비밀번호를 안 다룬다)
+- 5단계 스킵을 고르면: 그대로 두고 문서만 정리
+
+5단계 실행법·합격기준·롤백은 §1. 끝나면 §5 표 방식으로 라이브 재확인
 (특히 «실제 데몬 코드로 prod 폴링»과 «무중단 배포 프로브»).
 
-그다음 §7 이월 1번(COUPANG_OHITECH_AD 3.5일 정체)을 보면 좋겠다 — 손익에 영향이 있다.
+그다음 §7 이월 1번(COUPANG_OHITECH_AD 3.5일 정체)을 볼 것 — 손익에 영향이 있다.
 ```
