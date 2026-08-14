@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
 import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
-import { customRangeError, kstDate } from "../lib/periodRange";
+import { customRangeError, kstDate, OPS_MAX_SPAN_DAYS } from "../lib/periodRange";
 import { fetchSalesSummary, getCoupangAdCostDaily, requestAdCostRefresh, getAdCostRefreshStatus, type SalesSummary, type SalesProductRow, type SalesSellTypeRow, type SalesSummaryData } from "../lib/api";
 
 const COMPANIES = [
@@ -204,7 +204,9 @@ export default function CoupangOps() {
   const [from, setFrom] = useState(() => kstDate(-6));
   const [to, setTo] = useState(() => kstDate(0));
   // 백엔드가 막는 입력은 프론트가 먼저 막는다(빈 칸·뒤집힘·미래).
-  const rangeError = customRangeError({ from, to });
+  // ★상한은 백엔드와 짝(90일) — 화면 note가 「최대 90일」이라 적어놓고 안 막으면
+  //   400 원문이 새고 표는 이전 구간 숫자를 그대로 보인다(적대 리뷰 1R P1-2).
+  const rangeError = customRangeError({ from, to }, undefined, OPS_MAX_SPAN_DAYS);
   const [channelFilter, setChannelFilter] = useState<ChannelType>("전체");
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("revenue");
@@ -360,7 +362,7 @@ export default function CoupangOps() {
   const reqSeq = useRef(0);
   const load = useCallback(async (c: string, f: string, t: string) => {
     // 잘못된 구간이면 요청 자체를 안 보낸다 — 조용히 보정하지 않고 화면이 말한다.
-    if (customRangeError({ from: f, to: t })) return;
+    if (customRangeError({ from: f, to: t }, undefined, OPS_MAX_SPAN_DAYS)) return;
     const seq = ++reqSeq.current;
     const t0 = performance.now();
     setLoading(true);

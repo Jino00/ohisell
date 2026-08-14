@@ -5,7 +5,7 @@
 # 트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 → 라이브 호출은 서버에서만(로컬 403).
 from __future__ import annotations
 
-from app.utils.date_range import preset_range, resolve_range
+from app.utils.date_range import resolve_range
 from app.utils.kst import kst_now, kst_today
 import logging
 
@@ -503,8 +503,6 @@ def _vendor_to_channel(vendor_id: str) -> str:
 
 
 
-# 기간 해석은 `app.utils.date_range`가 단일 규칙으로 갖는다(운영 패널 전체가 같이 읽는다).
-_date_range = preset_range
 
 
 def _f(v) -> Decimal:

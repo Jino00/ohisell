@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
 import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
-import { customRangeError, kstDate } from "../lib/periodRange";
+import { customRangeError, kstDate, OPS_MAX_SPAN_DAYS } from "../lib/periodRange";
 import {
   fetchNaverSalesSummary, fetchGfaStatus, uploadGfaCsv,
   fetchNaverSettlement, syncNaverSettlement,
@@ -154,7 +154,8 @@ export default function NaverOps() {
   const [to, setTo] = useState(() => kstDate(0));
   // 백엔드가 막는 입력은 프론트가 먼저 막는다 — 빈 칸·뒤집힘·미래를 여기서 잡아
   // 400 원문("Input should be a valid date…")이 화면에 새지 않게 한다.
-  const rangeError = customRangeError({ from, to });
+  // ★상한은 백엔드와 짝(90일) — 적대 리뷰 1R P1-2 참조.
+  const rangeError = customRangeError({ from, to }, undefined, OPS_MAX_SPAN_DAYS);
   const [data, setData] = useState<NaverSalesSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

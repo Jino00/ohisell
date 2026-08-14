@@ -103,9 +103,17 @@ def test_다일_구간은_오늘_탭_레이아웃으로_안_빠진다(db):
 
 
 def test_days_프리셋은_안_바뀐다(db):
-    for d in (0, 1, 7, 15, 30):
+    """프리셋이 **어느 창**을 가리키는지 못박는다 — `from <= to`만 보면 창이 밀려도 통과한다."""
+    expected = {
+        0:  (TODAY, TODAY),
+        1:  (YESTERDAY, YESTERDAY),
+        7:  (TODAY - timedelta(days=6), TODAY),
+        15: (TODAY - timedelta(days=14), TODAY),
+        30: (TODAY - timedelta(days=29), TODAY),
+    }
+    for d, (f, t_) in expected.items():
         out = sales_summary(company="오하이테크", days=d, db=db)
-        assert out["period"]["from"] <= out["period"]["to"]
+        assert out["period"] == {"from": _iso(f), "to": _iso(t_)}, f"days={d} 창이 밀렸다"
 
 
 @pytest.mark.parametrize("kwargs", [

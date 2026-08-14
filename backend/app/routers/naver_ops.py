@@ -31,7 +31,7 @@ from app.models import (
 )
 from app.services import order_delivery
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.utils.date_range import preset_range, resolve_range
+from app.utils.date_range import resolve_range
 from app.utils.kst import kst_today
 
 log = logging.getLogger(__name__)
@@ -151,9 +151,6 @@ def logistics_totals(db: Session, start, end) -> tuple[int, Decimal]:
     return count, total
 
 
-# 기간 해석은 `app.utils.date_range`가 단일 규칙으로 갖는다(운영 패널 전체가 같이 읽는다).
-_date_range = preset_range
-_resolve_range = resolve_range
 
 
 def _f(v) -> Decimal:
@@ -167,7 +164,7 @@ def sales_summary(
     days: int = Query(default=7, ge=0, le=90),
     # ★`Query(default=None)`를 쓰지 않는다 — 그러면 **직접 호출**(테스트·내부 재사용) 시
     #   기본값이 `None`이 아니라 `Query` 객체로 들어와 `is None` 판정이 통째로 빗나간다.
-    #   실제로 이 파일의 기존 테스트가 그렇게 깨졌다. 검증은 `_resolve_range`가 한다.
+    #   실제로 이 파일의 기존 테스트가 그렇게 깨졌다. 검증은 `resolve_range`가 한다.
     date_from: str | None = None,   # YYYY-MM-DD. 주면 days를 무시한다
     date_to: str | None = None,     # YYYY-MM-DD. date_from과 함께 준다
     db: Session = Depends(get_db),
@@ -181,7 +178,7 @@ def sales_summary(
     확정된 구간은 응답 `period`에 그대로 실린다 — 화면이 그걸 보여줘야 «내가 고른 기간»과
     «계산된 기간»이 갈리지 않는다.
     """
-    dfrom, dto = _resolve_range(days, date_from, date_to)
+    dfrom, dto = resolve_range(days, date_from, date_to)
     start = datetime.combine(dfrom, time.min)
     end   = datetime.combine(dto,   time.max)
 

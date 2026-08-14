@@ -11,6 +11,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { SalesSummary } from "../lib/api";
+import { kstDate } from "../lib/periodRange";
 
 const h = vi.hoisted(() => ({
   fetchSalesSummary: vi.fn(),
@@ -68,7 +69,10 @@ function renderPage() {
 describe("쿠팡 운영 패널 · 「오늘」 탭", () => {
   it("뺀 로켓배송(1P) 광고비가 화면에 남는다 — 빼는 탭에서 숨으면 은폐다", async () => {
     renderPage();
-    await waitFor(() => expect(h.fetchSalesSummary).toHaveBeenCalled());
+    // ★인자를 못박는다(적대 리뷰 1R P1-1). `toHaveBeenCalled()`만 보면 기본 기간이
+    //   7일→30일로 바뀌거나 from/to가 뒤바뀌어도 통과한다 — 실제로 변이 3종이 살아남았다.
+    await waitFor(() =>
+      expect(h.fetchSalesSummary).toHaveBeenCalledWith("ALL", 0, kstDate(-6), kstDate(0)));
     await waitFor(() => {
       expect(screen.getByText(/로켓배송\(1P\) 광고비/)).toBeTruthy();
     });

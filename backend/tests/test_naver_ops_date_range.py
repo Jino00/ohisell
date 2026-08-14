@@ -103,16 +103,34 @@ def test_임의_구간이_그_구간을_돌려준다(db):
 
 
 def test_days_프리셋은_안_바뀐다(db):
-    """회귀 방어 — 날짜를 안 주면 종전과 완전히 같아야 한다."""
-    for d in (0, 1, 7, 15, 30):
+    """회귀 방어 — 프리셋이 **어느 창**을 가리키는지 못박는다.
+
+    ★`from <= to`만 보면 창이 통째로 밀려도 통과한다(적대 리뷰 1R P2-2).
+      화면은 이제 날짜를 보내지만, 이 경로는 API 계약으로 남아 있다."""
+    expected = {
+        0:  (TODAY, TODAY),
+        1:  (YESTERDAY, YESTERDAY),
+        7:  (TODAY - timedelta(days=6), TODAY),
+        15: (TODAY - timedelta(days=14), TODAY),
+        30: (TODAY - timedelta(days=29), TODAY),
+    }
+    for d, (f, t_) in expected.items():
         out = sales_summary(days=d, db=db)
-        assert "period" in out and out["period"]["from"] <= out["period"]["to"]
+        assert out["period"] == {"from": _iso(f), "to": _iso(t_)}, f"days={d} 창이 밀렸다"
 
 
-def test_다일_구간은_오늘_스냅샷_축을_안_쓴다(db):
-    """오늘을 «포함»하는 것과 «오늘 하루»는 다르다 — 종전 days>=2 동작을 유지한다."""
+def test_다일_구간은_확정치에_당일치를_더한다(db):
+    """오늘을 «포함»하는 구간과 «오늘 하루»는 다른 경로다 — 종전 days>=2 동작을 유지한다.
+
+    ★`kind != "today"`는 공허했다(적대 리뷰 1R P2-1): 실제 값은
+      `today_snapshot`/`today_no_snapshot`/`period`라 어떤 구현에서도 참이다. 금액으로 못박는다.
+    ★기대값의 근거(실측으로 정정): 다일 구간은 어제까지의 확정치(`ad_costs` 698,119)에
+      **당일 스냅샷 최대치(506,370)를 더한다**(`ad_basis.today_search_added`). 오늘 하루만
+      고른 경우(506,370 단독)와 금액이 달라야 두 경로가 안 섞였다는 뜻이다."""
     s = sales_summary(days=7, date_from=_iso(YESTERDAY), date_to=_iso(TODAY), db=db)
-    assert s["ad_basis"] is None or s["ad_basis"].get("kind") != "today"
+    assert s["ad_ref_date"] is None, "다일 구간인데 오늘 탭 기준일이 붙었다"
+    assert Decimal(s["summary"]["ad_spend"]) == Decimal("1204489"), \
+        "다일 구간의 광고비 축이 바뀌었다(확정치 698,119 + 당일 506,370)"
 
 
 # ── ③  잘못된 입력은 거절한다 ────────────────────────────────────────
