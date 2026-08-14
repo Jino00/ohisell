@@ -35,6 +35,13 @@ export type PeriodKey = (typeof PERIOD_PRESETS)[number]["key"] | "custom";
 /** 백엔드 `_MAX_CHANGE_LOG_SPAN_DAYS`와 같은 값. 양끝 포함이라 365일째까지 합법. */
 export const MAX_SPAN_DAYS = 365;
 
+/** 운영 패널(매출·손익) 계열의 상한. 백엔드 `app/utils/date_range.MAX_SPAN_DAYS`와 **같은 값**.
+ *  ★상한이 API마다 다르다: 변경 이력은 365일(422), 매출·손익은 90일(400). 그래서
+ *  `customRangeError`의 상한은 **호출부가 정한다** — 하나로 뭉치면 한쪽이 반드시 틀린다.
+ *  (적대 리뷰 1R P1-2: 화면엔 「최대 90일」이라 적어놓고 365일까지 통과시켜, 91일을 고르면
+ *   백엔드 400 원문이 새고 표는 이전 구간 숫자를 그대로 보여줬다.) */
+export const OPS_MAX_SPAN_DAYS = 90;
+
 /** 커스텀 구간이 조회 불가한 이유. null이면 조회 가능.
  *  ★`<input type="date">`는 사용자가 지우면 **빈 문자열**을 준다(실측). 그걸 안 잡으면
  *  `date_from=`이 그대로 나가고 백엔드가 422 + 날 것의 pydantic 메시지를 뱉어
@@ -46,7 +53,11 @@ export const MAX_SPAN_DAYS = 365;
  *  그 중간값들이 파라미터 검증을 **통과**한 뒤 span 초과로 422가 된다.
  *  여기서 막으면 요청 자체가 안 나가므로 디바운스 없이도 원문 노출이 사라진다.
  *  ★불변식: **백엔드가 막는 입력은 프론트가 먼저 막는다**(프론트가 더 엄격한 건 허용). */
-export function customRangeError(range: DateRange, today: string = kstDate(0)): string | null {
+export function customRangeError(
+  range: DateRange,
+  today: string = kstDate(0),
+  maxSpanDays: number = MAX_SPAN_DAYS,
+): string | null {
   if (!range.from || !range.to) return "시작일과 종료일을 모두 선택하세요.";
   if (range.from > range.to) return "시작일이 종료일보다 늦습니다.";
   // ★미래 차단(D-NAO-54 R2): 변경 이력은 지나간 사건의 기록이라 미래 구간은 의미가 없다.
@@ -56,7 +67,7 @@ export function customRangeError(range: DateRange, today: string = kstDate(0)): 
   const spanDays = (Date.parse(`${range.to}T00:00:00Z`) - Date.parse(`${range.from}T00:00:00Z`))
     / 86_400_000 + 1;
   if (!Number.isFinite(spanDays)) return "날짜 형식이 올바르지 않습니다.";
-  if (spanDays > MAX_SPAN_DAYS) return `조회 구간은 최대 ${MAX_SPAN_DAYS}일입니다.`;
+  if (spanDays > maxSpanDays) return `조회 구간은 최대 ${maxSpanDays}일입니다.`;
   return null;
 }
 

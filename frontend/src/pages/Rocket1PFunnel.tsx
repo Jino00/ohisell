@@ -16,6 +16,8 @@
 //   4) **모름은 "—".** 리뷰 0건의 평점은 0점이 아니고, 수집 안 된 조회는 0회가 아니다.
 import { useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Badge } from "../components/ui";
+import { PeriodRangeBar } from "../components/PeriodRangeBar";
+import { kstDate } from "../lib/periodRange";
 import { useAsyncData } from "../lib/useAsyncData";
 import { FreshnessNote } from "../components/FreshnessNote";
 import {
@@ -55,17 +57,6 @@ const POSITION: Record<FunnelPosition, { label: string; tone: "neutral" | "alert
   low_sample: { label: "표본 부족", tone: "neutral" },
 };
 
-function isoKST(d: Date): string {
-  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
-
-function daysAgo(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return isoKST(d);
-}
-
 function OptionRow({ o }: { o: Rocket1PFunnelOption }) {
   const pos = POSITION[o.position];
   return (
@@ -99,8 +90,10 @@ function OptionRow({ o }: { o: Rocket1PFunnelOption }) {
 }
 
 export default function Rocket1PFunnel() {
-  const [from, setFrom] = useState(daysAgo(6));
-  const [to, setTo] = useState(isoKST(new Date()));
+  // 종전 기본과 같은 최근 7일. 날짜 계산은 `kstDate`만 쓴다 —
+  // 이 화면이 들고 있던 `isoKST`/`daysAgo`는 같은 함수의 두 번째 벌이었다(정의를 늘리지 않는다).
+  const [from, setFrom] = useState(() => kstDate(-6));
+  const [to, setTo] = useState(() => kstDate(0));
   const [minPv, setMinPv] = useState(30);
 
   const { data, error } = useAsyncData(
@@ -118,26 +111,20 @@ export default function Rocket1PFunnel() {
         </p>
       </div>
 
-      <Card>
-        <div className="flex flex-wrap items-end gap-3 px-4 py-3">
-          <label className="text-sm">
-            <span className="mr-2 text-gray-500">시작</span>
-            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
-              className="rounded border border-gray-300 px-2 py-1" />
-          </label>
-          <label className="text-sm">
-            <span className="mr-2 text-gray-500">종료</span>
-            <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
-              className="rounded border border-gray-300 px-2 py-1" />
-          </label>
+      {/* 기간 UI는 **공용 컴포넌트**다(`PeriodRangeBar`) — 화면마다 날짜 입력을 따로 들면
+          곧 갈라진다. 이 화면 고유의 필터(판정 최소 조회수)만 오른쪽 슬롯에 얹는다. */}
+      <PeriodRangeBar
+        label="판매일"
+        from={from} to={to} onFrom={setFrom} onTo={setTo}
+        right={
           <label className="text-sm">
             <span className="mr-2 text-gray-500">판정 최소 조회수</span>
             <input type="number" min={0} value={minPv}
               onChange={(e) => setMinPv(Math.max(0, Number(e.target.value) || 0))}
               className="w-24 rounded border border-gray-300 px-2 py-1" />
           </label>
-        </div>
-      </Card>
+        }
+      />
 
       {error && (
         <Card><EmptyState reason="퍼널 데이터를 불러오지 못했습니다." hint={String(error)} /></Card>

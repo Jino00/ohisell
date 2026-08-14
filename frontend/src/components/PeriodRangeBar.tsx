@@ -16,11 +16,39 @@ import type { ReactNode } from "react";
 import { kstDate } from "../lib/periodRange";
 import { Button, Card } from "./ui";
 
-export type PeriodPreset = "today" | "yesterday" | "7d" | "30d" | "90d" | "1y";
+// ★"15d"는 운영 패널(쿠팡·스마트스토어)이 원래 갖고 있던 버튼이다 — 그 화면들을 이 공용
+//   바로 옮기면서 프리셋 하나가 조용히 사라지면 그건 기능 회귀다. 여기에 더해 공유한다.
+export type PeriodPreset = "today" | "yesterday" | "7d" | "15d" | "30d" | "90d" | "1y";
 
 const PRESET_LABEL: Record<PeriodPreset, string> = {
-  today: "오늘", yesterday: "어제", "7d": "7일", "30d": "30일", "90d": "90일", "1y": "1년",
+  today: "오늘", yesterday: "어제", "7d": "7일", "15d": "15일",
+  "30d": "30일", "90d": "90일", "1y": "1년",
 };
+
+/** 프리셋이 가리키는 **실제 창**(시작일·종료일). 순수 함수 — 테스트가 여기를 못박는다.
+ *
+ *  ★왜 밖으로 뺐나(적대 리뷰 1R P1-1): 기간 판정이 백엔드 `days`에서 이 컴포넌트로
+ *    옮겨왔는데, 컴포넌트 안에 있는 동안엔 «「오늘」이 어제를 가리키게» 바꿔도 프론트·백엔드
+ *    테스트 387건이 전부 통과했다. 판정이 사는 곳에 테스트가 없으면 그 판정은 안 지켜진다.
+ *    「오늘」이 어제가 되면 백엔드 `is_today_only`가 False가 되어 당일 광고 축을 통째로
+ *    벗어난다 — 2026-08-06에 이익 부호가 뒤집혔던 바로 그 경로다.
+ */
+export function presetWindow(k: PeriodPreset, today: string = kstDate(0)): { f: string; t: string } {
+  /** today 기준 n일 전. 인자가 today면 kstDate와 같은 축이다. */
+  const shift = (n: number) => {
+    const ms = Date.parse(`${today}T00:00:00Z`) + n * 86_400_000;
+    return new Date(ms).toISOString().slice(0, 10);
+  };
+  switch (k) {
+    case "today":     return { f: today, t: today };
+    case "yesterday": return { f: shift(-1), t: shift(-1) };
+    case "7d":        return { f: shift(-6), t: today };
+    case "15d":       return { f: shift(-14), t: today };
+    case "30d":       return { f: shift(-29), t: today };
+    case "90d":       return { f: shift(-89), t: today };
+    case "1y":        return { f: shift(-364), t: today };
+  }
+}
 
 export function PeriodRangeBar({
   label, from, to, onFrom, onTo,
@@ -39,20 +67,26 @@ export function PeriodRangeBar({
   title?: string;
 }) {
   const today = kstDate(0);
-  /** 오늘까지의 최근 N일. N=1이면 오늘 하루. */
-  const recent = (days: number) => { onFrom(kstDate(-(days - 1))); onTo(today); };
-  /** 하루짜리 창(어제처럼 시작=끝). 최근 N일과 달리 오늘을 포함하지 않는다. */
-  const singleDay = (agoDays: number) => { const d = kstDate(-agoDays); onFrom(d); onTo(d); };
   const active = (f: string, t: string) => from === f && to === t;
 
-  const SPEC: Record<PeriodPreset, { f: string; t: string; go: () => void }> = {
-    today: { f: today, t: today, go: () => recent(1) },
-    yesterday: { f: kstDate(-1), t: kstDate(-1), go: () => singleDay(1) },
-    "7d": { f: kstDate(-6), t: today, go: () => recent(7) },
-    "30d": { f: kstDate(-29), t: today, go: () => recent(30) },
-    "90d": { f: kstDate(-89), t: today, go: () => recent(90) },
-    "1y": { f: kstDate(-364), t: today, go: () => recent(365) },
+  // ★버튼이 «쓰는 창»과 «눌린 것처럼 보이는 창»은 **같은 함수 한 곳**에서 나온다.
+  //   적대 리뷰 2R P1-1: 종전엔 하이라이트만 `presetWindow`를 쓰고 클릭 동작은 별도
+  //   `recent()`/`singleDay()`가 했다. 그래서 「오늘」 버튼의 **동작만** 어제로 바꾸는 변이가
+  //   402건을 통과했다 — 테스트가 못박은 게 표시용 사본이었기 때문이다. 게다가 두 사본은
+  //   날짜 엔진마저 달랐다(문자열 UTC 산술 vs `kstDate`). 이 파일 헤더가 «정의를 늘리지
+  //   않는다»고 못박았는데 그 수정이 오히려 한 벌 늘렸었다.
+  const apply = (k: PeriodPreset) => {
+    const w = presetWindow(k, today);
+    onFrom(w.f);
+    onTo(w.t);
   };
+
+  const SPEC = Object.fromEntries(
+    (Object.keys(PRESET_LABEL) as PeriodPreset[]).map((k) => {
+      const w = presetWindow(k, today);
+      return [k, { ...w, go: () => apply(k) }];
+    }),
+  ) as Record<PeriodPreset, { f: string; t: string; go: () => void }>;
 
   return (
     <Card title={title}>
