@@ -8,6 +8,11 @@
 //   이었기 때문이다. 순수 함수 테스트(periodRangeBarPresets)는 이 구멍을 원리적으로 못 본다.
 //
 // 그래서 이 파일은 **클릭 경로**를 본다: 버튼을 눌러 `onFrom`/`onTo`에 무엇이 들어가는가.
+//
+// ⚠️**짝 파일: `periodRangeBarPresets.test.ts`.** 여기는 클릭 결과를 `presetWindow`와
+//   대조하므로 이 파일 **단독으로는 동어반복**이다 — `presetWindow`가 틀리면 양변이 같이
+//   움직인다. 짝 파일이 리터럴 날짜로 창을 못박아 고리를 닫는다. 한쪽을 지우면 나머지가
+//   조용히 아무것도 안 지키게 되므로 **둘은 같이 살고 같이 죽는다**(적대 리뷰 3R 이월).
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { PeriodRangeBar, presetWindow } from "./PeriodRangeBar";
