@@ -16,10 +16,13 @@ import type { ReactNode } from "react";
 import { kstDate } from "../lib/periodRange";
 import { Button, Card } from "./ui";
 
-export type PeriodPreset = "today" | "yesterday" | "7d" | "30d" | "90d" | "1y";
+// ★"15d"는 운영 패널(쿠팡·스마트스토어)이 원래 갖고 있던 버튼이다 — 그 화면들을 이 공용
+//   바로 옮기면서 프리셋 하나가 조용히 사라지면 그건 기능 회귀다. 여기에 더해 공유한다.
+export type PeriodPreset = "today" | "yesterday" | "7d" | "15d" | "30d" | "90d" | "1y";
 
 const PRESET_LABEL: Record<PeriodPreset, string> = {
-  today: "오늘", yesterday: "어제", "7d": "7일", "30d": "30일", "90d": "90일", "1y": "1년",
+  today: "오늘", yesterday: "어제", "7d": "7일", "15d": "15일",
+  "30d": "30일", "90d": "90일", "1y": "1년",
 };
 
 export function PeriodRangeBar({
@@ -49,6 +52,7 @@ export function PeriodRangeBar({
     today: { f: today, t: today, go: () => recent(1) },
     yesterday: { f: kstDate(-1), t: kstDate(-1), go: () => singleDay(1) },
     "7d": { f: kstDate(-6), t: today, go: () => recent(7) },
+    "15d": { f: kstDate(-14), t: today, go: () => recent(15) },
     "30d": { f: kstDate(-29), t: today, go: () => recent(30) },
     "90d": { f: kstDate(-89), t: today, go: () => recent(90) },
     "1y": { f: kstDate(-364), t: today, go: () => recent(365) },

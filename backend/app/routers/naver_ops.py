@@ -31,6 +31,7 @@ from app.models import (
 )
 from app.services import order_delivery
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.utils.date_range import preset_range, resolve_range
 from app.utils.kst import kst_today
 
 log = logging.getLogger(__name__)
@@ -150,14 +151,9 @@ def logistics_totals(db: Session, start, end) -> tuple[int, Decimal]:
     return count, total
 
 
-def _date_range(days: int) -> tuple[date, date]:
-    today = kst_today()
-    if days == 0:
-        return today, today
-    if days == 1:
-        d = today - timedelta(days=1)
-        return d, d
-    return today - timedelta(days=days - 1), today
+# 기간 해석은 `app.utils.date_range`가 단일 규칙으로 갖는다(운영 패널 전체가 같이 읽는다).
+_date_range = preset_range
+_resolve_range = resolve_range
 
 
 def _f(v) -> Decimal:
@@ -169,14 +165,23 @@ def _f(v) -> Decimal:
 @router.get("/sales-summary")
 def sales_summary(
     days: int = Query(default=7, ge=0, le=90),
+    # ★`Query(default=None)`를 쓰지 않는다 — 그러면 **직접 호출**(테스트·내부 재사용) 시
+    #   기본값이 `None`이 아니라 `Query` 객체로 들어와 `is None` 판정이 통째로 빗나간다.
+    #   실제로 이 파일의 기존 테스트가 그렇게 깨졌다. 검증은 `_resolve_range`가 한다.
+    date_from: str | None = None,   # YYYY-MM-DD. 주면 days를 무시한다
+    date_to: str | None = None,     # YYYY-MM-DD. date_from과 함께 준다
     db: Session = Depends(get_db),
 ):
     """네이버 스마트스토어 매출 현황 — 기간별 집계.
 
     반환: summary(합계) + by_product(상품명별).
     광고비는 ad_costs(naver_sa:*) 기간 총합 — 상품별 배분 없음(product_id NULL).
+
+    기간은 `days` 프리셋 또는 `date_from`·`date_to` 임의 구간으로 준다(후자가 우선).
+    확정된 구간은 응답 `period`에 그대로 실린다 — 화면이 그걸 보여줘야 «내가 고른 기간»과
+    «계산된 기간»이 갈리지 않는다.
     """
-    dfrom, dto = _date_range(days)
+    dfrom, dto = _resolve_range(days, date_from, date_to)
     start = datetime.combine(dfrom, time.min)
     end   = datetime.combine(dto,   time.max)
 
@@ -216,7 +221,13 @@ def sales_summary(
     ad_basis: dict | None = None
     ad_dfrom, ad_dto = dfrom, dto
 
-    if days == 0:
+    # ★「오늘」 판정은 **확정된 기간**으로 한다 — `days == 0`이 아니라. 날짜로 오늘~오늘을
+    #   고른 경우도 같은 축을 타야 하기 때문이다. 안 그러면 같은 하루가 어떻게 골랐느냐에
+    #   따라 다른 광고비를 내고, 그건 이 화면이 이미 한 번 크게 틀렸던 지점이다.
+    #   프리셋과 동치: days=0 → (오늘,오늘)만 참, days=1은 어제, days>=2는 다일 구간.
+    is_today_only = (dfrom == dto == kst_today())
+
+    if is_today_only:
         _snap = _today_search_snapshot(db, dfrom)   # 기간 탭과 같은 축(위 헬퍼 docstring 참조)
         snap_at = _snap["as_of"]
         if snap_at:

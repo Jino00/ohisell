@@ -2,6 +2,8 @@
 // 기간별 매출 현황 + 상품별 상세 (쿠팡 패널 단순화 버전)
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+import { customRangeError, kstDate } from "../lib/periodRange";
 import {
   fetchNaverSalesSummary, fetchGfaStatus, uploadGfaCsv,
   fetchNaverSettlement, syncNaverSettlement,
@@ -47,14 +49,9 @@ function hhmm(iso: string | null | undefined): string {
   return iso ? iso.slice(11, 16) : "—";
 }
 
-const PERIODS = [
-  { label: "오늘", days: 0 },
-  { label: "어제", days: 1 },
-  { label: "7일", days: 7 },
-  { label: "15일", days: 15 },
-  { label: "30일", days: 30 },
-];
-
+// ★프리셋에 「1년」이 없는 이유: 백엔드(`utils/date_range.py`)의 상한이 90일이라
+//   1년을 넣으면 누르는 즉시 400이 된다. 못 쓰는 버튼은 두지 않는다.
+const NAVER_PERIOD_PRESETS: PeriodPreset[] = ["today", "yesterday", "7d", "15d", "30d", "90d"];
 
 type SortKey = "product_name" | "revenue" | "profit" | "profit_rate";
 type SortDir = "asc" | "desc";
@@ -149,7 +146,15 @@ function ColFilter({
 }
 
 export default function NaverOps() {
-  const [days, setDays] = useState(7);
+  // 기간은 **항상 날짜 두 개**다 — 프리셋 버튼은 그 두 칸을 채우는 단축키일 뿐이다
+  // (공용 `PeriodRangeBar`가 그 계약을 들고 있다). 종전 기본과 같은 최근 7일로 시작한다.
+  // ★날짜는 `kstDate`만 쓴다: 프론트에서 타임존이 걸린 유일한 코드이고, 이 저장소가
+  //   타임존으로 두 번 사고를 낸 공통점이 "그 코드에 테스트가 없었다"는 것이다.
+  const [from, setFrom] = useState(() => kstDate(-6));
+  const [to, setTo] = useState(() => kstDate(0));
+  // 백엔드가 막는 입력은 프론트가 먼저 막는다 — 빈 칸·뒤집힘·미래를 여기서 잡아
+  // 400 원문("Input should be a valid date…")이 화면에 새지 않게 한다.
+  const rangeError = customRangeError({ from, to });
   const [data, setData] = useState<NaverSalesSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -168,11 +173,13 @@ export default function NaverOps() {
   // 그 상태가 "버튼과 데이터가 안 맞는다"로 보인다(이 화면이 방금 겪은 증상과 같은 모양).
   const reqSeq = useRef(0);
   const load = useCallback(async () => {
+    if (rangeError) return;   // 조용히 보정하지 않는다 — 화면이 잘못된 입력을 말한다
     const seq = ++reqSeq.current;
     const t0 = performance.now();
     setLoading(true); setError(null);
     try {
-      const r = await fetchNaverSalesSummary(days);
+      // 기간은 날짜로만 보낸다 — `days`는 이제 이 화면에 없다(프리셋도 날짜를 채울 뿐).
+      const r = await fetchNaverSalesSummary(0, from, to);
       // 응답이 ~0.2초라 그냥 두면 진행 표시가 깜빡이고 만다(사실상 안 보인다).
       // 최소 노출 시간을 채운 뒤에 값을 갈아끼운다 — 그동안 옛 값은 흐린 채로 남는다.
       const rest = MIN_BUSY_MS - (performance.now() - t0);
@@ -185,12 +192,13 @@ export default function NaverOps() {
     } finally {
       if (seq === reqSeq.current) setLoading(false);
     }
-  }, [days]);
+  }, [from, to, rangeError]);
 
   // ★지연 실행되는 콜백은 반드시 이 ref로 최신 load를 부른다.
-  // 왜: syncRealtime(마운트, 수 초)·handleSync(3초 setTimeout)가 **그 시점의 days를 붙잡은**
+  // 왜: syncRealtime(마운트, 수 초)·handleSync(3초 setTimeout)가 **그 시점의 기간을 붙잡은**
   // load를 나중에 호출하면, 그 사이 사용자가 기간을 바꿔도 옛 기간을 새로 요청해 화면을 덮는다.
   // 라이브 실측(2026-08-06): 30일 클릭 직후 `days=30` 다음에 `days=7`이 뒤따라 와 7일치가 남았다.
+  // (의존성이 `days`에서 `from`/`to`로 바뀌었을 뿐, 기계는 그대로다.)
   // 시퀀스 가드(reqSeq)는 응답 도착 순서만 정리할 뿐, 뒤늦게 발사되는 새 요청은 못 막는다.
   const loadRef = useRef(load);
   useEffect(() => { loadRef.current = load; }, [load]);
@@ -841,48 +849,51 @@ export default function NaverOps() {
     <div className="max-w-7xl mx-auto">
       <h1 className="text-2xl font-bold text-gray-900 mb-6">🛒 네이버 스마트스토어 운영 패널</h1>
 
-      {/* 기간 선택 */}
-      <div className="flex flex-wrap items-center gap-3 mb-6">
-        <div className="flex gap-1">
-          {PERIODS.map((p) => (
+      {/* 기간 선택 — 공용 `PeriodRangeBar`. 화면마다 날짜 UI를 따로 들면 곧 갈라지므로
+          같은 물건을 쓰고, **축 이름만** 이 화면이 정한다(여기는 「판매일」). */}
+      <div className="mb-6">
+        <PeriodRangeBar
+          label="판매일"
+          from={from} to={to} onFrom={setFrom} onTo={setTo}
+          presets={NAVER_PERIOD_PRESETS}
+          right={<>
             <button
-              key={p.days}
-              // 같은 기간을 다시 눌러도 재조회한다 — days가 안 바뀌면 이펙트가 안 돌아
-              // 실패 후 회복 수단이 없었다(다른 기간을 경유하거나 F5뿐이었다).
-              onClick={() => { if (days === p.days) load(); else setDays(p.days); }}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
-                days === p.days
-                  ? "bg-green-600 text-white"
-                  : "bg-white border border-gray-300 text-gray-700 hover:bg-gray-50"
-              }`}
-            >
-              {loading && days === p.days && <Spinner className="w-3.5 h-3.5" />}
-              {p.label}
-            </button>
-          ))}
-        </div>
-        <button
-          onClick={handleSync}
-          disabled={syncing}
-          className="px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-        >{syncing ? "동기화 중…" : "🔄 동기화"}</button>
-        {/* 갱신 중에는 기간 라벨 대신 진행 표시를 낸다 — 옛 기간 라벨을 새 값으로 오독하지 않게. */}
-        {loading ? (
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700">
-            <Spinner className="w-3 h-3" /> 데이터 업데이트 중…
-          </span>
-        ) : data && (
-          <span className="text-xs text-gray-400">
-            {data.period.from} ~ {data.period.to}
-            {/* pending이어도 as_of는 버리지 않는다 — "언제 확인한 0인가"가 정보다 */}
-            {data.ad_basis?.as_of
-              ? data.ad_basis.pending
-                ? ` (광고비 «모름» · ${hhmm(data.ad_basis.as_of)} 확인)`
-                : ` (광고비 ${hhmm(data.ad_basis.as_of)} 확인)`
-              : data.ad_basis?.pending ? " (광고비 «모름» · 수집 전)" : ""}
-            {data.ad_ref_date && ` (광고비 기준일: ${data.ad_ref_date})`}
-          </span>
-        )}
+              onClick={handleSync}
+              disabled={syncing}
+              className="px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >{syncing ? "동기화 중…" : "🔄 동기화"}</button>
+            {/* ★같은 기간을 다시 골라도 상태가 안 바뀌면 이펙트가 안 돈다 — 조회 실패 후
+                회복 수단이 사라지지 않게 «다시 조회»를 남긴다(종전엔 같은 버튼 재클릭이
+                그 역할이었다. 없으면 다른 기간을 경유하거나 F5뿐이다). */}
+            <button
+              onClick={() => load()}
+              disabled={loading || Boolean(rangeError)}
+              className="px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >🔁 다시 조회</button>
+            {/* 갱신 중에는 기간 라벨 대신 진행 표시를 낸다 — 옛 기간 라벨을 새 값으로 오독하지 않게. */}
+            {loading ? (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700">
+                <Spinner className="w-3 h-3" /> 데이터 업데이트 중…
+              </span>
+            ) : data && (
+              <span className="text-xs text-gray-400">
+                {data.period.from} ~ {data.period.to}
+                {/* pending이어도 as_of는 버리지 않는다 — "언제 확인한 0인가"가 정보다 */}
+                {data.ad_basis?.as_of
+                  ? data.ad_basis.pending
+                    ? ` (광고비 «모름» · ${hhmm(data.ad_basis.as_of)} 확인)`
+                    : ` (광고비 ${hhmm(data.ad_basis.as_of)} 확인)`
+                  : data.ad_basis?.pending ? " (광고비 «모름» · 수집 전)" : ""}
+                {data.ad_ref_date && ` (광고비 기준일: ${data.ad_ref_date})`}
+              </span>
+            )}
+          </>}
+          note={rangeError
+            ? <span className="font-medium text-red-600">
+                {rangeError} — 기간을 고칠 때까지 조회하지 않습니다
+              </span>
+            : <>기간은 <b>판매일(KST)</b> 기준이며 양끝을 포함합니다. 조회 구간은 최대 90일입니다.</>}
+        />
       </div>
 
       {/* ★원천 후퇴 표면화 — NAVER /stats 당일 누적이 뒤로 가는 일이 있다(2026-08-06 20:04 실측:
