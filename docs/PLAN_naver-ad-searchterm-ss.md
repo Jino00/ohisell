@@ -32,6 +32,7 @@
   | 14 | 전환매출 | CONV_COL_VALUE=12 |
   > **±2 오프셋은 SS1의 최대 실수 위험** — `naver_sa_ad_fetcher.py:33-54`의 기존 `CONV_COL_*`를 재사용하면 안 된다. SS 전용 `STCONV_COL_*` 상수 신설.
 - **파워링크 검색어×전환은 무용**: `AD_CONVERSION_DETAIL`은 검색어 컬럼이 항상 `'-'`(확장검색 버킷). 파워링크는 검색어별 전환 귀속 불가 → **SS2 판정은 쇼핑(SHOPPINGKEYWORD_CONVERSION_DETAIL)만**. 파워링크 검색어는 성과(clk/cost)만 있고 전환 없음 → 제외 판정에 전환게이트 적용 불가(§난제 5).
+  - **✅2026-08-14 공식 1차 출처로 확정**(ref 36 §7): 네이버 공식 `naver/searchad-apidoc` gh-pages `assets/json/ncc-report.json`의 `reportTp` 전수 13종은 성과·전환이 **6쌍 + 고아 1**인데, **짝이 없는 유일한 리포트가 `EXPKEYWORD`**다. 실시간 `/stats`도 `id`가 엔티티 ID 전용(검색어 없음)·`breakdown`에 검색어 축 없음 → **두 경로 모두 막혀 있다.** 실측 결론이 스펙으로 확인됐다. 단 「왜 없는지」는 스펙에 없으므로 추정하지 않는다.
 - **원시 성과 보고서 전환 컬럼은 죽어 있음**: `SHOPPINGKEYWORD_DETAIL` col15는 전부 0 고정 확정 → 전환은 반드시 별도 CONVERSION 보고서로.
 
 ## §실측-0 쇼핑 제외 쓰기 프로브 (2026-07-21, prod 가역 왕복 — 결정적)

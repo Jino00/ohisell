@@ -356,6 +356,59 @@ idx2=그룹~코드·idx3=기기·idx4=미상(항상 `1`, 전환행이라 자기 
   존재하는 것으로 보인다** — 활용하려면 코드 의미를 공식 문서나 네이버 고객센터로 먼저
   확정해야 한다(현재는 "미상" 상태로 데이터만 존재).
 
+## 7. ★공식 스펙 대조 (2026-08-14 추가) — 「파워링크 검색어별 전환 불가」 확정
+
+> 이 절은 §0·SS0(`docs/PLAN_naver-ad-searchterm-ss.md` §0.5)이 **실측만으로** 내렸던 결론
+> (「`AD_CONVERSION_DETAIL`의 검색어 컬럼이 항상 `-`」)에 **1차 출처 근거**를 붙인다.
+> 전역 CLAUDE.md §3: 규범형 지식은 공식 1차 출처를 직접 fetch해 대조한다.
+
+**출처**: 네이버 공식 API 문서 저장소 `naver/searchad-apidoc`, `gh-pages` 브랜치,
+`assets/json/ncc-report.json`(Report API swagger). 2026-08-14 직접 다운로드.
+문서 사이트(`naver.github.io/searchad-apidoc`)는 Angular SPA라 HTML fetch로는 본문이 안 잡힌다 —
+사이트가 읽는 원본 swagger 목록은 `app/config.js`의 `swaggerJson` 배열에 있다(9개 스펙).
+
+### `reportTp` 전수 13종 — 성과·전환이 «쌍»인데 EXPKEYWORD만 고아다
+
+`definitions.StatReportJob.properties.reportTp` / `ReportJobResponse.properties.reportTp` (동일):
+
+| 성과 리포트 | 전환 짝 |
+|---|---|
+| `AD` | `AD_CONVERSION` |
+| `AD_DETAIL` | `AD_CONVERSION_DETAIL` |
+| `ADEXTENSION` | `ADEXTENSION_CONVERSION` |
+| `SHOPPINGKEYWORD_DETAIL` | `SHOPPINGKEYWORD_CONVERSION_DETAIL` |
+| `SHOPPINGBRANDPRODUCT` | `SHOPPINGBRANDPRODUCT_CONVERSION` |
+| `CRITERION` | `CRITERION_CONVERSION` |
+| **`EXPKEYWORD`** (파워링크 확장검색어) | **없음** |
+
+**6쌍 + 고아 1 = 13종.** 짝이 없는 유일한 리포트가 `EXPKEYWORD`다. 쇼핑 검색어에는
+`SHOPPINGKEYWORD_CONVERSION_DETAIL`이 있으나 파워링크 확장검색어에는 대응물이 **아예 정의되어
+있지 않다.** 즉 §0·SS0의 실측 결론은 옳고, 리포트 목록 자체가 그것을 확인한다.
+
+### 실시간 `/stats` API에도 우회로가 없다
+
+- `id` 파라미터 설명 원문: `"Entity Id (campaign id, Ad group id, Ad keyword id, Ad id, Criterion id)"`
+  — **검색어가 목록에 없다.** 전환 필드(`convAmt`·`purchaseConvAmt`·`ror`·`purchaseRor`)는 존재하나
+  전부 이 엔티티 ID 단위다.
+- `breakdown` enum: `pcMblTp`(기기)·`dayw`(요일)·`hh24`(시간)·`regnNo`(지역) — **검색어 축 없음.**
+
+→ 대용량 리포트·실시간 조회 **두 경로 모두** 확장검색 검색어별 전환을 제공하지 않는다.
+
+### 스펙이 말하지 않는 것 (추정 금지 — 여기서 멈춘다)
+
+- **「왜 없는지」는 스펙 어디에도 없다.** `reportTp` 설명은 `"Type of ad performance Report"`가 전부다.
+- 쇼핑 검색어도 ID 없는 텍스트인데 거기엔 전환 리포트가 있다 — 따라서 「ID가 없어서 기술적으로
+  불가」는 **스펙으로 뒷받침되지 않는다.** 제품 결정으로 보이나 근거가 없으므로 단정하지 않는다.
+  향후 네이버가 추가할 가능성도 배제할 수 없다(이 절의 재확인 시점은 스펙 갱신 시).
+- §6의 `CRITERION` 의미(성별·연령대 추정)는 **여전히 미확정** — 이 스펙에도 컬럼 설명이 없다.
+
+### 실무 함의 (2026-08-14 라이브 실측 병기)
+
+파워링크 확장검색 버킷은 30일 비용 6,259,486원 / 전환 20,014,620원 = **ROAS 3.20**으로 계정에서
+가장 수익성 높은 구간이다(파워링크 전체 2.72, BEP 1.711). 검색어별 전환을 모르는 것이 현재
+손해로 이어지고 있지 않다. 이 구간이 악화되면 전환 대신 **클릭당 비용 이상치·버킷 평균 대비
+이탈**로 판정하는 축을 별도 설계해야 한다(현재 우선순위 낮음).
+
 ## 부록 — 조사에 사용한 스크립트/명령 요약
 
 모든 스크립트는 `_investigate_step{1..10}.py`로 prod `backend/`에 임시 배치 후 실행·즉시 삭제.
