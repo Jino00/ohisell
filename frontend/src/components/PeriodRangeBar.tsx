@@ -67,21 +67,26 @@ export function PeriodRangeBar({
   title?: string;
 }) {
   const today = kstDate(0);
-  /** 오늘까지의 최근 N일. N=1이면 오늘 하루. */
-  const recent = (days: number) => { onFrom(kstDate(-(days - 1))); onTo(today); };
-  /** 하루짜리 창(어제처럼 시작=끝). 최근 N일과 달리 오늘을 포함하지 않는다. */
-  const singleDay = (agoDays: number) => { const d = kstDate(-agoDays); onFrom(d); onTo(d); };
   const active = (f: string, t: string) => from === f && to === t;
 
-  const SPEC: Record<PeriodPreset, { f: string; t: string; go: () => void }> = {
-    today: { ...presetWindow("today"), go: () => recent(1) },
-    yesterday: { ...presetWindow("yesterday"), go: () => singleDay(1) },
-    "7d": { ...presetWindow("7d"), go: () => recent(7) },
-    "15d": { ...presetWindow("15d"), go: () => recent(15) },
-    "30d": { ...presetWindow("30d"), go: () => recent(30) },
-    "90d": { ...presetWindow("90d"), go: () => recent(90) },
-    "1y": { ...presetWindow("1y"), go: () => recent(365) },
+  // ★버튼이 «쓰는 창»과 «눌린 것처럼 보이는 창»은 **같은 함수 한 곳**에서 나온다.
+  //   적대 리뷰 2R P1-1: 종전엔 하이라이트만 `presetWindow`를 쓰고 클릭 동작은 별도
+  //   `recent()`/`singleDay()`가 했다. 그래서 「오늘」 버튼의 **동작만** 어제로 바꾸는 변이가
+  //   402건을 통과했다 — 테스트가 못박은 게 표시용 사본이었기 때문이다. 게다가 두 사본은
+  //   날짜 엔진마저 달랐다(문자열 UTC 산술 vs `kstDate`). 이 파일 헤더가 «정의를 늘리지
+  //   않는다»고 못박았는데 그 수정이 오히려 한 벌 늘렸었다.
+  const apply = (k: PeriodPreset) => {
+    const w = presetWindow(k, today);
+    onFrom(w.f);
+    onTo(w.t);
   };
+
+  const SPEC = Object.fromEntries(
+    (Object.keys(PRESET_LABEL) as PeriodPreset[]).map((k) => {
+      const w = presetWindow(k, today);
+      return [k, { ...w, go: () => apply(k) }];
+    }),
+  ) as Record<PeriodPreset, { f: string; t: string; go: () => void }>;
 
   return (
     <Card title={title}>
