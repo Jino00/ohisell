@@ -1,3 +1,35 @@
+[2026-08-16 23:5x] 로켓 판매분석 push HTTP 500 수리 — autoflush=False에서 브리지 이중 INSERT
+  · 커밋 `add8d099`(+ 리뷰 P2 주석 커밋), 브랜치 `claude/rocket-sales-ingest-500`.
+  · 사고: 2026-08-15 07:48 KST prod. 판매분석 1,409건을 500씩 3청크로 push 중 3번째(409건)가
+    HTTP 500. 다른 축(발주·정산·발주상세·쉽먼트)은 전부 rc=0 — 판매분석 축 하나만 막혔다.
+  · 원인: 세션이 `autoflush=False`(`backend/app/database.py:16`)인데
+    `rocket_promo_sync._observe_option_sku`가 「query로 존재 확인 → 없으면 `db.add()`」 모양이었다.
+    query가 미커밋 add()를 못 보므로 브리지에 없는 신규 option_id가 한 요청 안에서 **이틀 이상**
+    등장하면 INSERT가 두 번 쌓여 commit에서 청크가 통째 롤백된다.
+    prod 스택트레이스 3회(재시도 3회, 2026-08-14 22:42:33/22:45:19/22:48:11 UTC):
+    `coupang_ops.py:1630` → `rocket_promo_sync.py:157 db.commit()` →
+    `sqlite3.IntegrityError: UNIQUE constraint failed: coupang_rocket_option_sku.option_id`
+  · 왜 여태 안 터졌나: 신규 옵션이 하루만 팔리면 배치에 1회만 등장한다(2026-08-05~13 신규 13건
+    전부 1일). 이틀 이상 팔린 신규 옵션이 처음 나온 08-15 수집분에서 3번째 청크가 죽었다.
+  · 수리: per-run 캐시 `seen_options`를 query 앞에 둔다 — `returns_sync`(seen)·`rg_order_sync`
+    (pending)와 같은 모양. `seen`은 **필수 인자**(생략 가능하면 안 넘긴 호출부가 조용히 옛 결함
+    으로 돌아간다).
+  · ★테스트가 이 결함을 못 잡은 이유: `tests/test_rocket_promo.py`의 `db` 픽스처가
+    `sessionmaker(bind=engine)`(=autoflush True)라 **prod 세션과 달랐다**. 픽스처를
+    `autoflush=False`로 맞추자 새 재현 3종이 prod와 동일 예외로 FAIL. 백엔드 테스트 205파일 중
+    47개가 아직 autoflush 미지정.
+  · 적대 리뷰 1R **PASS**(P1 0건). 변이 9종 중 6종 KILLED. 살아남은 3종은 전부 이 PR 밖:
+    M2=등가 변이(경계 프로브 8종 재실행 결과 동일), M7·M8=부모 커밋에서도 생존(기존 커버리지
+    부채 → 이월). 규모 재현: 1,409옵션×29일=40,861행 → 브리지 정확히 1,409행·중복 0건.
+  · 전체 회귀: 5,548 passed / 1 failed
+    (`test_vendor_item_axis::test_health_route_actually_returns_conservation` — main에서도
+    실패하는 기존 건).
+  · 교훈 #292 기록(`.claude/memory/LESSONS_LEARNED.md`).
+  · 라이브 검증(합격기준 ③④)은 이 시점 **미완**: 배포 + `POST
+    /api/coupang/ops/rocket/request-refresh` 트리거 후 관측 예정.
+  · 이월 1건: `coupang_rocket_sales_daily`에 **2026-08-13 행이 0건**이다(08-14 08:39 push는
+    성공했는데도). 수리 후 push 성공 시 재측정으로 판정한다.
+
 [2026-08-13 12:0x] ★D-NAO-178 구현·배포 완료 — d1_st(검색어 grain D+1) + wisdom 오염 차단
   · PR #298(d717572 본체 + 3f9b774 리뷰수리) 병합 1371139. **무중단 배포 0초**(활성 :8011 pid
     707061) — 병행 세션의 Basic Auth 전환(PR #295·#296)이 프로브를 살려 --restart-legacy 불필요.

@@ -76,9 +76,12 @@ def _observe_option_sku(
             first_observed_at=now, last_observed_at=now,
         )
         db.add(row)
-        seen[option_id] = row
+        seen[option_id] = row   # ★UNIQUE 위반을 막는 층은 **이 한 줄**이다(신규 경로)
         _apply_option_attrs(row, rec, now)
         return
+    # 갱신 경로의 기입은 query 절감일 뿐 정확성 층이 아니다(적대 리뷰 변이 M2: 빼도 관측값
+    #   동일 — 여기 오는 행은 이미 seen에 있거나 DB에 실재해 다음 query가 다시 찾는다).
+    #   「이게 UNIQUE를 막는다」고 오독하면 위 신규 경로의 기입을 안심하고 지운다.
     seen[option_id] = row
     if row.sku_id != sku:
         log.warning(
