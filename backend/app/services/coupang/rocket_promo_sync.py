@@ -32,7 +32,10 @@ log = logging.getLogger(__name__)
 _COUPON_KIND = "INSTANT"
 
 
-def _observe_option_sku(db: Session, vendor_id: str, rec: dict, now) -> None:
+def _observe_option_sku(
+    db: Session, vendor_id: str, rec: dict, now,
+    seen: dict[str, CoupangRocketOptionSku],
+) -> None:
     """옵션ID↔상품번호 대응을 **누적 보존**한다(트랙 ohitech-ad D-16).
 
     판매분석은 BETA + 무료체험(D-CPP-5, 2026-08-20 종료 예정)이라 언젠가 끊긴다. 대응 자체는
@@ -43,16 +46,29 @@ def _observe_option_sku(db: Session, vendor_id: str, rec: dict, now) -> None:
     ★sku_id가 비면 **아무것도 쓰지 않는다**(빈 행이 "매핑 있음"으로 오인되면 손익이 0원가로
       계산돼 순이익이 과대해진다). ★기존 행의 sku_id는 값이 실제로 바뀔 때만 갱신하고 그때
       로그를 남긴다 — 불변이라던 전제가 깨진 것이므로 조용히 넘기면 안 된다.
+
+    seen: 이 요청에서 이미 잡은 브리지 행 캐시(option_id → 행). **필수 인자다** — 생략 가능하게
+      두면 안 넘긴 호출부가 조용히 옛 결함으로 돌아간다(교훈 #283 「한 파일 수리 ≠ 규율 채택」).
+      ★왜 필요한가(2026-08-15 prod 500 사고): 앱 세션은 `autoflush=False`(database.py)라
+      query가 **아직 flush 안 된 add()를 못 본다**. 판매분석 한 요청은 옵션×날짜 격자라 같은
+      option_id가 여러 날짜 행으로 되풀이 등장하는데, 브리지에 없는 신규 옵션이 **이틀 이상**
+      팔렸으면 같은 option_id로 INSERT가 두 번 쌓여 commit에서
+      `UNIQUE constraint failed: coupang_rocket_option_sku.option_id` → 그 청크가 통째 롤백된다.
+      신규 옵션이 하루만 팔리던 동안은 1회 등장이라 무사했고(2026-08-05~13 신규 13건 전부 1일),
+      2026-08-15 수집분에서 처음 이틀짜리 신규 옵션이 나와 3번째 청크가 죽었다.
+      returns_sync(`seen`)·rg_order_sync(`pending`)이 같은 이유로 쓰는 것과 같은 모양이다.
     """
     sku = (rec.get("sku_id") or "").strip()
     option_id = rec.get("option_id")
     if not sku or not option_id:
         return
-    row = (
-        db.query(CoupangRocketOptionSku)
-        .filter(CoupangRocketOptionSku.option_id == option_id)
-        .first()
-    )
+    row = seen.get(option_id)
+    if row is None:
+        row = (
+            db.query(CoupangRocketOptionSku)
+            .filter(CoupangRocketOptionSku.option_id == option_id)
+            .first()
+        )
     if row is None:
         row = CoupangRocketOptionSku(
             option_id=option_id, sku_id=sku, vendor_id=vendor_id,
@@ -60,8 +76,13 @@ def _observe_option_sku(db: Session, vendor_id: str, rec: dict, now) -> None:
             first_observed_at=now, last_observed_at=now,
         )
         db.add(row)
+        seen[option_id] = row   # ★UNIQUE 위반을 막는 층은 **이 한 줄**이다(신규 경로)
         _apply_option_attrs(row, rec, now)
         return
+    # 갱신 경로의 기입은 query 절감일 뿐 정확성 층이 아니다(적대 리뷰 변이 M2: 빼도 관측값
+    #   동일 — 여기 오는 행은 이미 seen에 있거나 DB에 실재해 다음 query가 다시 찾는다).
+    #   「이게 UNIQUE를 막는다」고 오독하면 위 신규 경로의 기입을 안심하고 지운다.
+    seen[option_id] = row
     if row.sku_id != sku:
         log.warning(
             "1P 브리지 변경 관측: option_id=%s sku %s → %s (불변 전제가 깨졌다 — 손익 귀속이 바뀐다)",
@@ -123,6 +144,9 @@ def ingest_rocket_sales(
     recs = parser.parse_sales_rows(rows, source=source, stats=stats)
     skipped = stats.get("skipped", 0)
     now = kst_now()
+    # 이 요청에서 잡은 브리지 행 캐시 — autoflush=False라 query가 pending add()를 못 본다.
+    #   상세 근거는 _observe_option_sku docstring(2026-08-15 prod 500 사고).
+    seen_options: dict[str, CoupangRocketOptionSku] = {}
     for rec in recs:
         row = (
             db.query(CoupangRocketSalesDaily)
@@ -153,7 +177,7 @@ def ingest_rocket_sales(
         row.product_name = rec["product_name"]
         row.source = rec["source"]
         row.synced_at = now
-        _observe_option_sku(db, vendor_id, rec, now)
+        _observe_option_sku(db, vendor_id, rec, now, seen_options)
     db.commit()
     log.info(
         "1P 판매 ingest: vendor=%s records=%d skipped=%d deduped=%d",
