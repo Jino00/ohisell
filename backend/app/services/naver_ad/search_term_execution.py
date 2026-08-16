@@ -106,6 +106,24 @@ _CONSOLE_DT_FUTURE_SLACK = timedelta(minutes=10)
 _CONSOLE_DT_MIN_YEAR = 2010
 
 
+def _parse_reg_tm(value: object) -> datetime | None:
+    """네이버 제외키워드 행의 `regTm`(UTC ISO, 예 `2026-07-14T03:59:54.000Z`) → tz-aware datetime.
+
+    ★이 값이 곧 «콘솔 등록시각»이다(D-NAO-179). 그래서 파워링크는 사람이 콘솔을 캡처하지
+      않아도 `console_excluded_at`이 채워진다 — D-NAO-176이 「시점 미상」을 전제로 만들어졌던
+      바로 그 칸이다.
+    tz-aware로 돌려주고 KST 정규화는 `_parse_console_excluded_at`에 맡긴다(시각 규칙의 단일 지점).
+    못 읽으면 **None(=모른다)** — 편입 시각으로 메우지 않는다. 그게 이 파일의 규율이다.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        log.warning("[제외발견] regTm을 못 읽었다(%r) — console_excluded_at은 미상으로 둔다", value)
+        return None
+
+
 def _parse_console_excluded_at(value: object, *, now: datetime) -> datetime | None:
     """콘솔이 보여준 «실제 제외 등록시각»을 KST naive로 정규화한다. 없으면 None(=모른다).
 
@@ -590,7 +608,16 @@ def void_execution(
 def detect_new_exclusions(
     db: Session, *, adgroup_ids: list[str] | None = None, now: datetime | None = None
 ) -> dict:
-    """라이브 제외키워드를 읽어 **원장에 없는 제외를 스스로 발견**해 등록한다.
+    """라이브 제외키워드를 읽어 **원장에 없는 제외를 스스로 발견**해 편입한다.
+
+    ★편입은 **일기 없는 입구**(`import_console_exclusions`, `source='console_import'`)로 간다
+      (D-NAO-179). 여기 걸리는 행은 정의상 «우리가 한 조치가 아니다» — 라이브에 있는데 우리
+      원장에 없다는 게 그 뜻이다. 종전엔 `record_execution(discovered=True)`로 들어가 diary
+      `execute` 행을 같이 만들었고, 그러면 남이 과거에 자른 것이 「오늘 우리가 한 조치」로
+      학습 사슬에 실려 승률을 오염시킨다. 그리고 읽기가 두 타입 union으로 넓어진 지금
+      (D-NAO-179) 그 경로엔 수백 건이 쏟아진다.
+      대가를 알고 쓴다: 편입분은 **성적표 판정 대상이 아니다**(`source`로 가른다) — 남의 조치를
+      우리 성적으로 세지 않겠다는 뜻이고, 그게 이 문을 고른 이유 그 자체다.
 
     ★왜 이 경로가 있나: 사람이 콘솔에서 자르고 화면에서 «실행했음»을 누르는 것을 잊으면, 그
       조치는 영원히 시스템 밖이다. 보고에 의존하는 경로는 이 리포에서 이미 한 번 실패했다
@@ -636,6 +663,7 @@ def detect_new_exclusions(
     )
 
     recorded: list[dict] = []
+    pending_import: list[dict] = []
     errors: list[str] = []
     groups_with_zero = 0
     unverifiable_groups = 0
@@ -680,20 +708,50 @@ def detect_new_exclusions(
             if not camp_of.get(adgroup_id):
                 unattributable.append({"adgroup_id": adgroup_id, "search_term": term})
                 continue
-            try:
-                out = record_execution(
-                    db, campaign_id=camp_of[adgroup_id], adgroup_id=adgroup_id,
-                    search_term=term, restrict_kwd_id=entry.get("nccAdgroupRestrictKwdId"),
-                    rationale="라이브 제외키워드 목록에 있는데 우리 원장에 없어 등록했다",
-                    discovered=True, now=now,
-                )
-            except ExclusionInputError as e:  # 입구 검증 거부 — 한 건이 스윕을 못 죽인다
-                errors.append(f"{adgroup_id}/{term}: {e}")
+            # ★일기를 만들지 않는 입구로 넣는다 (D-NAO-179). 여기 들어오는 행은 정의상
+            #   **우리가 한 조치가 아니다** — 라이브에 있는데 우리 원장에 없다는 것이 그
+            #   뜻이다. 그런데 종전 경로(`record_execution(discovered=True)`)는 원장과 함께
+            #   diary `execute` 행을 만들었고, 그러면 남이 과거에 콘솔에서 자른 것이
+            #   「오늘 우리가 실행한 조치」로 학습 사슬에 실린다.
+            #   D-NAO-176이 그 위험을 이미 문장으로 적어 뒀다(import_console_exclusions
+            #   독스트링: 43건을 부으면 진짜 표본 1건이 쓰레기 43건에 익사한다). 그 입구가
+            #   있는데 이 경로만 옛 문으로 가고 있었다 — 타입 union으로 읽기를 넓히는 순간
+            #   그 문으로 수백 건이 쏟아지므로 여기서 문을 바꾼다.
+            #   ★`regTm`은 콘솔 등록시각 그 자체다 — 파워링크는 캡처 없이 시각까지 채워진다
+            #     (쇼핑은 이 API가 목록을 안 돌려주므로 여전히 캡처가 유일한 입구다).
+            pending_import.append({
+                "campaign_id": camp_of[adgroup_id],
+                "adgroup_id": adgroup_id,
+                "search_term": term,
+                "restrict_kwd_id": entry.get("nccAdgroupRestrictKwdId"),
+                "console_excluded_at": _parse_reg_tm(entry.get("regTm")),
+                "note": (
+                    "라이브 제외키워드 목록에 있는데 우리 원장에 없어 편입했다"
+                    f" (type={entry.get('type') or '미상'})"
+                ),
+            })
+
+    # ── 편입은 한 번에 (행 단위 성공/거부는 그 함수의 계약이다 — 1건 오타가 나머지를 안 죽인다) ──
+    imported = skipped = rejected = 0
+    if pending_import:
+        out = import_console_exclusions(db, rows=pending_import, now=now)
+        imported, skipped, rejected = out["imported"], out["skipped"], out["rejected"]
+        for res in out["results"]:
+            src = pending_import[res["row"]]
+            if res["result"] == "rejected":
+                errors.append(f"{src['adgroup_id']}/{src['search_term']}: {res['reason']}")
                 continue
-            recorded.append({"adgroup_id": adgroup_id, "search_term": term, **out})
+            recorded.append({
+                "adgroup_id": src["adgroup_id"], "search_term": src["search_term"], **res,
+            })
 
     return {
         "scanned_groups": len(adgroup_ids),
+        # 편입 결과 — 「원장에 새로 선 행」과 「이미 알고 있던 행」을 가른다. ★일기는 0건이다
+        # (이 경로는 학습 사슬에 태우지 않는다 — 우리가 한 조치가 아니기 때문이다).
+        "imported": imported,
+        "already_known": skipped,
+        "rejected": rejected,
         # 쇼핑이라 애초에 대조가 불가능해 건너뛴 그룹 — «찾은 게 없다»와 «볼 수 없다»를 가른다.
         "unverifiable_groups": unverifiable_groups,
         # 유형 조회 자체가 실패한 그룹 — 쇼핑(위)과도 다르다. «모름»을 0건에 섞지 않는다.

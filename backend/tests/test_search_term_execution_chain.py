@@ -183,27 +183,94 @@ def test_re_exclusion_bumps_cycle_and_resets_live_state(db):
 
 
 def test_detect_finds_console_cuts_without_anyone_reporting_them(db, monkeypatch, powerlink_groups):
-    """★보고에 의존하지 않는 경로 — 사람이 콘솔에서 자르고 화면 보고를 잊어도 등록된다.
+    """★보고에 의존하지 않는 경로 — 사람이 콘솔에서 자르고 화면 보고를 잊어도 편입된다.
 
     이 리포는 이미 «보고에 없던 변경»에 당했다(대행사 되돌림 2건 중 1건은 change_log에 행조차
     없었다). 상태 대조가 사건 보고보다 튼튼하다는 같은 원리를 여기에도 쓴다.
+
+    ★D-NAO-179로 **문이 바뀌었다**: 편입은 `source='console_import'`(일기 없음)로 간다.
+      여기 걸리는 행은 정의상 «우리가 한 조치가 아니다».
     """
     _spend(db, day=date(2026, 8, 5), cost=9_000)
     db.commit()
     from app.services.naver_ad import naver_sa_writer
 
     monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
-        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False},
+        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": "2026-07-14T03:59:54.000Z"},
         {"nccAdgroupRestrictKwdId": "rst-2", "keyword": "이미지워진것", "delFlag": True},
     ])
 
     out = ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
 
-    assert len(out["recorded"]) == 1, "delFlag 행은 등록하지 않는다"
+    assert len(out["recorded"]) == 1, "delFlag 행은 편입하지 않는다"
+    assert out["imported"] == 1
     row = db.query(NaverSearchTermExclusion).one()
     assert row.search_term == TERM and row.restrict_kwd_id == "rst-1"
-    assert db.query(OpsDiaryEntry).count() == 1
-    assert "라이브 대조가 발견" in db.query(OpsDiaryEntry).one().rationale
+    assert row.source == ste.CONSOLE_IMPORT_SOURCE
+
+
+def test_detect_never_writes_a_diary_entry(db, monkeypatch, powerlink_groups):
+    """★남이 과거에 자른 것을 「오늘 우리가 한 조치」로 학습 사슬에 태우지 않는다 (D-NAO-179).
+
+    종전 경로(`record_execution(discovered=True)`)는 원장과 함께 diary `execute` 행을 만들었다.
+    읽기가 두 타입 union으로 넓어지면(EXP_SEARCH 711건) 그 문으로 수백 건이 쏟아지고,
+    D-NAO-176이 이미 적어 둔 그대로 **진짜 표본 1건이 쓰레기 수백 건에 익사한다.**
+    """
+    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    db.commit()
+    from app.services.naver_ad import naver_sa_writer
+
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
+        {"nccAdgroupRestrictKwdId": f"rst-{i}", "keyword": f"남이자른것{i}", "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": "2025-04-30T05:43:10.000Z"}
+        for i in range(20)
+    ])
+
+    out = ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+
+    assert out["imported"] == 20
+    assert db.query(OpsDiaryEntry).count() == 0, "편입은 일기를 만들지 않는다"
+
+
+def test_detect_preserves_console_registration_time_from_reg_tm(db, monkeypatch, powerlink_groups):
+    """★`regTm`이 곧 콘솔 등록시각이다 — 파워링크는 사람이 캡처하지 않아도 시각이 채워진다.
+
+    D-NAO-176은 「시점 미상」을 전제로 이 칸을 만들었는데, API가 UTC로 그 값을 준다.
+    KST naive로 정규화돼 들어가야 한다(2026-07-14T03:59:54Z = 2026-07-14 12:59:54 KST).
+    """
+    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    db.commit()
+    from app.services.naver_ad import naver_sa_writer
+
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
+        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": "2026-07-14T03:59:54.000Z"},
+    ])
+
+    ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.console_excluded_at == datetime(2026, 7, 14, 12, 59, 54)
+    # 편입 시각으로 메우지 않는다 — 두 칸은 뜻이 다르다(D-NAO-177)
+    assert row.excluded_at == NOW
+
+
+def test_detect_leaves_console_time_unknown_when_reg_tm_is_garbage(db, monkeypatch, powerlink_groups):
+    """못 읽은 시각을 «지금»으로 메우지 않는다 — 모르는 것을 아는 것으로 세지 않는다."""
+    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    db.commit()
+    from app.services.naver_ad import naver_sa_writer
+
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
+        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": "언제인지모름"},
+    ])
+
+    ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.console_excluded_at is None
 
 
 def test_detect_reports_groups_that_returned_nothing(db, monkeypatch, powerlink_groups):

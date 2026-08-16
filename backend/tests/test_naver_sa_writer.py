@@ -55,6 +55,12 @@ def _restricted_kwds_resp(rows):
     return FakeResp(200, rows)
 
 
+# ★D-NAO-179: get_restricted_keywords는 **타입마다 한 번씩** GET 한다
+# (KEYWORD_PLUS_RESTRICT → EXP_SEARCH). 그래서 제외목록 조회 1회당 응답이 2개 필요하다.
+# 이 상수는 «EXP_SEARCH 쪽은 비어 있다»는 뜻이고, 두 타입이 섞이는 경우는 전용 테스트에서 다룬다.
+NO_EXP = FakeResp(200, [])
+
+
 # ── add_restricted_keywords ──────────────────────────────────────────────
 
 
@@ -68,7 +74,7 @@ def test_add_success_roundtrip():
         200, [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어", "type": "KEYWORD_PLUS_RESTRICT"}]
     )
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]) as mock_get, \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP, after_resp, NO_EXP]) as mock_get, \
          patch.object(writer.requests, "post", return_value=post_resp) as mock_post:
         result = writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
 
@@ -78,7 +84,8 @@ def test_add_success_roundtrip():
     assert result.response == post_resp.json()
     assert result.after == after_resp.json()
     assert result.created_ids == ["rkw-1"]
-    assert mock_get.call_count == 3
+    # adgroup GET 1 + before(타입 2) + after(타입 2) = 5 (D-NAO-179)
+    assert mock_get.call_count == 5
     assert mock_post.call_count == 1
 
 
@@ -86,13 +93,13 @@ def test_add_post_403_raises_write_error_and_no_after_refetch():
     before_resp = _restricted_kwds_resp([])
     post_resp = FakeResp(403, {"message": "signature invalid"})
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp]) as mock_get, \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP]) as mock_get, \
          patch.object(writer.requests, "post", return_value=post_resp) as mock_post:
         with pytest.raises(WriteError):
             writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
 
     assert mock_post.call_count == 1
-    assert mock_get.call_count == 2  # adgroup GET + before GET만, after 재조회 없음
+    assert mock_get.call_count == 3  # adgroup GET + before(타입 2)만, after 재조회 없음
 
 
 def test_add_post_2xx_but_keyword_missing_in_after_raises_verification_error():
@@ -100,7 +107,7 @@ def test_add_post_2xx_but_keyword_missing_in_after_raises_verification_error():
     after_resp = _restricted_kwds_resp([])  # 반영 안 됨
     post_resp = FakeResp(200, [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "post", return_value=post_resp):
         with pytest.raises(WriteVerificationError):
             writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
@@ -128,7 +135,7 @@ def test_add_empty_keywords_raises_validation_error_no_http():
 def test_add_duplicate_keyword_already_in_before_raises_validation_error_no_post():
     before_resp = _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-0", "keyword": "테스트제외어"}])
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP]), \
          patch.object(writer.requests, "post") as mock_post:
         with pytest.raises(WriteValidationError):
             writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
@@ -140,7 +147,7 @@ def test_add_post_429_no_retry_single_call_raises_write_error():
     before_resp = _restricted_kwds_resp([])
     post_resp = FakeResp(429, {"message": "rate limited"})
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP]), \
          patch.object(writer.requests, "post", return_value=post_resp) as mock_post:
         with pytest.raises(WriteError):
             writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
@@ -153,7 +160,7 @@ def test_add_headers_signed_with_post_method():
     after_resp = _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
     post_resp = FakeResp(200, [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "post", return_value=post_resp), \
          patch.object(writer.fetcher, "_headers", return_value={}) as mock_headers:
         writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
@@ -179,7 +186,7 @@ def test_add_post_2xx_with_unparseable_body_still_succeeds_via_after_verificatio
 
     post_resp = UnparseableResp(201, None)
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "post", return_value=post_resp):
         result = writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
 
@@ -197,7 +204,7 @@ def test_add_created_ids_derived_from_after_even_if_post_body_partial():
     ])
     post_resp = FakeResp(200, [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "제외어A"}])
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "post", return_value=post_resp):
         result = writer.add_restricted_keywords(ADGROUP_ID, ["제외어A", "제외어B"])
 
@@ -211,7 +218,7 @@ def test_add_after_row_missing_id_field_raises_verification_error():
     after_resp = _restricted_kwds_resp([{"keyword": "테스트제외어"}])  # id 필드 누락
     post_resp = FakeResp(200, [{"keyword": "테스트제외어"}])
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "post", return_value=post_resp):
         with pytest.raises(WriteVerificationError):
             writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
@@ -228,7 +235,7 @@ def test_add_after_has_multiple_rows_for_same_keyword_raises_verification_error(
     ])
     post_resp = FakeResp(200, [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
 
-    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "post", return_value=post_resp):
         with pytest.raises(WriteVerificationError):
             writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
@@ -253,7 +260,7 @@ def test_delete_success():
     after_resp = _restricted_kwds_resp([])
     delete_resp = FakeResp(204, None)
 
-    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "delete", return_value=delete_resp) as mock_delete:
         result = writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-1"])
 
@@ -270,7 +277,7 @@ def test_delete_2xx_but_id_still_present_raises_verification_error():
     after_resp = _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
     delete_resp = FakeResp(204, None)
 
-    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "delete", return_value=delete_resp):
         with pytest.raises(WriteVerificationError):
             writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-1"])
@@ -281,7 +288,7 @@ def test_delete_headers_signed_with_delete_method_and_no_query_in_path():
     after_resp = _restricted_kwds_resp([])
     delete_resp = FakeResp(204, None)
 
-    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, after_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, NO_EXP, after_resp, NO_EXP]), \
          patch.object(writer.requests, "delete", return_value=delete_resp), \
          patch.object(writer.fetcher, "_headers", return_value={}) as mock_headers:
         writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-1"])
@@ -298,7 +305,7 @@ def test_delete_id_not_in_before_raises_validation_error_no_delete():
     검증이 공허하게 통과하는 구멍. DELETE 호출 전에 차단한다."""
     before_resp = _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
 
-    with patch.object(writer.fetcher, "_get", side_effect=[before_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, NO_EXP]), \
          patch.object(writer.requests, "delete") as mock_delete:
         with pytest.raises(WriteValidationError):
             writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-STALE"])
@@ -311,7 +318,7 @@ def test_delete_429_no_retry_single_call_raises_write_error():
     before_resp = _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
     delete_resp = FakeResp(429, {"message": "rate limited"})
 
-    with patch.object(writer.fetcher, "_get", side_effect=[before_resp]), \
+    with patch.object(writer.fetcher, "_get", side_effect=[before_resp, NO_EXP]), \
          patch.object(writer.requests, "delete", return_value=delete_resp) as mock_delete:
         with pytest.raises(WriteError):
             writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-1"])
@@ -334,12 +341,105 @@ def test_delete_empty_ids_raises_validation_error_no_http():
 
 def test_get_restricted_keywords_returns_raw_json():
     rows = [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}]
-    with patch.object(writer.fetcher, "_get", return_value=_restricted_kwds_resp(rows)) as mock_get:
+    with patch.object(writer.fetcher, "_get", side_effect=[_restricted_kwds_resp(rows), NO_EXP]) as mock_get:
         out = writer.get_restricted_keywords(ADGROUP_ID)
 
     assert out == rows
     args, kwargs = mock_get.call_args
     assert args[0] == f"/ncc/adgroups/{ADGROUP_ID}/restricted-keywords"
+
+
+# ── D-NAO-179: 제외키워드 타입은 둘이고 둘은 분리된 목록이다 ──────────────
+# 라이브 실증(2026-08-16): WEB_SITE 그룹에 EXP_SEARCH 1건을 만들면 EXP_SEARCH 조회엔 1건,
+# KEYWORD_PLUS_RESTRICT 조회엔 0건. 계정 전수로는 723건 중 711건이 EXP_SEARCH였다.
+
+
+def test_get_restricted_keywords_unions_both_types():
+    """한 타입만 물으면 나머지가 «없는 것»이 된다 — 그게 711건 전맹의 기제였다."""
+    kp = [{"nccAdgroupRestrictKwdId": "rkw-kp", "keyword": "키워드확장제외", "type": "KEYWORD_PLUS_RESTRICT"}]
+    exp = [{"nccAdgroupRestrictKwdId": "rkw-exp", "keyword": "확장검색제외", "type": "EXP_SEARCH"}]
+
+    with patch.object(writer.fetcher, "_get",
+                      side_effect=[_restricted_kwds_resp(kp), _restricted_kwds_resp(exp)]) as mock_get:
+        out = writer.get_restricted_keywords(ADGROUP_ID)
+
+    assert [r["keyword"] for r in out] == ["키워드확장제외", "확장검색제외"]
+    asked = [c.args[1]["type"] for c in mock_get.call_args_list]
+    assert asked == ["KEYWORD_PLUS_RESTRICT", "EXP_SEARCH"]
+
+
+def test_get_restricted_keywords_stamps_missing_type():
+    """행에 type이 없으면 조회한 타입으로 채운다 — 나중에 «어느 목록에서» 지울지가 그 값에 달렸다."""
+    with patch.object(writer.fetcher, "_get",
+                      side_effect=[_restricted_kwds_resp([{"keyword": "타입없는행"}]), NO_EXP]):
+        out = writer.get_restricted_keywords(ADGROUP_ID)
+
+    assert out[0]["type"] == "KEYWORD_PLUS_RESTRICT"
+
+
+def test_get_restricted_keywords_second_type_failure_raises_not_partial():
+    """★fail-closed: 두 번째 타입 조회가 죽으면 **부분 union을 성공으로 돌려주지 않는다.**
+    부분 목록은 「없다」와 구분되지 않고, 생존감시는 그걸 「제외가 사라졌다」로 읽는다
+    (D-NAO-174가 정확히 그 결함으로 P1을 맞았다)."""
+    with patch.object(writer.fetcher, "_get",
+                      side_effect=[_restricted_kwds_resp([{"keyword": "살아있는제외"}]), FakeResp(500, "boom")]):
+        with pytest.raises(RuntimeError):
+            writer.get_restricted_keywords(ADGROUP_ID)
+
+
+def test_add_duplicate_guard_sees_keyword_registered_as_exp_search():
+    """이미 EXP_SEARCH로 걸려 있는 키워드를 다시 등록하려 하면 중복 가드가 잡아야 한다.
+    종전엔 KEYWORD_PLUS_RESTRICT만 봐서 «없다»로 통과했다."""
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        WEB_SITE_ADGROUP,
+        _restricted_kwds_resp([]),                                    # KEYWORD_PLUS: 없음
+        _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-e",
+                                "keyword": "테스트제외어", "type": "EXP_SEARCH"}]),
+    ]), patch.object(writer.requests, "post") as mock_post:
+        with pytest.raises(WriteValidationError):
+            writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
+
+    mock_post.assert_not_called()
+
+
+def test_fetcher_restricted_count_sums_both_types():
+    """★두 번째 하드코딩 지점 — `naver_sa_ad_fetcher`는 writer를 import하지 않으려고 같은 상수를
+    **따로** 들고 있었다(BM 단일 책임). 그래서 writer만 고치면 BM deep 차원은 조용히 옛 숫자를
+    센다. 값이 갈라지는 곳은 한 번에 같이 본다."""
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, [{"keyword": "a"}]),
+        FakeResp(200, [{"keyword": "b"}, {"keyword": "c"}]),
+    ]) as mock_get:
+        assert writer.fetcher.get_restricted_keyword_count(ADGROUP_ID) == 3
+
+    assert [c.args[1]["type"] for c in mock_get.call_args_list] == [
+        "KEYWORD_PLUS_RESTRICT", "EXP_SEARCH",
+    ]
+
+
+def test_fetcher_restricted_count_raises_on_partial_failure():
+    """부분합을 숫자로 돌려주지 않는다 — 숫자는 «모름»을 표현할 수 없다."""
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, [{"keyword": "a"}]), FakeResp(500, "boom"),
+    ]):
+        with pytest.raises(RuntimeError):
+            writer.fetcher.get_restricted_keyword_count(ADGROUP_ID)
+
+
+def test_delete_accepts_id_registered_as_exp_search():
+    """EXP_SEARCH로 등록된 제외도 id가 before union에 있으니 삭제가 진행된다
+    (종전엔 before에서 못 찾아 stale id로 오인해 거부했다)."""
+    delete_resp = FakeResp(204, None)
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        _restricted_kwds_resp([]),                                    # before KEYWORD_PLUS
+        _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-e",
+                                "keyword": "확장검색제외", "type": "EXP_SEARCH"}]),
+        _restricted_kwds_resp([]), NO_EXP,                            # after 둘 다 비었다
+    ]), patch.object(writer.requests, "delete", return_value=delete_resp) as mock_delete:
+        result = writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-e"])
+
+    assert result.after == []
+    assert mock_delete.call_count == 1
 
 
 # ── X1b T1: update_keyword_bid / set_keyword_lock / set_adgroup_lock / set_campaign_lock ──
