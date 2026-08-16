@@ -5758,3 +5758,37 @@ D+2·D+3 재수집에서 그 검색어 행이 생겨도 다시 안 본다 — §
 **집행 지점**: `.like(` / `.ilike(`에 변수를 이어붙이는 곳은 `escape=` 인자가 있는지 본다 —
 `grep -n "\.i\?like(" backend/app | grep -v "escape="`. 없으면 그 매칭은 사용자 입력에
 무방비다.
+
+## #292 — 테스트 세션이 prod 세션보다 관대하면, 그 차이만큼 결함이 통과한다 (2026-08-16)
+
+로켓 「판매분석 push」가 2026-08-15 07:48 KST prod에서 HTTP 500으로 죽었다. 원인은
+`_observe_option_sku`의 「query로 존재 확인 → 없으면 `db.add()`」였다. 앱 세션은
+`autoflush=False`(`database.py:16`)라 query가 **미커밋 add()를 못 본다** — 브리지에 없는
+신규 `option_id`가 한 요청 안에서 두 날짜로 오면 INSERT가 두 번 쌓여
+`UNIQUE constraint failed`로 청크가 통째로 롤백된다.
+
+이 결함은 **새로 들어온 게 아니다.** 이 코드는 몇 달을 살아 있었고, 같은 결함이 이 repo에서
+이미 네 번 수리됐다(`returns_sync`의 `seen`, `rg_order_sync`의 `pending`,
+`vendor_item_sales_sync`, `ad_settings_diff`). 그런데도 이 파일만 안 잡힌 이유는 두 겹이다.
+
+**첫째, 방아쇠가 희귀했다.** 신규 옵션이 **하루만** 팔리면 배치에 1회만 등장해 무사하다.
+2026-08-05~13 신규 13건이 전부 그랬다. 이틀 이상 팔린 신규 옵션이 처음 나온 08-15에 터졌다.
+즉 이 결함은 「언제 터질지」가 데이터에 달려 있어 시간이 안전의 증거가 되지 못했다.
+
+**둘째 — 이쪽이 진짜다 — 테스트 픽스처가 prod와 다른 세션이었다.** `test_rocket_promo.py`의
+`db` 픽스처는 `sessionmaker(bind=engine)`, 즉 `autoflush=True`였다. 그러면 query가 미커밋
+add()를 **먼저 flush해서 보여주므로** 이 결함이 테스트에서만 무사히 통과한다. 63개 테스트가
+전부 초록이었고 그중엔 브리지 전용 클래스(`TestOptionSkuBridgeIsAccumulated`)도 있었다.
+픽스처를 `autoflush=False`로 바꾸자 새 재현 3종이 **prod와 같은 예외로** 죽었다.
+백엔드 테스트 205개 파일 중 158개는 이미 `autoflush=False`를 쓰고 있었다 — 규율은 있었고
+이 파일이 그 47개 예외에 있었을 뿐이다.
+
+**교훈**: 테스트 하네스가 프로덕션 런타임보다 **관대한 축**을 하나라도 가지면, 그 축에서
+생기는 결함은 테스트를 통과하는 게 아니라 **테스트에 보이지 않는다.** 커버리지·통과율은
+이 구멍을 표시하지 못한다 — 결함이 있는 경로를 실행하고도 초록이기 때문이다. 그리고 관대한
+축은 대개 «기본값을 안 적은 것»이라 diff에도 안 보인다.
+
+**집행 지점**: 테스트가 세션을 직접 만들면 prod 설정과 대조한다 —
+`for f in $(grep -rln "sessionmaker(" backend/tests); do grep -q autoflush "$f" || echo "$f"; done`
+(2026-08-16 실측 47건). 새 ingest·sync 테스트를 쓸 때 `sessionmaker(bind=engine)`만 적혀
+있으면 그 파일은 `autoflush=False` 결함을 원리적으로 못 잡는다.
