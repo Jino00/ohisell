@@ -256,21 +256,49 @@ def test_detect_preserves_console_registration_time_from_reg_tm(db, monkeypatch,
     assert row.excluded_at == NOW
 
 
-def test_detect_leaves_console_time_unknown_when_reg_tm_is_garbage(db, monkeypatch, powerlink_groups):
-    """못 읽은 시각을 «지금»으로 메우지 않는다 — 모르는 것을 아는 것으로 세지 않는다."""
+@pytest.mark.parametrize("reg_tm", [
+    "언제인지모름",                 # 파싱 불가
+    "2005-01-01T00:00:00.000Z",   # 연도 오타로 볼 만큼 과거(<2010)
+    "2026-08-12T00:00:00.000Z",   # NOW(2026-08-11 12:00) 기준 미래
+    "",                            # 값 없음
+])
+def test_detect_imports_even_when_reg_tm_is_unusable(db, monkeypatch, powerlink_groups, reg_tm):
+    """★시각은 모를 수 있어도 «제외가 있다»는 사실은 반드시 들어온다 (적대 리뷰 1R P1).
+
+    `console_excluded_at`은 보조 메타데이터인데, 그 한 칸의 이상값이 행 전체를 rejected로
+    만들면 그 키워드는 **매 스윕마다 같은 이유로 거부되어 영구히 원장 밖**에 남는다.
+    `regTm`은 API가 주는 고정값이라 사람이 고쳐 넣을 수도 없다.
+    """
     _spend(db, day=date(2026, 8, 5), cost=9_000)
     db.commit()
     from app.services.naver_ad import naver_sa_writer
 
     monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
         {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False,
-         "type": "EXP_SEARCH", "regTm": "언제인지모름"},
+         "type": "EXP_SEARCH", "regTm": reg_tm},
     ])
 
-    ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+    out = ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
 
+    assert out["imported"] == 1 and out["rejected"] == 0
     row = db.query(NaverSearchTermExclusion).one()
+    assert row.search_term == TERM
+    # 모르는 것을 «지금»으로 메우지 않는다 — 아는 값과 구분되지 않으면 아무도 되짚을 수 없다
     assert row.console_excluded_at is None
+
+
+def test_console_import_still_rejects_bad_time_from_a_human(db):
+    """사람 입력 경로는 여전히 거부한다 — 오타를 조용히 삼키면 사람이 고칠 기회가 사라진다.
+
+    같은 경계 규칙인데 처분이 다른 이유가 이것이다(입력원의 성격 차이). 두 테스트는 짝이다.
+    """
+    out = ste.import_console_exclusions(db, rows=[{
+        "campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM,
+        "console_excluded_at": "2005.01.01 00:00",
+    }], now=NOW)
+
+    assert out["rejected"] == 1 and out["imported"] == 0
+    assert "너무 과거" in out["results"][0]["reason"]
 
 
 def test_detect_reports_groups_that_returned_nothing(db, monkeypatch, powerlink_groups):

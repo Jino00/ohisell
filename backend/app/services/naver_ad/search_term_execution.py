@@ -106,21 +106,37 @@ _CONSOLE_DT_FUTURE_SLACK = timedelta(minutes=10)
 _CONSOLE_DT_MIN_YEAR = 2010
 
 
-def _parse_reg_tm(value: object) -> datetime | None:
-    """네이버 제외키워드 행의 `regTm`(UTC ISO, 예 `2026-07-14T03:59:54.000Z`) → tz-aware datetime.
+def _parse_reg_tm(value: object, *, now: datetime) -> datetime | None:
+    """네이버 제외키워드 행의 `regTm`(UTC ISO, 예 `2026-07-14T03:59:54.000Z`) → KST naive.
 
     ★이 값이 곧 «콘솔 등록시각»이다(D-NAO-179). 그래서 파워링크는 사람이 콘솔을 캡처하지
       않아도 `console_excluded_at`이 채워진다 — D-NAO-176이 「시점 미상」을 전제로 만들어졌던
       바로 그 칸이다.
-    tz-aware로 돌려주고 KST 정규화는 `_parse_console_excluded_at`에 맡긴다(시각 규칙의 단일 지점).
-    못 읽으면 **None(=모른다)** — 편입 시각으로 메우지 않는다. 그게 이 파일의 규율이다.
+
+    ★★**같은 규칙을 쓰되 처분이 다르다**(적대 리뷰 1R P1). 경계 판정은 아래
+      `_parse_console_excluded_at`에 그대로 위임한다(규칙을 두 벌로 만들지 않는다) — 다만
+      그쪽은 범위 밖 값을 `ExclusionInputError`로 **거부**하고 여기서는 **None(=모른다)**으로
+      낮춘다. 입력원의 성격이 다르기 때문이다:
+        · 사람이 콘솔 화면을 보고 옮겨 적는 값 → 오타면 그 행을 거부해 **고쳐 넣게** 해야 한다.
+        · API가 준 값 → 고쳐 넣을 사람이 없다. 거부하면 그 키워드는 **매 스윕마다 같은 이유로
+          거부되어 영구히 원장 밖**에 남는다. 보조 메타데이터 한 칸 때문에 「제외를 본다」는
+          1급 목표가 깨지는 것이다.
+      즉 **시각은 모를 수 있어도 «제외가 있다»는 사실 자체는 반드시 들어와야 한다.**
     """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
     except ValueError:
         log.warning("[제외발견] regTm을 못 읽었다(%r) — console_excluded_at은 미상으로 둔다", value)
+        return None
+    try:
+        return _parse_console_excluded_at(dt, now=now)
+    except ExclusionInputError as e:
+        log.warning(
+            "[제외발견] regTm이 범위 밖이다(%r: %s) — console_excluded_at은 미상으로 두고 편입은 계속한다",
+            value, e,
+        )
         return None
 
 
@@ -724,7 +740,7 @@ def detect_new_exclusions(
                 "adgroup_id": adgroup_id,
                 "search_term": term,
                 "restrict_kwd_id": entry.get("nccAdgroupRestrictKwdId"),
-                "console_excluded_at": _parse_reg_tm(entry.get("regTm")),
+                "console_excluded_at": _parse_reg_tm(entry.get("regTm"), now=now),
                 "note": (
                     "라이브 제외키워드 목록에 있는데 우리 원장에 없어 편입했다"
                     f" (type={entry.get('type') or '미상'})"
