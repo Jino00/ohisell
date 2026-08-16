@@ -299,11 +299,15 @@ def test_parse_coupon_usage_zero_is_kept():
 
 
 # ═══ ingest Harness (인메모리 SQLite) ═══
+# ★autoflush=False는 **prod 세션과 맞추려고** 있다(database.py:16), 편의가 아니다. 기본값(True)
+#   으로 두면 query가 미커밋 add()를 먼저 flush해 보여주므로 「query로 확인 → 없으면 add」 결함이
+#   테스트에서만 무사히 통과한다 — 2026-08-15 prod 500 사고(브리지 UNIQUE 위반)가 정확히 이 틈으로
+#   새어나갔다. 이 파일의 대상 코드는 그 세션에서 도는 것이므로 픽스처도 그 세션이어야 한다.
 @pytest.fixture
 def db():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
-    s = sessionmaker(bind=engine)()
+    s = sessionmaker(bind=engine, autoflush=False)()
     yield s
     s.close()
 
@@ -351,6 +355,52 @@ class TestOptionSkuBridgeIsAccumulated:
         for _ in range(3):
             sync.ingest_rocket_sales(db, "A01029796", _SALES_ROWS)
         assert db.query(CoupangRocketOptionSku).count() == 2
+
+    def test_신규옵션이_한_요청에_여러_날짜로_와도_브리지가_하나만_생긴다(self, db):
+        """2026-08-15 prod 500 재현 — 브리지에 없는 옵션이 **이틀 이상** 팔린 배치.
+
+        판매분석 한 요청은 옵션×날짜 격자라 같은 option_id가 날짜 수만큼 되풀이 등장한다.
+        세션이 autoflush=False라 query가 미커밋 add()를 못 보므로, per-run 캐시가 없으면
+        같은 option_id로 INSERT가 두 번 쌓여 commit에서
+        `UNIQUE constraint failed: coupang_rocket_option_sku.option_id` → 그 청크가 통째로
+        롤백된다(= 페처가 받는 HTTP 500). 신규 옵션이 하루만 팔리던 동안은 1회 등장이라
+        무사했고, 이틀짜리 신규 옵션이 처음 나온 2026-08-15 수집분에서 3번째 청크가 죽었다.
+        """
+        from app.models import CoupangRocketOptionSku
+        신규옵션_이틀치 = [
+            {"option_id": "95999000111", "sku_id": "70011122", "date": "2026-08-13",
+             "qty": 4, "revenue": "60000", "product_name": "오하이 신규 옵션"},
+            {"option_id": "95999000111", "sku_id": "70011122", "date": "2026-08-14",
+             "qty": 9, "revenue": "135000", "product_name": "오하이 신규 옵션"},
+        ]
+        out = sync.ingest_rocket_sales(db, "A01029796", 신규옵션_이틀치)
+        assert out["ingested"] == 2                      # 날짜 행은 둘 다 남고
+        assert db.query(CoupangRocketOptionSku).filter_by(
+            option_id="95999000111").count() == 1        # 브리지는 하나뿐이다
+
+    def test_신규옵션_여러개가_각각_여러_날짜로_와도_안전하다(self, db):
+        """한 배치에 이틀짜리 신규 옵션이 여럿이어도 각 옵션당 브리지 1행."""
+        from app.models import CoupangRocketOptionSku
+        rows = [
+            {"option_id": oid, "sku_id": f"7000{i}", "date": d, "qty": 1, "revenue": "1000"}
+            for i, oid in enumerate(("95999000111", "95999000222", "95999000333"))
+            for d in ("2026-08-13", "2026-08-14", "2026-08-15")
+        ]
+        sync.ingest_rocket_sales(db, "A01029796", rows)
+        assert db.query(CoupangRocketOptionSku).count() == 3
+        assert db.query(CoupangRocketSalesDaily).count() == 9
+
+    def test_같은_배치_안에서_sku가_바뀌면_그것도_잡는다(self, db):
+        """캐시가 «갱신 경로»를 건너뛰지 않는다 — 배치 안 변경도 경고+반영돼야 한다."""
+        from app.models import CoupangRocketOptionSku
+        sync.ingest_rocket_sales(db, "A01029796", [
+            {"option_id": "95999000444", "sku_id": "70044400", "date": "2026-08-13",
+             "qty": 1, "revenue": "1000"},
+            {"option_id": "95999000444", "sku_id": "70044499", "date": "2026-08-14",
+             "qty": 1, "revenue": "1000"},
+        ])
+        assert db.query(CoupangRocketOptionSku).filter_by(
+            option_id="95999000444").one().sku_id == "70044499"
 
     def test_sku가_실제로_바뀌면_갱신하고_경고한다(self, db, caplog):
         """불변이라던 전제가 깨진 것이므로 조용히 넘기면 안 된다(손익 귀속이 바뀐다)."""
