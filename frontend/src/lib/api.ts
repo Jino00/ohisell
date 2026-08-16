@@ -958,9 +958,23 @@ export interface SalesProductRow {
   conv_revenue: string; roas: string | null;
 }
 
-export function fetchSalesSummary(company: string, days: number): Promise<SalesSummary> {
+/** 쿠팡 운영 패널 매출 요약.
+ *
+ *  ★기간 규칙은 백엔드 `utils/date_range.py` 한 곳에 있다: **날짜 둘을 주면 그게 이기고**,
+ *  없으면 `days` 프리셋을 쓴다. 한쪽만 주면 400이므로 여기서도 **둘 다 있을 때만** 날짜로
+ *  보낸다 — 반쪽짜리 요청을 만들어 백엔드에 판정을 미루지 않는다.
+ *  (네이버 쪽 `fetchNaverSalesSummary`와 같은 모양이다 — 두 입구가 갈라지지 않게.) */
+export function fetchSalesSummary(
+  company: string,
+  days: number,
+  dateFrom?: string | null,
+  dateTo?: string | null,
+): Promise<SalesSummary> {
+  const q = dateFrom && dateTo
+    ? `date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`
+    : `days=${days}`;
   return fetchApi<SalesSummary>(
-    `/api/coupang/ops/sales-summary?company=${encodeURIComponent(company)}&days=${days}`
+    `/api/coupang/ops/sales-summary?company=${encodeURIComponent(company)}&${q}`
   );
 }
 
@@ -2224,8 +2238,16 @@ export interface NaverSalesProductRow {
   profit: string | null; profit_rate: string | null;
 }
 
-export function fetchNaverSalesSummary(days: number): Promise<NaverSalesSummary> {
-  return fetchApi<NaverSalesSummary>(`/api/naver/ops/sales-summary?days=${days}`);
+/** 기간 프리셋(days) 또는 임의 구간(dateFrom~dateTo). 둘 다 주면 **구간이 이긴다**(백엔드도 동일). */
+export function fetchNaverSalesSummary(
+  days: number,
+  dateFrom?: string | null,
+  dateTo?: string | null,
+): Promise<NaverSalesSummary> {
+  const q = dateFrom && dateTo
+    ? `date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`
+    : `days=${days}`;
+  return fetchApi<NaverSalesSummary>(`/api/naver/ops/sales-summary?${q}`);
 }
 
 // ── GFA(디스플레이) 광고비 현황·업로드 ───────────────────────────

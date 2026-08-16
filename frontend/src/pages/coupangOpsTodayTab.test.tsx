@@ -8,9 +8,10 @@
 //   컴포넌트 단위 테스트는 이 구멍을 못 본다 — 컴포넌트는 멀쩡하고 «안 부른 것»이 문제라서다.
 //   그래서 페이지를 통째로 그려서 확인한다.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { SalesSummary } from "../lib/api";
+import { kstDate } from "../lib/periodRange";
 
 const h = vi.hoisted(() => ({
   fetchSalesSummary: vi.fn(),
@@ -68,11 +69,31 @@ function renderPage() {
 describe("쿠팡 운영 패널 · 「오늘」 탭", () => {
   it("뺀 로켓배송(1P) 광고비가 화면에 남는다 — 빼는 탭에서 숨으면 은폐다", async () => {
     renderPage();
-    await waitFor(() => expect(h.fetchSalesSummary).toHaveBeenCalled());
+    // ★인자를 못박는다(적대 리뷰 1R P1-1). `toHaveBeenCalled()`만 보면 기본 기간이
+    //   7일→30일로 바뀌거나 from/to가 뒤바뀌어도 통과한다 — 실제로 변이 3종이 살아남았다.
+    await waitFor(() =>
+      expect(h.fetchSalesSummary).toHaveBeenCalledWith("ALL", 0, kstDate(-6), kstDate(0)));
     await waitFor(() => {
       expect(screen.getByText(/로켓배송\(1P\) 광고비/)).toBeTruthy();
     });
     expect(screen.getByText("536,212원")).toBeTruthy();
+  });
+
+  it("90일을 넘는 구간은 **요청 자체가 안 나간다** — 상한 배선까지 본다", async () => {
+    // ★적대 리뷰 3R 이월: 같은 결함(테스트가 라이브러리만 보고 배선은 안 봄)을 두 호출부 중
+    //   NaverOps만 덮었다. 「같은 모양이 두 번이면 개별 수리를 멈춘다」(교훈 #283)를 근거로
+    //   든 수정이 정작 절반이었다 — CoupangOps 쪽도 같은 방식으로 못박는다.
+    renderPage();
+    await waitFor(() => expect(h.fetchSalesSummary).toHaveBeenCalled());
+    const calls = h.fetchSalesSummary.mock.calls.length;
+
+    const [fromInput] = Array.from(
+      document.querySelectorAll<HTMLInputElement>('input[type="date"]'));
+    expect(fromInput).toBeTruthy();
+    fireEvent.change(fromInput, { target: { value: kstDate(-120) } });   // 121일 구간
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(h.fetchSalesSummary.mock.calls.length).toBe(calls);
   });
 
   it("판매유형 표가 이 탭에도 그려진다", async () => {

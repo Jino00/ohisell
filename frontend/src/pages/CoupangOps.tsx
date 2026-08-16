@@ -3,26 +3,17 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+import { customRangeError, kstDate, OPS_MAX_SPAN_DAYS } from "../lib/periodRange";
 import { fetchSalesSummary, getCoupangAdCostDaily, requestAdCostRefresh, getAdCostRefreshStatus, type SalesSummary, type SalesProductRow, type SalesSellTypeRow, type SalesSummaryData } from "../lib/api";
-
-// 오늘 날짜(KST) YYYY-MM-DD
-function isoKSTDate(): string {
-  const kst = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
 
 const COMPANIES = [
   { value: "ALL", label: "전체" },
   { value: "오픽스", label: "오픽스" },
   { value: "오하이테크", label: "오하이테크" },
 ];
-const PERIODS = [
-  { label: "오늘", days: 0 },
-  { label: "어제", days: 1 },
-  { label: "7일", days: 7 },
-  { label: "15일", days: 15 },
-  { label: "30일", days: 30 },
-];
+// ★「1년」은 넣지 않는다 — 백엔드(`utils/date_range.py`) 상한이 90일이라 누르는 즉시 400이다.
+const COUPANG_PERIOD_PRESETS: PeriodPreset[] = ["today", "yesterday", "7d", "15d", "30d", "90d"];
 const CHANNEL_TYPES = ["전체", "Wing", "로켓그로스", "로켓배송"] as const;
 type ChannelType = (typeof CHANNEL_TYPES)[number];
 type SortKey = "product_name" | "revenue" | "ad_spend" | "conv_revenue" | "roas" | "profit" | "profit_rate";
@@ -208,7 +199,14 @@ function SummaryCard({ label, value, sub }: { label: string; value: string; sub?
 
 export default function CoupangOps() {
   const [company, setCompany] = useState("ALL");
-  const [days, setDays] = useState(7);
+  // 기간은 **항상 날짜 두 개**다 — 프리셋 버튼은 그 두 칸을 채우는 단축키일 뿐이다.
+  // 종전 기본과 같은 최근 7일. 날짜 계산은 `kstDate`만 쓴다(타임존이 걸린 유일한 코드).
+  const [from, setFrom] = useState(() => kstDate(-6));
+  const [to, setTo] = useState(() => kstDate(0));
+  // 백엔드가 막는 입력은 프론트가 먼저 막는다(빈 칸·뒤집힘·미래).
+  // ★상한은 백엔드와 짝(90일) — 화면 note가 「최대 90일」이라 적어놓고 안 막으면
+  //   400 원문이 새고 표는 이전 구간 숫자를 그대로 보인다(적대 리뷰 1R P1-2).
+  const rangeError = customRangeError({ from, to }, undefined, OPS_MAX_SPAN_DAYS);
   const [channelFilter, setChannelFilter] = useState<ChannelType>("전체");
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("revenue");
@@ -288,7 +286,7 @@ export default function CoupangOps() {
   // 오늘 라이브 광고비(coupang_ad_cost_daily, Mac 페처가 채움) 로드.
   async function loadTodayAdCost() {
     try {
-      const today = isoKSTDate();
+      const today = kstDate(0);
       const { costs } = await getCoupangAdCostDaily(today, today);
       const total = costs.reduce((s, c) => s + (c.day_cost || 0), 0);
       setTodayAdCost(costs.length ? total : null);
@@ -349,7 +347,7 @@ export default function CoupangOps() {
       await triggerSync();
       setSyncMsg("동기화 완료");
       // 동기화가 2분+ 걸리므로 그 사이 바뀐 기간을 존중한다(클릭 시점 값이 아니라 현재 값).
-      await load(selRef.current.company, selRef.current.days);
+      await load(selRef.current.company, selRef.current.from, selRef.current.to);
       await loadAdCookieStatus();
       await loadTodayAdCost();
     } catch (e: any) {
@@ -362,13 +360,16 @@ export default function CoupangOps() {
   // 연달아 기간을 바꾸면 응답 도착 순서가 요청 순서와 다를 수 있다 → 마지막 요청만 반영.
   // 최소 노출 시간(MIN_BUSY_MS)을 채운 뒤 값을 갈아끼워, 그동안 옛 값은 흐린 채로 남긴다.
   const reqSeq = useRef(0);
-  const load = useCallback(async (c: string, d: number) => {
+  const load = useCallback(async (c: string, f: string, t: string) => {
+    // 잘못된 구간이면 요청 자체를 안 보낸다 — 조용히 보정하지 않고 화면이 말한다.
+    if (customRangeError({ from: f, to: t }, undefined, OPS_MAX_SPAN_DAYS)) return;
     const seq = ++reqSeq.current;
     const t0 = performance.now();
     setLoading(true);
     setError(null);
     try {
-      const r = await fetchSalesSummary(c, d);
+      // 기간은 날짜로만 보낸다 — `days`는 이제 이 화면에 없다(프리셋도 날짜를 채울 뿐).
+      const r = await fetchSalesSummary(c, 0, f, t);
       const rest = MIN_BUSY_MS - (performance.now() - t0);
       if (rest > 0) await new Promise((res) => setTimeout(res, rest));
       if (seq !== reqSeq.current) return;   // 더 최신 요청이 진행 중 — 이 응답은 버린다
@@ -387,10 +388,10 @@ export default function CoupangOps() {
   // 그 이펙트가 붙잡은 company·days는 **마운트 시점의 값**이다. 그 사이 사용자가 기간을
   // 바꾸면 2분 뒤에 옛 기간을 새로 요청해 화면을 되돌린다(스마트스토어에서 같은 기계가
   // 실제로 화면을 덮은 것을 2026-08-06 네트워크 로그로 확인했다).
-  const selRef = useRef({ company, days });
+  const selRef = useRef({ company, from, to });
   // 렌더 중 대입이 아니라 커밋 후에 갱신한다 — 동시성 렌더에서 **버려진 렌더의 값**이 ref에
   // 남을 수 있기 때문이다(적대 리뷰 P2). 이 ref를 읽는 쪽은 전부 커밋 이후에 도는 지연 콜백이다.
-  useEffect(() => { selRef.current = { company, days }; }, [company, days]);
+  useEffect(() => { selRef.current = { company, from, to }; }, [company, from, to]);
 
   // 페이지 접속 시 자동 sync → 완료 후 데이터 로드
   useEffect(() => {
@@ -401,7 +402,7 @@ export default function CoupangOps() {
       if (!cancelled) {
         setSyncing(false);
         // 마운트 시점이 아니라 **지금 선택된** 기간을 읽는다(위 selRef 주석 참조).
-        load(selRef.current.company, selRef.current.days);
+        load(selRef.current.company, selRef.current.from, selRef.current.to);
         loadAdCookieStatus();
         loadTodayAdCost();
       }
@@ -410,7 +411,7 @@ export default function CoupangOps() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // 마운트 1회만
 
-  useEffect(() => { load(company, days); }, [company, days, load]);
+  useEffect(() => { load(company, from, to); }, [company, from, to, load]);
 
   // 드롭다운 외부 클릭 시 닫기
   useEffect(() => {
@@ -575,21 +576,6 @@ export default function CoupangOps() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1">
-            {PERIODS.map((p) => (
-              <button
-                key={p.days}
-                // 같은 기간 재클릭도 재조회(실패 후 회복 경로). load는 현재 선택을 인자로 받는다.
-                onClick={() => { if (days === p.days) load(company, days); else setDays(p.days); }}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium ${
-                  days === p.days ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-              >
-                {loading && days === p.days && <Spinner className="w-3.5 h-3.5" />}
-                {p.label}
-              </button>
-            ))}
-          </div>
           <button
             onClick={syncNow}
             disabled={syncing}
@@ -630,6 +616,35 @@ export default function CoupangOps() {
             ※ 쿠팡 API 약 1~2시간 지연 발생 가능
           </span>
         </div>
+      </div>
+
+      {/* ── 기간 선택 ── 공용 `PeriodRangeBar`. 화면마다 날짜 UI를 따로 들면 곧 갈라지므로
+          같은 물건을 쓰고, **축 이름만** 이 화면이 정한다(여기는 「판매일」).
+          ★「오늘」을 고르면(=오늘~오늘) 백엔드가 `ad_ref_date`를 실어 주고 아래 요약이
+            「오늘」 전용 레이아웃으로 갈라진다 — 그 분기는 날짜가 정하지 이 바가 정하지 않는다. */}
+      <div className="mb-4">
+        <PeriodRangeBar
+          label="판매일"
+          from={from} to={to} onFrom={setFrom} onTo={setTo}
+          presets={COUPANG_PERIOD_PRESETS}
+          right={
+            /* 같은 기간을 다시 골라도 상태가 안 바뀌면 이펙트가 안 돈다 — 조회 실패 후
+               회복 수단이 사라지지 않게 «다시 조회»를 남긴다(종전엔 같은 버튼 재클릭이 그 역할). */
+            <button
+              onClick={() => load(company, from, to)}
+              disabled={loading || Boolean(rangeError)}
+              className="px-3 py-1.5 rounded text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-50 inline-flex items-center gap-1.5"
+            >
+              {loading && <Spinner className="w-3.5 h-3.5" />}
+              🔁 다시 조회
+            </button>
+          }
+          note={rangeError
+            ? <span className="font-medium text-red-600">
+                {rangeError} — 기간을 고칠 때까지 조회하지 않습니다
+              </span>
+            : <>기간은 <b>판매일(KST)</b> 기준이며 양끝을 포함합니다. 조회 구간은 최대 90일입니다.</>}
+        />
       </div>
 
       {/* ── 광고 쿠키 설정 패널 ── */}

@@ -5,6 +5,7 @@
 # 트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 → 라이브 호출은 서버에서만(로컬 403).
 from __future__ import annotations
 
+from app.utils.date_range import resolve_range
 from app.utils.kst import kst_now, kst_today
 import logging
 
@@ -502,14 +503,6 @@ def _vendor_to_channel(vendor_id: str) -> str:
 
 
 
-def _date_range(days: int) -> tuple[date, date]:
-    today = kst_today()
-    if days == 0:
-        return today, today                      # 오늘
-    if days == 1:
-        d = today - timedelta(days=1)
-        return d, d                              # 어제
-    return today - timedelta(days=days - 1), today
 
 
 def _f(v) -> Decimal:
@@ -591,14 +584,24 @@ def _rg_fulfillment_per_unit(
 def sales_summary(
     company: str = Query(default="ALL", description="오픽스 | 오하이테크 | ALL"),
     days: int = Query(default=7, ge=0, le=90),
+    # ★`Query(default=None)`을 쓰지 않는다 — 직접 호출 시 기본값이 `Query` 객체로 들어와
+    #   `is None` 판정이 빗나간다(naver_ops에서 실제로 기존 테스트가 그렇게 깨졌다).
+    date_from: str | None = None,   # YYYY-MM-DD. 주면 days를 무시한다
+    date_to: str | None = None,     # YYYY-MM-DD. date_from과 함께 준다
     db: Session = Depends(get_db),
 ):
     """쿠팡 채널 매출 현황 — 회사별·기간별·채널타입별 집계.
 
-    반환: summary(합계) + by_product(상품명별, channel_type 포함).
+    반환: summary(합계) + by_product(상품명별, channel_type 포함) + by_sell_type.
     광고비·광고전환매출은 coupang_ad_option_daily + coupang_product_item 조인.
+
+    기간은 `days` 프리셋 또는 `date_from`·`date_to` 임의 구간(후자 우선). 확정 구간은
+    응답 `period`에 실린다 — 화면이 그걸 보여줘야 «고른 기간»과 «계산된 기간»이 안 갈린다.
     """
-    dfrom, dto = _date_range(days)
+    dfrom, dto = resolve_range(days, date_from, date_to)
+    # ★「오늘」 판정은 **확정된 기간**으로 한다(`days == 0`이 아니라) — 날짜로 오늘~오늘을
+    #   고른 경우도 같은 축을 타야 하기 때문이다. 프리셋과 동치: days=0만 (오늘,오늘)이다.
+    is_today_only = (dfrom == dto == kst_today())
     start = datetime.combine(dfrom, time.min)
     end = datetime.combine(dto, time.max)
 
@@ -702,7 +705,7 @@ def sales_summary(
     #     2026-04-15~05-14 **30일 연속** 실재했다(3P/2P 행 0건).
     ad_dfrom, ad_dto = dfrom, dto
     ad_ref_date: str | None = None
-    if days == 0:
+    if is_today_only:
         latest_ad = (
             db.query(func.max(CoupangAdOptionDaily.report_date))
             .filter(*ad_scope_filter)
@@ -972,7 +975,7 @@ def sales_summary(
     # 일별 폴백분은 옵션 분해가 없어 판매유형으로 못 가른다 — 분해에 «미분류»로 따로 남긴다.
     ad_fallback_spend = _Z
     ad_fallback_conv = _Z
-    if days != 0 and company in ("ALL", "오픽스"):
+    if not is_today_only and company in ("ALL", "오픽스"):
         # ★scope 필터를 여기도 건다 — "그날 XLSX가 있나"의 답은 «우리가 실제로 쓰는 축에»
         #   있느냐여야 한다. Retail 행만 있는 날을 '있음'으로 세면 3P/2P 광고비가 0인 채로
         #   일별 폴백까지 막혀 그날 광고비가 통째로 사라진다.
@@ -1087,7 +1090,7 @@ def sales_summary(
     # 노출해 '실시간'으로 오인하지 않게 하고, '광고비 갱신' 버튼으로 재fetch하도록 안내한다.
     ad_today: Decimal | None = None
     ad_today_synced_at: str | None = None
-    if days == 0 and company in ("ALL", "오픽스"):
+    if is_today_only and company in ("ALL", "오픽스"):
         _today_rows = ad_cost_sync.get_ad_cost_range(db, dfrom, dto)
         ad_today = sum((Decimal(str(r["day_cost"])) for r in _today_rows), _Z)
         _synced = db.query(func.max(CoupangAdCostDaily.synced_at)).filter(
