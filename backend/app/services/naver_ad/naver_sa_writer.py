@@ -25,7 +25,14 @@ from app.services import naver_sa_ad_fetcher as fetcher
 
 log = logging.getLogger(__name__)
 
-_RESTRICT_TYPE = "KEYWORD_PLUS_RESTRICT"
+# ★타입은 «쓰는 것»과 «읽는 것»이 다르다 (D-NAO-179, 2026-08-16 라이브 실측).
+# 제외키워드 리소스에는 타입이 **둘** 있고(공식 스펙 AdgroupRestrictKwd.type enum), 둘은
+# **분리된 목록**이다 — EXP_SEARCH로 등록된 행은 type=KEYWORD_PLUS_RESTRICT 조회에 **안 잡힌다**
+# (대조군 실증: WEB_SITE 그룹에 EXP_SEARCH 1건 생성 → EXP_SEARCH 조회 1건 / KEYWORD_PLUS 조회 0건).
+# 그래서 한 타입만 묻는 것은 「없다」는 거짓말을 받는 것이다: 계정 전수 실측에서 우리가 보던
+# 제외는 723건 중 12건(1.7%)뿐이었고, 나머지 711건(64개 그룹)이 시야 밖에 있었다.
+_RESTRICT_TYPE = "KEYWORD_PLUS_RESTRICT"  # 우리가 **쓸 때** 쓰는 타입(효과 실증됨 — 일기 425)
+RESTRICT_TYPES = ("KEYWORD_PLUS_RESTRICT", "EXP_SEARCH")  # **읽을 때는 둘 다**
 
 
 class WriteError(Exception):
@@ -85,16 +92,37 @@ class WriteResult:
         )
 
 
-def get_restricted_keywords(adgroup_id: str) -> list[dict]:
-    """GET /ncc/adgroups/{adgroupId}/restricted-keywords — 현재 등록된 제외키워드 원본 JSON.
+def get_restricted_keywords(
+    adgroup_id: str, types: tuple[str, ...] = RESTRICT_TYPES
+) -> list[dict]:
+    """GET /ncc/adgroups/{adgroupId}/restricted-keywords — 등록된 제외키워드 원본 JSON **전 타입**.
 
-    writer의 before/after 재조회(검증)용 유일 소스(ref 27 §2-2·§5).
+    writer의 before/after 재조회(검증)용 유일 소스(ref 27 §2-2·§5)이자 생존감시·자동발견의
+    라이브 소스다.
+
+    ★타입별로 한 번씩 GET 해 **union**을 돌려준다(D-NAO-179). 한 타입만 물으면 다른 타입으로
+      등록된 제외가 «없는 것»이 되는데, 그 결과가 셋 다 나쁘다: ①생존감시가 멀쩡히 살아 있는
+      제외를 「사라졌다」로 본다 ②중복 가드가 이미 있는 키워드를 못 잡는다 ③삭제 대상 id를
+      before에서 못 찾아 거부한다.
+
+    각 행의 `type`은 응답에 실려 오지만, 없으면 조회한 타입으로 채운다 — 나중에 이 행을
+    **어느 목록에서** 지울지가 그 값에 달렸기 때문에 «모르는 type»을 만들지 않는다.
+
+    ★fail-closed: 한 타입이라도 조회에 실패하면 **예외를 그대로 올린다**(부분 union을 성공으로
+      돌려주지 않는다). 부분 목록은 「없다」와 구분되지 않고, 이 리포는 D-NAO-174에서 정확히
+      그 결함(모름을 0건으로 셈)으로 P1을 맞았다.
     """
-    resp = fetcher._get(
-        f"/ncc/adgroups/{adgroup_id}/restricted-keywords", {"type": _RESTRICT_TYPE}
-    )
-    resp.raise_for_status()
-    return resp.json()
+    rows: list[dict] = []
+    for typ in types:
+        resp = fetcher._get(
+            f"/ncc/adgroups/{adgroup_id}/restricted-keywords", {"type": typ}
+        )
+        resp.raise_for_status()
+        for row in resp.json():
+            if isinstance(row, dict) and not row.get("type"):
+                row["type"] = typ
+            rows.append(row)
+    return rows
 
 
 def _get_adgroup(adgroup_id: str) -> dict:

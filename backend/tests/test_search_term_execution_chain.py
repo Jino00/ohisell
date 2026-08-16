@@ -183,27 +183,122 @@ def test_re_exclusion_bumps_cycle_and_resets_live_state(db):
 
 
 def test_detect_finds_console_cuts_without_anyone_reporting_them(db, monkeypatch, powerlink_groups):
-    """★보고에 의존하지 않는 경로 — 사람이 콘솔에서 자르고 화면 보고를 잊어도 등록된다.
+    """★보고에 의존하지 않는 경로 — 사람이 콘솔에서 자르고 화면 보고를 잊어도 편입된다.
 
     이 리포는 이미 «보고에 없던 변경»에 당했다(대행사 되돌림 2건 중 1건은 change_log에 행조차
     없었다). 상태 대조가 사건 보고보다 튼튼하다는 같은 원리를 여기에도 쓴다.
+
+    ★D-NAO-179로 **문이 바뀌었다**: 편입은 `source='console_import'`(일기 없음)로 간다.
+      여기 걸리는 행은 정의상 «우리가 한 조치가 아니다».
     """
     _spend(db, day=date(2026, 8, 5), cost=9_000)
     db.commit()
     from app.services.naver_ad import naver_sa_writer
 
     monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
-        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False},
+        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": "2026-07-14T03:59:54.000Z"},
         {"nccAdgroupRestrictKwdId": "rst-2", "keyword": "이미지워진것", "delFlag": True},
     ])
 
     out = ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
 
-    assert len(out["recorded"]) == 1, "delFlag 행은 등록하지 않는다"
+    assert len(out["recorded"]) == 1, "delFlag 행은 편입하지 않는다"
+    assert out["imported"] == 1
     row = db.query(NaverSearchTermExclusion).one()
     assert row.search_term == TERM and row.restrict_kwd_id == "rst-1"
-    assert db.query(OpsDiaryEntry).count() == 1
-    assert "라이브 대조가 발견" in db.query(OpsDiaryEntry).one().rationale
+    assert row.source == ste.CONSOLE_IMPORT_SOURCE
+
+
+def test_detect_never_writes_a_diary_entry(db, monkeypatch, powerlink_groups):
+    """★남이 과거에 자른 것을 「오늘 우리가 한 조치」로 학습 사슬에 태우지 않는다 (D-NAO-179).
+
+    종전 경로(`record_execution(discovered=True)`)는 원장과 함께 diary `execute` 행을 만들었다.
+    읽기가 두 타입 union으로 넓어지면(EXP_SEARCH 711건) 그 문으로 수백 건이 쏟아지고,
+    D-NAO-176이 이미 적어 둔 그대로 **진짜 표본 1건이 쓰레기 수백 건에 익사한다.**
+    """
+    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    db.commit()
+    from app.services.naver_ad import naver_sa_writer
+
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
+        {"nccAdgroupRestrictKwdId": f"rst-{i}", "keyword": f"남이자른것{i}", "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": "2025-04-30T05:43:10.000Z"}
+        for i in range(20)
+    ])
+
+    out = ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+
+    assert out["imported"] == 20
+    assert db.query(OpsDiaryEntry).count() == 0, "편입은 일기를 만들지 않는다"
+
+
+def test_detect_preserves_console_registration_time_from_reg_tm(db, monkeypatch, powerlink_groups):
+    """★`regTm`이 곧 콘솔 등록시각이다 — 파워링크는 사람이 캡처하지 않아도 시각이 채워진다.
+
+    D-NAO-176은 「시점 미상」을 전제로 이 칸을 만들었는데, API가 UTC로 그 값을 준다.
+    KST naive로 정규화돼 들어가야 한다(2026-07-14T03:59:54Z = 2026-07-14 12:59:54 KST).
+    """
+    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    db.commit()
+    from app.services.naver_ad import naver_sa_writer
+
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
+        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": "2026-07-14T03:59:54.000Z"},
+    ])
+
+    ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.console_excluded_at == datetime(2026, 7, 14, 12, 59, 54)
+    # 편입 시각으로 메우지 않는다 — 두 칸은 뜻이 다르다(D-NAO-177)
+    assert row.excluded_at == NOW
+
+
+@pytest.mark.parametrize("reg_tm", [
+    "언제인지모름",                 # 파싱 불가
+    "2005-01-01T00:00:00.000Z",   # 연도 오타로 볼 만큼 과거(<2010)
+    "2026-08-12T00:00:00.000Z",   # NOW(2026-08-11 12:00) 기준 미래
+    "",                            # 값 없음
+])
+def test_detect_imports_even_when_reg_tm_is_unusable(db, monkeypatch, powerlink_groups, reg_tm):
+    """★시각은 모를 수 있어도 «제외가 있다»는 사실은 반드시 들어온다 (적대 리뷰 1R P1).
+
+    `console_excluded_at`은 보조 메타데이터인데, 그 한 칸의 이상값이 행 전체를 rejected로
+    만들면 그 키워드는 **매 스윕마다 같은 이유로 거부되어 영구히 원장 밖**에 남는다.
+    `regTm`은 API가 주는 고정값이라 사람이 고쳐 넣을 수도 없다.
+    """
+    _spend(db, day=date(2026, 8, 5), cost=9_000)
+    db.commit()
+    from app.services.naver_ad import naver_sa_writer
+
+    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords", lambda a: [
+        {"nccAdgroupRestrictKwdId": "rst-1", "keyword": TERM, "delFlag": False,
+         "type": "EXP_SEARCH", "regTm": reg_tm},
+    ])
+
+    out = ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+
+    assert out["imported"] == 1 and out["rejected"] == 0
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.search_term == TERM
+    # 모르는 것을 «지금»으로 메우지 않는다 — 아는 값과 구분되지 않으면 아무도 되짚을 수 없다
+    assert row.console_excluded_at is None
+
+
+def test_console_import_still_rejects_bad_time_from_a_human(db):
+    """사람 입력 경로는 여전히 거부한다 — 오타를 조용히 삼키면 사람이 고칠 기회가 사라진다.
+
+    같은 경계 규칙인데 처분이 다른 이유가 이것이다(입력원의 성격 차이). 두 테스트는 짝이다.
+    """
+    out = ste.import_console_exclusions(db, rows=[{
+        "campaign_id": CAMPAIGN, "adgroup_id": ADGROUP, "search_term": TERM,
+        "console_excluded_at": "2005.01.01 00:00",
+    }], now=NOW)
+
+    assert out["rejected"] == 1 and out["imported"] == 0
+    assert "너무 과거" in out["results"][0]["reason"]
 
 
 def test_detect_reports_groups_that_returned_nothing(db, monkeypatch, powerlink_groups):

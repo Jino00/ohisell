@@ -915,11 +915,14 @@ def get_ads(adgroup_id: str) -> list[dict]:
 # 둘 다 읽기 전용(GET만). SA-1(bm_snapshot)이 실행 손(naver_sa_writer/naver_execution_harness)을
 # import하지 않고도 같은 엔드포인트를 쓸 수 있도록 이 순수 GET fetcher에 독립 구현한다
 # (§0 금지선 1 — BM은 실행 손을 import조차 하지 않는다, 원칙18-1 단일 책임).
-_RESTRICT_TYPE = "KEYWORD_PLUS_RESTRICT"  # naver_sa_writer._RESTRICT_TYPE과 동일 값(ref 27 §2-2)
+# ★타입이 둘이고 둘은 분리된 목록이다(D-NAO-179 라이브 실측) — naver_sa_writer.RESTRICT_TYPES와
+# 동일 값. 값이 갈라지면 BM deep 차원만 조용히 옛 숫자를 세게 되므로, 바꿀 땐 양쪽을 같이 본다
+# (import로 묶지 않는 이유는 §0 금지선 1 — BM은 실행 손을 import조차 하지 않는다).
+_RESTRICT_TYPES = ("KEYWORD_PLUS_RESTRICT", "EXP_SEARCH")
 
 
 def get_restricted_keyword_count(adgroup_id: str) -> int:
-    """그룹의 제외키워드(KEYWORD_PLUS_RESTRICT) 등록 수. GET /ncc/adgroups/{id}/restricted-keywords.
+    """그룹의 제외키워드 등록 수(**두 타입 합**). GET /ncc/adgroups/{id}/restricted-keywords.
 
     엔드포인트·파라미터 실측 근거: naver_sa_writer.get_restricted_keywords(그 함수가 쓰기
     재조회 검증에 쓰는 바로 그 GET, ref 27 §2-2)와 동일 경로 — 여기선 개수만 필요해 응답
@@ -927,10 +930,18 @@ def get_restricted_keyword_count(adgroup_id: str) -> int:
     WEB_SITE(파워링크) 광고그룹 전용 API(naver_execution_harness §실측-0 — SHOPPING은 HTTP 400
     code 3728). 호출측(bm_snapshot.update_deep_dimensions)이 campaign_type=WEB_SITE인 그룹만
     호출해 불필요한 400을 피한다.
+
+    ★두 타입을 각각 세어 더한다(D-NAO-179). 종전엔 KEYWORD_PLUS_RESTRICT만 세어 계정 전수
+      723건 중 12건만 보고 있었다 — deep 차원의 `제외키워드` 수가 사실상 항상 0이었다는 뜻이고,
+      그러면 경쟁사 대비 diff가 «변화 없음»으로 고정된다.
+      한 타입이라도 실패하면 예외를 그대로 올린다(부분합을 숫자로 돌려주지 않는다 — fail-closed).
     """
-    resp = _get(f"/ncc/adgroups/{adgroup_id}/restricted-keywords", {"type": _RESTRICT_TYPE})
-    resp.raise_for_status()
-    return len(resp.json())
+    total = 0
+    for typ in _RESTRICT_TYPES:
+        resp = _get(f"/ncc/adgroups/{adgroup_id}/restricted-keywords", {"type": typ})
+        resp.raise_for_status()
+        total += len(resp.json())
+    return total
 
 
 def get_ad_count(adgroup_id: str) -> int:
