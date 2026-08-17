@@ -1,0 +1,255 @@
+adgroup_id,adgroup_name,campaign_name,campaign_type,parsed_model,matched_json_model,launch_kr,preorder_kr,announce_kr,source_tier,match_confidence,model_known,cost_365d,golf_flag
+grp-a001-01-000000031186688,02. 아이폰12,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,40180,False
+grp-a001-01-000000038737184,02. 아이폰13,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,165270,False
+grp-a001-01-000000038737213,02. 아이폰14,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,129300,False
+grp-a001-01-000000038769329,02. 아이폰12,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,20740,False
+grp-a001-01-000000038769330,02. 아이폰13,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,40780,False
+grp-a001-01-000000038769331,02. 아이폰14,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,54490,False
+grp-a001-01-000000038934985,02. 아이패드_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:generic_gen_unknown,,,,,,unresolved,True,485280,False
+grp-a001-01-000000038934999,02. 아이패드_종이질감,○ 02. 파워링크_PC,WEB_SITE,ipad:generic_gen_unknown,,,,,,unresolved,True,131580,False
+grp-a001-01-000000038935115,01. 갤럭시탭_종이필름,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,48410,False
+grp-a001-01-000000040211251,01. 갤럭시_S22/S21/S20/노트20_사생활보호,○ 02. 파워링크_MO,WEB_SITE,note:노트20,,,,,,unresolved,True,70020,False
+grp-a001-01-000000045692018,01. 갤럭시 Z폴드SE_지문방지필름,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,28670,False
+grp-a001-01-000000045694026,01. 갤럭시 Z폴드SE_지문방지필름,○ 02. 파워링크_PC,WEB_SITE,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,10980,False
+grp-a001-01-000000046416698,01. 종이질감_K10 플러스,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,40378,False
+grp-a001-01-000000046416699,01. 종이질감_K11 LTE,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,200787,False
+grp-a001-01-000000046416701,01. 종이질감_K13 OLED,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,72988,False
+grp-a001-01-000000046416702,01. 종이질감_P11/GS10/RS10/10,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,32435,False
+grp-a001-01-000000046507364,01. 갤럭시탭_S7시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,99230,False
+grp-a001-01-000000046581751,01. 갤럭시탭_S6시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,73460,False
+grp-a001-01-000000046584475,01. 갤럭시탭_A9,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,27820,False
+grp-a001-01-000000046585858,01. 갤럭시탭_A8,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,20580,False
+grp-a001-01-000000046646662,01. 갤럭시S21,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,82739,False
+grp-a001-01-000000046646763,01. 갤럭시S20,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,102720,False
+grp-a001-01-000000046742693,01. 갤럭시 노트20,○ 02. 파워링크_MO,WEB_SITE,note:노트20,,,,,,unresolved,True,126560,False
+grp-a001-01-000000046834534,01. 갤럭시탭_S5시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,8640,False
+grp-a001-01-000000046835241,01. 갤럭시탭_A7,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,17941,False
+grp-a001-01-000000046838157,01. 갤럭시탭_S7시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,11780,False
+grp-a001-01-000000046838297,01. 갤럭시탭_S6시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,7870,False
+grp-a001-01-000000046838896,01. 갤럭시탭_S5시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,540,False
+grp-a001-01-000000046839232,01. 갤럭시탭_A9,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,12630,False
+grp-a001-01-000000046939809,01. 갤럭시탭_S7 시리즈_6H BLC,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,11880,False
+grp-a001-01-000000046954978,01. 갤럭시S21_사생활보호,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,118500,False
+grp-a001-01-000000046962945,02. 아이폰14_사생활 강화유리,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,46690,False
+grp-a001-01-000000046970893,02.아이패드_에어 4/5세대_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,15170,False
+grp-a001-01-000000046971480,02.아이패드_에어 4/5세대_종이질감,○ 02. 파워링크_PC,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,7070,False
+grp-a001-01-000000046973844,02.아이패드_에어 4/5세대_6H BLC,○ 02. 파워링크_MO,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,11390,False
+grp-a001-01-000000046975770,01. 갤럭시탭_S7 시리즈_6H BLC,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,990,False
+grp-a001-01-000000046976135,02.아이패드_에어 4/5세대_6H BLC,○ 02. 파워링크_PC,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,1390,False
+grp-a001-01-000000046980878,01. 갤럭시S21_지문방지,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,115740,False
+grp-a001-01-000000049865057,"01. 갤럭시 플립1,2",○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:1-2,,,,,,unresolved,True,28280,False
+grp-a001-01-000000058445222,14. 트라이폴드,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,52700,False
+grp-a001-01-000000058445534,14. 트라이폴드,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,19460,False
+grp-a001-01-000000059039599,00. 아이폰SE2 SE3,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_SE2,,,,,,unresolved,True,4670,False
+grp-a001-01-000000059040364,00. 아이폰SE2 SE3,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_SE2,,,,,,unresolved,True,13020,False
+grp-a001-01-000000060481584,S23FE_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23FE_unresolved,,,,,,unresolved,True,26906,False
+grp-a001-01-000000060481588,S21_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,58659,False
+grp-a001-01-000000060481589,S21플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,68390,False
+grp-a001-01-000000060481590,S21울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,142049,False
+grp-a001-01-000000060481591,S20플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,66311,False
+grp-a001-01-000000060489568,S20_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,67692,False
+grp-a001-01-000000060489686,S20울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,67950,False
+grp-a001-01-000000060489687,S20FE_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,28126,False
+grp-a001-01-000000060530499,S25FE_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25FE_unresolved,,,,,,unresolved,True,192263,False
+grp-a001-01-000000060531067,플립1_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:1-2,,,,,,unresolved,True,13453,False
+grp-a001-01-000000060531082,플립2_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:1-2,,,,,,unresolved,True,25836,False
+grp-a001-01-000000060548659,폴드2_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:1-2,,,,,,unresolved,True,77048,False
+grp-a001-01-000000060554861,폴드SE_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,124972,False
+grp-a001-01-000000060604009,아이폰12_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,2874,False
+grp-a001-01-000000060604010,아이폰12미니_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,641,False
+grp-a001-01-000000060604011,아이폰12프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,33643,False
+grp-a001-01-000000060604013,아이폰12프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,13382,False
+grp-a001-01-000000060604014,아이폰13_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,143018,False
+grp-a001-01-000000060604015,아이폰13미니_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,187129,False
+grp-a001-01-000000060604017,아이폰13프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,70974,False
+grp-a001-01-000000060604019,아이폰13프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,48287,False
+grp-a001-01-000000060604020,아이폰14_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,28988,False
+grp-a001-01-000000060604022,아이폰14프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,124967,False
+grp-a001-01-000000060604025,아이폰14프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,44686,False
+grp-a001-01-000000060604027,아이폰14플러스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,3451,False
+grp-a001-01-000000060609365,노트8_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트8,,,,,,unresolved,True,25736,False
+grp-a001-01-000000060610033,노트9_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트9,,,,,,unresolved,True,78227,False
+grp-a001-01-000000060610036,노트10_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트10,,,,,,unresolved,True,67768,False
+grp-a001-01-000000060610039,노트10플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트10플러스,,,,,,unresolved,True,75008,False
+grp-a001-01-000000060612109,S10E_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,28729,False
+grp-a001-01-000000060612110,S10플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,28675,False
+grp-a001-01-000000060612113,A73_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A73,,,,,,unresolved,True,4792,False
+grp-a001-01-000000060612114,S10_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,74431,False
+grp-a001-01-000000060612115,S8_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,21669,False
+grp-a001-01-000000060612840,S9플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,15738,False
+grp-a001-01-000000060612841,S105G_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,30386,False
+grp-a001-01-000000060612842,S8플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,10454,False
+grp-a001-01-000000060612843,S9_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,29537,False
+grp-a001-01-000000060612964,노트20_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트20,,,,,,unresolved,True,158239,False
+grp-a001-01-000000060617381,노트20울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트20울트라,,,,,,unresolved,True,87125,False
+grp-a001-01-000000060763483,S21_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,74599,False
+grp-a001-01-000000060763875,노트20_사생활보호,○ 갤럭시 파워링크,WEB_SITE,note:노트20,,,,,,unresolved,True,97890,False
+grp-a001-01-000000060763877,S20_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,34842,False
+grp-a001-01-000000060764895,아이폰14_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,24442,False
+grp-a001-01-000000060765090,S20플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,23841,False
+grp-a001-01-000000060765091,S21플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,54430,False
+grp-a001-01-000000060765092,S21울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,39242,False
+grp-a001-01-000000060765094,S20울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,13084,False
+grp-a001-01-000000060796462,아이폰14프로맥스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,9532,False
+grp-a001-01-000000060796463,아이폰13_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,15336,False
+grp-a001-01-000000060796465,아이폰13프로맥스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,44585,False
+grp-a001-01-000000060796466,아이폰12프로맥스_사생활,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,4578,False
+grp-a001-01-000000060796467,아이폰14프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,104719,False
+grp-a001-01-000000060796549,아이폰14플러스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,51586,False
+grp-a001-01-000000060796550,아이폰13프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,26238,False
+grp-a001-01-000000060796551,아이폰13미니_사생활보호(품절),○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,5870,False
+grp-a001-01-000000060796552,아이폰12미니_사생활,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,980,False
+grp-a001-01-000000060796704,아이폰12_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,9825,False
+grp-a001-01-000000060796707,아이폰12프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,38505,False
+grp-a001-01-000000060809909,노트20울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,note:노트20울트라,,,,,,unresolved,True,62917,False
+grp-a001-01-000000060824084,종이질감필름_아이패드,○ 기타 파워링크,WEB_SITE,ipad:generic_gen_unknown,,,,,,unresolved,True,70129,False
+grp-a001-01-000000060824882,A7_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,29556,False
+grp-a001-01-000000060824932,A7라이트_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,27517,False
+grp-a001-01-000000060824935,A8(2022)_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,22284,False
+grp-a001-01-000000060825654,A9_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,20183,False
+grp-a001-01-000000060825655,S5e_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,23507,False
+grp-a001-01-000000060825656,S6라이트_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,97772,False
+grp-a001-01-000000060825657,S6_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,86738,False
+grp-a001-01-000000060825704,S7플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,70204,False
+grp-a001-01-000000060825705,S7_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,52279,False
+grp-a001-01-000000060825706,S7FE_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,68500,False
+grp-a001-01-000000060841560,에어4-5세대(10.9인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,619,False
+grp-a001-01-000000060841580,프로3-4-5세대(11인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro3-5,,,,,,unresolved,True,23493,False
+grp-a001-01-000000060841582,7-8-9세대(10.2인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:UNKNOWN_9,,,,,,unresolved,True,48039,False
+grp-a001-01-000000060841584,프로3-4-5세대(11인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro3-5,,,,,,unresolved,True,63058,False
+grp-a001-01-000000060842566,에어4-5세대(10.9인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,127992,False
+grp-a001-01-000000060843406,S7_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,12938,False
+grp-a001-01-000000060843407,S7플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,10955,False
+grp-a001-01-000000060843408,S7FE_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,13871,False
+grp-a001-01-000000060843409,A9_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,16866,False
+grp-a001-01-000000060868357,아이폰SE2_지문방지,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_SE2,,,,,,unresolved,True,83147,False
+grp-a001-01-000000060868358,아이폰SE3_지문방지,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_SE3,,,,,,unresolved,True,43736,False
+grp-a001-01-000000061883897,14프로_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,5176,False
+grp-a001-01-000000061883898,14프로맥스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,2028,False
+grp-a001-01-000000061883899,14_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,3690,False
+grp-a001-01-000000061883900,14플러스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,2810,False
+grp-a001-01-000000061883901,13프로_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,6190,False
+grp-a001-01-000000061883902,13프로맥스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,1860,False
+grp-a001-01-000000061883903,13_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,840,False
+grp-a001-01-000000061883904,13미니_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,3330,False
+grp-a001-01-000000061924085,13_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,860,False
+grp-a001-01-000000061924086,13미니_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,3780,False
+grp-a001-01-000000061924087,13프로_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,1245,False
+grp-a001-01-000000061924088,13프로맥스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,490,False
+grp-a001-01-000000061924089,14_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,470,False
+grp-a001-01-000000061924090,14프로_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,2800,False
+grp-a001-01-000000061924091,14프로맥스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,0,False
+grp-a001-01-000000061924092,14플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,500,False
+grp-a001-01-000000061924194,노트20_일(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,note:노트20,,,,,,unresolved,True,260,False
+grp-a001-01-000000061924195,노트20울트라_일(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,note:노트20울트라,,,,,,unresolved,True,420,False
+grp-a001-02-000000044299892,02. S23FE,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_s:S23FE_unresolved,,,,,,unresolved,True,1547302,False
+grp-a001-02-000000044299955,03. S20FE,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,622096,False
+grp-a001-02-000000044300450,06. 53/A73,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A73,,,,,,unresolved,True,339519,False
+grp-a001-02-000000044565865,버디필름,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_a:budi_unresolved,,,,,,unresolved,True,25563,False
+grp-a001-02-000000044601555,14프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,1580027,False
+grp-a001-02-000000044603941,12프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,691058,False
+grp-a001-02-000000044603942,13프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,940874,False
+grp-a001-02-000000044743917,05. 아이폰14 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,154853,False
+grp-a001-02-000000044743918,07. 아이폰12 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,374408,False
+grp-a001-02-000000044743919,06. 아이폰13 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,111189,False
+grp-a001-02-000000044744110,09. 아이폰X 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_X,,,,,,unresolved,True,615329,False
+grp-a001-02-000000044744111,08. 아이폰11 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_11,,,,,,unresolved,True,570392,False
+grp-a001-02-000000044744526,10. 아이폰 SE2/SE3,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_SE2,,,,,,unresolved,True,368344,False
+grp-a001-02-000000044952305,01. 갤럭시탭_종이질감_BULK,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,18409,False
+grp-a001-02-000000045023176,S20울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,633911,False
+grp-a001-02-000000045023177,S21울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,1379769,False
+grp-a001-02-000000045023993,S105G,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,645758,False
+grp-a001-02-000000045025481,노트9,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트9,,,,,,unresolved,True,971206,False
+grp-a001-02-000000045025482,노트10,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트10,,,,,,unresolved,True,185190,False
+grp-a001-02-000000045025483,노트20,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트20,,,,,,unresolved,True,2674908,False
+grp-a001-02-000000045087060,01. 갤럭시탭S6_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,196800,False
+grp-a001-02-000000045087074,01. 갤럭시탭S5E_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,0,False
+grp-a001-02-000000045448738,09. Z플립1/2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:1-2,,,,,,unresolved,True,156817,False
+grp-a001-02-000000045448744,10. Z폴드2/3,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:1-2,,,,,,unresolved,True,235399,False
+grp-a001-02-000000045949118,01. 갤럭시탭A9시리즈_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,326968,False
+grp-a001-02-000000045949120,01. 갤럭시탭A7_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,0,False
+grp-a001-02-000000045949121,01. 갤럭시탭A7LITE_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,0,False
+grp-a001-02-000000046072554,04. 아이폰14,● 05. 아이폰_사생활보호,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,704835,False
+grp-a001-02-000000046074558,05. 아이폰13,● 05. 아이폰_사생활보호,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,452833,False
+grp-a001-02-000000046074559,06. 아이폰12,● 05. 아이폰_사생활보호,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,86438,False
+grp-a001-02-000000046126151,01. 아이패드에어_4-5세대_10.9인치,● 07. 아이패드_종이질감,SHOPPING,ipad:air5|ipad:air4,,,,,,unresolved,True,34775,False
+grp-a001-02-000000046126177,01. 아이패드프로_5세대_11인치,● 07. 아이패드_종이질감,SHOPPING,ipad:pro3-5,,,,,,unresolved,True,232340,False
+grp-a001-02-000000046126373,01. 아이패드7-8-9세대_10.2인치,● 07. 아이패드_종이질감,SHOPPING,ipad:UNKNOWN_9,,,,,,unresolved,True,256736,False
+grp-a001-02-000000046161215,01. 갤럭시탭S7_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,16135,False
+grp-a001-02-000000046223421,01. 갤럭시탭S7/FE/플러스_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,1266880,False
+grp-a001-02-000000046415318,01. 뮤패드_종이질감,● 13. 아이뮤즈_뮤패드,SHOPPING,mupad:generic,,,,,,unresolved,True,247087,False
+grp-a001-02-000000046415341,01. 뮤패드_지문방지,● 13. 아이뮤즈_뮤패드,SHOPPING,mupad:generic,,,,,,unresolved,True,152934,False
+grp-a001-02-000000046838302,01. 갤럭시탭A9/플러스_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,1470670,False
+grp-a001-02-000000046838304,01. 갤럭시탭A8_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,651465,False
+grp-a001-02-000000046838305,01. 갤럭시탭A7/라이트_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,324057,False
+grp-a001-02-000000047005364,01. 버디필름,● 09. 기타상품,SHOPPING,galaxy_a:budi_unresolved,,,,,,unresolved,True,5750687,False
+grp-a001-02-000000047076722,01. 아이패드에어4/5세대10.9인치,● 07. 아이패드_블루라이트,SHOPPING,ipad:air5|ipad:air4,,,,,,unresolved,True,516809,False
+grp-a001-02-000000047076797,01. 갤럭시탭S7시리즈,● 06. 갤럭시탭_6H_PET_BLC,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,1501002,False
+grp-a001-02-000000047485224,S25FE,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S25FE_unresolved,,,,,,unresolved,True,5914983,False
+grp-a001-02-000000051215431,04. 뮤패드_종이질감,● 09. 기타상품,SHOPPING,mupad:generic,,,,,,unresolved,True,180,False
+grp-a001-02-000000051215435,04. 뮤패드_지문방지,● 09. 기타상품,SHOPPING,mupad:generic,,,,,,unresolved,True,0,False
+grp-a001-02-000000052193613,03. 아이폰_13,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,92332,False
+grp-a001-02-000000052193617,04. 아이폰_14,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,563002,False
+grp-a001-02-000000053481831,02. 아이패드 789세대 10.2인치,● 14. 아이패드_지문방지,SHOPPING,ipad:generic_gen_unknown,,,,,,unresolved,True,53293,False
+grp-a001-02-000000053481936,04. 아이패드 프로 5세대 11인치,● 14. 아이패드_지문방지,SHOPPING,ipad:pro3-5,,,,,,unresolved,True,18950,False
+grp-a001-02-000000053482203,09. 아이패드 에어 45세대 10.9인치,● 14. 아이패드_지문방지,SHOPPING,ipad:air5|ipad:air4,,,,,,unresolved,True,326533,False
+grp-a001-02-000000054403336,11. 맥세이프거치대,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_11,,,,,,unresolved,True,210190,False
+grp-a001-02-000000054537533,노트20울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트20울트라,,,,,,unresolved,True,1559118,False
+grp-a001-02-000000055386434,12. 스트랩,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,30109,False
+grp-a001-02-000000058709325,"11. 아이폰7,8",● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_7,,,,,,unresolved,True,281887,False
+grp-a001-02-000000058709513,S8,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,309858,False
+grp-a001-02-000000058709674,S9,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,380477,False
+grp-a001-02-000000059252905,99. 플립2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:1-2,,,,,,unresolved,True,219452,False
+grp-a001-02-000000059812037,S20,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,439868,False
+grp-a001-02-000000059812606,노트20,● 01. 갤럭시_지문방지_사생활,SHOPPING,note:노트20,,,,,,unresolved,True,596010,False
+grp-a001-02-000000059817936,S21,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,161314,False
+grp-a001-02-000000059820953,S21,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,215691,False
+grp-a001-02-000000059820960,S21플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,175333,False
+grp-a001-02-000000059820987,S20,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,229833,False
+grp-a001-02-000000059820998,S20플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,116277,False
+grp-a001-02-000000059821015,S10,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,154271,False
+grp-a001-02-000000059821023,S10플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,311314,False
+grp-a001-02-000000059821034,S10E,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,243840,False
+grp-a001-02-000000059821054,S9플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,257199,False
+grp-a001-02-000000059821232,Z플립2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:1-2,,,,,,unresolved,True,122145,False
+grp-a001-02-000000059821852,Z폴드2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:1-2,,,,,,unresolved,True,285365,False
+grp-a001-02-000000059822246,S21울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,82412,False
+grp-a001-02-000000059822251,S20플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,350981,False
+grp-a001-02-000000059822273,S20울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,65517,False
+grp-a001-02-000000059822914,노트8,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트8,,,,,,unresolved,True,420773,False
+grp-a001-02-000000059823013,S21플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,235509,False
+grp-a001-02-000000059824059,노트20울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,note:노트20울트라,,,,,,unresolved,True,794733,False
+grp-a001-02-000000059826423,Z폴드SE,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,4069,False
+grp-a001-02-000000059826628,노트10플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트10플러스,,,,,,unresolved,True,35966,False
+grp-a001-02-000000059827298,S21,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,2630,False
+grp-a001-02-000000059829872,S21플러스,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,1000,False
+grp-a001-02-000000059829962,노트20,● 01. 갤럭시_지문방지_PET,SHOPPING,note:노트20,,,,,,unresolved,True,23196,False
+grp-a001-02-000000059830530,14프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,237697,False
+grp-a001-02-000000059830538,14,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,231092,False
+grp-a001-02-000000059830552,14플러스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,86474,False
+grp-a001-02-000000059832206,12프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,119599,False
+grp-a001-02-000000059832280,12,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,177828,False
+grp-a001-02-000000059832344,13프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,170952,False
+grp-a001-02-000000059832492,13,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,189598,False
+grp-a001-02-000000061693728,14프로_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,22140,False
+grp-a001-02-000000061693731,14프로맥스_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,26682,False
+grp-a001-02-000000061693735,14플러스_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,19960,False
+grp-a001-02-000000061693737,14_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,26050,False
+grp-a001-02-000000061693757,13프로_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,42384,False
+grp-a001-02-000000061693760,13프로맥스_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,28220,False
+grp-a001-02-000000061693771,13_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,15686,False
+grp-a001-02-000000061693781,13미니_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,48550,False
+grp-a001-02-000000061793448,노트20_맥,소다케이스_갤럭시,SHOPPING,note:노트20,,,,,,unresolved,True,15400,False
+grp-a001-02-000000061793457,노트20울트라_맥,소다케이스_갤럭시,SHOPPING,note:노트20울트라,,,,,,unresolved,True,9960,False
+grp-a001-02-000000061794086,12미니_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,3600,False
+grp-a001-02-000000061794093,12_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,6000,False
+grp-a001-02-000000061794099,12프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,0,False
+grp-a001-02-000000061794111,12프로_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,4800,False
+grp-a001-02-000000061794117,13미니_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,27014,False
+grp-a001-02-000000061794129,13_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,34391,False
+grp-a001-02-000000061794137,13프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,27657,False
+grp-a001-02-000000061794145,13프로_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,28910,False
+grp-a001-02-000000061794152,14_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,20750,False
+grp-a001-02-000000061794155,14플러스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,16947,False
+grp-a001-02-000000061794157,14프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,44850,False
+grp-a001-02-000000061794159,14프로_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,34150,False

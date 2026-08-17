@@ -1,0 +1,855 @@
+adgroup_id,adgroup_name,campaign_name,campaign_type,parsed_model,matched_json_model,launch_kr,preorder_kr,announce_kr,source_tier,match_confidence,model_known,cost_365d,golf_flag
+grp-a001-01-000000031116306,핸드폰필름,○ 00. 자사키워드,WEB_SITE,,,,,,,no_model,False,553593,False
+grp-a001-01-000000031175118,00. 지문방지필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,312020,False
+grp-a001-01-000000031176101,00. 강화유리필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,218882,False
+grp-a001-01-000000031176229,01. 갤럭시,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,133640,False
+grp-a001-01-000000031185769,00. 지문방지필름,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,82090,False
+grp-a001-01-000000031185770,00. 강화유리필름,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,20670,False
+grp-a001-01-000000031185773,01. 갤럭시,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,21620,False
+grp-a001-01-000000031186688,02. 아이폰12,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,40180,False
+grp-a001-01-000000032245671,01. 갤럭시S23,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,690520,False
+grp-a001-01-000000037423343,00. 일반필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,235400,False
+grp-a001-01-000000037423348,00. 사생활보호필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,478790,False
+grp-a001-01-000000037423351,아이폰17_맥세이프케이스,○ 02. 파워링크_MO,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,134220,False
+grp-a001-01-000000037423354,01. 갤럭시폴드6,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_fold:6,갤럭시 Z 폴드6,2024-07-19,2024-07-12,2024-07-10,official,exact,True,585524,False
+grp-a001-01-000000037423356,01. 갤럭시 플립6,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:6,갤럭시 Z 플립6,2024-07-19,2024-07-12,2024-07-10,official,exact,True,553480,False
+grp-a001-01-000000037423624,00. 일반필름,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,198842,False
+grp-a001-01-000000037423628,00. 사생활보호필름,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,53120,False
+grp-a001-01-000000037423635,01. 갤럭시폴드,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,238991,False
+grp-a001-01-000000037423636,01. 갤럭시플립,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,214612,False
+grp-a001-01-000000037840548,02. 아이폰15,○ 02. 파워링크_MO,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,178757,False
+grp-a001-01-000000037842041,02. 아이폰15,○ 02. 파워링크_PC,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,32651,False
+grp-a001-01-000000038737184,02. 아이폰13,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,165270,False
+grp-a001-01-000000038737213,02. 아이폰14,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,129300,False
+grp-a001-01-000000038737226,01. 갤럭시_이전기종,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,76090,False
+grp-a001-01-000000038769329,02. 아이폰12,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,20740,False
+grp-a001-01-000000038769330,02. 아이폰13,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,40780,False
+grp-a001-01-000000038769331,02. 아이폰14,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,54490,False
+grp-a001-01-000000038769333,02. 아이폰_이전기종,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,43680,False
+grp-a001-01-000000038934985,02. 아이패드_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:generic_gen_unknown,,,,,,unresolved,True,485280,False
+grp-a001-01-000000038934999,02. 아이패드_종이질감,○ 02. 파워링크_PC,WEB_SITE,ipad:generic_gen_unknown,,,,,,unresolved,True,131580,False
+grp-a001-01-000000038935115,01. 갤럭시탭_종이필름,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,48410,False
+grp-a001-01-000000040080458,01. 갤럭시S23_지문방지필름,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,145072,False
+grp-a001-01-000000040080459,01. 갤럭시S24,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,164810,False
+grp-a001-01-000000040173278,02. 아이폰15_강화유리,○ 02. 파워링크_MO,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,827484,False
+grp-a001-01-000000040173279,02. 아이폰15_사생활 강화유리,○ 02. 파워링크_MO,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,205340,False
+grp-a001-01-000000040173283,02. 아이폰15_지문방지,○ 02. 파워링크_MO,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,166856,False
+grp-a001-01-000000040173285,02. 아이폰15_강화유리,○ 02. 파워링크_PC,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,105050,False
+grp-a001-01-000000040173291,02. 아이폰_사생활보호,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,71250,False
+grp-a001-01-000000040173293,02. 아이폰15_지문방지,○ 02. 파워링크_PC,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,77661,False
+grp-a001-01-000000040189692,01. 갤럭시S24_사생활보호,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,185370,False
+grp-a001-01-000000040189693,01. 갤럭시S23_사생활보호,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,426247,False
+grp-a001-01-000000040189696,01. 갤럭시S_사생활보호,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,168200,False
+grp-a001-01-000000040211251,01. 갤럭시_S22/S21/S20/노트20_사생활보호,○ 02. 파워링크_MO,WEB_SITE,note:노트20,,,,,,unresolved,True,70020,False
+grp-a001-01-000000040284140,01. 갤럭시S24_강화유리,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,105290,False
+grp-a001-01-000000040284151,01. 갤럭시S24_강화유리,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,27920,False
+grp-a001-01-000000042724551,00. 태블릿_종이질감필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,35360,False
+grp-a001-01-000000042969517,55. 갤럭시워치 실리콘 스트랩,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,132360,False
+grp-a001-01-000000042969832,55. 갤럭시워치 스트랩,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,34664,False
+grp-a001-01-000000043502507,50. 골프 버디 필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,203170,True
+grp-a001-01-000000043935093,골프필름,○ 00. 자사키워드,WEB_SITE,,,,,,,no_model,False,44286,True
+grp-a001-01-000000044377702,37 LG_지문방지필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,10820,False
+grp-a001-01-000000044378320,37 LG_지문방지필름,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,6720,False
+grp-a001-01-000000044807690,02. 아이폰16_강화유리,○ 02. 파워링크_MO,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,1298350,False
+grp-a001-01-000000044807691,02. 아이폰16_지문방지,○ 02. 파워링크_MO,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,61070,False
+grp-a001-01-000000044808405,02. 아이폰16_사생활보호,○ 02. 파워링크_MO,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,204050,False
+grp-a001-01-000000044808498,02. 아이폰16_강화유리,○ 02. 파워링크_PC,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,190453,False
+grp-a001-01-000000044808499,02. 아이폰16_사생활보호,○ 02. 파워링크_PC,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,49740,False
+grp-a001-01-000000044808500,02. 아이폰16_지문방지,○ 02. 파워링크_PC,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,23860,False
+grp-a001-01-000000045692018,01. 갤럭시 Z폴드SE_지문방지필름,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,28670,False
+grp-a001-01-000000045694026,01. 갤럭시 Z폴드SE_지문방지필름,○ 02. 파워링크_PC,WEB_SITE,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,10980,False
+grp-a001-01-000000045800955,01. 갤럭시탭_S10 울트라 플러스,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,515720,False
+grp-a001-01-000000045802263,01. 갤럭시탭_S10울트라 플러스,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,161220,False
+grp-a001-01-000000045920162,01. 갤럭시S24FE_지문방지,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S24 FE,갤럭시 S24 FE,2024-11-01,,2024-09-26,press,exact,True,135660,False
+grp-a001-01-000000046127917,02.아이패드_미니7/6세대_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,66800,False
+grp-a001-01-000000046132066,02.아이패드_미니7/6세대_종이질감,○ 02. 파워링크_PC,WEB_SITE,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,15749,False
+grp-a001-01-000000046416698,01. 종이질감_K10 플러스,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,40378,False
+grp-a001-01-000000046416699,01. 종이질감_K11 LTE,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,200787,False
+grp-a001-01-000000046416701,01. 종이질감_K13 OLED,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,72988,False
+grp-a001-01-000000046416702,01. 종이질감_P11/GS10/RS10/10,○ 04. 뮤패드,WEB_SITE,mupad:generic,,,,,,unresolved,True,32435,False
+grp-a001-01-000000046436514,01. 갤럭시S24_자가복원 고투명,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,3720,False
+grp-a001-01-000000046475854,01. 갤럭시A16_지문방지,○ 02. 파워링크_MO,WEB_SITE,galaxy_a:A16,갤럭시 A16 LTE,2024-11-29,,2024-10-15,press,fuzzy,True,135600,False
+grp-a001-01-000000046477597,01. 갤럭시A16_지문방지,○ 02. 파워링크_PC,WEB_SITE,galaxy_a:A16,갤럭시 A16 LTE,2024-11-29,,2024-10-15,press,fuzzy,True,29350,False
+grp-a001-01-000000046478478,01. 갤럭시A16_자가복원 고투명,○ 02. 파워링크_MO,WEB_SITE,galaxy_a:A16,갤럭시 A16 LTE,2024-11-29,,2024-10-15,press,fuzzy,True,7040,False
+grp-a001-01-000000046480952,01. 갤럭시A16_자가복원 고투명,○ 02. 파워링크_PC,WEB_SITE,galaxy_a:A16,갤럭시 A16 LTE,2024-11-29,,2024-10-15,press,fuzzy,True,4900,False
+grp-a001-01-000000046483564,01. 갤럭시S24_지문방지,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,84070,False
+grp-a001-01-000000046507364,01. 갤럭시탭_S7시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,99230,False
+grp-a001-01-000000046578743,01. 갤럭시탭_S9시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,140190,False
+grp-a001-01-000000046579761,01. 갤럭시탭_S8시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,73244,False
+grp-a001-01-000000046581751,01. 갤럭시탭_S6시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,73460,False
+grp-a001-01-000000046583926,01. 갤럭시탭_A9플러스,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:A9+,갤럭시탭 A9+,2023-11-02,,2023-11-02,press,exact,True,46130,False
+grp-a001-01-000000046584475,01. 갤럭시탭_A9,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,27820,False
+grp-a001-01-000000046585858,01. 갤럭시탭_A8,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,20580,False
+grp-a001-01-000000046588417,01. 갤럭시탭_S9시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,26630,False
+grp-a001-01-000000046645092,01. 갤럭시S22,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,232770,False
+grp-a001-01-000000046646662,01. 갤럭시S21,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,82739,False
+grp-a001-01-000000046646763,01. 갤럭시S20,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,102720,False
+grp-a001-01-000000046742693,01. 갤럭시 노트20,○ 02. 파워링크_MO,WEB_SITE,note:노트20,,,,,,unresolved,True,126560,False
+grp-a001-01-000000046807499,"02.아이패드_프로 6,7세대_종이질감",○ 02. 파워링크_MO,WEB_SITE,ipad:pro6|ipad:pro7,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 7세대(11/13인치, M4)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,31180,False
+grp-a001-01-000000046834534,01. 갤럭시탭_S5시리즈,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,8640,False
+grp-a001-01-000000046835241,01. 갤럭시탭_A7,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,17941,False
+grp-a001-01-000000046835750,02.아이패드_에어 6(M2)세대_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:air6,"아이패드 에어 6세대(11/13인치, M2)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,84190,False
+grp-a001-01-000000046837921,01. 갤럭시탭_S8시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,20640,False
+grp-a001-01-000000046838157,01. 갤럭시탭_S7시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,11780,False
+grp-a001-01-000000046838297,01. 갤럭시탭_S6시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,7870,False
+grp-a001-01-000000046838896,01. 갤럭시탭_S5시리즈,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,540,False
+grp-a001-01-000000046839132,01. 갤럭시탭_A9플러스,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:A9+,갤럭시탭 A9+,2023-11-02,,2023-11-02,press,exact,True,14370,False
+grp-a001-01-000000046839232,01. 갤럭시탭_A9,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,12630,False
+grp-a001-01-000000046904555,01. 갤럭시탭_S10 울트라 플러스_6H BLC,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,27560,False
+grp-a001-01-000000046904979,01. 갤럭시탭_S9시리즈_6H BLC,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,39190,False
+grp-a001-01-000000046939750,01. 갤럭시탭_S8시리즈_6H BLC,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,24310,False
+grp-a001-01-000000046939809,01. 갤럭시탭_S7 시리즈_6H BLC,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,11880,False
+grp-a001-01-000000046954263,01. 갤럭시S22_사생활보호,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,179730,False
+grp-a001-01-000000046954978,01. 갤럭시S21_사생활보호,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,118500,False
+grp-a001-01-000000046962945,02. 아이폰14_사생활 강화유리,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,46690,False
+grp-a001-01-000000046970779,02.아이패드_미니7/6세대_6H BLC,○ 02. 파워링크_MO,WEB_SITE,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,2090,False
+grp-a001-01-000000046970893,02.아이패드_에어 4/5세대_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,15170,False
+grp-a001-01-000000046971358,02.아이패드_에어 6(M2)세대_종이질감,○ 02. 파워링크_PC,WEB_SITE,ipad:air6,"아이패드 에어 6세대(11/13인치, M2)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,26454,False
+grp-a001-01-000000046971480,02.아이패드_에어 4/5세대_종이질감,○ 02. 파워링크_PC,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,7070,False
+grp-a001-01-000000046971678,02.아이패드_미니7/6세대_6H BLC,○ 02. 파워링크_PC,WEB_SITE,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,3410,False
+grp-a001-01-000000046973844,02.아이패드_에어 4/5세대_6H BLC,○ 02. 파워링크_MO,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,11390,False
+grp-a001-01-000000046974236,02.아이패드_에어 6세대_6H BLC,○ 02. 파워링크_MO,WEB_SITE,ipad:air6,"아이패드 에어 6세대(11/13인치, M2)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,12080,False
+grp-a001-01-000000046975254,02.아이패드_프로 7세대_6H BLC,○ 02. 파워링크_MO,WEB_SITE,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,2860,False
+grp-a001-01-000000046975512,01. 갤럭시탭_S9시리즈_6H BLC,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,2970,False
+grp-a001-01-000000046975542,01. 갤럭시탭_S10 울트라 플러스_6H BLC,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,2980,False
+grp-a001-01-000000046975626,01. 갤럭시탭_S8시리즈_6H BLC,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,3730,False
+grp-a001-01-000000046975770,01. 갤럭시탭_S7 시리즈_6H BLC,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,990,False
+grp-a001-01-000000046976107,02.아이패드_에어 6세대_6H BLC,○ 02. 파워링크_PC,WEB_SITE,ipad:air6,"아이패드 에어 6세대(11/13인치, M2)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,160,False
+grp-a001-01-000000046976135,02.아이패드_에어 4/5세대_6H BLC,○ 02. 파워링크_PC,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,1390,False
+grp-a001-01-000000046976468,02.아이패드_10세대_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:10,아이패드 10세대(10.9인치),2022-11-30,2022-11-17,2022-10-18,press,exact,True,20728,False
+grp-a001-01-000000046977473,02.아이패드_10세대_6H BLC,○ 02. 파워링크_MO,WEB_SITE,ipad:10,아이패드 10세대(10.9인치),2022-11-30,2022-11-17,2022-10-18,press,exact,True,3030,False
+grp-a001-01-000000046978005,"02.아이패드_프로 6,7세대_종이질감",○ 02. 파워링크_PC,WEB_SITE,ipad:pro6|ipad:pro7,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 7세대(11/13인치, M4)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,47210,False
+grp-a001-01-000000046978099,02.아이패드_프로 7세대_6H BLC,○ 02. 파워링크_PC,WEB_SITE,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,1670,False
+grp-a001-01-000000046979820,01. 갤럭시S24FE_지문방지,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S24 FE,갤럭시 S24 FE,2024-11-01,,2024-09-26,press,exact,True,17700,False
+grp-a001-01-000000046980388,01. 갤럭시S22_지문방지필름,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,142136,False
+grp-a001-01-000000046980878,01. 갤럭시S21_지문방지,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,115740,False
+grp-a001-01-000000047003535,50. 도어락_사생활보호 지문방지,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,104270,False
+grp-a001-01-000000047003798,50. 도어락_사생활보호 지문방지,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,13710,False
+grp-a001-01-000000047075282,01. 갤럭시A55(퀀텀5) 35 25 15_지문방지,○ 02. 파워링크_MO,WEB_SITE,galaxy_a:A55,"갤럭시 A55 (국내명: 갤럭시 퀀텀5, SKT 단독)",2024-08-28,2024-08-23,2024-03-11,press,fuzzy,True,29280,False
+grp-a001-01-000000047076625,01. 갤럭시A54(퀀텀4) 34 24_지문방지,○ 02. 파워링크_MO,WEB_SITE,galaxy_a:A54,"갤럭시 A54 (국내명: 갤럭시 퀀텀4, SKT 단독)",2023-06-08,,2023-03,press,fuzzy,True,36510,False
+grp-a001-01-000000047162713,01. 갤럭시S24_6H 사생활보호 ,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,48423,False
+grp-a001-01-000000047166586,01. 갤럭시S24_6H 사생활보호,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,9988,False
+grp-a001-01-000000047485469,01. 갤럭시S25_지문방지TPU,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,1105630,False
+grp-a001-01-000000047485563,01. 갤럭시S25_지문방지TPU,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,272890,False
+grp-a001-01-000000047486489,01. 갤럭시S25_EZ강화유리,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,146480,False
+grp-a001-01-000000047486647,01. 갤럭시S25_EZ강화유리,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,61818,False
+grp-a001-01-000000047486686,01. 갤럭시S25_자가복원 고투명,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,8100,False
+grp-a001-01-000000047487792,01. 갤럭시S25_자가복원 고투명,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,790,False
+grp-a001-01-000000047488792,01. 갤럭시S25_사생활_TPU,○ 02. 파워링크_MO,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,116510,False
+grp-a001-01-000000047488926,01. 갤럭시S25_사생활_TPU,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,48669,False
+grp-a001-01-000000047489113,01. 갤럭시S25_6H 사생활보호,○ 02. 파워링크_PC,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,10150,False
+grp-a001-01-000000048499536,50. 골프버디필름,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,572000,True
+grp-a001-01-000000048499741,50. 골프버디필름,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,162770,True
+grp-a001-01-000000048564412,일미리케이스,○ 01. 자사몰,WEB_SITE,,,,,,,no_model,False,333587,False
+grp-a001-01-000000049350730,02.아이패드_에어_7세대_종이질감,○ 02. 파워링크_PC,WEB_SITE,ipad:air7,"아이패드 에어 7세대(11/13인치, M3)",2025-04-10,2025-04-03,2025-03-04,press,exact,True,3910,False
+grp-a001-01-000000049350994,02.아이패드_에어_7세대_종이질감,○ 02. 파워링크_MO,WEB_SITE,ipad:air7,"아이패드 에어 7세대(11/13인치, M3)",2025-04-10,2025-04-03,2025-03-04,press,exact,True,18010,False
+grp-a001-01-000000049354066,02.아이패드_에어_7세대_강화유리코팅,○ 02. 파워링크_MO,WEB_SITE,ipad:air7,"아이패드 에어 7세대(11/13인치, M3)",2025-04-10,2025-04-03,2025-03-04,press,exact,True,2130,False
+grp-a001-01-000000049354073,02.아이패드_에어_7세대_강화유리코팅,○ 02. 파워링크_PC,WEB_SITE,ipad:air7,"아이패드 에어 7세대(11/13인치, M3)",2025-04-10,2025-04-03,2025-03-04,press,exact,True,1030,False
+grp-a001-01-000000049549995,"02.아이패드_프로 6,7세대",○ 02. 파워링크_MO,WEB_SITE,ipad:pro6|ipad:pro7,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 7세대(11/13인치, M4)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,60530,False
+grp-a001-01-000000049863305,01. 갤럭시 플립5,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:5,갤럭시 Z 플립5,2023-08-12,2023-08-01,2023-07-26,press,exact,True,488530,False
+grp-a001-01-000000049864292,01. 갤럭시 플립4,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:4,갤럭시 Z 플립4,2022-08-26,2022-08-16,2022-08-10,official,exact,True,85470,False
+grp-a001-01-000000049865057,"01. 갤럭시 플립1,2",○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:1-2,,,,,,unresolved,True,28280,False
+grp-a001-01-000000049865502,01. 갤럭시 플립3~6힌지,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:3,갤럭시 Z 플립3,2021-08-27,2021-08-17,2021-08-11,official,exact,True,136940,False
+grp-a001-01-000000049866750,01. 갤럭시폴드3~6힌지필름,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_fold:3,갤럭시 Z 폴드3,2021-08-27,2021-08-17,2021-08-11,official,exact,True,148480,False
+grp-a001-01-000000050212614,00. 갤럭시s25엣지,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,113840,False
+grp-a001-01-000000050221991,00. 갤럭시s25엣지,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,27810,False
+grp-a001-01-000000050397977,00. 갤럭시s25엣지(사생활),○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,55530,False
+grp-a001-01-000000050409988,00. 갤럭시s25엣지(사생활),○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,6790,False
+grp-a001-01-000000051955092,02. 아이폰16e_지문방지,○ 02. 파워링크_MO,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,22606,False
+grp-a001-01-000000052182861,01. 갤럭시 플립7,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,1581083,False
+grp-a001-01-000000052225586,01. 갤럭시 플립7,○ 02. 파워링크_PC,WEB_SITE,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,357459,False
+grp-a001-01-000000052260531,01. 갤럭시 폴드7,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,1901329,False
+grp-a001-01-000000052263060,01. 갤럭시폴드7,○ 02. 파워링크_PC,WEB_SITE,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,336107,False
+grp-a001-01-000000052822167,00. 플립7 케이스,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,210830,False
+grp-a001-01-000000052822210,00. 폴드7 케이스,○ 02. 파워링크_MO,WEB_SITE,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,324970,False
+grp-a001-01-000000053177765,맥세이프카드지갑,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,144790,False
+grp-a001-01-000000053180338,맥세이프카드지갑,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,94340,False
+grp-a001-01-000000053266390,56. 방수팩,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,35438,False
+grp-a001-01-000000053273491,56. 방수팩,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,1350,False
+grp-a001-01-000000054203750,셀카봉,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,410702,False
+grp-a001-01-000000054212536,셀카봉,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,119519,False
+grp-a001-01-000000054403622,맥세이프거치대,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,39210,False
+grp-a001-01-000000054405090,맥세이프거치대,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,11270,False
+grp-a001-01-000000054618773,17 아이폰_맥세이프케이스,○ 02. 파워링크_PC,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,84703,False
+grp-a001-01-000000054664266,,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,0,False
+grp-a001-01-000000054666555,00. 아이폰17_사생활,○ 02. 파워링크_MO,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,410460,False
+grp-a001-01-000000054666566,00. 아이폰17_강화유리,○ 02. 파워링크_MO,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,982310,False
+grp-a001-01-000000054671417,00. 아이폰17_강화유리,○ 02. 파워링크_PC,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,400098,False
+grp-a001-01-000000054671419,00. 아이폰17_사생활,○ 02. 파워링크_PC,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,95030,False
+grp-a001-01-000000055142639,01. 갤럭시탭_S11,○ 02. 파워링크_MO,WEB_SITE,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,186005,False
+grp-a001-01-000000055151707,01. 갤럭시탭_S11,○ 02. 파워링크_PC,WEB_SITE,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,90800,False
+grp-a001-01-000000056068060,모션링 맥세이프 그립톡,○ 02. 파워링크_MO,WEB_SITE,,,,,,,no_model,False,99870,False
+grp-a001-01-000000056068629,모션링 맥세이프 그립톡,○ 02. 파워링크_PC,WEB_SITE,,,,,,,no_model,False,18040,False
+grp-a001-01-000000058445222,14. 트라이폴드,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,52700,False
+grp-a001-01-000000058445534,14. 트라이폴드,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,19460,False
+grp-a001-01-000000059039599,00. 아이폰SE2 SE3,○ 02. 파워링크_PC,WEB_SITE,iphone:UNKNOWN_SE2,,,,,,unresolved,True,4670,False
+grp-a001-01-000000059040364,00. 아이폰SE2 SE3,○ 02. 파워링크_MO,WEB_SITE,iphone:UNKNOWN_SE2,,,,,,unresolved,True,13020,False
+grp-a001-01-000000060480003,S25_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,276423,False
+grp-a001-01-000000060480311,S25플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,280476,False
+grp-a001-01-000000060480313,S25울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,806429,False
+grp-a001-01-000000060480315,S25엣지_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25 Edge,갤럭시 S25 엣지,2025-05-23,2025-05-14,2025-05-13,press,exact,True,335261,False
+grp-a001-01-000000060480386,S24_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,405808,False
+grp-a001-01-000000060480649,S24플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,135601,False
+grp-a001-01-000000060480724,S24울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,715939,False
+grp-a001-01-000000060480725,S23_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,421154,False
+grp-a001-01-000000060480727,S23플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,221135,False
+grp-a001-01-000000060480728,S23울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,571389,False
+grp-a001-01-000000060481114,S22_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,148565,False
+grp-a001-01-000000060481115,S22플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,77635,False
+grp-a001-01-000000060481178,S22울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,309833,False
+grp-a001-01-000000060481180,S24FE_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S24 FE,갤럭시 S24 FE,2024-11-01,,2024-09-26,press,exact,True,178929,False
+grp-a001-01-000000060481584,S23FE_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23FE_unresolved,,,,,,unresolved,True,26906,False
+grp-a001-01-000000060481588,S21_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,58659,False
+grp-a001-01-000000060481589,S21플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,68390,False
+grp-a001-01-000000060481590,S21울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,142049,False
+grp-a001-01-000000060481591,S20플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,66311,False
+grp-a001-01-000000060489568,S20_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,67692,False
+grp-a001-01-000000060489686,S20울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,67950,False
+grp-a001-01-000000060489687,S20FE_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,28126,False
+grp-a001-01-000000060530499,S25FE_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25FE_unresolved,,,,,,unresolved,True,192263,False
+grp-a001-01-000000060531067,플립1_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:1-2,,,,,,unresolved,True,13453,False
+grp-a001-01-000000060531082,플립2_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:1-2,,,,,,unresolved,True,25836,False
+grp-a001-01-000000060531708,플립3_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:3,갤럭시 Z 플립3,2021-08-27,2021-08-17,2021-08-11,official,exact,True,20048,False
+grp-a001-01-000000060531709,플립5_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:5,갤럭시 Z 플립5,2023-08-12,2023-08-01,2023-07-26,press,exact,True,263767,False
+grp-a001-01-000000060531710,플립4_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:4,갤럭시 Z 플립4,2022-08-26,2022-08-16,2022-08-10,official,exact,True,93884,False
+grp-a001-01-000000060531711,플립6_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:6,갤럭시 Z 플립6,2024-07-19,2024-07-12,2024-07-10,official,exact,True,295449,False
+grp-a001-01-000000060531781,플립7_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,707701,False
+grp-a001-01-000000060548659,폴드2_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:1-2,,,,,,unresolved,True,77048,False
+grp-a001-01-000000060548667,폴드3_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:3,갤럭시 Z 폴드3,2021-08-27,2021-08-17,2021-08-11,official,exact,True,55903,False
+grp-a001-01-000000060548974,폴드4_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:4,갤럭시 Z 폴드4,2022-08-26,2022-08-16,2022-08-10,official,exact,True,107652,False
+grp-a001-01-000000060554859,폴드5_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:5,갤럭시 Z 폴드5,2023-08-12,2023-08-01,2023-07-26,press,exact,True,156177,False
+grp-a001-01-000000060554861,폴드SE_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,124972,False
+grp-a001-01-000000060554862,폴드7_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,1201249,False
+grp-a001-01-000000060554863,폴드6_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:6,갤럭시 Z 폴드6,2024-07-19,2024-07-12,2024-07-10,official,exact,True,249956,False
+grp-a001-01-000000060558824,트라이폴드_지문방지,○ 갤럭시 파워링크,WEB_SITE,,,,,,,no_model,False,21886,False
+grp-a001-01-000000060603885,아이폰17_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,325900,False
+grp-a001-01-000000060603888,아이폰17에어_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,70542,False
+grp-a001-01-000000060603890,아이폰17프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,93358,False
+grp-a001-01-000000060603891,아이폰17프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,236976,False
+grp-a001-01-000000060604009,아이폰12_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,2874,False
+grp-a001-01-000000060604010,아이폰12미니_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,641,False
+grp-a001-01-000000060604011,아이폰12프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,33643,False
+grp-a001-01-000000060604013,아이폰12프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,13382,False
+grp-a001-01-000000060604014,아이폰13_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,143018,False
+grp-a001-01-000000060604015,아이폰13미니_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,187129,False
+grp-a001-01-000000060604017,아이폰13프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,70974,False
+grp-a001-01-000000060604019,아이폰13프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,48287,False
+grp-a001-01-000000060604020,아이폰14_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,28988,False
+grp-a001-01-000000060604022,아이폰14프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,124967,False
+grp-a001-01-000000060604025,아이폰14프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,44686,False
+grp-a001-01-000000060604027,아이폰14플러스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,3451,False
+grp-a001-01-000000060604029,아이폰15_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,234989,False
+grp-a001-01-000000060604032,아이폰15프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,360994,False
+grp-a001-01-000000060604034,아이폰15프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,168499,False
+grp-a001-01-000000060604037,아이폰15플러스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,18742,False
+grp-a001-01-000000060604039,아이폰16_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,183166,False
+grp-a001-01-000000060604040,아이폰16프로_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,134856,False
+grp-a001-01-000000060604043,아이폰16프로맥스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,104903,False
+grp-a001-01-000000060604044,아이폰16플러스_강화유리,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,24214,False
+grp-a001-01-000000060609365,노트8_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트8,,,,,,unresolved,True,25736,False
+grp-a001-01-000000060610033,노트9_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트9,,,,,,unresolved,True,78227,False
+grp-a001-01-000000060610036,노트10_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트10,,,,,,unresolved,True,67768,False
+grp-a001-01-000000060610039,노트10플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트10플러스,,,,,,unresolved,True,75008,False
+grp-a001-01-000000060610042,A23_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A23,갤럭시 A23,2022-03-25,,,unverified,exact,True,40521,False
+grp-a001-01-000000060610047,A24_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A24,갤럭시 A24,2023-05-19,,2023-04-19,press,exact,True,25135,False
+grp-a001-01-000000060610050,A33_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A33,갤럭시 A33,2022-07-29,,2022-03-17,unverified,exact,True,9116,False
+grp-a001-01-000000060612108,A53_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A53,갤럭시 A53,2022-03-25,2022-03-18,2022-03-17,official,exact,True,20285,False
+grp-a001-01-000000060612109,S10E_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,28729,False
+grp-a001-01-000000060612110,S10플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,28675,False
+grp-a001-01-000000060612113,A73_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A73,,,,,,unresolved,True,4792,False
+grp-a001-01-000000060612114,S10_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,74431,False
+grp-a001-01-000000060612115,S8_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,21669,False
+grp-a001-01-000000060612840,S9플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,15738,False
+grp-a001-01-000000060612841,S105G_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,30386,False
+grp-a001-01-000000060612842,S8플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,10454,False
+grp-a001-01-000000060612843,S9_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,29537,False
+grp-a001-01-000000060612844,A16_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A16,갤럭시 A16 LTE,2024-11-29,,2024-10-15,press,fuzzy,True,107142,False
+grp-a001-01-000000060612964,노트20_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트20,,,,,,unresolved,True,158239,False
+grp-a001-01-000000060613245,A54_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A54,"갤럭시 A54 (국내명: 갤럭시 퀀텀4, SKT 단독)",2023-06-08,,2023-03,press,exact,True,12505,False
+grp-a001-01-000000060613246,A55_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A55,"갤럭시 A55 (국내명: 갤럭시 퀀텀5, SKT 단독)",2024-08-28,2024-08-23,2024-03-11,press,exact,True,15062,False
+grp-a001-01-000000060613247,A25_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A25,갤럭시 A25,2024-01-05,,,official,exact,True,19886,False
+grp-a001-01-000000060613249,A34_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A34,갤럭시 A34,2023-03-31,,,official,exact,True,26577,False
+grp-a001-01-000000060613254,A35_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A35,갤럭시 A35,2024-06-21,,,official,exact,True,23869,False
+grp-a001-01-000000060613256,A15_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A15,갤럭시 A15,2024-03-18,,,official,exact,True,13746,False
+grp-a001-01-000000060617379,A17_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_a:A17,갤럭시 A17 LTE,2025-11-07,,,official,fuzzy,True,125710,False
+grp-a001-01-000000060617381,노트20울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,note:노트20울트라,,,,,,unresolved,True,87125,False
+grp-a001-01-000000060763483,S21_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,74599,False
+grp-a001-01-000000060763689,S22_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,57056,False
+grp-a001-01-000000060763694,S23_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,313914,False
+grp-a001-01-000000060763718,S24_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,63422,False
+grp-a001-01-000000060763874,S25_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,281708,False
+grp-a001-01-000000060763875,노트20_사생활보호,○ 갤럭시 파워링크,WEB_SITE,note:노트20,,,,,,unresolved,True,97890,False
+grp-a001-01-000000060763876,S25엣지_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25 Edge,갤럭시 S25 엣지,2025-05-23,2025-05-14,2025-05-13,press,exact,True,111175,False
+grp-a001-01-000000060763877,S20_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,34842,False
+grp-a001-01-000000060764711,아이폰16_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,82573,False
+grp-a001-01-000000060764713,아이폰15_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,206003,False
+grp-a001-01-000000060764895,아이폰14_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,24442,False
+grp-a001-01-000000060765090,S20플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,23841,False
+grp-a001-01-000000060765091,S21플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,54430,False
+grp-a001-01-000000060765092,S21울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,39242,False
+grp-a001-01-000000060765094,S20울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S9-S21,,,,,,unresolved,True,13084,False
+grp-a001-01-000000060784942,S22플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,119523,False
+grp-a001-01-000000060784943,S22울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,220027,False
+grp-a001-01-000000060784944,S23플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,171149,False
+grp-a001-01-000000060792702,S23울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,629255,False
+grp-a001-01-000000060792703,S24플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,72539,False
+grp-a001-01-000000060792982,S25울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,464133,False
+grp-a001-01-000000060792983,S24울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,180331,False
+grp-a001-01-000000060792984,S25플러스_사생활보호,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,169459,False
+grp-a001-01-000000060792987,아이폰17프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,209181,False
+grp-a001-01-000000060792988,아이폰에어_사생활보호,○ 아이폰 파워링크,WEB_SITE,,,,,,,no_model,False,59159,False
+grp-a001-01-000000060792989,아이폰16프로맥스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,66036,False
+grp-a001-01-000000060792990,아이폰15프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,204552,False
+grp-a001-01-000000060792991,아이폰17프로맥스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,207793,False
+grp-a001-01-000000060792992,아이폰16프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,105506,False
+grp-a001-01-000000060792993,아이폰16플러스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,8098,False
+grp-a001-01-000000060792994,아이폰15프로맥스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,36989,False
+grp-a001-01-000000060796462,아이폰14프로맥스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,9532,False
+grp-a001-01-000000060796463,아이폰13_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,15336,False
+grp-a001-01-000000060796465,아이폰13프로맥스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,44585,False
+grp-a001-01-000000060796466,아이폰12프로맥스_사생활,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,4578,False
+grp-a001-01-000000060796467,아이폰14프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,104719,False
+grp-a001-01-000000060796549,아이폰14플러스_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,51586,False
+grp-a001-01-000000060796550,아이폰13프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,26238,False
+grp-a001-01-000000060796551,아이폰13미니_사생활보호(품절),○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,5870,False
+grp-a001-01-000000060796552,아이폰12미니_사생활,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,980,False
+grp-a001-01-000000060796704,아이폰12_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,9825,False
+grp-a001-01-000000060796707,아이폰12프로_사생활보호,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_12,,,,,,unresolved,True,38505,False
+grp-a001-01-000000060809909,노트20울트라_사생활보호,○ 갤럭시 파워링크,WEB_SITE,note:노트20울트라,,,,,,unresolved,True,62917,False
+grp-a001-01-000000060823525,골프버디필름(스마트스토어)_PC,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,302328,True
+grp-a001-01-000000060823768,셀카봉,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,429592,False
+grp-a001-01-000000060823769,방수팩,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,1677,False
+grp-a001-01-000000060823923,맥세이프카드지갑(가죽),○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,13305,False
+grp-a001-01-000000060823924,맥세이프케이스_아이폰17,○ 기타 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,33411,False
+grp-a001-01-000000060823925,맥세이프그립톡,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,160,False
+grp-a001-01-000000060823926,도어락_사생활보호,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,2850,False
+grp-a001-01-000000060824081,도어락_지문방지,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,6363,False
+grp-a001-01-000000060824082,지문방지필름,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,277362,False
+grp-a001-01-000000060824084,종이질감필름_아이패드,○ 기타 파워링크,WEB_SITE,ipad:generic_gen_unknown,,,,,,unresolved,True,70129,False
+grp-a001-01-000000060824085,지문방지필름_LG,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,3685,False
+grp-a001-01-000000060824088,사생활보호필름,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,279807,False
+grp-a001-01-000000060824108,강화유리필름,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,73263,False
+grp-a001-01-000000060824109,일반필름,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,74566,False
+grp-a001-01-000000060824110,종이질감필름_태블릿,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,6555,False
+grp-a001-01-000000060824113,갤럭시워치 스트랩,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,30246,False
+grp-a001-01-000000060824785,일미리케이스_S22시리즈,○ 기타 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,530,False
+grp-a001-01-000000060824786,일미리케이스_S24시리즈,○ 기타 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,31198,False
+grp-a001-01-000000060824882,A7_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,29556,False
+grp-a001-01-000000060824932,A7라이트_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,27517,False
+grp-a001-01-000000060824935,A8(2022)_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,22284,False
+grp-a001-01-000000060824936,A9플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:A9+,갤럭시탭 A9+,2023-11-02,,2023-11-02,press,exact,True,128164,False
+grp-a001-01-000000060825654,A9_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,20183,False
+grp-a001-01-000000060825655,S5e_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,23507,False
+grp-a001-01-000000060825656,S6라이트_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,97772,False
+grp-a001-01-000000060825657,S6_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,86738,False
+grp-a001-01-000000060825704,S7플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,70204,False
+grp-a001-01-000000060825705,S7_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,52279,False
+grp-a001-01-000000060825706,S7FE_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,68500,False
+grp-a001-01-000000060825707,S8울트라_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,49491,False
+grp-a001-01-000000060825794,S8플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,35203,False
+grp-a001-01-000000060825796,S8_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,59061,False
+grp-a001-01-000000060825797,S9울트라_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,34953,False
+grp-a001-01-000000060825798,S9플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,96007,False
+grp-a001-01-000000060825799,S9_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,87593,False
+grp-a001-01-000000060825800,S9FE플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,39775,False
+grp-a001-01-000000060825801,S9FE_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,159535,False
+grp-a001-01-000000060825802,S10울트라_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,83251,False
+grp-a001-01-000000060826103,S10플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,152782,False
+grp-a001-01-000000060826106,S10FE플러스_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,170809,False
+grp-a001-01-000000060826107,S10FE_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,257703,False
+grp-a001-01-000000060826108,S11울트라_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,275398,False
+grp-a001-01-000000060826110,S11_종이질감,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,296232,False
+grp-a001-01-000000060841229,프로M47세대(11인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,22873,False
+grp-a001-01-000000060841400,10세대(10.9인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:10,아이패드 10세대(10.9인치),2022-11-30,2022-11-17,2022-10-18,press,exact,True,5963,False
+grp-a001-01-000000060841560,에어4-5세대(10.9인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,619,False
+grp-a001-01-000000060841575,에어6-7세대(11인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,33303,False
+grp-a001-01-000000060841577,미니6-7세대(8.3인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,45002,False
+grp-a001-01-000000060841579,프로M47세대(13인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,4102,False
+grp-a001-01-000000060841580,프로3-4-5세대(11인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro3-5,,,,,,unresolved,True,23493,False
+grp-a001-01-000000060841581,프로3-4-5-6세대(12.9인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,39238,False
+grp-a001-01-000000060841582,7-8-9세대(10.2인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:UNKNOWN_9,,,,,,unresolved,True,48039,False
+grp-a001-01-000000060841583,10세대(10.9인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:10,아이패드 10세대(10.9인치),2022-11-30,2022-11-17,2022-10-18,press,exact,True,204568,False
+grp-a001-01-000000060841584,프로3-4-5세대(11인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro3-5,,,,,,unresolved,True,63058,False
+grp-a001-01-000000060842559,프로3-4-5-6세대(12.9인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,125728,False
+grp-a001-01-000000060842560,프로M45세대(11인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,2847,False
+grp-a001-01-000000060842564,프로M47세대(13인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,46638,False
+grp-a001-01-000000060842565,미니6-7세대(8.3인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,71605,False
+grp-a001-01-000000060842566,에어4-5세대(10.9인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:air5|ipad:air4,,,,,,unresolved,True,127992,False
+grp-a001-01-000000060842733,에어6-7세대(11인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,11858,False
+grp-a001-01-000000060842734,에어6-7세대(13인치)_종이질감,○ P. 아이패드 파워링크,WEB_SITE,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,103563,False
+grp-a001-01-000000060842824,에어6-7세대(13인치)_6H BLC,○ P. 아이패드 파워링크,WEB_SITE,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,6722,False
+grp-a001-01-000000060843107,S11울트라_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,52889,False
+grp-a001-01-000000060843258,S11_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,61445,False
+grp-a001-01-000000060843261,S10울트라_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,10382,False
+grp-a001-01-000000060843263,S10플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,61638,False
+grp-a001-01-000000060843265,S10FE_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,24458,False
+grp-a001-01-000000060843278,S10FE플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,27638,False
+grp-a001-01-000000060843279,S9_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,8812,False
+grp-a001-01-000000060843280,S9울트라_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,5100,False
+grp-a001-01-000000060843281,S9플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,8188,False
+grp-a001-01-000000060843310,S9FE_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,13051,False
+grp-a001-01-000000060843311,S9FE플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,11296,False
+grp-a001-01-000000060843312,S8_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,10932,False
+grp-a001-01-000000060843313,S8울트라_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,33337,False
+grp-a001-01-000000060843314,S8플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,46188,False
+grp-a001-01-000000060843406,S7_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,12938,False
+grp-a001-01-000000060843407,S7플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,10955,False
+grp-a001-01-000000060843408,S7FE_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,13871,False
+grp-a001-01-000000060843409,A9_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:구형,,,,,,unresolved,True,16866,False
+grp-a001-01-000000060843410,A9플러스_6H BLC,○ 갤럭시탭 파워링크,WEB_SITE,galaxy_tab:A9+,갤럭시탭 A9+,2023-11-02,,2023-11-02,press,exact,True,30315,False
+grp-a001-01-000000060858091,카메라필름_아이폰,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,32169,False
+grp-a001-01-000000060858092,일미리케이스_플립7,○ 기타 파워링크,WEB_SITE,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,25951,False
+grp-a001-01-000000060865149,일미리케이스_폴드7,○ 기타 파워링크,WEB_SITE,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,7049,False
+grp-a001-01-000000060866006,골프버디필름(자사몰),○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,73690,True
+grp-a001-01-000000060868357,아이폰SE2_지문방지,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_SE2,,,,,,unresolved,True,83147,False
+grp-a001-01-000000060868358,아이폰SE3_지문방지,○ 아이폰 파워링크,WEB_SITE,iphone:UNKNOWN_SE3,,,,,,unresolved,True,43736,False
+grp-a001-01-000000060868899,갤럭시필름,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,19347,False
+grp-a001-01-000000061108461,지문방지-1769481954482,○ 갤럭시 파워링크,WEB_SITE,,,,,,,no_model,False,36480,False
+grp-a001-01-000000061871554,S25울트라_맥(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,7425,False
+grp-a001-01-000000061883424,S25_맥(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,3978,False
+grp-a001-01-000000061883426,S25플러스_맥(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,4368,False
+grp-a001-01-000000061883430,S24울트라_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,7560,False
+grp-a001-01-000000061883437,S24플러스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,2695,False
+grp-a001-01-000000061883438,S24_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,17660,False
+grp-a001-01-000000061883745,S26플러스_맥(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,6490,False
+grp-a001-01-000000061883746,S26울트라_맥(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,18080,False
+grp-a001-01-000000061883792,S26_맥(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,16040,False
+grp-a001-01-000000061883886,17_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,2240,False
+grp-a001-01-000000061883887,17에어_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,2351,False
+grp-a001-01-000000061883888,16프로_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,9970,False
+grp-a001-01-000000061883889,16프로맥스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,2708,False
+grp-a001-01-000000061883890,16_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,7250,False
+grp-a001-01-000000061883891,16플러스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,670,False
+grp-a001-01-000000061883892,15프로_맥(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,6850,False
+grp-a001-01-000000061883893,15프로맥스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,1858,False
+grp-a001-01-000000061883895,15_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,7150,False
+grp-a001-01-000000061883896,15플러스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,2210,False
+grp-a001-01-000000061883897,14프로_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,5176,False
+grp-a001-01-000000061883898,14프로맥스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,2028,False
+grp-a001-01-000000061883899,14_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,3690,False
+grp-a001-01-000000061883900,14플러스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,2810,False
+grp-a001-01-000000061883901,13프로_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,6190,False
+grp-a001-01-000000061883902,13프로맥스_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,1860,False
+grp-a001-01-000000061883903,13_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,840,False
+grp-a001-01-000000061883904,13미니_맥,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,3330,False
+grp-a001-01-000000061924085,13_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,860,False
+grp-a001-01-000000061924086,13미니_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,3780,False
+grp-a001-01-000000061924087,13프로_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,1245,False
+grp-a001-01-000000061924088,13프로맥스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_13,,,,,,unresolved,True,490,False
+grp-a001-01-000000061924089,14_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,470,False
+grp-a001-01-000000061924090,14프로_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,2800,False
+grp-a001-01-000000061924091,14프로맥스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,0,False
+grp-a001-01-000000061924092,14플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:UNKNOWN_14,,,,,,unresolved,True,500,False
+grp-a001-01-000000061924093,15_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,500,False
+grp-a001-01-000000061924094,15프로_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,0,False
+grp-a001-01-000000061924107,15프로맥스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,3250,False
+grp-a001-01-000000061924108,15플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,5960,False
+grp-a001-01-000000061924109,16_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,920,False
+grp-a001-01-000000061924110,16프로_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,4660,False
+grp-a001-01-000000061924111,16프로맥스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,4430,False
+grp-a001-01-000000061924112,16플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,0,False
+grp-a001-01-000000061924113,17_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,5070,False
+grp-a001-01-000000061924114,17에어_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,11770,False
+grp-a001-01-000000061924115,17프로_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,4650,False
+grp-a001-01-000000061924116,17프로맥스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,9026,False
+grp-a001-01-000000061924149,S22_일(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,0,False
+grp-a001-01-000000061924150,S22울트라_일(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,0,False
+grp-a001-01-000000061924151,S22플러스_일(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,785,False
+grp-a001-01-000000061924152,S23_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,50890,False
+grp-a001-01-000000061924153,S23울트라_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,16140,False
+grp-a001-01-000000061924154,S23플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,5490,False
+grp-a001-01-000000061924155,S24_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,37510,False
+grp-a001-01-000000061924156,S24울트라_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,39162,False
+grp-a001-01-000000061924157,S24플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,12220,False
+grp-a001-01-000000061924158,S25_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,61490,False
+grp-a001-01-000000061924189,S25울트라_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,12470,False
+grp-a001-01-000000061924190,S25플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,12880,False
+grp-a001-01-000000061924191,S26_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,15080,False
+grp-a001-01-000000061924192,S26울트라_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,59644,False
+grp-a001-01-000000061924193,S26플러스_일,○ [P_Test]소다케이스 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,7660,False
+grp-a001-01-000000061924194,노트20_일(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,note:노트20,,,,,,unresolved,True,260,False
+grp-a001-01-000000061924195,노트20울트라_일(품절),○ [P_Test]소다케이스 파워링크,WEB_SITE,note:노트20울트라,,,,,,unresolved,True,420,False
+grp-a001-01-000000062965454,S26_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,1404737,False
+grp-a001-01-000000062965457,S26울트라_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,1442568,False
+grp-a001-01-000000062965459,S26플러스_지문방지_TPU,○ 갤럭시 파워링크,WEB_SITE,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,304772,False
+grp-a001-01-000000067675781,맥세이프카드지갑(이지),○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,830389,False
+grp-a001-01-000000070094275,폴드8_PC,폴드8 / 플립8 키워드,WEB_SITE,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,40718,False
+grp-a001-01-000000070102294,,폴드8 / 플립8 키워드,WEB_SITE,,,,,,,no_model,False,0,False
+grp-a001-01-000000070109481,플립8_MO,폴드8 / 플립8 키워드,WEB_SITE,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,67142,False
+grp-a001-01-000000070110695,폴드8_MO,폴드8 / 플립8 키워드,WEB_SITE,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,62560,False
+grp-a001-01-000000070110703,폴드8_컨텐츠 매체,폴드8 / 플립8 키워드,WEB_SITE,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,4388,False
+grp-a001-01-000000070111139,플립8_PC,폴드8 / 플립8 키워드,WEB_SITE,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,14993,False
+grp-a001-01-000000070111142,플립8_컨텐츠 매체,폴드8 / 플립8 키워드,WEB_SITE,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,1721,False
+grp-a001-01-000000070136001,골프버디필름(스마트스토어)_MO,○ 기타 파워링크,WEB_SITE,,,,,,,no_model,False,97109,True
+grp-a001-01-000000070512941,폴드8_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,489454,False
+grp-a001-01-000000070513016,폴드8울트라_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,146090,False
+grp-a001-01-000000070513065,플립8_지문방지,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,79128,False
+grp-a001-01-000000071340947,폴드8_사생활,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,49641,False
+grp-a001-01-000000071340962,폴드8울트라_사생활,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,136087,False
+grp-a001-01-000000071340970,플립8_사생활,○ 갤럭시 파워링크,WEB_SITE,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,4149,False
+grp-a001-02-000000043610882,01. 컨텐츠매체_01,● 10. 컨텐츠매체,SHOPPING,,,,,,,no_model,False,877856,False
+grp-a001-02-000000043610925,02. 컨텐츠매체_02,● 10. 컨텐츠매체,SHOPPING,,,,,,,no_model,False,602523,False
+grp-a001-02-000000043610930,03. 컨텐츠매체_03,● 10. 컨텐츠매체,SHOPPING,,,,,,,no_model,False,1461636,False
+grp-a001-02-000000043615764,00. 컨텐츠매체_메인 TOP25,● 10. 컨텐츠매체,SHOPPING,,,,,,,no_model,False,169569,False
+grp-a001-02-000000043624035,,● 11. 벌크,SHOPPING,,,,,,,no_model,False,226800,False
+grp-a001-02-000000043624057,,● 11. 벌크,SHOPPING,,,,,,,no_model,False,356630,False
+grp-a001-02-000000043624087,,● 11. 벌크,SHOPPING,,,,,,,no_model,False,117630,False
+grp-a001-02-000000043624094,,● 11. 벌크,SHOPPING,,,,,,,no_model,False,592490,False
+grp-a001-02-000000044103604,전기종,● 01. 갤럭시_지문방지_TPU,SHOPPING,,,,,,,no_model,False,26050,False
+grp-a001-02-000000044108257,S23플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,2632334,False
+grp-a001-02-000000044108615,S22,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,1397401,False
+grp-a001-02-000000044108616,S24울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,2502284,False
+grp-a001-02-000000044299892,02. S23FE,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_s:S23FE_unresolved,,,,,,unresolved,True,1547302,False
+grp-a001-02-000000044299955,03. S20FE,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,622096,False
+grp-a001-02-000000044299975,04. A55(퀀텀5),● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A55,"갤럭시 A55 (국내명: 갤럭시 퀀텀5, SKT 단독)",2024-08-28,2024-08-23,2024-03-11,press,fuzzy,True,226262,False
+grp-a001-02-000000044300022,07. A35/A25/A15,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A35,갤럭시 A35,2024-06-21,,,official,exact,True,839075,False
+grp-a001-02-000000044300024,08. A24/A34,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A24,갤럭시 A24,2023-05-19,,2023-04-19,press,exact,True,1401421,False
+grp-a001-02-000000044300027,09. A23/A33,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A23,갤럭시 A23,2022-03-25,,,unverified,exact,True,940281,False
+grp-a001-02-000000044300450,06. 53/A73,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A73,,,,,,unresolved,True,339519,False
+grp-a001-02-000000044300513,05. A54(퀀텀4),● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A54,"갤럭시 A54 (국내명: 갤럭시 퀀텀4, SKT 단독)",2023-06-08,,2023-03,press,fuzzy,True,262146,False
+grp-a001-02-000000044490481,Z폴드5,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:5,갤럭시 Z 폴드5,2023-08-12,2023-08-01,2023-07-26,press,exact,True,4388716,False
+grp-a001-02-000000044490484,Z플립5,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:5,갤럭시 Z 플립5,2023-08-12,2023-08-01,2023-07-26,press,exact,True,3010170,False
+grp-a001-02-000000044565865,버디필름,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_a:budi_unresolved,,,,,,unresolved,True,25563,False
+grp-a001-02-000000044601438,16프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,2565783,False
+grp-a001-02-000000044601555,14프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,1580027,False
+grp-a001-02-000000044603941,12프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,691058,False
+grp-a001-02-000000044603942,13프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,940874,False
+grp-a001-02-000000044628749,02. S24_사생활✔,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,522244,False
+grp-a001-02-000000044629990,04. S22_사생활✔,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,1404888,False
+grp-a001-02-000000044629993,03. S23_사생활✔,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,1128973,False
+grp-a001-02-000000044743916,03. 아이폰15 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,274697,False
+grp-a001-02-000000044743917,05. 아이폰14 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,154853,False
+grp-a001-02-000000044743918,07. 아이폰12 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,374408,False
+grp-a001-02-000000044743919,06. 아이폰13 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,111189,False
+grp-a001-02-000000044744110,09. 아이폰X 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_X,,,,,,unresolved,True,615329,False
+grp-a001-02-000000044744111,08. 아이폰11 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_11,,,,,,unresolved,True,570392,False
+grp-a001-02-000000044744526,10. 아이폰 SE2/SE3,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_SE2,,,,,,unresolved,True,368344,False
+grp-a001-02-000000044823468,15프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,2377042,False
+grp-a001-02-000000044825994,02. 아이폰16 시리즈,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,297644,False
+grp-a001-02-000000044952212,01. 갤럭시탭S9_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,1607,False
+grp-a001-02-000000044952305,01. 갤럭시탭_종이질감_BULK,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:generic_gen_unknown,,,,,,unresolved,True,18409,False
+grp-a001-02-000000045023175,,● 01. 갤럭시_지문방지_TPU,SHOPPING,,,,,,,no_model,False,50450,False
+grp-a001-02-000000045023176,S20울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,633911,False
+grp-a001-02-000000045023177,S21울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,1379769,False
+grp-a001-02-000000045023993,S105G,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,645758,False
+grp-a001-02-000000045025481,노트9,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트9,,,,,,unresolved,True,971206,False
+grp-a001-02-000000045025482,노트10,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트10,,,,,,unresolved,True,185190,False
+grp-a001-02-000000045025483,노트20,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트20,,,,,,unresolved,True,2674908,False
+grp-a001-02-000000045087060,01. 갤럭시탭S6_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,196800,False
+grp-a001-02-000000045087074,01. 갤럭시탭S5E_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,0,False
+grp-a001-02-000000045329157,01. 갤럭시탭S10_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,934,False
+grp-a001-02-000000045448738,09. Z플립1/2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:1-2,,,,,,unresolved,True,156817,False
+grp-a001-02-000000045448744,10. Z폴드2/3,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:1-2,,,,,,unresolved,True,235399,False
+grp-a001-02-000000045687119,Z폴드6SE,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:6,갤럭시 Z 폴드6,2024-07-19,2024-07-12,2024-07-10,official,exact,True,172650,False
+grp-a001-02-000000045811975,01. S24FE,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_s:S24 FE,갤럭시 S24 FE,2024-11-01,,2024-09-26,press,exact,True,1884136,False
+grp-a001-02-000000045949118,01. 갤럭시탭A9시리즈_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,326968,False
+grp-a001-02-000000045949120,01. 갤럭시탭A7_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,0,False
+grp-a001-02-000000045949121,01. 갤럭시탭A7LITE_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,0,False
+grp-a001-02-000000046072248,02. 아이폰16,● 05. 아이폰_사생활보호,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,435195,False
+grp-a001-02-000000046072553,03. 아이폰15,● 05. 아이폰_사생활보호,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,560516,False
+grp-a001-02-000000046072554,04. 아이폰14,● 05. 아이폰_사생활보호,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,704835,False
+grp-a001-02-000000046074558,05. 아이폰13,● 05. 아이폰_사생활보호,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,452833,False
+grp-a001-02-000000046074559,06. 아이폰12,● 05. 아이폰_사생활보호,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,86438,False
+grp-a001-02-000000046125958,01. 아이패드에어_6-7세대_13인치,● 07. 아이패드_종이질감,SHOPPING,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,101758,False
+grp-a001-02-000000046125983,01. 아이패드에어_6-7세대_11인치,● 07. 아이패드_종이질감,SHOPPING,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,164663,False
+grp-a001-02-000000046126151,01. 아이패드에어_4-5세대_10.9인치,● 07. 아이패드_종이질감,SHOPPING,ipad:air5|ipad:air4,,,,,,unresolved,True,34775,False
+grp-a001-02-000000046126174,01. 아이패드미니_6-7세대_8.3인치,● 07. 아이패드_종이질감,SHOPPING,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,71074,False
+grp-a001-02-000000046126176,01. 아이패드프로_7세대_13인치,● 07. 아이패드_종이질감,SHOPPING,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,159345,False
+grp-a001-02-000000046126177,01. 아이패드프로_5세대_11인치,● 07. 아이패드_종이질감,SHOPPING,ipad:pro3-5,,,,,,unresolved,True,232340,False
+grp-a001-02-000000046126252,01. 아이패드프로_3-4-5-6세대_12.9인치,● 07. 아이패드_종이질감,SHOPPING,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,43541,False
+grp-a001-02-000000046126256,01. 아이패드프로_3-4-5-6세대_11인치,● 07. 아이패드_종이질감,SHOPPING,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,188173,False
+grp-a001-02-000000046126369,01. 아이패드_10세대_10.9인치,● 07. 아이패드_종이질감,SHOPPING,ipad:10,아이패드 10세대(10.9인치),2022-11-30,2022-11-17,2022-10-18,press,exact,True,137613,False
+grp-a001-02-000000046126373,01. 아이패드7-8-9세대_10.2인치,● 07. 아이패드_종이질감,SHOPPING,ipad:UNKNOWN_9,,,,,,unresolved,True,256736,False
+grp-a001-02-000000046161213,01. 갤럭시탭S8_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,260311,False
+grp-a001-02-000000046161215,01. 갤럭시탭S7_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,16135,False
+grp-a001-02-000000046222149,Z폴드/플립3_힌지,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:3|galaxy_z_flip:3,갤럭시 Z 플립3|갤럭시 Z 폴드3,2021-08-27,2021-08-17,2021-08-11,official,fuzzy,True,32437,False
+grp-a001-02-000000046222157,"10. Z플립,폴드5/6",● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:5,갤럭시 Z 폴드5,2023-08-12,2023-08-01,2023-07-26,press,exact,True,88835,False
+grp-a001-02-000000046223421,01. 갤럭시탭S7/FE/플러스_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,1266880,False
+grp-a001-02-000000046224017,01. 갤럭시탭S8_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,1091652,False
+grp-a001-02-000000046224018,01. 갤럭시탭S9/울트라_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,1702033,False
+grp-a001-02-000000046224076,01. 갤럭시탭S10/플러스_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,1002233,False
+grp-a001-02-000000046224077,01. 갤럭시탭S10/울트라_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,1482752,False
+grp-a001-02-000000046415318,01. 뮤패드_종이질감,● 13. 아이뮤즈_뮤패드,SHOPPING,mupad:generic,,,,,,unresolved,True,247087,False
+grp-a001-02-000000046415341,01. 뮤패드_지문방지,● 13. 아이뮤즈_뮤패드,SHOPPING,mupad:generic,,,,,,unresolved,True,152934,False
+grp-a001-02-000000046437508,10. A16,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A16,갤럭시 A16 LTE,2024-11-29,,2024-10-15,press,fuzzy,True,1535521,False
+grp-a001-02-000000046838302,01. 갤럭시탭A9/플러스_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,1470670,False
+grp-a001-02-000000046838304,01. 갤럭시탭A8_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,651465,False
+grp-a001-02-000000046838305,01. 갤럭시탭A7/라이트_지문방지,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,324057,False
+grp-a001-02-000000046842468,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046842692,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046842695,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046842713,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046842714,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,4030,False
+grp-a001-02-000000046842715,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046842716,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,1450,False
+grp-a001-02-000000046842729,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,2730,False
+grp-a001-02-000000046842731,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,3970,False
+grp-a001-02-000000046842732,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,2670,False
+grp-a001-02-000000046843727,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046843728,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046843730,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,3070,False
+grp-a001-02-000000046843732,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,24380,False
+grp-a001-02-000000046843733,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000046843734,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,4850,False
+grp-a001-02-000000046843735,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,26580,False
+grp-a001-02-000000046843736,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,45250,False
+grp-a001-02-000000047005161,02. 도어락필름,● 09. 기타상품,SHOPPING,,,,,,,no_model,False,426101,False
+grp-a001-02-000000047005364,01. 버디필름,● 09. 기타상품,SHOPPING,galaxy_a:budi_unresolved,,,,,,unresolved,True,5750687,False
+grp-a001-02-000000047076131,"01. 아이패드에어6,7세대11인치",● 07. 아이패드_블루라이트,SHOPPING,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,174482,False
+grp-a001-02-000000047076159,01. 아이패드미니6/7세대8.3인치,● 07. 아이패드_블루라이트,SHOPPING,ipad:mini6|ipad:mini7,아이패드 미니 6세대(8.3인치)|아이패드 미니 7세대(8.3인치),2021-11-02,2021-10-21,2021-09-15,press,fuzzy,True,267182,False
+grp-a001-02-000000047076722,01. 아이패드에어4/5세대10.9인치,● 07. 아이패드_블루라이트,SHOPPING,ipad:air5|ipad:air4,,,,,,unresolved,True,516809,False
+grp-a001-02-000000047076723,01. 아이패드10세대10.9인치,● 07. 아이패드_블루라이트,SHOPPING,ipad:10,아이패드 10세대(10.9인치),2022-11-30,2022-11-17,2022-10-18,press,exact,True,271723,False
+grp-a001-02-000000047076737,01. 아이패드프로7세대11/13인치,● 07. 아이패드_블루라이트,SHOPPING,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,246308,False
+grp-a001-02-000000047076738,01. 아이패드프로3/4/5/6세대11/12.9인치,● 07. 아이패드_블루라이트,SHOPPING,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,48542,False
+grp-a001-02-000000047076745,01. 갤럭시탭A9플러스,● 06. 갤럭시탭_6H_PET_BLC,SHOPPING,galaxy_tab:A9+,갤럭시탭 A9+,2023-11-02,,2023-11-02,press,exact,True,1127114,False
+grp-a001-02-000000047076797,01. 갤럭시탭S7시리즈,● 06. 갤럭시탭_6H_PET_BLC,SHOPPING,galaxy_tab:구형,,,,,,unresolved,True,1501002,False
+grp-a001-02-000000047076945,01. 갤럭시탭S8시리즈,● 06. 갤럭시탭_6H_PET_BLC,SHOPPING,galaxy_tab:S8,갤럭시탭 S8 울트라,2022-02-25,2022-02-10,2022-02-10,official,exact,True,1393439,False
+grp-a001-02-000000047076946,01. 갤럭시탭S9 시리즈,● 06. 갤럭시탭_6H_PET_BLC,SHOPPING,galaxy_tab:S9,갤럭시탭 S9 울트라,2023-08-11,2023-07-27,2023-07-26,official,exact,True,1674058,False
+grp-a001-02-000000047077161,01. 갤럭시탭S10 시리즈,● 06. 갤럭시탭_6H_PET_BLC,SHOPPING,galaxy_tab:S10,갤럭시탭 S10 울트라·+,2024-10-04,,2024-09-26,official,exact,True,1749334,False
+grp-a001-02-000000047485224,S25FE,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S25FE_unresolved,,,,,,unresolved,True,5914983,False
+grp-a001-02-000000047485408,01. S25_강화유리✔,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,452749,False
+grp-a001-02-000000048079095,01. 아이폰16e,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,302522,False
+grp-a001-02-000000048079128,01. 아이폰16e,● 05. 아이폰_사생활보호,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,25980,False
+grp-a001-02-000000049350416,01. 아이패드프로3~6세대11인치,● 07. 아이패드_블루라이트,SHOPPING,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,358788,False
+grp-a001-02-000000049353543,,● 14. 아이패드_지문방지,SHOPPING,,,,,,,no_model,False,0,False
+grp-a001-02-000000049354013,"01. 아이패드에어6,7세대 13인치",● 07. 아이패드_블루라이트,SHOPPING,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,294813,False
+grp-a001-02-000000051215431,04. 뮤패드_종이질감,● 09. 기타상품,SHOPPING,mupad:generic,,,,,,unresolved,True,180,False
+grp-a001-02-000000051215435,04. 뮤패드_지문방지,● 09. 기타상품,SHOPPING,mupad:generic,,,,,,unresolved,True,0,False
+grp-a001-02-000000052176555,플립7,● 99. 갤럭시_Z플립/폴드 7,SHOPPING,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,4104520,False
+grp-a001-02-000000052176575,폴드7,● 99. 갤럭시_Z플립/폴드 7,SHOPPING,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,8705950,False
+grp-a001-02-000000052193550,01. 갤럭시_S25,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,178120,False
+grp-a001-02-000000052193556,02. 갤럭시_S24,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,105241,False
+grp-a001-02-000000052193613,03. 아이폰_13,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,92332,False
+grp-a001-02-000000052193617,04. 아이폰_14,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,563002,False
+grp-a001-02-000000052193624,05. 아이폰_15,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,459832,False
+grp-a001-02-000000052193631,06. 아이폰_16,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,757907,False
+grp-a001-02-000000052350928,,● 11. 벌크,SHOPPING,,,,,,,no_model,False,7920,False
+grp-a001-02-000000052350984,04. 컨텐츠매체_04,● 10. 컨텐츠매체,SHOPPING,,,,,,,no_model,False,1267785,False
+grp-a001-02-000000052819145,00. Z플립폴드7,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,1298273,False
+grp-a001-02-000000052959049,07. 맥세이프카드지갑,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,,,,,,,no_model,False,727237,False
+grp-a001-02-000000053253939,08. 방수팩,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,,,,,,,no_model,False,53520,False
+grp-a001-02-000000053481812,01. 아이패드 10세대 10.9인치,● 14. 아이패드_지문방지,SHOPPING,ipad:10,아이패드 10세대(10.9인치),2022-11-30,2022-11-17,2022-10-18,press,exact,True,213574,False
+grp-a001-02-000000053481831,02. 아이패드 789세대 10.2인치,● 14. 아이패드_지문방지,SHOPPING,ipad:generic_gen_unknown,,,,,,unresolved,True,53293,False
+grp-a001-02-000000053481892,03. 아이패드 프로 7세대 13인치,● 14. 아이패드_지문방지,SHOPPING,ipad:pro7,"아이패드 프로 7세대(11/13인치, M4)",2024-06-19,2024-06-08,2024-05-07,press,exact,True,62885,False
+grp-a001-02-000000053481936,04. 아이패드 프로 5세대 11인치,● 14. 아이패드_지문방지,SHOPPING,ipad:pro3-5,,,,,,unresolved,True,18950,False
+grp-a001-02-000000053481974,05. 아이패드 프로 3456세대 12.9인치,● 14. 아이패드_지문방지,SHOPPING,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,84653,False
+grp-a001-02-000000053482043,06. 아이패드 프로 3456세대 11인치,● 14. 아이패드_지문방지,SHOPPING,ipad:pro3-5|ipad:pro6,"아이패드 프로 6세대(11/12.9인치, M2)|아이패드 프로 3~5세대(11/12.9인치)",2022-11-30,2022-11-17,2022-10-18,press,fuzzy,True,64490,False
+grp-a001-02-000000053482102,07. 아이패드 에어 67세대 13인치,● 14. 아이패드_지문방지,SHOPPING,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,106573,False
+grp-a001-02-000000053482158,08. 아이패드 에어 67세대 11인치,● 14. 아이패드_지문방지,SHOPPING,ipad:air6|ipad:air7,"아이패드 에어 6세대(11/13인치, M2)|아이패드 에어 7세대(11/13인치, M3)",2024-06-19,2024-06-08,2024-05-07,press,fuzzy,True,141411,False
+grp-a001-02-000000053482203,09. 아이패드 에어 45세대 10.9인치,● 14. 아이패드_지문방지,SHOPPING,ipad:air5|ipad:air4,,,,,,unresolved,True,326533,False
+grp-a001-02-000000054131225,10. A16-1756452751536,● 02. 갤럭시_보급형_M,SHOPPING,galaxy_a:A16,갤럭시 A16 LTE,2024-11-29,,2024-10-15,press,fuzzy,True,1360,False
+grp-a001-02-000000054204201,09. 셀카봉,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,,,,,,,no_model,False,857037,False
+grp-a001-02-000000054212607,05. 컨텐츠매체_05,● 10. 컨텐츠매체,SHOPPING,,,,,,,no_model,False,895614,False
+grp-a001-02-000000054282282,10. 충전기,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,,,,,,,no_model,False,111142,False
+grp-a001-02-000000054403336,11. 맥세이프거치대,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_11,,,,,,unresolved,True,210190,False
+grp-a001-02-000000054530371,S25울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,2063621,False
+grp-a001-02-000000054536931,Z플립6,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:6,갤럭시 Z 플립6,2024-07-19,2024-07-12,2024-07-10,official,exact,True,1767323,False
+grp-a001-02-000000054537415,S24플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,1089382,False
+grp-a001-02-000000054537529,S23울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,4769178,False
+grp-a001-02-000000054537533,노트20울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트20울트라,,,,,,unresolved,True,1559118,False
+grp-a001-02-000000054537767,Z폴드4,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:4,갤럭시 Z 폴드4,2022-08-26,2022-08-16,2022-08-10,official,exact,True,1986623,False
+grp-a001-02-000000054538147,S22울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,2495247,False
+grp-a001-02-000000054607977,00. 아이폰_17 일미리,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,65442,False
+grp-a001-02-000000054608016,00. 아이폰_17 맥세이프,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,328215,False
+grp-a001-02-000000054617822,01. 강화유리,● 00. 아이폰_17,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,6268292,False
+grp-a001-02-000000054617868,02. 사생활,● 00. 아이폰_17,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,1764560,False
+grp-a001-02-000000055045417,S25엣지,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S25 Edge,갤럭시 S25 엣지,2025-05-23,2025-05-14,2025-05-13,press,exact,True,830788,False
+grp-a001-02-000000055074537,01. 갤럭시탭S11,● 06. 갤럭시탭_지문방지,SHOPPING,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,894044,False
+grp-a001-02-000000055074671,01. 갤럭시탭S11_종이질감,● 06. 갤럭시탭_종이질감_M,SHOPPING,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,428637,False
+grp-a001-02-000000055087285,01. 갤럭시탭S11,● 06. 갤럭시탭_6H_PET_BLC,SHOPPING,galaxy_tab:S11,갤럭시탭 S11 (+울트라),2025-09-19,,2025-09-04,press,exact,True,694968,False
+grp-a001-02-000000055091017,03. 6H 사생활,● 00. 아이폰_17,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,490,False
+grp-a001-02-000000055116659,벌크1,● 11. 벌크,SHOPPING,,,,,,,no_model,False,375482,False
+grp-a001-02-000000055116668,벌크2,● 11. 벌크,SHOPPING,,,,,,,no_model,False,265294,False
+grp-a001-02-000000055116672,벌크3,● 11. 벌크,SHOPPING,,,,,,,no_model,False,133463,False
+grp-a001-02-000000055116677,벌크4,● 11. 벌크,SHOPPING,,,,,,,no_model,False,378698,False
+grp-a001-02-000000055116682,벌크5,● 11. 벌크,SHOPPING,,,,,,,no_model,False,315638,False
+grp-a001-02-000000055116686,벌크6,● 11. 벌크,SHOPPING,,,,,,,no_model,False,349024,False
+grp-a001-02-000000055386434,12. 스트랩,● 12. 케이스/지갑/방수팩/셀카봉/충전기/스트랩,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,30109,False
+grp-a001-02-000000056537604,S25플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,742793,False
+grp-a001-02-000000058445051,Z트라이폴드,● 01. 갤럭시_지문방지_TPU,SHOPPING,,,,,,,no_model,False,287680,False
+grp-a001-02-000000058709325,"11. 아이폰7,8",● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:UNKNOWN_7,,,,,,unresolved,True,281887,False
+grp-a001-02-000000058709513,S8,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,309858,False
+grp-a001-02-000000058709674,S9,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,380477,False
+grp-a001-02-000000059252905,99. 플립2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:1-2,,,,,,unresolved,True,219452,False
+grp-a001-02-000000059808374,S25,● 01. 갤럭시_강화유리,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,93270,False
+grp-a001-02-000000059808403,S25,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,180499,False
+grp-a001-02-000000059809116,S24,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,143046,False
+grp-a001-02-000000059810135,S23,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,194571,False
+grp-a001-02-000000059810410,S22,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,230452,False
+grp-a001-02-000000059811691,S25플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,159794,False
+grp-a001-02-000000059812037,S20,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,439868,False
+grp-a001-02-000000059812606,노트20,● 01. 갤럭시_지문방지_사생활,SHOPPING,note:노트20,,,,,,unresolved,True,596010,False
+grp-a001-02-000000059817936,S21,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,161314,False
+grp-a001-02-000000059819574,S25플러스,● 01. 갤럭시_강화유리,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,74110,False
+grp-a001-02-000000059819577,S25울트라,● 01. 갤럭시_강화유리,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,35730,False
+grp-a001-02-000000059819724,S25울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,295881,False
+grp-a001-02-000000059819800,S25엣지,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S25 Edge,갤럭시 S25 엣지,2025-05-23,2025-05-14,2025-05-13,press,exact,True,206697,False
+grp-a001-02-000000059820721,S24울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,298274,False
+grp-a001-02-000000059820722,S24플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,107094,False
+grp-a001-02-000000059820848,S25,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,296747,False
+grp-a001-02-000000059820884,S24,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,162400,False
+grp-a001-02-000000059820913,S23,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,945045,False
+grp-a001-02-000000059820923,S23울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,552855,False
+grp-a001-02-000000059820925,S23플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,185595,False
+grp-a001-02-000000059820931,S22플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,401924,False
+grp-a001-02-000000059820953,S21,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,215691,False
+grp-a001-02-000000059820960,S21플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,175333,False
+grp-a001-02-000000059820987,S20,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,229833,False
+grp-a001-02-000000059820998,S20플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,116277,False
+grp-a001-02-000000059821015,S10,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,154271,False
+grp-a001-02-000000059821023,S10플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,311314,False
+grp-a001-02-000000059821034,S10E,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,243840,False
+grp-a001-02-000000059821054,S9플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,257199,False
+grp-a001-02-000000059821088,Z플립4,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:4,갤럭시 Z 플립4,2022-08-26,2022-08-16,2022-08-10,official,exact,True,858579,False
+grp-a001-02-000000059821217,Z플립3,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:3,갤럭시 Z 플립3,2021-08-27,2021-08-17,2021-08-11,official,exact,True,435314,False
+grp-a001-02-000000059821232,Z플립2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:1-2,,,,,,unresolved,True,122145,False
+grp-a001-02-000000059821852,Z폴드2,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:1-2,,,,,,unresolved,True,285365,False
+grp-a001-02-000000059821874,Z폴드3,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:3,갤럭시 Z 폴드3,2021-08-27,2021-08-17,2021-08-11,official,exact,True,88142,False
+grp-a001-02-000000059821962,Z폴드6,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:6,갤럭시 Z 폴드6,2024-07-19,2024-07-12,2024-07-10,official,exact,True,1655831,False
+grp-a001-02-000000059822073,S22울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,451389,False
+grp-a001-02-000000059822154,S22플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,282261,False
+grp-a001-02-000000059822246,S21울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,82412,False
+grp-a001-02-000000059822251,S20플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,350981,False
+grp-a001-02-000000059822273,S20울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,65517,False
+grp-a001-02-000000059822914,노트8,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트8,,,,,,unresolved,True,420773,False
+grp-a001-02-000000059823013,S21플러스,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,235509,False
+grp-a001-02-000000059824059,노트20울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,note:노트20울트라,,,,,,unresolved,True,794733,False
+grp-a001-02-000000059826000,S24플러스,● 01. 갤럭시_강화유리,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,0,False
+grp-a001-02-000000059826423,Z폴드SE,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:SE_unresolved,,,,,,unresolved,True,4069,False
+grp-a001-02-000000059826577,S25,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,3788,False
+grp-a001-02-000000059826628,노트10플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,note:노트10플러스,,,,,,unresolved,True,35966,False
+grp-a001-02-000000059827137,S24,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,2980,False
+grp-a001-02-000000059827296,S23,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,4356,False
+grp-a001-02-000000059827297,S22,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,5053,False
+grp-a001-02-000000059827298,S21,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,2630,False
+grp-a001-02-000000059828242,S25울트라,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,19361,False
+grp-a001-02-000000059828246,S25플러스,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,4710,False
+grp-a001-02-000000059828464,S24FE,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S24 FE,갤럭시 S24 FE,2024-11-01,,2024-09-26,press,exact,True,17577,False
+grp-a001-02-000000059828469,S24울트라,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,5600,False
+grp-a001-02-000000059828556,S24플러스,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,4020,False
+grp-a001-02-000000059829132,S23플러스,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,18482,False
+grp-a001-02-000000059829228,S22플러스,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,8690,False
+grp-a001-02-000000059829872,S21플러스,● 01. 갤럭시_지문방지_PET,SHOPPING,galaxy_s:S9-S21,,,,,,unresolved,True,1000,False
+grp-a001-02-000000059829962,노트20,● 01. 갤럭시_지문방지_PET,SHOPPING,note:노트20,,,,,,unresolved,True,23196,False
+grp-a001-02-000000059830517,16프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,506909,False
+grp-a001-02-000000059830521,16,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,160717,False
+grp-a001-02-000000059830530,14프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,237697,False
+grp-a001-02-000000059830538,14,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,231092,False
+grp-a001-02-000000059830547,16플러스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,82214,False
+grp-a001-02-000000059830552,14플러스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,86474,False
+grp-a001-02-000000059830874,Z폴드7,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,2964374,False
+grp-a001-02-000000059830952,Z플립7,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,1889172,False
+grp-a001-02-000000059832147,폴드7,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_z_fold:7,갤럭시 Z 폴드7,2025-07-25,2025-07-15,,press,exact,True,668621,False
+grp-a001-02-000000059832150,플립7,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_z_flip:7,갤럭시 Z 플립7,2025-07-25,2025-07-15,,press,exact,True,123001,False
+grp-a001-02-000000059832206,12프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,119599,False
+grp-a001-02-000000059832280,12,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,177828,False
+grp-a001-02-000000059832332,15프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,294927,False
+grp-a001-02-000000059832344,13프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,170952,False
+grp-a001-02-000000059832490,15플러스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,305426,False
+grp-a001-02-000000059832492,13,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,189598,False
+grp-a001-02-000000059879629,17프로,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,266700,False
+grp-a001-02-000000059879675,17프로맥스,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,123148,False
+grp-a001-02-000000059879687,17,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,309194,False
+grp-a001-02-000000059880038,17에어,● [P_삭제금지]03. 아이폰_강화유리,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,94734,False
+grp-a001-02-000000061581230,S24_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,50920,False
+grp-a001-02-000000061581250,S24울트라_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,142128,False
+grp-a001-02-000000061581254,S24플러스_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,146952,False
+grp-a001-02-000000061581256,S25_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,0,False
+grp-a001-02-000000061581260,S25울트라_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,0,False
+grp-a001-02-000000061581263,S25플러스_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,0,False
+grp-a001-02-000000061581264,S26_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,72981,False
+grp-a001-02-000000061581269,S26울트라_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,329560,False
+grp-a001-02-000000061581308,S26플러스_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,47408,False
+grp-a001-02-000000061693679,17프로_맥,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,26615,False
+grp-a001-02-000000061693682,17프로맥스_맥,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,26740,False
+grp-a001-02-000000061693688,17_맥,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,40350,False
+grp-a001-02-000000061693693,17에어_맥,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,12853,False
+grp-a001-02-000000061693695,16프로_맥,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,33960,False
+grp-a001-02-000000061693698,16프로맥스_맥,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,40457,False
+grp-a001-02-000000061693700,16플러스_맥,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,26890,False
+grp-a001-02-000000061693708,16_맥,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,18930,False
+grp-a001-02-000000061693716,15프로_맥,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,65000,False
+grp-a001-02-000000061693720,15프로맥스_맥,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,40868,False
+grp-a001-02-000000061693722,15_맥,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,43855,False
+grp-a001-02-000000061693725,15플러스_맥,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,27716,False
+grp-a001-02-000000061693728,14프로_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,22140,False
+grp-a001-02-000000061693731,14프로맥스_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,26682,False
+grp-a001-02-000000061693735,14플러스_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,19960,False
+grp-a001-02-000000061693737,14_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,26050,False
+grp-a001-02-000000061693757,13프로_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,42384,False
+grp-a001-02-000000061693760,13프로맥스_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,28220,False
+grp-a001-02-000000061693771,13_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,15686,False
+grp-a001-02-000000061693781,13미니_맥,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,48550,False
+grp-a001-02-000000061793266,S22_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,15380,False
+grp-a001-02-000000061793288,S22플러스_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,8380,False
+grp-a001-02-000000061793303,S22울트라_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,13990,False
+grp-a001-02-000000061793320,S23_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,33540,False
+grp-a001-02-000000061793328,S23플러스_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,50660,False
+grp-a001-02-000000061793341,S23울트라_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,50951,False
+grp-a001-02-000000061793346,S24_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,22527,False
+grp-a001-02-000000061793358,S24플러스_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,23070,False
+grp-a001-02-000000061793364,S24울트라_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S24,갤럭시 S24 (+/울트라),2024-01-31,2024-01-19,2024-01-17,official,exact,True,30730,False
+grp-a001-02-000000061793373,S25_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,60164,False
+grp-a001-02-000000061793386,S25플러스_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,54581,False
+grp-a001-02-000000061793395,S25울트라_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S25,갤럭시 S25 (+/울트라/FE),2025-02-07,2025-01-24,2025-01-22,official,exact,True,57867,False
+grp-a001-02-000000061793407,S26_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,67016,False
+grp-a001-02-000000061793411,S26플러스_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,40010,False
+grp-a001-02-000000061793423,S26울트라_일,소다케이스_갤럭시,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,97028,False
+grp-a001-02-000000061793448,노트20_맥,소다케이스_갤럭시,SHOPPING,note:노트20,,,,,,unresolved,True,15400,False
+grp-a001-02-000000061793457,노트20울트라_맥,소다케이스_갤럭시,SHOPPING,note:노트20울트라,,,,,,unresolved,True,9960,False
+grp-a001-02-000000061793470,S22_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,6000,False
+grp-a001-02-000000061793476,S22플러스_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,6550,False
+grp-a001-02-000000061793489,S22울트라_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S22,갤럭시 S22 (+/울트라),2022-02-25,2022-02-14,2022-02-09,press,exact,True,21620,False
+grp-a001-02-000000061793496,S23_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,8804,False
+grp-a001-02-000000061793511,S23플러스_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,8060,False
+grp-a001-02-000000061793521,S23울트라_맥,소다케이스_갤럭시,SHOPPING,galaxy_s:S23,갤럭시 S23 (+/울트라/FE),2023-02-17,2023-02-07,2023-02-01,unverified,exact,True,28034,False
+grp-a001-02-000000061794086,12미니_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,3600,False
+grp-a001-02-000000061794093,12_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,6000,False
+grp-a001-02-000000061794099,12프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,0,False
+grp-a001-02-000000061794111,12프로_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_12,,,,,,unresolved,True,4800,False
+grp-a001-02-000000061794117,13미니_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,27014,False
+grp-a001-02-000000061794129,13_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,34391,False
+grp-a001-02-000000061794137,13프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,27657,False
+grp-a001-02-000000061794145,13프로_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_13,,,,,,unresolved,True,28910,False
+grp-a001-02-000000061794152,14_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,20750,False
+grp-a001-02-000000061794155,14플러스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,16947,False
+grp-a001-02-000000061794157,14프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,44850,False
+grp-a001-02-000000061794159,14프로_일,소다케이스_아이폰,SHOPPING,iphone:UNKNOWN_14,,,,,,unresolved,True,34150,False
+grp-a001-02-000000061794162,15_일,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,30611,False
+grp-a001-02-000000061794163,15플러스_일,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,24071,False
+grp-a001-02-000000061794165,15프로_일,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,29070,False
+grp-a001-02-000000061794167,15프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:15,아이폰15(추정 매핑),2023-09-22,,,inferred_from_order,fuzzy,True,31255,False
+grp-a001-02-000000061794170,16_일,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,32790,False
+grp-a001-02-000000061794172,16플러스_일,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,11370,False
+grp-a001-02-000000061794176,16프로_일,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,30038,False
+grp-a001-02-000000061794179,16프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:16,아이폰16(추정 매핑),2024-09-20,,,inferred_from_order,fuzzy,True,21290,False
+grp-a001-02-000000061794180,17_일,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,57459,False
+grp-a001-02-000000061794181,17에어_일,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,24492,False
+grp-a001-02-000000061794184,17프로_일,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,35369,False
+grp-a001-02-000000061794187,17프로맥스_일,소다케이스_아이폰,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,33330,False
+grp-a001-02-000000061878144,06. 컨텐츠매체_06,● 10. 컨텐츠매체,SHOPPING,,,,,,,no_model,False,151584,False
+grp-a001-02-000000062947038,S26,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,512026,False
+grp-a001-02-000000062947040,S26울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,1318941,False
+grp-a001-02-000000062947041,S26플러스,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_s:S26,갤럭시 S26 (+/울트라),2026-03-11,2026-02-27,2026-02-25,official,exact,True,758486,False
+grp-a001-02-000000063093385,아이폰 17프로 필름,아이폰 17프로 필름,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,0,False
+grp-a001-02-000000063093697,아이폰필름,아이폰 17프로 필름,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,3477,False
+grp-a001-02-000000063093828,휴대폰악세사리,아이폰 17프로 필름,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,739,False
+grp-a001-02-000000063095763,아이폰 17프로 필름-1772082445224,아이폰 17프로 필름,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,0,False
+grp-a001-02-000000063096531,TEST,벌크,SHOPPING,,,,,,,no_model,False,1291,False
+grp-a001-02-000000065140028,17E,● [P_삭제금지]04. 아이폰_지문방지,SHOPPING,iphone:17,아이폰17(추정 매핑),2025-09-19,,,inferred_from_order,fuzzy,True,198994,False
+grp-a001-02-000000069087677,기존상품명,● [P_삭제금지]맥세이프카드케이스_쇼검,SHOPPING,,,,,,,no_model,False,58111,False
+grp-a001-02-000000069089452,맥세이프카드지갑,● [P_삭제금지]맥세이프카드케이스_쇼검,SHOPPING,,,,,,,no_model,False,100708,False
+grp-a001-02-000000069089465,맥세이프지갑,● [P_삭제금지]맥세이프카드케이스_쇼검,SHOPPING,,,,,,,no_model,False,24661,False
+grp-a001-02-000000069089475,멕세이프카드지갑,● [P_삭제금지]맥세이프카드케이스_쇼검,SHOPPING,,,,,,,no_model,False,58424,False
+grp-a001-02-000000070108611,맥세이프_PC,● [P_삭제금지]맥세이프카드케이스_쇼검,SHOPPING,,,,,,,no_model,False,55087,False
+grp-a001-02-000000070109616,맥세이프_MO,● [P_삭제금지]맥세이프카드케이스_쇼검,SHOPPING,,,,,,,no_model,False,295745,False
+grp-a001-02-000000070109620,맥세이프_컨텐츠 지면,● [P_삭제금지]맥세이프카드케이스_쇼검,SHOPPING,,,,,,,no_model,False,6441,False
+grp-a001-02-000000070451363,Z폴드8울트라,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,500662,False
+grp-a001-02-000000070523564,Z폴드8와이드,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,2716662,False
+grp-a001-02-000000070523694,Z플립8,● 01. 갤럭시_지문방지_TPU,SHOPPING,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,289632,False
+grp-a001-02-000000070833125,01. Z플립8,● 15. 갤럭시Z_폴드8플립8_사생활보호,SHOPPING,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,5478,False
+grp-a001-02-000000070833126,02. Z폴드8 와이드,● 15. 갤럭시Z_폴드8플립8_사생활보호,SHOPPING,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,16590,False
+grp-a001-02-000000070833127,03. Z폴드8 울트라,● 15. 갤럭시Z_폴드8플립8_사생활보호,SHOPPING,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,50810,False
+grp-a001-02-000000070991863,폴드8,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,1278144,False
+grp-a001-02-000000070992078,폴드8울트라,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_z_fold:8,갤럭시 Z 폴드8 (울트라 포함),2026-08-07,2026-07-28,,official,exact,True,86822,False
+grp-a001-02-000000070992116,플립8,● 01. 갤럭시_지문방지_사생활,SHOPPING,galaxy_z_flip:8,갤럭시 Z 플립8,2026-08-07,2026-07-28,,official,exact,True,89993,False

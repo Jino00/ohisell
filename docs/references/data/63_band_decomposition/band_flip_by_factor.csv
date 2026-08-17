@@ -1,0 +1,213 @@
+adgroup_id,adgroup_name,campaign_type,band_total,band_baseline_only,direction,dominant_label,dominant_excess,cost_total,conv_amt_total
+grp-a001-01-000000052260531,01. 갤럭시 폴드7,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),F3,-1178613.3,1900099,3840230
+grp-a001-02-000000052176575,폴드7,SHOPPING,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F1b,951590.27,8705950,17894020
+grp-a001-02-000000052176555,플립7,SHOPPING,band2,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F1b,488310.33,4103720,7924220
+grp-a001-01-000000052225586,01. 갤럭시 플립7,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),F3,-289963.9,357459,618920
+grp-a001-01-000000054618773,17 아이폰_맥세이프케이스,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,277177.57,84703,63510
+grp-a001-01-000000054671417,00. 아이폰17_강화유리,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),F3,-269493.02,400098,810920
+grp-a001-01-000000055142639,01. 갤럭시탭_S11,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,257565.06,185665,679200
+grp-a001-01-000000054666555,00. 아이폰17_사생활,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,247273.17,409970,1113290
+grp-a001-02-000000047485224,S25FE,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-243697.24,5847026,11785240
+grp-a001-02-000000059830952,Z플립7,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-202602.92,1883183,3752690
+grp-a001-02-000000052819145,00. Z플립폴드7,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F1b,-163422.02,1298273,1595220
+grp-a001-01-000000054671419,00. 아이폰17_사생활,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,162750.96,95030,296210
+grp-a001-02-000000043610930,03. 컨텐츠매체_03,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-142564.56,1460976,2356760
+grp-a001-02-000000054537415,S24플러스,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-140339.77,1073844,1771140
+grp-a001-01-000000044807690,02. 아이폰16_강화유리,WEB_SITE,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,137191.78,1293400,2960120
+grp-a001-02-000000044601438,16프로,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-125144.29,2520924,4964570
+grp-a001-02-000000054536931,Z플립6,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-114062.69,1760957,3477370
+grp-a001-01-000000070136001,골프버디필름(스마트스토어)_MO,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,111465.52,88012,242900
+grp-a001-02-000000055074537,01. 갤럭시탭S11,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),F3,108608.44,858520,1516610
+grp-a001-02-000000046072553,03. 아이폰15,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-97579.45,560516,1105460
+grp-a001-02-000000055074671,01. 갤럭시탭S11_종이질감,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-86878.8,427797,795400
+grp-a001-02-000000047076722,01. 아이패드에어4/5세대10.9인치,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,85333.4,516809,922850
+grp-a001-01-000000060531709,플립5_지문방지,WEB_SITE,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),주말,83638.58,249015,594200
+grp-a001-01-000000060480728,S23울트라_지문방지_TPU,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-82221.27,524119,839800
+grp-a001-01-000000048499536,50. 골프버디필름,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-79607.0,572000,1028700
+grp-a001-02-000000046843736,,SHOPPING,band2,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,-74987.0,45250,77910
+grp-a001-01-000000060824082,지문방지필름,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-74487.9,276802,427200
+grp-a001-01-000000052822210,00. 폴드7 케이스,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F2,-71965.61,324970,290400
+grp-a001-02-000000046224076,01. 갤럭시탭S10/플러스_지문방지,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-71220.92,983442,1956750
+grp-a001-02-000000045023177,S21울트라,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-70749.98,1367556,2645530
+grp-a001-02-000000059820987,S20,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-66796.24,180531,348600
+grp-a001-01-000000037423351,아이폰17_맥세이프케이스,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),F3,-66414.73,133990,85530
+grp-a001-02-000000043624094,,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-66142.32,592490,1204520
+grp-a001-02-000000059879629,17프로,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),F3,-64206.09,266700,475610
+grp-a001-01-000000060480724,S24울트라_지문방지_TPU,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-63884.3,673901,1256800
+grp-a001-02-000000059830521,16,SHOPPING,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),주말,62425.22,160717,435600
+grp-a001-01-000000060603885,아이폰17_사생활보호,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),F3,61537.17,324980,667600
+grp-a001-02-000000059810410,S22,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-61012.11,227796,397500
+grp-a001-01-000000052822167,00. 플립7 케이스,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F2,-60108.98,210830,127360
+grp-a001-01-000000060531711,플립6_지문방지,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-58699.26,284354,413800
+grp-a001-01-000000060604029,아이폰15_강화유리,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-58201.49,233285,366000
+grp-a001-01-000000060825799,S9_종이질감,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,56738.4,85302,266200
+grp-a001-01-000000037423356,01. 갤럭시 플립6,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-55601.37,553480,1022030
+grp-a001-02-000000044299955,03. S20FE,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-55333.31,614282,971210
+grp-a001-02-000000043610925,02. 컨텐츠매체_02,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-51979.96,601543,952480
+grp-a001-02-000000043624057,,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,51921.76,356630,640320
+grp-a001-02-000000061581308,S26플러스_맥,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,49272.0,47408,0
+grp-a001-01-000000046835750,02.아이패드_에어 6(M2)세대_종이질감,WEB_SITE,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),주말,47651.36,83860,221800
+grp-a001-01-000000060792987,아이폰17프로_사생활보호,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),F3,46443.58,206111,492200
+grp-a001-01-000000055151707,01. 갤럭시탭_S11,WEB_SITE,band1,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,46074.92,90800,344100
+grp-a001-02-000000059820998,S20플러스,SHOPPING,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,44118.4,103341,232500
+grp-a001-01-000000060604040,아이폰16프로_강화유리,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,42634.53,121642,241600
+grp-a001-02-000000044603941,12프로,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,41849.73,691058,1244010
+grp-a001-01-000000060481178,S22울트라_지문방지_TPU,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,41613.78,291777,518900
+grp-a001-02-000000046074558,05. 아이폰13,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-39929.84,452833,927200
+grp-a001-01-000000060826108,S11울트라_종이질감,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-38925.25,273484,452200
+grp-a001-02-000000059811691,S25플러스,SHOPPING,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),주말,37518.86,159794,367700
+grp-a001-02-000000059808403,S25,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-36828.57,175345,251400
+grp-a001-01-000000037423636,01. 갤럭시플립,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,36669.94,213742,452830
+grp-a001-02-000000059832147,폴드7,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),공휴일,35838.46,667273,1256200
+grp-a001-01-000000060554863,폴드6_지문방지,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-35797.09,234971,416600
+grp-a001-02-000000044743916,03. 아이폰15 시리즈,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,35435.79,274697,489230
+grp-a001-01-000000060617379,A17_지문방지_TPU,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),F3,35273.9,118490,272300
+grp-a001-02-000000052193613,03. 아이폰_13,SHOPPING,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-34704.32,92332,113920
+grp-a001-01-000000060480727,S23플러스_지문방지_TPU,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-34697.46,211112,389500
+grp-a001-02-000000055116686,벌크6,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-34280.79,348639,545300
+grp-a001-02-000000059820960,S21플러스,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,34063.41,170149,306900
+grp-a001-01-000000038934999,02. 아이패드_종이질감,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-32858.15,131580,253810
+grp-a001-01-000000060610039,노트10플러스_지문방지_TPU,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,32055.43,70629,184800
+grp-a001-01-000000060604039,아이폰16_강화유리,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-31884.99,183166,265500
+grp-a001-02-000000052193550,01. 갤럭시_S25,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-31645.57,177749,226900
+grp-a001-02-000000059823013,S21플러스,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-31491.92,232754,477000
+grp-a001-01-000000040173283,02. 아이폰15_지문방지,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-31361.27,166366,306200
+grp-a001-02-000000061581264,S26_맥,SHOPPING,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-30223.53,71991,33800
+grp-a001-01-000000047486489,01. 갤럭시S25_EZ강화유리,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-30019.93,146480,244750
+grp-a001-01-000000060763694,S23_사생활보호,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-29455.76,303859,573400
+grp-a001-02-000000061794184,17프로_일,SHOPPING,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),F3,-29169.45,35369,12900
+grp-a001-01-000000061924192,S26울트라_일,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F1b,-28958.57,56754,12900
+grp-a001-02-000000059812037,S20,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,27818.57,414512,732400
+grp-a001-02-000000061794180,17_일,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-27746.45,57459,57500
+grp-a001-01-000000060603888,아이폰17에어_강화유리,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,26832.91,70542,71400
+grp-a001-01-000000060765090,S20플러스_사생활보호,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,26681.94,23841,63600
+grp-a001-01-000000046416702,01. 종이질감_P11/GS10/RS10/10,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,26453.14,31243,75100
+grp-a001-01-000000060481591,S20플러스_지문방지_TPU,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-26219.1,64914,127200
+grp-a001-01-000000060841581,프로3-4-5-6세대(12.9인치)_6H BLC,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,25745.01,39238,67600
+grp-a001-01-000000060842565,미니6-7세대(8.3인치)_종이질감,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-25703.45,71155,131100
+grp-a001-02-000000061794137,13프로맥스_일,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,25552.74,27657,38700
+grp-a001-01-000000060843314,S8플러스_6H BLC,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,25538.79,45198,67600
+grp-a001-01-000000060531710,플립4_지문방지,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),공휴일,25331.88,88925,164200
+grp-a001-01-000000060548659,폴드2_지문방지,WEB_SITE,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,25227.42,72588,197100
+grp-a001-02-000000059879675,17프로맥스,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-25224.2,123148,144200
+grp-a001-02-000000061794187,17프로맥스_일,SHOPPING,band3,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-25210.0,33330,0
+grp-a001-01-000000060604014,아이폰13_강화유리,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-24781.78,136770,236700
+grp-a001-02-000000061693688,17_맥,SHOPPING,band3,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-24470.0,40350,0
+grp-a001-01-000000060612844,A16_지문방지_TPU,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-24292.52,101005,173800
+grp-a001-01-000000060612841,S105G_지문방지_TPU,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,23366.65,28061,58700
+grp-a001-01-000000060603891,아이폰17프로맥스_강화유리,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-22126.41,235996,421500
+grp-a001-02-000000059809116,S24,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,22050.65,137225,251220
+grp-a001-02-000000059822154,S22플러스,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,21933.89,276857,477000
+grp-a001-01-000000060480725,S23_지문방지_TPU,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-21920.39,396710,791840
+grp-a001-01-000000060610036,노트10_지문방지_TPU,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,21273.33,66873,143100
+grp-a001-01-000000060784944,S23플러스_사생활보호,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-21172.57,166466,333900
+grp-a001-01-000000060843107,S11울트라_6H BLC,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-21019.9,52889,74600
+grp-a001-02-000000061793320,S23_일,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),연휴,20586.09,33540,38700
+grp-a001-01-000000061883792,S26_맥(품절),WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F1b,20054.53,15760,33800
+grp-a001-01-000000060617381,노트20울트라_지문방지_TPU,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-19906.38,87125,159000
+grp-a001-01-000000060481115,S22플러스_지문방지_TPU,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,19879.16,72851,143100
+grp-a001-01-000000060824936,A9플러스_종이질감,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-19609.09,127606,210700
+grp-a001-01-000000060604022,아이폰14프로_강화유리,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-19562.55,117923,216800
+grp-a001-02-000000047076738,01. 아이패드프로3/4/5/6세대11/12.9인치,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,19273.36,48542,44600
+grp-a001-01-000000060841560,에어4-5세대(10.9인치)_6H BLC,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,18361.6,619,31800
+grp-a001-02-000000046126373,01. 아이패드7-8-9세대_10.2인치,SHOPPING,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),주말,18195.37,254817,559500
+grp-a001-02-000000059830530,14프로맥스,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-17755.99,207093,330200
+grp-a001-02-000000059820722,S24플러스,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-17292.95,89165,135100
+grp-a001-01-000000046978005,"02.아이패드_프로 6,7세대_종이질감",WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,17064.92,46210,111300
+grp-a001-01-000000060824108,강화유리필름,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-17012.14,72403,110300
+grp-a001-02-000000059810135,S23,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-16703.35,193088,318000
+grp-a001-02-000000059880038,17에어,SHOPPING,band2,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,16698.94,93798,164100
+grp-a001-01-000000046132066,02.아이패드_미니7/6세대_종이질감,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,16604.13,15749,47700
+grp-a001-01-000000060843407,S7플러스_6H BLC,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,16326.2,10955,32800
+grp-a001-01-000000060612115,S8_지문방지_TPU,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,16168.39,21669,33600
+grp-a001-01-000000060481589,S21플러스_지문방지_TPU,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,15790.7,67447,124200
+grp-a001-01-000000053266390,56. 방수팩,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-15290.11,35438,0
+grp-a001-01-000000049549995,"02.아이패드_프로 6,7세대",WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-14384.92,59020,110500
+grp-a001-01-000000060824932,A7라이트_종이질감,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,14309.67,26817,15900
+grp-a001-01-000000060823924,맥세이프케이스_아이폰17,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-14297.0,33111,0
+grp-a001-02-000000052193556,02. 갤럭시_S24,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,14265.26,105241,135430
+grp-a001-02-000000061794129,13_일,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-13822.45,34391,38700
+grp-a001-02-000000044743917,05. 아이폰14 시리즈,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-13712.95,154853,224960
+grp-a001-01-000000061924189,S25울트라_일,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,13571.2,12470,41200
+grp-a001-01-000000044808499,02. 아이폰16_사생활보호,WEB_SITE,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,13227.03,49740,113300
+grp-a001-01-000000046807499,"02.아이패드_프로 6,7세대_종이질감",WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-12610.18,30370,47700
+grp-a001-01-000000061924156,S24울트라_일,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-12426.55,39162,55500
+grp-a001-02-000000046222157,"10. Z플립,폴드5/6",SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-12300.74,79625,121600
+grp-a001-02-000000059820931,S22플러스,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,12062.75,395817,699600
+grp-a001-01-000000037840548,02. 아이폰15,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-11559.59,177937,361100
+grp-a001-01-000000046980878,01. 갤럭시S21_지문방지,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,11550.8,115120,206700
+grp-a001-01-000000060604020,아이폰14_강화유리,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,11465.1,27142,18900
+grp-a001-01-000000046971358,02.아이패드_에어 6(M2)세대_종이질감,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,11429.89,26454,15900
+grp-a001-01-000000038769333,02. 아이폰_이전기종,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-11404.55,43680,64500
+grp-a001-01-000000060604025,아이폰14프로맥스_강화유리,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-11304.16,42929,36800
+grp-a001-01-000000060489687,S20FE_지문방지_TPU,WEB_SITE,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,11210.17,26872,57600
+grp-a001-01-000000049350994,02.아이패드_에어_7세대_종이질감,WEB_SITE,band2,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,10858.14,18010,31800
+grp-a001-02-000000059827297,S22,SHOPPING,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,10323.45,5053,15900
+grp-a001-01-000000044378320,37 LG_지문방지필름,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,10106.21,6720,15900
+grp-a001-01-000000060824113,갤럭시워치 스트랩,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-9844.74,30246,34800
+grp-a001-01-000000060858092,일미리케이스_플립7,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-9698.86,24631,36400
+grp-a001-01-000000060613246,A55_지문방지_TPU,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),공휴일,9691.5,13971,15900
+grp-a001-02-000000061793364,S24울트라_일,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),연휴,-9608.69,30730,38700
+grp-a001-01-000000060612113,A73_지문방지_TPU,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),공휴일,9401.45,4792,15900
+grp-a001-02-000000059828242,S25울트라,SHOPPING,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,9345.0,17846,47700
+grp-a001-01-000000060843279,S9_6H BLC,WEB_SITE,band2,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),공휴일,9261.49,8812,16900
+grp-a001-01-000000060489686,S20울트라_지문방지_TPU,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-9195.18,62216,95400
+grp-a001-01-000000060843280,S9울트라_6H BLC,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,9020.24,5100,15900
+grp-a001-01-000000040173291,02. 아이폰_사생활보호,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-8928.92,69370,139300
+grp-a001-01-000000060843261,S10울트라_6H BLC,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,8794.45,10382,15900
+grp-a001-02-000000061693695,16프로_맥,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-8575.0,33960,0
+grp-a001-01-000000060825654,A9_종이질감,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-8380.42,20183,31800
+grp-a001-01-000000061924114,17에어_일,WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-8200.0,11320,0
+grp-a001-01-000000058445222,14. 트라이폴드,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-8000.77,52700,0
+grp-a001-01-000000042969832,55. 갤럭시워치 스트랩,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,7780.0,34664,0
+grp-a001-02-000000061794162,15_일,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-7723.18,30611,40800
+grp-a001-02-000000061793328,S23플러스_일,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),공휴일,-7392.94,50660,93300
+grp-a001-01-000000060823926,도어락_사생활보호,WEB_SITE,band1,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,7219.95,2850,14200
+grp-a001-02-000000059829132,S23플러스,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,6956.78,18482,31800
+grp-a001-01-000000060612840,S9플러스_지문방지_TPU,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-6740.56,15738,15900
+grp-a001-01-000000060610050,A33_지문방지_TPU,WEB_SITE,band2,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,6666.55,9116,15900
+grp-a001-01-000000060858091,카메라필름_아이폰,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-6643.4,31179,49700
+grp-a001-02-000000061693679,17프로_맥,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),연휴,-6567.58,26615,33800
+grp-a001-01-000000060548667,폴드3_지문방지,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-6424.37,54391,89000
+grp-a001-02-000000046222149,Z폴드/플립3_힌지,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,-6411.42,24155,19200
+grp-a001-01-000000050221991,00. 갤럭시s25엣지,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,6238.35,27810,47700
+grp-a001-01-000000031185770,00. 강화유리필름,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-6137.44,20670,35910
+grp-a001-02-000000061693737,14_맥,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-6092.6,26050,33800
+grp-a001-02-000000061693698,16프로맥스_맥,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-6060.67,40457,0
+grp-a001-01-000000061883745,S26플러스_맥(품절),WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F1b,-5870.0,6210,0
+grp-a001-01-000000058445534,14. 트라이폴드,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-5720.43,19460,30510
+grp-a001-01-000000060825794,S8플러스_종이질감,WEB_SITE,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),휴가창,5654.19,34635,63600
+grp-a001-01-000000038769329,02. 아이폰12,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-5501.06,20740,37800
+grp-a001-01-000000060609365,노트8_지문방지_TPU,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-5488.06,24818,31800
+grp-a001-01-000000060613256,A15_지문방지_TPU,WEB_SITE,band1,band2,band_total이_더_우수(요인이_없으면_더_나쁨),주말,5187.93,13746,31800
+grp-a001-02-000000059828464,S24FE,SHOPPING,band2,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,5165.04,17577,31800
+grp-a001-01-000000047162713,01. 갤럭시S24_6H 사생활보호 ,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-5070.33,48063,96930
+grp-a001-02-000000061794157,14프로맥스_일,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,4974.25,42610,12900
+grp-a001-01-000000045694026,01. 갤럭시 Z폴드SE_지문방지필름,WEB_SITE,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-4645.07,10980,19800
+grp-a001-02-000000055386434,12. 스트랩,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,4445.85,30109,9700
+grp-a001-01-000000047075282,01. 갤럭시A55(퀀텀5) 35 25 15_지문방지,WEB_SITE,band1,band3,band_total이_더_우수(요인이_없으면_더_나쁨),주말,4269.94,29280,61600
+grp-a001-01-000000061924113,17_일,WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-4240.0,4690,0
+grp-a001-01-000000060841577,미니6-7세대(8.3인치)_6H BLC,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,4068.98,45002,31800
+grp-a001-01-000000061924115,17프로_일,WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-3760.0,4650,0
+grp-a001-01-000000046974236,02.아이패드_에어 6세대_6H BLC,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-3722.74,12080,16900
+grp-a001-01-000000060842733,에어6-7세대(11인치)_종이질감,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-3621.8,11858,15900
+grp-a001-01-000000060843310,S9FE_6H BLC,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-3600.33,13051,16900
+grp-a001-01-000000044377702,37 LG_지문방지필름,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-3516.84,10820,15900
+grp-a001-02-000000061794176,16프로_일,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,3512.12,30038,12900
+grp-a001-01-000000060604037,아이폰15플러스_강화유리,WEB_SITE,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-3489.49,17190,18900
+grp-a001-01-000000060604013,아이폰12프로맥스_강화유리,WEB_SITE,band3,band1,band_total이_더_열등(요인이_없으면_더_좋음),휴가창,-2980.54,13382,15900
+grp-a001-01-000000060843313,S8울트라_6H BLC,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,2725.31,33337,0
+grp-a001-02-000000061794152,14_일,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),주말,-2718.69,20750,29800
+grp-a001-01-000000060841575,에어6-7세대(11인치)_6H BLC,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-2551.92,33303,0
+grp-a001-02-000000061693735,14플러스_맥,SHOPPING,band3,band2,band_total이_더_열등(요인이_없으면_더_좋음),연휴,-2545.53,19960,33800
+grp-a001-02-000000061693722,15_맥,SHOPPING,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),공휴일,-1982.91,43855,16900
+grp-a001-02-000000059829228,S22플러스,SHOPPING,band2,band1,band_total이_더_열등(요인이_없으면_더_좋음),주말,-1716.15,8690,15900
+grp-a001-02-000000054131225,10. A16-1756452751536,SHOPPING,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-1360.0,1360,0
+grp-a001-01-000000061883886,17_맥,WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F3,-1340.0,2240,0
+grp-a001-02-000000044952212,01. 갤럭시탭S9_종이질감,SHOPPING,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,-1180.0,1607,0
+grp-a001-01-000000061924153,S23울트라_일,WEB_SITE,band3,band4_unjudgeable,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),연휴,960.0,15010,0
+grp-a001-01-000000047487792,01. 갤럭시S25_자가복원 고투명,WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),휴가창,-790.0,790,0
+grp-a001-01-000000060823925,맥세이프그립톡,WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-160.0,160,0
+grp-a001-01-000000046976107,02.아이패드_에어 6세대_6H BLC,WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),주말,-160.0,160,0
+grp-a001-01-000000061924195,노트20울트라_일(품절),WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F2,0.0,0,0
+grp-a001-01-000000061924194,노트20_일(품절),WEB_SITE,band4_unjudgeable,excluded_cost0,판정가능성_변화(band4_unjudgeable/excluded_cost0 관련 — 우열 비교 대상 아님),F2,0.0,0,0

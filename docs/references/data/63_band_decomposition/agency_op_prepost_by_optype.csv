@@ -1,0 +1,10 @@
+op_type,n_ops,pre_avg_mean,post_avg_mean,delta_mean,delta_median
+ad_edit,8,-311.6,206.8,518.4,696.3
+adgroup_add,9,-5777.8,-4066.4,2382.7,1049.8
+bid_change,67,40.5,-321.6,-362.1,-189.4
+budget_change,3,-19639.8,-3458.6,16181.2,1565.5
+campaign_add,1,,-5409.1,,
+extended_toggle,53,-844.7,772.6,1631.7,277.4
+keyword_add,6,173.5,147.8,-25.6,-259.4
+keyword_remove,2,-2520.4,-1739.0,781.4,781.4
+status_flip,15,-3556.3,2798.5,8240.9,3991.5

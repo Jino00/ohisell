@@ -1,0 +1,3 @@
+campaign_type,distinct_dates,min_date,max_date,rows,cost,conv_amt
+SHOPPING,381,2025-07-22,2026-08-16,66497,172295790,329186820
+WEB_SITE,368,2025-07-22,2026-08-16,69748,56400439,128984840
