@@ -42,6 +42,15 @@ WEB_SITE_ADGROUP_TYPE = "WEB_SITE"      # 파워링크 → restricted-keywords �
 SHOPPING_ADGROUP_TYPE = "SHOPPING"      # 쇼핑몰 상품형 → /ncc/targets 리소스
 _RESTRICT_KEYWORD_TARGET_TP = "RESTRICT_KEYWORD_TARGET"
 
+# 쇼핑 제외 항목의 `type` — 우리가 **쓸 때** 넣는 값 (D-NAO-181 ③).
+# ★파워링크의 `_RESTRICT_TYPE`("KEYWORD_PLUS_RESTRICT")과 **다른 축의 값**이다. 이 리소스의
+#   `type`은 문자열 enum이 아니라 정수(`1`/`2`/`None`)이고 뜻은 공식 스펙에 없다. 계정 전수
+#   실측(3,880건)에서 등록 시기와 강하게 상관했다: `None`(2024) → `1`(2025~26) → `2`(2026).
+#   즉 스키마 버전의 흔적으로 보이며, **현재 최다수이자 우리가 직접 만든 항목이 받은 값이 `1`**
+#   이다(2026-08-17 ① 프로브에서 서버가 신규 항목에 `type=1`을 되돌려줬다). 그래서 1을 쓴다.
+#   추정으로 2를 고르지 않는다 — 뜻을 모르는 값을 새로 심으면 나중에 되읽을 때 기준이 없다.
+_SHOPPING_RESTRICT_TYPE = 1
+
 
 def _epoch_to_utc_iso(value: object) -> str | None:
     """`/ncc/targets` 항목의 `date`(초 단위 epoch) → `regTm`과 같은 UTC ISO 표기.
@@ -81,6 +90,19 @@ class WriteVerificationError(Exception):
 
 class WriteValidationError(Exception):
     """쓰기 전 사전 검증 실패(빈 입력, WEB_SITE 아닌 광고그룹, 중복 키워드 등)."""
+
+
+class WriteConcurrentEditError(Exception):
+    """조회 뒤 쓰기 전에 **다른 행위자가 같은 리소스를 수정**해 거부됨 (D-NAO-181 ③).
+
+    ★교체(replace) 의미론 리소스에만 생기는 위험이다. `PUT /ncc/targets/{id}`는 요청 body가 곧
+      최종 상태라, 우리가 조회한 뒤 남이 1건을 추가하면 우리가 든 「전문」은 이미 옛것이고 그대로
+      쓰면 **그 조치를 지운다.** 그래서 `editTm`이 바뀌면 쓰지 않고 이 예외로 거부한다.
+
+    ★`WriteError`(HTTP 실패)와 갈라 두는 이유: 이건 **재시도하면 대개 성공**한다(새 목록으로 다시
+      계산되므로). 반면 `WriteError`는 재시도 대상이 아니다(비멱등). 호출자가 둘을 같은 것으로
+      받으면 재시도할 것을 포기하거나 포기할 것을 재시도한다.
+    """
 
 
 class GroupBidDeadError(WriteValidationError):
@@ -275,6 +297,223 @@ def get_live_exclusions(adgroup_id: str, adgroup_type: str | None) -> list[dict]
     if adgroup_type == SHOPPING_ADGROUP_TYPE:
         return get_shopping_exclusions(adgroup_id)
     return None
+
+
+def _shopping_restrict_target(adgroup_id: str) -> dict:
+    """쇼핑 그룹의 `RESTRICT_KEYWORD_TARGET` 행 **원본**을 돌려준다(쓰기 경로 전용).
+
+    `get_shopping_exclusions`는 정규화된 «키워드 목록»을 주지만, 쓰기에는 그것으로 부족하다:
+      · `nccTargetId` — PUT의 대상
+      · `editTm` — **낙관적 잠금의 앵커**(아래 `add_shopping_exclusions` 참조)
+      · 항목의 `date` 원값 — 기존 항목을 **원문 그대로** 되돌려 보내야 서버가 등록시각을 보존한다
+    """
+    resp = fetcher._get("/ncc/targets", {"ownerId": adgroup_id})
+    resp.raise_for_status()
+    rows = [
+        t for t in resp.json()
+        if t.get("targetTp") == _RESTRICT_KEYWORD_TARGET_TP and not t.get("delFlag")
+    ]
+    if len(rows) != 1:
+        # 0개면 쓸 대상이 없고, 2개 이상이면 어디에 써야 할지 모른다. 둘 다 추측하지 않는다.
+        raise WriteValidationError(
+            f"add_shopping_exclusions: RESTRICT_KEYWORD_TARGET 행이 {len(rows)}개 "
+            f"— 쓰기 대상을 특정할 수 없다(fail-closed) adgroup={adgroup_id}"
+        )
+    return rows[0]
+
+
+def _shopping_items(target: dict) -> list[dict]:
+    """타겟 행의 항목 리스트 — `None`(미설정)과 `[]`(비움)은 **둘 다 0건**이다.
+
+    근거는 `get_shopping_exclusions` 독스트링(라이브 대조군)에 있다. 여기서 규칙을 두 벌로
+    만들지 않으려고 같은 처분을 쓴다.
+    """
+    items = target.get("target")
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise WriteError(
+            f"RESTRICT_KEYWORD_TARGET.target이 리스트가 아니다({type(items).__name__})"
+        )
+    return items
+
+
+def add_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult:
+    """PUT /ncc/targets/{targetId} — **쇼핑** 광고그룹 제외 검색어 추가 (D-NAO-181 ③).
+
+    파워링크의 `add_restricted_keywords`(POST, 추가 의미론)와 **위험의 성격이 다르다.**
+    이 엔드포인트는 **교체(replace)**라 요청 body가 곧 최종 상태다 — 즉 **쓰기의 고유 위험이
+    「추가 실패」가 아니라 「기존 유실」**이다. 대상 계정엔 대행사가 2024년부터 쌓은 3,880건이
+    있고 **백업이 없다.** 이 함수의 설계는 전부 그 한 문장에서 나온다.
+
+    ## 세 겹의 방어
+
+    **① 전문 전송** — 기존 항목을 **원문 그대로**(`date` 포함) 실어 보내고 신규를 덧붙인다.
+      부분 전송은 나머지를 지운다. 2026-08-17 라이브 실증: 「기존 + 더미」를 보내면 기존이
+      살아남고 기존 항목의 `date`도 서버가 보존한다.
+
+    **② 낙관적 잠금(`editTm`)** — before 조회와 PUT 사이에 다른 행위자(콘솔의 사람·대행사·MOP)가
+      1건을 추가하면, 우리가 든 「전문」은 이미 옛것이라 **그 조치를 지운다.** 그래서 PUT 직전
+      한 번 더 조회해 `editTm`이 그대로인지 본다. 바뀌었으면 **쓰지 않고 거부**한다(호출자가
+      다시 시도하면 새 전문으로 다시 계산된다). 창을 0으로 만들지는 못하지만 — 서버가
+      compare-and-swap을 안 주므로 — 실제 위험 구간을 수백 ms로 줄인다.
+
+    **③ 보존 검증** — after 재조회에서 「요청 키워드가 들어왔나」만 보지 않고 **「before의 전건이
+      아직 있나」**를 본다. 이게 이 함수의 존재 이유다. 하나라도 사라졌으면
+      `WriteVerificationError`로 fail-closed 하고, 메시지에 **사라진 키워드 전문**을 싣는다 —
+      복구는 사람이 해야 하는데 무엇이 사라졌는지 모르면 복구할 수 없기 때문이다.
+
+    ## created_ids가 빈 이유
+    이 리소스엔 **키워드 단위 id가 없다**(`nccTargetId`는 그룹 단위다). 그룹 id를 키워드 id인 척
+    돌려주면 그 값이 `restrict_kwd_id`에 저장되고, 그 칸의 유일한 실쓰기 소비자가
+    개방(`delete_restricted_keywords`)이라 **나중에 엉뚱한 대상을 지운다.** 그래서 비운다.
+
+    Raises:
+        WriteValidationError: keywords 빈 값·요청 내 중복 / adgroup이 SHOPPING 아님 /
+            이미 등록된 키워드 재등록 / 타겟 행 특정 불가.
+        WriteConcurrentEditError: before 조회 뒤 PUT 전에 `editTm`이 바뀜(남의 쓰기와 경합).
+        WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
+        WriteVerificationError: PUT은 2xx인데 재조회에 신규가 없거나 **기존이 유실**됨.
+    """
+    if not keywords:
+        raise WriteValidationError("add_shopping_exclusions: keywords가 비었습니다")
+    if len(set(keywords)) != len(keywords):
+        raise WriteValidationError(
+            f"add_shopping_exclusions: 요청 내 중복 키워드 — 서버 동작이 문서에 없어 차단: {keywords}"
+        )
+
+    adgroup_type = _get_adgroup(adgroup_id).get("adgroupType")
+    if adgroup_type != SHOPPING_ADGROUP_TYPE:
+        raise WriteValidationError(
+            f"add_shopping_exclusions: adgroup {adgroup_id}는 SHOPPING이 아님"
+            f"(adgroupType={adgroup_type!r}) — 파워링크는 add_restricted_keywords를 쓴다"
+        )
+
+    before_target = _shopping_restrict_target(adgroup_id)
+    target_id = before_target.get("nccTargetId")
+    before_items = _shopping_items(before_target)
+
+    # ② 낙관적 잠금 — PUT 직전 재확인.
+    recheck = _shopping_restrict_target(adgroup_id)
+    if recheck.get("editTm") != before_target.get("editTm"):
+        raise WriteConcurrentEditError(
+            f"add_shopping_exclusions: 조회 뒤 PUT 전에 다른 행위자가 이 그룹을 수정했다 "
+            f"(editTm {before_target.get('editTm')} → {recheck.get('editTm')}) — 옛 목록을 쓰면 "
+            f"그 조치가 지워지므로 쓰지 않고 거부한다(재시도하면 새 목록으로 다시 계산된다) "
+            f"adgroup={adgroup_id}"
+        )
+
+    # ★★PUT 본문·중복검사·보존검증의 기준은 **`recheck`(최신)**다 — `before_target`이 아니다
+    #   (적대 리뷰 1R P1-1).
+    #   초판은 `recheck`로 최신 목록을 **받아 놓고 그걸 버린 채** `before_items`로 본문을 만들었다.
+    #   그러면 낙관적 잠금이 «검사만 하고 그 결과인 신선한 데이터는 안 쓰는» 반쪽이 된다:
+    #   `editTm`은 **초 단위 해상도**라(naver_execution_harness도 같은 사실을 명문화해 뒀다)
+    #   before와 recheck 사이의 편집이 **같은 초**에 나면 문자열이 같아 잠금을 통과하고, 그때
+    #   남이 방금 추가한 키워드가 옛 스냅샷에 없으므로 **교체 PUT이 그것을 지운다.**
+    #   ★게다가 보존 검증도 못 잡는다 — `before`에 없던 키워드라 «유실»로 안 보인다.
+    #   즉 예외 없이 성공으로 끝나고 change_log에도 성공으로 남는다(fail-silent, 최악의 모양).
+    #   `recheck`에서 본문을 만들면 잠금이 못 잡는 그 창에서도 **남의 조치가 보존된다.**
+    #   잠금은 그대로 둔다 — 감지된 경합은 조용히 병합하지 않고 거부하는 쪽이 옳다(이중 방어).
+    current_items = _shopping_items(recheck)
+    current_keywords = [it.get("keyword") for it in current_items]
+    dup = [k for k in keywords if k in set(current_keywords)]
+    if dup:
+        raise WriteValidationError(
+            f"add_shopping_exclusions: 이미 등록된 키워드 재등록 시도 — 서버 동작이 문서에 없어 "
+            f"진입 자체를 차단함(추정 금지): {dup}"
+        )
+
+    # ① 전문 전송 — 기존은 **원문 그대로**(date 포함), 신규만 덧붙인다.
+    body = dict(recheck)
+    body["target"] = list(current_items) + [
+        {"keyword": k, "type": _SHOPPING_RESTRICT_TYPE} for k in keywords
+    ]
+    path = f"/ncc/targets/{target_id}"
+    log.info(
+        "Naver SA 쓰기 시도: add_shopping_exclusions adgroup=%s target=%s 기존=%d건 추가=%s",
+        adgroup_id, target_id, len(current_items), keywords,
+    )
+    resp = requests.put(
+        fetcher.BASE_URL + path,
+        headers=fetcher._headers(path, method="PUT"),
+        json=body,
+        timeout=fetcher.HTTP_TIMEOUT_S,
+    )
+    if not (200 <= resp.status_code < 300):
+        log.error(
+            "Naver SA 쓰기 실패: add_shopping_exclusions adgroup=%s status=%s body=%s",
+            adgroup_id, resp.status_code, resp.text[:300],
+        )
+        raise WriteError(
+            f"add_shopping_exclusions 실패: status={resp.status_code} body={resp.text[:300]}"
+        )
+    try:
+        response_body = resp.json()
+    except ValueError:
+        response_body = None
+
+    # ③ 보존 검증 — 「추가됐나」보다 「기존이 남았나」가 먼저다.
+    #   ★기준은 `current_keywords`(PUT 직전 최신)다. `before_keywords`로 재면 before~recheck
+    #    사이에 남이 추가한 것을 «원래 없던 것»으로 취급해 유실을 못 잡는다(P1-1과 같은 뿌리).
+    after_items = _shopping_items(_shopping_restrict_target(adgroup_id))
+    after_keywords = {it.get("keyword") for it in after_items}
+    lost = [k for k in current_keywords if k not in after_keywords]
+    if lost:
+        raise WriteVerificationError(
+            f"add_shopping_exclusions: ★기존 제외가 유실됐다({len(lost)}건) — PUT이 교체 의미론이라 "
+            f"복구는 사람이 해야 한다. 사라진 키워드 전문: {lost} "
+            f"(adgroup={adgroup_id} target={target_id} before={len(current_items)}건 "
+            f"after={len(after_items)}건)"
+        )
+    missing = [k for k in keywords if k not in after_keywords]
+    if missing:
+        raise WriteVerificationError(
+            f"add_shopping_exclusions: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 "
+            f"반영되지 않음(fail-closed): {missing}"
+        )
+
+    return WriteResult(
+        action="add_shopping_exclusions",
+        before=current_items,
+        response=response_body,
+        after=after_items,
+        # ★비운다 — 이 리소스엔 키워드 단위 id가 없다(위 독스트링 「created_ids가 빈 이유」).
+        created_ids=[],
+    )
+
+
+def add_exclusions(
+    adgroup_id: str, keywords: list[str], adgroup_type: str | None = None
+) -> WriteResult:
+    """광고그룹 유형에 맞는 경로로 제외를 **쓴다** — `get_live_exclusions`의 쓰기 쌍 (D-NAO-181 ③).
+
+      · `WEB_SITE`  → `POST /ncc/adgroups/{id}/restricted-keywords` (추가 의미론)
+      · `SHOPPING`  → `PUT /ncc/targets/{targetId}` (교체 의미론 — 전문 전송·보존 검증)
+
+    `adgroup_type`을 안 주면 **라이브에서 읽는다.** 호출자가 들고 있는 값(예: `NaverEntity`의
+    `campaign_type`)을 그대로 쓰지 않는 이유: **캠페인 유형과 광고그룹 유형은 다른 축**이고,
+    D-NAO-179에서 그 둘을 섞은 게이트가 실제로 723건 중 711건을 시야 밖에 뒀다. 쓰기 경로에서
+    같은 혼동이 나면 **엉뚱한 리소스에 쓴다.**
+
+    ★**쓸 줄 모르는 유형은 거부한다**(읽기의 `None`과 대칭이 아니다). 읽기에서 «모름»은 조용히
+      건너뛰어도 관측이 한 칸 비는 것으로 끝나지만, 쓰기에서 «모름»을 조용히 넘기면 **조치가
+      실행되지 않았는데 실행된 것처럼** 흘러간다. 그래서 예외로 올린다.
+    """
+    if adgroup_type is None:
+        # ★`get_adgroup_type`을 **쓰지 않는다**. 그쪽은 조회 실패를 삼켜 `None`을 돌려주는데
+        #   (읽기 경로에선 그게 옳다 — 「모름」을 fail-closed로 처분하려고 만든 것이다), 쓰기에서
+        #   그 값을 받으면 **일시적 조회 실패가 「경로를 모르는 유형」으로 둔갑**한다. 그러면
+        #   에러 메시지가 사람을 엉뚱한 곳으로 보낸다(있지도 않은 유형 문제를 찾게 된다).
+        #   여기서는 실패가 실패로 올라와야 한다.
+        adgroup_type = _get_adgroup(adgroup_id).get("adgroupType")
+    if adgroup_type == WEB_SITE_ADGROUP_TYPE:
+        return add_restricted_keywords(adgroup_id, keywords)
+    if adgroup_type == SHOPPING_ADGROUP_TYPE:
+        return add_shopping_exclusions(adgroup_id, keywords)
+    raise WriteValidationError(
+        f"add_exclusions: adgroupType={adgroup_type!r}에 제외를 쓰는 경로를 모른다 "
+        f"— 조용히 건너뛰지 않고 거부한다(fail-closed) adgroup={adgroup_id}"
+    )
 
 
 def add_restricted_keywords(adgroup_id: str, keywords: list[str]) -> WriteResult:
