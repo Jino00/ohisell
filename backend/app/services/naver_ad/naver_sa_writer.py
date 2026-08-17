@@ -392,15 +392,8 @@ def add_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult
     before_target = _shopping_restrict_target(adgroup_id)
     target_id = before_target.get("nccTargetId")
     before_items = _shopping_items(before_target)
-    before_keywords = [it.get("keyword") for it in before_items]
-    dup = [k for k in keywords if k in set(before_keywords)]
-    if dup:
-        raise WriteValidationError(
-            f"add_shopping_exclusions: 이미 등록된 키워드 재등록 시도 — 서버 동작이 문서에 없어 "
-            f"진입 자체를 차단함(추정 금지): {dup}"
-        )
 
-    # ② 낙관적 잠금 — PUT 직전 재확인. `editTm`이 바뀌었으면 우리 «전문»은 옛것이다.
+    # ② 낙관적 잠금 — PUT 직전 재확인.
     recheck = _shopping_restrict_target(adgroup_id)
     if recheck.get("editTm") != before_target.get("editTm"):
         raise WriteConcurrentEditError(
@@ -410,15 +403,35 @@ def add_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult
             f"adgroup={adgroup_id}"
         )
 
+    # ★★PUT 본문·중복검사·보존검증의 기준은 **`recheck`(최신)**다 — `before_target`이 아니다
+    #   (적대 리뷰 1R P1-1).
+    #   초판은 `recheck`로 최신 목록을 **받아 놓고 그걸 버린 채** `before_items`로 본문을 만들었다.
+    #   그러면 낙관적 잠금이 «검사만 하고 그 결과인 신선한 데이터는 안 쓰는» 반쪽이 된다:
+    #   `editTm`은 **초 단위 해상도**라(naver_execution_harness도 같은 사실을 명문화해 뒀다)
+    #   before와 recheck 사이의 편집이 **같은 초**에 나면 문자열이 같아 잠금을 통과하고, 그때
+    #   남이 방금 추가한 키워드가 옛 스냅샷에 없으므로 **교체 PUT이 그것을 지운다.**
+    #   ★게다가 보존 검증도 못 잡는다 — `before`에 없던 키워드라 «유실»로 안 보인다.
+    #   즉 예외 없이 성공으로 끝나고 change_log에도 성공으로 남는다(fail-silent, 최악의 모양).
+    #   `recheck`에서 본문을 만들면 잠금이 못 잡는 그 창에서도 **남의 조치가 보존된다.**
+    #   잠금은 그대로 둔다 — 감지된 경합은 조용히 병합하지 않고 거부하는 쪽이 옳다(이중 방어).
+    current_items = _shopping_items(recheck)
+    current_keywords = [it.get("keyword") for it in current_items]
+    dup = [k for k in keywords if k in set(current_keywords)]
+    if dup:
+        raise WriteValidationError(
+            f"add_shopping_exclusions: 이미 등록된 키워드 재등록 시도 — 서버 동작이 문서에 없어 "
+            f"진입 자체를 차단함(추정 금지): {dup}"
+        )
+
     # ① 전문 전송 — 기존은 **원문 그대로**(date 포함), 신규만 덧붙인다.
-    body = dict(before_target)
-    body["target"] = list(before_items) + [
+    body = dict(recheck)
+    body["target"] = list(current_items) + [
         {"keyword": k, "type": _SHOPPING_RESTRICT_TYPE} for k in keywords
     ]
     path = f"/ncc/targets/{target_id}"
     log.info(
         "Naver SA 쓰기 시도: add_shopping_exclusions adgroup=%s target=%s 기존=%d건 추가=%s",
-        adgroup_id, target_id, len(before_items), keywords,
+        adgroup_id, target_id, len(current_items), keywords,
     )
     resp = requests.put(
         fetcher.BASE_URL + path,
@@ -440,14 +453,16 @@ def add_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult
         response_body = None
 
     # ③ 보존 검증 — 「추가됐나」보다 「기존이 남았나」가 먼저다.
+    #   ★기준은 `current_keywords`(PUT 직전 최신)다. `before_keywords`로 재면 before~recheck
+    #    사이에 남이 추가한 것을 «원래 없던 것»으로 취급해 유실을 못 잡는다(P1-1과 같은 뿌리).
     after_items = _shopping_items(_shopping_restrict_target(adgroup_id))
     after_keywords = {it.get("keyword") for it in after_items}
-    lost = [k for k in before_keywords if k not in after_keywords]
+    lost = [k for k in current_keywords if k not in after_keywords]
     if lost:
         raise WriteVerificationError(
             f"add_shopping_exclusions: ★기존 제외가 유실됐다({len(lost)}건) — PUT이 교체 의미론이라 "
             f"복구는 사람이 해야 한다. 사라진 키워드 전문: {lost} "
-            f"(adgroup={adgroup_id} target={target_id} before={len(before_items)}건 "
+            f"(adgroup={adgroup_id} target={target_id} before={len(current_items)}건 "
             f"after={len(after_items)}건)"
         )
     missing = [k for k in keywords if k not in after_keywords]
@@ -459,7 +474,7 @@ def add_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult
 
     return WriteResult(
         action="add_shopping_exclusions",
-        before=before_items,
+        before=current_items,
         response=response_body,
         after=after_items,
         # ★비운다 — 이 리소스엔 키워드 단위 id가 없다(위 독스트링 「created_ids가 빈 이유」).

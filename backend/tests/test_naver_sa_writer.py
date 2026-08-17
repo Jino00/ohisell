@@ -1426,8 +1426,9 @@ def test_shopping_write_refuses_duplicate_and_empty():
         writer.add_shopping_exclusions(ADGROUP_ID, [])
     with pytest.raises(WriteValidationError):
         writer.add_shopping_exclusions(ADGROUP_ID, ["같은것", "같은것"])
+    # 중복 검사는 낙관적 잠금 **뒤**에 온다(기준이 recheck이므로) → GET 3회
     with patch.object(writer.fetcher, "_get", side_effect=[
-        FakeResp(200, {"adgroupType": "SHOPPING"}), _targets_resp(),
+        FakeResp(200, {"adgroupType": "SHOPPING"}), _targets_resp(), _targets_resp(),
     ]):
         with pytest.raises(WriteValidationError):
             writer.add_shopping_exclusions(ADGROUP_ID, ["기존A"])
@@ -1471,3 +1472,61 @@ def test_add_exclusions_refuses_unknown_type_instead_of_skipping(unknown):
                       side_effect=AssertionError("모르면 쓰지 않는다")):
         with pytest.raises(WriteValidationError):
             writer.add_exclusions(ADGROUP_ID, ["k"])
+
+
+def test_shopping_write_uses_the_recheck_snapshot_not_the_stale_one():
+    """★★적대 리뷰 1R P1-1 회귀 — 낙관적 잠금이 «검사만 하고 결과는 안 쓰는» 반쪽이면 안 된다.
+
+    초판은 `recheck`로 최신 목록을 **받아 놓고 버린 채** `before`로 본문을 만들었다. `editTm`은
+    **초 단위 해상도**라 before~recheck 사이의 편집이 같은 초에 나면 문자열이 같아 잠금을
+    통과하는데, 그때 옛 스냅샷으로 교체 PUT을 쏘면 **남이 방금 건 조치가 지워진다.**
+    ★그리고 보존 검증도 못 잡는다 — `before`에 없던 키워드라 「유실」로 안 보인다.
+    즉 예외 없이 성공으로 끝난다(fail-silent, 최악의 모양).
+
+    여기서는 `editTm`을 **같게 유지**해 잠금을 일부러 통과시킨다. 그래야 「잠금이 못 잡는 창」
+    자체를 겨눌 수 있다.
+    """
+    put = _FakePut()
+    same_edit_tm = "2025-04-22T18:23:47.000Z"
+    concurrent = _EXISTING + [{"keyword": "남이방금건것", "type": 2, "date": 1786900000}]
+    after = concurrent + [{"keyword": "신규", "type": 1, "date": 1786937658}]
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(_EXISTING, same_edit_tm),      # before — 아직 2건
+        _targets_resp(concurrent, same_edit_tm),     # recheck — 3건인데 editTm은 같은 초
+        _targets_resp(after),                        # after
+    ]), patch.object(writer.requests, "put", put):
+        writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+
+    sent = [k["keyword"] for k in put.calls[0]["target"]]
+    assert "남이방금건것" in sent, (
+        "★잠금이 못 잡는 창에서도 남의 조치가 보존돼야 한다 — recheck로 본문을 만들어야 한다"
+    )
+    assert sent == ["기존A", "기존B", "남이방금건것", "신규"]
+
+
+def test_shopping_write_preservation_check_is_measured_against_the_freshest_list():
+    """보존 검증의 기준도 `recheck`다 — `before`로 재면 그 창의 항목 유실을 못 잡는다."""
+    put = _FakePut()
+    same = "2025-04-22T18:23:47.000Z"
+    concurrent = _EXISTING + [{"keyword": "남이방금건것", "type": 2, "date": 1786900000}]
+    # 서버가 그 항목을 떨어뜨린 채 돌려준 상황 — before 기준이면 눈치채지 못한다.
+    after = _EXISTING + [{"keyword": "신규", "type": 1, "date": 1786937658}]
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(_EXISTING, same), _targets_resp(concurrent, same), _targets_resp(after),
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(WriteVerificationError) as e:
+            writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+    assert "남이방금건것" in str(e.value)
+
+
+def test_shopping_items_raise_when_shape_is_neither_list_nor_none():
+    """적대 리뷰 P2-1(채택) — 이 방어 분기에 테스트가 0건이었다(변이 SURVIVED).
+
+    이 함수의 존재 이유가 「모름을 0건으로 세지 않는다」인데, 그걸 지키는 테스트가 없으면
+    다음 사람이 조용히 `return []`로 바꿔도 아무도 모른다.
+    """
+    for bad in ({"keyword": "골프"}, "골프", 123):
+        with pytest.raises(WriteError):
+            writer._shopping_items({"target": bad})
