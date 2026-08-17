@@ -1,3 +1,40 @@
+[2026-08-17 23:0x~23:2x] S1 판독 실측 3건 — 제외 슬롯 분포 · bidWeight · 인계 주장 5건 (교훈 #309)
+  · 배포 없음. `backend/`·`alembic/` 변경 0건. 네이버 API 콜 0. prod는 `sqlite3 -readonly`만.
+    PAO 완전 정지 유지(`optimizer='none'` 7/7 재확인). origin 미푸시 유지(Jino 지시).
+  · Jino 지시: HANDOFF §6-b부터, 「히스토그램과 bidWeight 판독이 먼저」, 「다시 설계하지 말고
+    §6-b 목록을 그대로 앵커로」. → 앵커 `.claude/anchors/da48087f-….md`에 원문 이전.
+  · 읽기 전용 서브에이전트 3기 병렬(Sonnet). 정본 산출물 =
+    `docs/references/data/66_exclusion_slots/S1_readout_20260817.md`.
+  · ★①제외 슬롯: 쇼핑 116그룹/3,880건 · p50 28 · **p90=p95=max=70** · **70/70 도달 15그룹** ·
+    60~69 16그룹(≥60이 116개의 26.7%). 「33.4건(48%)」 **유효**(분모=제외어 있는 116그룹) —
+    전체 쇼핑 그룹 482(on 327) 분모로는 **17.0%**. **도달 15그룹의 칸은 전건 대행사 것**
+    (쇼핑 제외 3,880건 중 우리 몫 3건). 콘솔 대조점 「버디필름 43/70」 원장 일치(42+1).
+    → §6-a② 소유권 분리가 취향이 아니라 **집행 선행 조건**. ⚠️매칭 타입(exact/phrase) 컬럼이
+    원장에 **없어** phrase 통합의 원료 부재 — `/ncc/targets` GET 1회전에 함께 판독해야 한다.
+  · ★②bidWeight: **방향은 맞고 규모는 과장이었다.** 실설정 **1,271행**(인계 1,343은 WEB_SITE
+    연령 72행 **이중계상**), 100이 아닌 것은 **8행/1,271(0.6%)·4그룹/385(1.0%)·비용 0.97%**.
+    편중은 WEB_SITE `…70512941`(가중치 80, 2026-07-31 설정, 489,454원=4그룹 합의 58%).
+    미독 4곳 확정(`bid_ceiling_calculator:340·286`·`effective_bid:58`·`rank_servo:49`·writer 0개).
+    ★**BEP 판정은 왜곡 없음**(실현 cost를 읽는다) — ref 65의 「전 판정이 100% 가정」은 과했다.
+    ⚠️안 본 축: `pcNetworkBidWeight`/`mobileNetworkBidWeight` · MEDIA/PC_MOBILE 내부 필드 = 미상.
+    원자료 `criterion_real.json`이 **남의 세션 스크래치패드에만** 있어 repo 편입
+    (`docs/references/data/58_sa_surface_probe/criterion_real_20260817.json`).
+  · ★③인계 주장 5건: **유효 3 / 부분오류 2.** 유효 = n-gram 부재(grep 0) · BRAND_SEARCH
+    settings 0행 · `optimizer='none'` 7/7 + bidWeight writer 0. 부분오류 = ⓐ`pool_all` 호출부 0은
+    맞으나 **소비처 좌표 2/3이 틀렸다**(`flight_loop:47`=죽은 import, `bid_ceiling_calculator:34`=주석
+    → 실제는 `exploration:367`·`auto_operator:1509`·`growth_sweeper:114`, 죽은 것은 모듈이 아니라
+    `pool_all` 함수 하나 — `shrink`는 `probe_cell_aggregate:27`에서 살아 쓰인다)
+    ⓑ**「매일 diary에 쓰고 있다」가 틀렸다 → 교훈 #309.**
+  · ★★부수 최대 발견: **쇼핑 제외 브리핑이 배포(07-22) 이후 26일간 0회 발동.** 크론 로그가 매일
+    `shopping=0`, diary 0건, 쇼핑 제안 all-time 0건. 즉 「존재하되 침묵」이 아니라 **애초에 발동
+    자체가 없음** — judge가 쇼핑 exclude 후보를 한 건도 산출한 적이 없다. 원인은 **판정불능**
+    (정상 0인가 상류 결함 0인가 미조사). → **ⓔ(674줄 전제 제거)만으로는 S1 합격 ⑤에 못 닿는다**;
+    상류 0의 원인 규명이 ⓔ에 선행한다.
+  · 정정 전파 차단: ref 65 §3 표·§6 S1(정정 블록 5건) · `ad_type_inventory.md` · `paper_adoption_audit.md`
+    · 트랙 D-NAO-188 절에 각각 정정 기입(원문은 취소선으로 남겨 전파 경로를 보존).
+  · 순서 재판단(bidWeight 최우선 근거 축소 vs 칸 고갈 실측)은 **Jino 결정으로 올림** — 설계 문서의
+    순서를 모델이 바꾸지 않았다.
+
 [2026-08-17 20:5x~21:4x] 논문 채택 13항목 실배선 감사 + 적용 설계서 ref 65 (D-NAO-188)
   · 커밋 `4b64e68a`. 배포 없음. `backend/`·`alembic/` 변경 0건. PAO 완전 정지 유지.
   · 발단: Jino 「예전에 학습한 논문 로직이 모두 적용되어 있나?」 → 기억으로 답하지 않고 실측.

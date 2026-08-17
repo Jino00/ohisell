@@ -46,7 +46,7 @@
 1. **BRAND_SEARCH(브랜드검색) — `naver_campaign_settings` 등록이 0건이다.** SHOPPING 6·WEB_SITE 1은 등록돼 있어 `optimizer` 상태를 확인할 수 있지만, BRAND_SEARCH 2캠페인은 **PAO 시스템 자체가 그 존재를 모른다**(현재는 둘 다 off·30일 집행 0원이라 실害는 없으나, 켜지는 순간 사각이 된다). 이번 조사에서 새로 확인한 사실(ref57·58은 이 표를 직접 안 냄).
 2. **ADVoost(PMAX)·GFA(디스플레이) — 성과 원리적으로 못 봄.** 비용은 자동 수집되나(90일 528만원) imp/clk/전환/상품 연결이 전부 없다. 층1 SHOPPING·WEB_SITE 합계(90일 8,748만원)의 6% 규모.
 3. **PLACE(플레이스광고)·POWER_CONTENTS(파워콘텐츠) — 캠페인 자체를 안 산다**(0개, ref57 §2 재확인만). 우리가 안 보는 게 아니라 아예 운영하지 않는 상품.
-4. **타겟팅 레버(연령·성별·요일시간·지역·매체·PC/모바일 가중치) — 실설정이 SHOPPING 1,215행·WEB_SITE 128행 있는데 코드가 어디서도 안 읽는다.** `bidWeight` grep 전수 0건(hourly_pattern.py 주석 1곳만 언급, 미적용). 우리 실효 입찰가·순위 서보·BEP 판정 전부 「가중치 100%」를 암묵 가정.
+4. **타겟팅 레버(연령·성별·요일시간·지역·매체·PC/모바일 가중치) — 실설정이 ~~SHOPPING 1,215행~~·WEB_SITE 128행 있는데 코드가 어디서도 안 읽는다.** ★**정정(2026-08-17 23:1x)**: SHOPPING은 **1,143행**(AG 1,140+GN 3)이다 — 여기서 WEB_SITE의 연령 72행을 SHOPPING에 **이중 계상**해 총계가 1,271→1,343으로 부풀었고, 그 1,343이 `paper_adoption_audit.md`→ref 65→트랙→HANDOFF로 전파됐다. 정본 = ref 58 §3(1,271) + `docs/references/data/66_exclusion_slots/S1_readout_20260817.md` §2. `bidWeight` grep 전수 0건(hourly_pattern.py 주석 1곳만 언급, 미적용). 우리 실효 입찰가·순위 서보·BEP 판정 전부 「가중치 100%」를 암묵 가정.
 5. **확장소재(ad-extensions) 413개 — 성과를 안 잰다.** `ADEXTENSION`·`ADEXTENSION_CONVERSION` 리포트 타입 미생성.
 6. **쇼핑 검색어 리포트의 시간대·지역·매체 3열 — 매일 받으면서 버린다.** `naver_sa_ad_fetcher.py`가 col7/8/9를 「미상, 불필요」로 주석 처리(ref58 §12-1). `naver_search_term_daily` grain에 그 축이 없어 물리적으로 적재가 안 됨.
 7. **타겟팅 성과(`CRITERION`·`CRITERION_CONVERSION` 리포트) — 적재 테이블이 아직 없다.** `naver_criterion_daily`류 테이블 0개(현재 `.tables` 전수 확인), C-1(ref58) 제안 상태 그대로 미착수.
