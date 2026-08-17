@@ -1,0 +1,64 @@
+
+===== 14-day window (2026-08-04~2026-08-17) =====
+-- source=shopping g0(entry)=107643
+   g1_drop: dropped=544  survive_after=107099
+   g2_drop: dropped=100163  survive_after=6936
+   g3_drop: dropped=6936  survive_after=0
+   g4_drop: dropped=0  survive_after=0
+   g5_drop: dropped=0  survive_after=0
+   g6_drop: dropped=0  survive_after=0
+   survive_all_gates(reported)=0  (check running=0)
+-- source=expkeyword g0(entry)=21264
+   g1_drop: dropped=0  survive_after=21264
+   g2_drop: dropped=19732  survive_after=1532
+   g3_drop: dropped=1532  survive_after=0
+   g4_drop: dropped=0  survive_after=0
+   g5_drop: dropped=0  survive_after=0
+   g6_drop: dropped=0  survive_after=0
+   survive_all_gates(reported)=0  (check running=0)
+-- source=ALL g0(entry)=128907
+   g1_drop: dropped=544  survive_after=128363
+   g2_drop: dropped=119895  survive_after=8468
+   g3_drop: dropped=8468  survive_after=0
+   g4_drop: dropped=0  survive_after=0
+   g5_drop: dropped=0  survive_after=0
+   g6_drop: dropped=0  survive_after=0
+   survive_all_gates(reported)=0  (check running=0)
+ clk histogram (post G1+G2 survivors, shopping): {'0': 6896, '1': 35, '2-4': 4, '5-9': 1}  max_clk=5
+ top whitelist tokens (shopping, rows dropped by each): {'필름': 13223, '폴드': 13114, '액정보호': 11894, '갤럭시': 11330, '강화유리': 8660, '2매입': 6695, '아이폰': 2839, '외부': 2412, '풀커버': 2255, '갤럭시s25': 2136, '내부': 2031, '울트라': 1999, '지문방지': 1710, 'z플립': 1508, '아이폰16': 1400, '자가복원': 1082, '갤럭시s24': 1073, '갤럭시s26': 962, '맥스': 843, '종이질감': 759}
+ margin adgroups: present=0 none=0
+ sensitivity: {'g2_off_survive': 10, 'g3_clk5_survive': 0, 'g4_failopen_survive': 0}
+ full_pass_rows count: 0
+
+===== 90-day window (2026-05-20~2026-08-17) =====
+-- source=shopping g0(entry)=262031
+   g1_drop: dropped=1261  survive_after=260770
+   g2_drop: dropped=241455  survive_after=19315
+   g3_drop: dropped=19310  survive_after=5
+   g4_drop: dropped=1  survive_after=4
+   g5_drop: dropped=2  survive_after=2
+   g6_drop: dropped=0  survive_after=2
+   survive_all_gates(reported)=2  (check running=2)
+-- source=expkeyword g0(entry)=370340
+   g1_drop: dropped=0  survive_after=370340
+   g2_drop: dropped=343453  survive_after=26887
+   g3_drop: dropped=26883  survive_after=4
+   g4_drop: dropped=4  survive_after=0
+   g5_drop: dropped=0  survive_after=0
+   g6_drop: dropped=0  survive_after=0
+   survive_all_gates(reported)=0  (check running=0)
+-- source=ALL g0(entry)=632371
+   g1_drop: dropped=1261  survive_after=631110
+   g2_drop: dropped=584908  survive_after=46202
+   g3_drop: dropped=46193  survive_after=9
+   g4_drop: dropped=5  survive_after=4
+   g5_drop: dropped=2  survive_after=2
+   g6_drop: dropped=0  survive_after=2
+   survive_all_gates(reported)=2  (check running=2)
+ clk histogram (post G1+G2 survivors, shopping): {'0': 19175, '1': 119, '2-4': 15, '10+': 5, '5-9': 1}  max_clk=17
+ top whitelist tokens (shopping, rows dropped by each): {'필름': 40099, '갤럭시': 29717, '폴드': 28309, '액정보호': 22738, '강화유리': 19410, '2매입': 10547, '아이폰': 8830, '울트라': 4903, '갤럭시s25': 4762, '내부': 4590, 'z플립': 4560, '외부': 4410, '풀커버': 4312, '갤럭시s26': 3676, '아이폰16': 3370, '지문방지': 2699, '종이질감': 2176, '케이스': 2050, '갤럭시s24': 1993, '휴대폰': 1938}
+ margin adgroups: present=3 none=4
+ sensitivity: {'g2_off_survive': 36, 'g3_clk5_survive': 2, 'g4_failopen_survive': 3}
+ full_pass_rows count: 2
+   PASS: {'source': 'shopping', 'campaign_id': 'cmp-a001-02-000000008902804', 'adgroup_id': 'grp-a001-02-000000047005364', 'search_term': '골프', 'imp': '3216', 'clk': '16', 'cost': '36098', 'conv_purchase_cnt': '0', 'conv_direct_cnt': '0', 'conv_purchase_amt': '0'}
+   PASS: {'source': 'shopping', 'campaign_id': 'cmp-a001-02-000000008902804', 'adgroup_id': 'grp-a001-02-000000047005364', 'search_term': '골프스티커', 'imp': '945', 'clk': '10', 'cost': '13328', 'conv_purchase_cnt': '0', 'conv_direct_cnt': '0', 'conv_purchase_amt': '0'}
