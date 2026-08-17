@@ -1530,3 +1530,110 @@ def test_shopping_items_raise_when_shape_is_neither_list_nor_none():
     for bad in ({"keyword": "골프"}, "골프", 123):
         with pytest.raises(WriteError):
             writer._shopping_items({"target": bad})
+
+
+# ═══ 캡 경합 롤백 — 쇼핑 제외 «제거» (키워드 기반) ═══
+#
+# ★롤백이 원래 사고보다 나빠지면 안 된다. 제거도 **교체 PUT**이라 잘못하면 그 그룹의 제외가
+#   통째로 날아간다 — 캡 경합 1건을 되돌리려다 3,880건을 지우는 것이 최악의 결과다.
+
+
+def test_remove_sends_the_remaining_list_verbatim():
+    """남는 항목은 **원문 그대로**(date 포함) 되돌려 보내야 서버가 등록시각을 보존한다."""
+    put = _FakePut()
+    after = [_EXISTING[1]]  # 기존A만 제거되고 기존B는 남는다
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(), _targets_resp(), _targets_resp(after),
+    ]), patch.object(writer.requests, "put", put):
+        result = writer.remove_shopping_exclusions(ADGROUP_ID, ["기존A"])
+
+    sent = put.calls[0]["target"]
+    assert [k["keyword"] for k in sent] == ["기존B"]
+    assert sent[0] == _EXISTING[1], "남는 항목을 새로 만들면 date가 갈린다"
+    assert result.created_ids == []
+
+
+def test_remove_fails_closed_when_it_wipes_the_rest():
+    """★★「대상이 사라졌나」만 보면 **전부 지우기도 성공으로 통과**한다.
+
+    롤백이 캡 경합 1건을 되돌리려다 그룹 전체를 비우는 것이 이 경로의 최악 시나리오다.
+    그래서 검증은 「나머지가 남았나」를 **함께** 본다.
+    """
+    put = _FakePut()
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(), _targets_resp(), _targets_resp([]),  # 서버가 통째로 비웠다
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(WriteVerificationError) as e:
+            writer.remove_shopping_exclusions(ADGROUP_ID, ["기존A"])
+    assert "기존B" in str(e.value), "무엇이 사라졌는지 이름을 대야 복구할 수 있다"
+
+
+def test_remove_fails_closed_when_target_still_there():
+    """PUT이 2xx여도 대상이 재조회에 남아 있으면 실패다(응답이 아니라 재조회가 진실)."""
+    put = _FakePut()
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(), _targets_resp(), _targets_resp(),  # 그대로 2건
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(WriteVerificationError):
+            writer.remove_shopping_exclusions(ADGROUP_ID, ["기존A"])
+
+
+def test_remove_refuses_keyword_that_is_not_live():
+    """★없는 것을 지우라고 하면 **멱등하게 넘기지 않고 거부**한다.
+
+    롤백 대상이 라이브에 없다 = 우리가 안다고 믿은 상태와 실제가 다르다. 그 상태로 교체 PUT을
+    쏘는 것이 위험하다(다른 행위자가 이미 손댔을 수 있다).
+    """
+    put = _FakePut()
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}), _targets_resp(), _targets_resp(),
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(WriteValidationError):
+            writer.remove_shopping_exclusions(ADGROUP_ID, ["없는키워드"])
+    assert put.calls == [], "판단이 서지 않으면 쓰지 않는다"
+
+
+def test_remove_refuses_when_someone_edited_between_read_and_write():
+    """제거도 낙관적 잠금을 쓴다 — add와 같은 한 벌(`_shopping_restrict_put`)이기 때문이다."""
+    put = _FakePut()
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(), _targets_resp(edit_tm="2026-08-17T03:34:18.000Z"),
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(writer.WriteConcurrentEditError):
+            writer.remove_shopping_exclusions(ADGROUP_ID, ["기존A"])
+    assert put.calls == []
+
+
+def test_rollback_uses_a_different_key_per_adgroup_type():
+    """★되돌리는 **열쇠**가 유형마다 다르다 — 파워링크는 회수한 id, 쇼핑은 키워드 본문.
+
+    쇼핑엔 키워드 단위 id가 없어서 `created_ids`가 구조적으로 비어 있다. 그래서 하나로 합칠 수
+    없다. ★그리고 **파워링크 경로는 바뀌지 않아야 한다** — 이미 검증돼 운영 중인 경로이고,
+    롤백은 원래 사고를 수습하는 자리라 여기서 새 위험을 만들면 안 된다.
+    """
+    with patch.object(writer, "delete_restricted_keywords", return_value="웹") as dele, \
+         patch.object(writer, "remove_shopping_exclusions", return_value="쇼핑") as rm:
+        assert writer.rollback_exclusions(
+            ADGROUP_ID, ["검색어"], ["rkw-1"], adgroup_type="WEB_SITE") == "웹"
+        dele.assert_called_once_with(ADGROUP_ID, ["rkw-1"])  # ★id 기반 그대로
+        rm.assert_not_called()
+
+        assert writer.rollback_exclusions(
+            ADGROUP_ID, ["검색어"], [], adgroup_type="SHOPPING") == "쇼핑"
+        rm.assert_called_once_with(ADGROUP_ID, ["검색어"])   # ★키워드 기반
+
+
+@pytest.mark.parametrize("unknown", [None, "BRAND_SEARCH", "PLACE", ""])
+def test_rollback_refuses_unknown_type_instead_of_doing_nothing(unknown):
+    """★롤백이 조용히 «안 함»으로 끝나면 **원복되지 않은 조치가 원복된 것처럼** 기록된다."""
+    with patch.object(writer, "_get_adgroup", return_value={"adgroupType": unknown}), \
+         patch.object(writer, "delete_restricted_keywords",
+                      side_effect=AssertionError("모르면 되돌리지 않는다")), \
+         patch.object(writer, "remove_shopping_exclusions",
+                      side_effect=AssertionError("모르면 되돌리지 않는다")):
+        with pytest.raises(WriteValidationError):
+            writer.rollback_exclusions(ADGROUP_ID, ["검색어"], ["rkw-1"])

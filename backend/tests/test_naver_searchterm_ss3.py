@@ -239,11 +239,14 @@ def test_daily_cap_toctou_rollback_on_concurrent_commit(db):
 
     with patch.object(harness.naver_sa_writer, "add_exclusions",
                        side_effect=_write_then_race) as mock_write, \
+         patch.object(harness.naver_sa_writer, "_get_adgroup",
+                      return_value={"adgroupType": "WEB_SITE"}), \
          patch.object(harness.naver_sa_writer, "delete_restricted_keywords") as mock_delete:
         with pytest.raises(naver_sa_writer.WriteError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_called_once_with("grp-web", ["경합후보"])
-    mock_delete.assert_called_once_with("grp-web", ["rkw-1"])  # 방금 등록한 키워드 원복
+    # ★파워링크 롤백은 **종전 그대로** id 기반이다 — 검증된 경로를 흔들지 않는다.
+    mock_delete.assert_called_once_with("grp-web", ["rkw-1"])
     db.refresh(p)
     assert p.status == "failed"
     row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
@@ -252,6 +255,50 @@ def test_daily_cap_toctou_rollback_on_concurrent_commit(db):
     assert row.after_value is None  # 원복된 행은 캡 카운트에 다시 잡히면 안 됨(불변식 유지)
     # 캡 카운트 자체는 오염 없이 실재 성공행(9 seed + race1 + race2)만 반영
     assert harness._count_search_term_excludes_today(db, _NOW) == 11
+
+
+def test_daily_cap_toctou_rollback_now_works_for_shopping(db):
+    """★★종전엔 이 자리에서 롤백이 **구조적으로 안 돌았다.**
+
+    캡 롤백이 `delete_restricted_keywords(adgroup_id, created_ids)`로 도는데 쇼핑은
+    `created_ids=[]`다(이 리소스엔 키워드 단위 id가 없고, 없는 id를 지어내지 않는 것이 의도된
+    설계다). 그래서 빈 리스트로 호출돼 즉시 `WriteValidationError` — 자동 원복이 전혀 안 됐다.
+    은닉은 아니었으나(`rolled_back=False`로 정직히 기록) 쓰기를 켜기 전엔 반드시 메워야 하는
+    구멍이었다. 이제 **키워드 기반**으로 되돌린다.
+    """
+    _settings(db)
+    _entity(db, "grp-shop", "SHOPPING")
+    for i in range(9):
+        _committed_exclude(db, f"seed{i}")
+    db.commit()
+    p = _proposal(db, adgroup_id="grp-shop", term="쇼핑경합후보")
+
+    def _write_then_race(adgroup_id, keywords):
+        _committed_exclude(db, "race1")
+        _committed_exclude(db, "race2")
+        db.commit()
+        return naver_sa_writer.WriteResult(
+            action="add_shopping_exclusions", before=[], response=None,
+            after=[{"keyword": keywords[0]}], created_ids=[],  # ★쇼핑은 언제나 빈 리스트
+        )
+
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
+                      side_effect=_write_then_race), \
+         patch.object(harness.naver_sa_writer, "_get_adgroup",
+                      return_value={"adgroupType": "SHOPPING"}), \
+         patch.object(harness.naver_sa_writer, "remove_shopping_exclusions") as mock_remove, \
+         patch.object(harness.naver_sa_writer, "delete_restricted_keywords") as mock_delete:
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness.execute(db, p.id, dry_run=False, now=_NOW)
+
+    mock_remove.assert_called_once_with("grp-shop", ["쇼핑경합후보"])  # ★키워드로 되돌린다
+    mock_delete.assert_not_called()  # id 경로는 쇼핑에서 애초에 못 쓴다
+    db.refresh(p)
+    assert p.status == "failed"
+    row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert "동시성 초과 롤백" in row.rationale
+    assert "롤백 성공" in row.rationale, "★종전엔 여기가 「롤백 실패」였다"
+    assert row.after_value is None
 
 
 def test_daily_cap_toctou_rollback_failure_records_honestly(db):
