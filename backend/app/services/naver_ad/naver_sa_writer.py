@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 
 import requests
 
@@ -33,6 +34,41 @@ log = logging.getLogger(__name__)
 # 제외는 723건 중 12건(1.7%)뿐이었고, 나머지 711건(64개 그룹)이 시야 밖에 있었다.
 _RESTRICT_TYPE = "KEYWORD_PLUS_RESTRICT"  # 우리가 **쓸 때** 쓰는 타입(효과 실증됨 — 일기 425)
 RESTRICT_TYPES = ("KEYWORD_PLUS_RESTRICT", "EXP_SEARCH")  # **읽을 때는 둘 다**
+
+# ★광고그룹 유형별로 제외의 «진실의 소스»가 다르다 (D-NAO-180). 이 상수들이 여기 사는 이유는
+# 유형 판정과 소스 선택이 한 모듈 안에 있어야 갈라지지 않기 때문이다 — 종전엔 문자열
+# "WEB_SITE"가 소비자마다 하드코딩돼 있었고, 쇼핑을 열 때 그 자리를 전부 찾아다녀야 했다.
+WEB_SITE_ADGROUP_TYPE = "WEB_SITE"      # 파워링크 → restricted-keywords 리소스
+SHOPPING_ADGROUP_TYPE = "SHOPPING"      # 쇼핑몰 상품형 → /ncc/targets 리소스
+_RESTRICT_KEYWORD_TARGET_TP = "RESTRICT_KEYWORD_TARGET"
+
+
+def _epoch_to_utc_iso(value: object) -> str | None:
+    """`/ncc/targets` 항목의 `date`(초 단위 epoch) → `regTm`과 같은 UTC ISO 표기.
+
+    ★epoch를 **UTC로** 읽는 것이 옳다는 근거는 라이브 대조다(2026-08-17): 알려진 벽시계 시각
+      12:34:18 KST에 직접 등록한 항목의 `date`를 UTC로 환산하면 같은 응답의 `editTm`
+      (`2026-08-17T03:34:18.000Z`)과 **초 단위까지 일치**했다. ref 58 §13-5가 「43/43이 +1시간,
+      원인 미상」으로 남긴 오차는 API가 아니라 **콘솔 표기** 쪽에 있다.
+
+    못 읽으면 None이다 — 시각 한 칸 때문에 «제외가 있다»는 1급 사실을 버리지 않는다
+    (`_parse_reg_tm` 독스트링과 같은 처분).
+    """
+    if value in (None, "", 0):
+        return None
+    try:
+        ts = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        log.warning("[쇼핑제외] date를 못 읽었다(%r) — 등록시각은 미상으로 둔다", value)
+        return None
+    try:
+        return (
+            datetime.fromtimestamp(ts, tz=timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        )
+    except (OverflowError, OSError, ValueError):
+        log.warning("[쇼핑제외] date가 표현 범위 밖이다(%r) — 등록시각은 미상으로 둔다", value)
+        return None
 
 
 class WriteError(Exception):
@@ -144,6 +180,89 @@ def get_adgroup_type(adgroup_id: str) -> str | None:
     except Exception:  # noqa: BLE001 — 조회 실패는 «모름»(None)이지 «WEB_SITE 아님»이 아니다
         log.exception("get_adgroup_type 실패 adgroup=%s", adgroup_id)
         return None
+
+
+def get_shopping_exclusions(adgroup_id: str) -> list[dict]:
+    """GET /ncc/targets?ownerId={id} → 쇼핑 광고그룹의 제외 검색어를 **restricted-keywords 행
+    모양으로 정규화**해 돌려준다 (D-NAO-180).
+
+    ★왜 이 함수가 생겼나: 「쇼핑 제외는 API로 못 본다」는 전제가 **틀렸다**(2026-08-17 실측).
+      안 보였던 것은 `restricted-keywords` **리소스**였지 쇼핑 제외 자체가 아니다. 같은 계정에서
+      이 엔드포인트는 **3,880건/116그룹**을 돌려주고, 콘솔 캡처로 원장에 넣은 43건과 차집합
+      양쪽 0으로 일치했다. 그래서 사람이 그룹마다 화면을 캡처하던 입구(S5)가 필요 없어진다.
+
+    ★**반환 모양을 새로 만들지 않는다.** 하류(생존감시 `_classify`·자동발견 편입)는 이미
+      restricted-keywords 행 모양을 읽는데, 여기서 새 모양을 돌려주면 소비자마다 분기가 생기고
+      그 분기가 갈라지는 것이 이 리포가 반복해 당한 형태다([[same-defect-three-times-fix-the-shape]]).
+      그래서 `keyword`/`delFlag`/`type`/`regTm`을 **그 이름 그대로** 채워 내보낸다.
+
+    ★`date`(epoch) → `regTm`(UTC ISO)로 옮기는 이유: 하류의 `_parse_reg_tm`이 이미 「UTC ISO를
+      KST로」 하는 유일한 규칙이다. epoch를 따로 파싱하는 두 번째 규칙을 만들면 두 벌이 갈라진다.
+      **epoch를 UTC로 읽는 것이 옳다는 근거는 라이브 대조다**(2026-08-17 12:34:18 KST에 직접
+      만든 항목의 `date`를 UTC로 환산하면 같은 응답의 `editTm`과 **초 단위까지 일치**했다).
+      ref 58 §13-5가 남긴 「+1시간, 원인 미상」은 API가 아니라 **콘솔 표기 쪽**의 오차다.
+
+    ★★**개별 키워드 id를 만들어 내지 않는다.** 이 리소스의 id(`nccTargetId`)는 **그룹 단위**라
+      키워드 1건을 가리키지 않는다. 그런데 `_classify`가 회수한 id는 `restrict_kwd_id`에 저장되고
+      그 칸의 유일한 실쓰기 소비자가 **개방(`delete_restricted_keywords`)**이다 — 그룹 id를
+      키워드 id인 척 넣으면 나중에 **엉뚱한 대상을 지운다.** 그래서 `nccAdgroupRestrictKwdId`를
+      **일부러 비운다**(하류는 본문 정확 일치로 대조하도록 이미 만들어져 있다).
+      그룹 id는 이름이 다른 칸(`nccTargetId`)에 그대로 실어 보내 쓰기 배선(③)이 쓰게 둔다.
+
+    ※ 벌크(`?ownerIds=a,b,c`)도 200으로 동작한다(2026-08-17 실측, 100그룹/1콜까지 확인).
+      지금은 소비자가 이미 그룹당 루프라 per-group으로 둔다 — 필요해지면 그때 올린다.
+    """
+    resp = fetcher._get("/ncc/targets", {"ownerId": adgroup_id})
+    resp.raise_for_status()
+    rows: list[dict] = []
+    for target in resp.json():
+        if target.get("targetTp") != _RESTRICT_KEYWORD_TARGET_TP:
+            continue
+        if target.get("delFlag"):
+            # 타겟 행 자체가 소프트 삭제면 그 안의 키워드는 효력이 없다.
+            continue
+        items = target.get("target")
+        if not isinstance(items, list):
+            # 이 targetTp는 리스트를 싣는다. 아니면 스키마가 바뀐 것이므로 «0건»이라 말하지
+            # 않고 예외로 올린다 — 모름을 0건으로 세는 것이 이 계열의 고질 결함이다(교훈 #123).
+            raise WriteError(
+                f"RESTRICT_KEYWORD_TARGET.target이 리스트가 아니다({type(items).__name__}) "
+                f"— adgroup={adgroup_id}"
+            )
+        for item in items:
+            if not isinstance(item, dict) or not item.get("keyword"):
+                continue
+            rows.append({
+                "keyword": item.get("keyword"),
+                "type": item.get("type"),
+                # 이 리소스는 살아 있는 항목만 싣는다(소프트 삭제 개념이 없다) — 하류가
+                # delFlag를 반드시 보므로 «없음»이 아니라 명시적 False를 넣는다.
+                "delFlag": False,
+                "nccAdgroupRestrictKwdId": None,  # ★위 독스트링 — 일부러 비운다
+                "nccTargetId": target.get("nccTargetId"),
+                "regTm": _epoch_to_utc_iso(item.get("date")),
+            })
+    return rows
+
+
+def get_live_exclusions(adgroup_id: str, adgroup_type: str | None) -> list[dict] | None:
+    """광고그룹 유형에 맞는 소스로 **라이브 제외 목록**을 돌려준다 (D-NAO-180).
+
+    유형별 진실의 소스가 다르다:
+      · `WEB_SITE`(파워링크) → `restricted-keywords` 두 타입 union (D-NAO-179)
+      · `SHOPPING`(쇼핑몰 상품형) → `/ncc/targets`의 `RESTRICT_KEYWORD_TARGET` (D-NAO-180)
+
+    ★**«읽을 수 없다»는 None으로 돌려준다 — 빈 리스트가 아니다.** 브랜드검색·플레이스 등 아직
+      소스를 모르는 유형과, 유형 자체를 조회하지 못한 경우(`adgroup_type is None`)가 여기 걸린다.
+      이 둘을 `[]`로 뭉개면 「제외가 0건이다」와 구별되지 않고, 그 혼동이 정확히 이 리포가
+      D-NAO-174에서 P1을 맞은 결함이다(모름을 0건으로 셈). 호출부는 None을 «대조 불가»로
+      처분해야 한다.
+    """
+    if adgroup_type == WEB_SITE_ADGROUP_TYPE:
+        return get_restricted_keywords(adgroup_id)
+    if adgroup_type == SHOPPING_ADGROUP_TYPE:
+        return get_shopping_exclusions(adgroup_id)
+    return None
 
 
 def add_restricted_keywords(adgroup_id: str, keywords: list[str]) -> WriteResult:

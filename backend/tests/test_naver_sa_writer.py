@@ -1166,3 +1166,121 @@ def test_group_bid_dead_error_is_a_write_validation_error():
     실패로 기록되지 않고 다른 경로로 샌다.
     """
     assert issubclass(writer.GroupBidDeadError, WriteValidationError)
+
+
+# ═══ D-NAO-180 — 쇼핑 제외 읽기 (`GET /ncc/targets`) ═══
+#
+# ★배경: 「쇼핑 제외는 API로 못 본다」는 전제가 2026-08-17에 무너졌다. 안 보였던 것은
+#   `restricted-keywords` **리소스**였지 쇼핑 제외 자체가 아니다 — `/ncc/targets`의
+#   `RESTRICT_KEYWORD_TARGET`이 3,880건/116그룹을 돌려주고 콘솔 캡처분과 차집합 0으로 일치했다.
+#   아래는 그 읽기가 **하류가 이미 아는 모양으로** 정규화돼 나오는지를 겨눈다.
+
+# 라이브 실물(2026-08-17 `grp-a001-02-000000047076738`) — 항목은 keyword/type/date뿐이고
+# **키워드 단위 id가 없다**. id는 `nccTargetId` 하나로 **그룹 단위**다.
+_TARGETS_LIVE = [
+    {"nccTargetId": "tgt-1", "targetTp": "MEDIA_TARGET", "delFlag": False,
+     "target": {"type": 2, "search": ["naver"]}},
+    {"nccTargetId": "tgt-2", "targetTp": "RESTRICT_KEYWORD_TARGET", "delFlag": False,
+     "target": [{"keyword": "아이패드블루", "type": 1, "date": 1745346227}]},
+    {"nccTargetId": "tgt-3", "targetTp": "NON_SEARCH_KEYWORD_TARGET", "delFlag": False,
+     "target": {"excluded": False}},
+]
+
+
+def test_shopping_exclusions_normalize_into_restricted_keyword_shape():
+    """쇼핑 제외는 **하류가 이미 읽는 모양**으로 나와야 한다.
+
+    새 모양을 돌려주면 소비자(생존감시 `_classify`·자동발견 편입)마다 분기가 생기고, 그 분기가
+    갈라지는 것이 이 리포가 반복해 당한 형태다([[same-defect-three-times-fix-the-shape]]).
+    """
+    with patch.object(writer.fetcher, "_get", return_value=FakeResp(200, _TARGETS_LIVE)) as g:
+        rows = writer.get_shopping_exclusions(ADGROUP_ID)
+
+    g.assert_called_once_with("/ncc/targets", {"ownerId": ADGROUP_ID})
+    assert len(rows) == 1, "RESTRICT_KEYWORD_TARGET 외의 targetTp가 섞이면 안 된다"
+    row = rows[0]
+    assert row["keyword"] == "아이패드블루"
+    assert row["type"] == 1
+    assert row["delFlag"] is False, "하류가 delFlag를 반드시 보므로 «없음»이 아니라 명시 False다"
+    assert row["nccTargetId"] == "tgt-2"
+
+
+def test_shopping_exclusions_do_not_forge_a_keyword_id():
+    """★★그룹 단위 id(`nccTargetId`)를 키워드 id인 척 넣으면 **나중에 엉뚱한 대상을 지운다.**
+
+    `_classify`가 회수한 id는 `restrict_kwd_id`에 저장되고, 그 칸의 유일한 실쓰기 소비자가
+    개방(`delete_restricted_keywords`)이다. 이 테스트가 그 경로를 막는 유일한 가드다.
+    """
+    with patch.object(writer.fetcher, "_get", return_value=FakeResp(200, _TARGETS_LIVE)):
+        row = writer.get_shopping_exclusions(ADGROUP_ID)[0]
+
+    assert row["nccAdgroupRestrictKwdId"] is None
+
+
+def test_shopping_exclusion_date_becomes_utc_regtm():
+    """`date`(epoch) → `regTm`(UTC ISO). 하류 `_parse_reg_tm`이 그대로 쓴다.
+
+    ★epoch를 UTC로 읽는 근거는 라이브 대조다(2026-08-17 12:34:18 KST에 직접 등록한 항목의
+      `date`를 UTC로 환산하면 같은 응답의 `editTm`과 초 단위까지 일치). ref 58 §13-5의
+      「+1시간, 원인 미상」은 API가 아니라 콘솔 표기 쪽 오차다 — 여기서 보정하면 오히려 틀린다.
+    """
+    with patch.object(writer.fetcher, "_get", return_value=FakeResp(200, _TARGETS_LIVE)):
+        row = writer.get_shopping_exclusions(ADGROUP_ID)[0]
+
+    assert row["regTm"] == "2025-04-22T18:23:47.000Z"
+
+
+@pytest.mark.parametrize("bad", [None, 0, "", "어제", [1], 10**18])
+def test_shopping_exclusion_bad_date_is_unknown_not_a_dropped_row(bad):
+    """시각 한 칸 때문에 «제외가 있다»는 1급 사실을 버리지 않는다(`_parse_reg_tm`과 같은 처분)."""
+    payload = [{"nccTargetId": "tgt-2", "targetTp": "RESTRICT_KEYWORD_TARGET", "delFlag": False,
+                "target": [{"keyword": "골프", "type": 1, "date": bad}]}]
+    with patch.object(writer.fetcher, "_get", return_value=FakeResp(200, payload)):
+        rows = writer.get_shopping_exclusions(ADGROUP_ID)
+
+    assert len(rows) == 1 and rows[0]["keyword"] == "골프"
+    assert rows[0]["regTm"] is None
+
+
+def test_shopping_exclusions_skip_soft_deleted_target():
+    """타겟 행 자체가 소프트 삭제면 그 안의 키워드는 효력이 없다."""
+    payload = [{"nccTargetId": "tgt-2", "targetTp": "RESTRICT_KEYWORD_TARGET", "delFlag": True,
+                "target": [{"keyword": "골프", "type": 1, "date": 1745346227}]}]
+    with patch.object(writer.fetcher, "_get", return_value=FakeResp(200, payload)):
+        assert writer.get_shopping_exclusions(ADGROUP_ID) == []
+
+
+def test_shopping_exclusions_raise_when_shape_changes():
+    """★스키마가 바뀌면 «0건»이라 말하지 않고 **예외로 올린다**(교훈 #123: 모름≠0건).
+
+    조용히 []를 돌려주면 3,880건이 하루아침에 「제외 없음」이 되고, 생존감시는 전부 missing으로,
+    자동발견은 「찾을 게 없음」으로 뒤집힌다 — 둘 다 침묵으로 지나간다.
+    """
+    payload = [{"nccTargetId": "tgt-2", "targetTp": "RESTRICT_KEYWORD_TARGET", "delFlag": False,
+                "target": {"keyword": "골프"}}]
+    with patch.object(writer.fetcher, "_get", return_value=FakeResp(200, payload)):
+        with pytest.raises(WriteError):
+            writer.get_shopping_exclusions(ADGROUP_ID)
+
+
+def test_get_live_exclusions_picks_source_by_adgroup_type():
+    """유형이 소스를 고른다 — 이 분기가 한 곳에만 있어야 소비자마다 갈라지지 않는다."""
+    with patch.object(writer, "get_restricted_keywords", return_value=[{"keyword": "웹"}]) as rk, \
+         patch.object(writer, "get_shopping_exclusions", return_value=[{"keyword": "쇼핑"}]) as sh:
+        assert writer.get_live_exclusions(ADGROUP_ID, "WEB_SITE") == [{"keyword": "웹"}]
+        assert writer.get_live_exclusions(ADGROUP_ID, "SHOPPING") == [{"keyword": "쇼핑"}]
+        rk.assert_called_once_with(ADGROUP_ID)
+        sh.assert_called_once_with(ADGROUP_ID)
+
+
+@pytest.mark.parametrize("unknown_type", [None, "BRAND_SEARCH", "PLACE", "", "web_site"])
+def test_get_live_exclusions_returns_none_for_unreadable_types(unknown_type):
+    """★«읽을 수 없다»는 None이다 — **빈 리스트가 아니다.**
+
+    []로 뭉개면 「제외가 0건」과 구별되지 않고, 그 혼동이 D-NAO-174에서 P1을 맞은 결함이다.
+    `"web_site"`(소문자)가 여기 있는 이유: 유형 문자열이 조금만 어긋나도 **조용히 0건**이 되는
+    것이 아니라 «못 읽음»으로 떨어져야 한다.
+    """
+    with patch.object(writer.fetcher, "_get",
+                      side_effect=AssertionError("읽을 소스를 모르면 호출조차 하지 않는다")):
+        assert writer.get_live_exclusions(ADGROUP_ID, unknown_type) is None

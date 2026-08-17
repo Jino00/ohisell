@@ -640,11 +640,13 @@ def detect_new_exclusions(
       (대행사 되돌림 2회 중 1회는 change_log에 행조차 없었다). **상태 대조가 사건 보고보다
       튼튼하다**는 같은 원리를 여기에도 쓴다.
 
-    ⚠️**쇼핑에서 이 경로가 도는지는 실측 미해결이다**(2026-08-11): 쇼핑 광고그룹의
-      `GET restricted-keywords`는 200이지만 0건이라, 「쇼핑 제외가 이 리소스로 되읽히는가」를
-      아직 가르지 못했다(파워링크는 정상 조회됨). 되읽히지 않으면 이 함수는 쇼핑에서 아무것도
-      못 찾고, 그때는 화면의 수동 기록 경로가 유일한 입구다. 그 사실을 반환값
-      (`groups_with_zero`)으로 표면화한다 — 0건과 «못 읽음»이 같아 보이면 안 된다.
+    ★**쇼핑도 이 경로로 돈다**(D-NAO-180, 2026-08-17 해소). 2026-08-11엔 「쇼핑 광고그룹의
+      `GET restricted-keywords`가 200/0건이라 되읽히는지 못 가른다」로 남아 있었다. 답은
+      **되읽힌다 — 다른 리소스로**다: `/ncc/targets`의 `RESTRICT_KEYWORD_TARGET`이 같은 계정에서
+      3,880건/116그룹을 돌려주고, 콘솔 캡처로 원장에 넣은 43건과 차집합 양쪽 0으로 일치했다.
+      소스 선택은 `naver_sa_writer.get_live_exclusions`가 유형을 보고 한다.
+      아직 소스를 모르는 유형(브랜드검색·플레이스 등)은 None으로 와서 `unverifiable_groups`에
+      쌓인다 — 0건과 «못 읽음»이 같아 보이면 안 된다.
 
     Args:
         adgroup_ids: 대조할 광고그룹. 미지정이면 최근 30일 비용이 있는 그룹 전체(비싸다).
@@ -686,9 +688,11 @@ def detect_new_exclusions(
     type_unknown_groups = 0
     unattributable: list[dict] = []
     for adgroup_id in adgroup_ids:
-        # ★쇼핑 그룹은 이 API가 제외 목록을 돌려주지 않는다(2026-08-11 실측: 콘솔 43건 vs
-        #   API 0건). 그러니 여기서 «없다»를 근거로 아무 판단도 하지 않는다 — 자동 발견은
-        #   구조적으로 파워링크 전용이고, 쇼핑의 유일한 입구는 화면 수동 기록이다.
+        # ★유형이 라이브 소스를 고른다(D-NAO-180): 파워링크는 `restricted-keywords`,
+        #   **쇼핑은 `/ncc/targets`**. 종전 주석은 「자동 발견은 구조적으로 파워링크 전용이고
+        #   쇼핑의 유일한 입구는 화면 수동 기록」이라고 적혀 있었는데, 그 전제가 2026-08-17에
+        #   무너졌다 — 안 보였던 것은 리소스 하나였지 쇼핑 제외가 아니다(3,880건/116그룹이
+        #   읽히고 콘솔 캡처분 43건과 차집합 0). 그래서 쇼핑도 자동 발견에 들어온다.
         adgroup_type = naver_sa_writer.get_adgroup_type(adgroup_id)
         if adgroup_type is None:
             # ★«모른다»는 «WEB_SITE가 아니다»가 아니다(get_adgroup_type docstring이 직접 그렇게
@@ -699,13 +703,15 @@ def detect_new_exclusions(
             #   규율이 이 파일엔 안 들어와 있었다. 모르면 «못 봤다» 쪽에 센다(fail-closed).
             type_unknown_groups += 1
             continue
-        if adgroup_type != "WEB_SITE":
-            unverifiable_groups += 1
-            continue
         try:
-            live = naver_sa_writer.get_restricted_keywords(adgroup_id)
+            live = naver_sa_writer.get_live_exclusions(adgroup_id, adgroup_type)
         except Exception as e:  # noqa: BLE001 — 한 그룹 실패가 나머지를 지우지 않는다
             errors.append(f"{adgroup_id}: {type(e).__name__}: {e}")
+            continue
+        if live is None:
+            # 소스를 아직 모르는 유형(브랜드검색·플레이스 등)만 여기 온다. «못 봤다»를 «0건»에
+            # 섞지 않는다 — 그 혼동이 D-NAO-174에서 P1을 맞은 결함 그 자체다.
+            unverifiable_groups += 1
             continue
         if not live:
             groups_with_zero += 1
@@ -733,8 +739,11 @@ def detect_new_exclusions(
             #   독스트링: 43건을 부으면 진짜 표본 1건이 쓰레기 43건에 익사한다). 그 입구가
             #   있는데 이 경로만 옛 문으로 가고 있었다 — 타입 union으로 읽기를 넓히는 순간
             #   그 문으로 수백 건이 쏟아지므로 여기서 문을 바꾼다.
-            #   ★`regTm`은 콘솔 등록시각 그 자체다 — 파워링크는 캡처 없이 시각까지 채워진다
-            #     (쇼핑은 이 API가 목록을 안 돌려주므로 여전히 캡처가 유일한 입구다).
+            #   ★`regTm`은 콘솔 등록시각 그 자체다 — **캡처 없이 시각까지 채워진다.**
+            #     쇼핑도 마찬가지다(D-NAO-180): `/ncc/targets` 항목의 `date`(epoch)를
+            #     `get_shopping_exclusions`가 같은 `regTm` 칸에 UTC ISO로 실어 보내므로 이
+            #     줄은 유형을 몰라도 된다. epoch를 UTC로 읽는 것이 옳다는 근거는 라이브
+            #     대조다(직접 만든 항목의 date가 같은 응답 editTm과 초 단위까지 일치).
             pending_import.append({
                 "campaign_id": camp_of[adgroup_id],
                 "adgroup_id": adgroup_id,
@@ -768,7 +777,9 @@ def detect_new_exclusions(
         "imported": imported,
         "already_known": skipped,
         "rejected": rejected,
-        # 쇼핑이라 애초에 대조가 불가능해 건너뛴 그룹 — «찾은 게 없다»와 «볼 수 없다»를 가른다.
+        # 라이브 소스를 아직 모르는 유형이라 건너뛴 그룹 — «찾은 게 없다»와 «볼 수 없다»를
+        # 가른다. ★D-NAO-180 이후 쇼핑은 여기 안 들어온다(실제로 읽히므로). 이 수가 갑자기
+        # 늘면 그건 유형이 늘었다는 뜻이지 「조용히 정상」이 아니다.
         "unverifiable_groups": unverifiable_groups,
         # 유형 조회 자체가 실패한 그룹 — 쇼핑(위)과도 다르다. «모름»을 0건에 섞지 않는다.
         "type_unknown_groups": type_unknown_groups,

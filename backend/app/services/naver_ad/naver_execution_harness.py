@@ -1282,7 +1282,14 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
         _guard_failure(db, proposal, now, "exclude_search_term", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
-    # SHOPPING 명시 거부(§실측-0) — 엔티티 campaign_type이 SHOPPING이면 API 자동 제외 불가.
+    # SHOPPING 명시 거부(§실측-0) — 이 **쓰기 경로**(POST restricted-keywords)는 쇼핑에서 지금도
+    # HTTP 400/3728이다. 가드는 유효하다.
+    # ★단 「쇼핑 제외는 못 만진다」로 읽지 말 것(D-NAO-180): 쇼핑 제외는 **읽기가 열려 있고**
+    #   (`/ncc/targets` → `naver_sa_writer.get_shopping_exclusions`, 3,880건/116그룹) **쓰기도
+    #   `PUT /ncc/targets/{targetId}`로는 된다**(2026-08-17 실증, 전문 PUT이면 기존 보존됨).
+    #   즉 막힌 것은 «쇼핑 제외»가 아니라 «이 리소스»다. 쇼핑 자동 제외를 열려면 이 가드를
+    #   지우는 게 아니라 **PUT 기반 쇼핑 전용 경로를 신설**해야 한다(가드를 지우면 실패할 요청을
+    #   계속 쏜다). 그 경로는 Jino 별도 승인 대상이다.
     entity = (
         db.query(NaverEntity)
         .filter(NaverEntity.entity_type == "adgroup", NaverEntity.entity_id == proposal.adgroup_id)
@@ -1290,8 +1297,10 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
     )
     if entity is not None and (entity.campaign_type or "") == "SHOPPING":
         reason = (
-            "SHOPPING 광고그룹 제외키워드 API 쓰기 불가(§실측-0, HTTP 400 code 3728) — "
-            "쇼핑 제외는 콘솔 수동만(fail-closed 명시 거부, writer WEB_SITE 관문과 이중 방벽)"
+            "SHOPPING 광고그룹은 restricted-keywords 쓰기 불가(§실측-0, HTTP 400 code 3728) — "
+            "이 경로로는 자동 제외가 안 된다(fail-closed 명시 거부, writer WEB_SITE 관문과 "
+            "이중 방벽). ※쇼핑 제외 «읽기»는 /ncc/targets로 열려 있고 쓰기도 PUT으로는 "
+            "가능하다(D-NAO-180) — 열려면 그 전용 경로를 신설한다"
         )
         _guard_failure(db, proposal, now, "exclude_search_term", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
