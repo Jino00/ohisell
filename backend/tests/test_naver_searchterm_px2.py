@@ -89,7 +89,7 @@ def _write_result(term, kwd_id="rkw-1"):
 def test_autofire_creates_changelog_and_exclusion_row(db):
     _scope(db)
     _pl_term(db, term="파워손실", clk=10, cost=6000)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                       return_value=_write_result("파워손실")) as mock_write:
         res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_called_once_with("grp-web", ["파워손실"])
@@ -126,7 +126,7 @@ def test_daily_cap_pre_limits_autofire(db):
             changed_at=_NOW, executed_at=_NOW,
         ))
     db.commit()
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_not_called()  # 캡 소진 → 무의미한 발사 억제
     assert res["powerlink_fired"] == 0
@@ -143,7 +143,7 @@ def test_active_exclusion_row_dedups(db):
         next_review_at=date(2026, 8, 21),
     ))
     db.commit()
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_not_called()
     assert res["powerlink_fired"] == 0
@@ -160,7 +160,7 @@ def test_group_slot_cap_skips(db):
             cycle=1, restrict_kwd_id=f"rkw-{i}", excluded_at=_NOW, last_transition_at=_NOW,
         ))
     db.commit()
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_not_called()
     assert res["powerlink_fired"] == 0
@@ -171,7 +171,7 @@ def test_group_slot_cap_skips(db):
 def test_restrict_kwd_id_recovered_from_write_result(db):
     _scope(db)
     _pl_term(db, term="파워손실", clk=10, cost=6000)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                       return_value=_write_result("파워손실", kwd_id="rkw-777")):
         lane.run_search_term_ss_lane(db, now=_NOW)
     row = db.query(NaverSearchTermExclusion).one()
@@ -192,7 +192,7 @@ def test_agency_powerlink_briefing_no_write(db):
     db.add(NaverAdgroupProduct(adgroup_id="grp-web", mall_product_id="PW", campaign_id="cmp1"))
     db.commit()
     _pl_term(db, term="대행사고비용", clk=12, cost=40000)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_not_called()
     assert res["powerlink_fired"] == 0
@@ -249,7 +249,7 @@ def test_autofire_blocked_when_adgroup_membership_mismatch(db):
         NaverEntity.entity_type == "adgroup", NaverEntity.entity_id == "grp-web"
     ).update({"parent_id": "cmp-대행사"}, synchronize_session=False)
     db.commit()
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_not_called()  # 소속 미검증 → 자동 제외 skip(fail-closed)
     assert res["powerlink_fired"] == 0
@@ -302,7 +302,7 @@ def test_reexam_consumes_cap_before_new_candidates(db):
         return {"opened": 0, "reexcluded": 1, "restored": 0, "healed": 0, "probation_healed": 0}
 
     with patch.object(lane, "_run_reexamination", side_effect=fake_reexam):
-        with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+        with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
             res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_not_called()  # 재심사가 잔여 캡 소진 → 신규 발사 밀림
     assert res["powerlink_fired"] == 0

@@ -295,7 +295,7 @@ def test_probation_still_candidate_reexcludes_with_cycle_succession(db):
     _scope(db)
     row = _excl(db, term="여전히손실", status="probation", cycle=1, restrict_kwd_id=None,
                 next_review_at=None, probation_until=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(lane.naver_sa_writer, "add_exclusions",
                       return_value=_add_result("여전히손실", kwd_id="rkw-9")) as mock_add:
         res = lane._run_reexamination(db, [_cand("여전히손실")], _NOW)
     mock_add.assert_called_once_with("grp-web", ["여전히손실"])
@@ -312,7 +312,7 @@ def test_probation_not_candidate_restores(db):
     _scope(db)
     row = _excl(db, term="회복됨", status="probation", cycle=1, restrict_kwd_id=None,
                 next_review_at=None, probation_until=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "add_restricted_keywords") as mock_add:
+    with patch.object(lane.naver_sa_writer, "add_exclusions") as mock_add:
         res = lane._run_reexamination(db, [], _NOW)  # powerlink 후보 아님
     mock_add.assert_not_called()
     assert res["restored"] == 1
@@ -335,7 +335,7 @@ def test_backoff_caps_at_90(db):
     _scope(db)
     row = _excl(db, term="반복손실", status="probation", cycle=3, restrict_kwd_id=None,
                 next_review_at=None, probation_until=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(lane.naver_sa_writer, "add_exclusions",
                       return_value=_add_result("반복손실")):
         lane._run_reexamination(db, [_cand("반복손실")], _NOW)
     db.refresh(row)
@@ -350,7 +350,7 @@ def test_killswitch_off_freezes_reexamination(db):
                   next_review_at=None, probation_until=date(2026, 7, 22))
     row_r = _excl(db, term="회복됨2", adgroup_id="grp-web", status="probation", restrict_kwd_id=None,
                   next_review_at=None, probation_until=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "add_restricted_keywords") as mock_add:
+    with patch.object(lane.naver_sa_writer, "add_exclusions") as mock_add:
         res = lane._run_reexamination(db, [_cand("손실여전")], _NOW)
     mock_add.assert_not_called()
     assert res["reexcluded"] == 0 and res["restored"] == 0

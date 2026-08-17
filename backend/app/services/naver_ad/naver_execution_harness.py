@@ -233,6 +233,11 @@ EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
 # ★"모름"을 "차단됨"으로 표시하는 것은 원칙22 위반이다. 이 코드의 다른 곳(:441 주석)도
 #   쓰기 실패에 대해 "사람이 네이버 콘솔로 실제 반영 여부를 확인"하라고 못 박고 있다.
 GUARD_BLOCK_MARKER = "[실행 불가]"
+# 제외 쓰기 경로를 아는 캠페인 유형 (D-NAO-181 ③). 여기 없는 유형은 harness가 조기 거부한다.
+# ★이건 «조기 판별»이지 최종 판정이 아니다 — 실제 경로 선택은 naver_sa_writer.add_exclusions가
+#   라이브 adgroupType으로 한다(캠페인 축 ≠ 광고그룹 축, D-NAO-179).
+_WRITABLE_EXCLUSION_CAMPAIGN_TYPES = frozenset({"WEB_SITE", "SHOPPING"})
+
 WRITE_FAILURE_MARKER = "[실행 실패]"
 # ★D-NAO-170(B-4): 「그룹입찰이 죽은 그룹에 그룹입찰을 쓰려 했다」 전용 마커.
 # 일반 실패와 **분리해서 셀 수 있어야** 한다 — 이 실패는 버그가 아니라 «라우터의 입력 데이터가
@@ -1282,25 +1287,32 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
         _guard_failure(db, proposal, now, "exclude_search_term", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
-    # SHOPPING 명시 거부(§실측-0) — 이 **쓰기 경로**(POST restricted-keywords)는 쇼핑에서 지금도
-    # HTTP 400/3728이다. 가드는 유효하다.
-    # ★단 「쇼핑 제외는 못 만진다」로 읽지 말 것(D-NAO-180): 쇼핑 제외는 **읽기가 열려 있고**
-    #   (`/ncc/targets` → `naver_sa_writer.get_shopping_exclusions`, 3,880건/116그룹) **쓰기도
-    #   `PUT /ncc/targets/{targetId}`로는 된다**(2026-08-17 실증, 전문 PUT이면 기존 보존됨).
-    #   즉 막힌 것은 «쇼핑 제외»가 아니라 «이 리소스»다. 쇼핑 자동 제외를 열려면 이 가드를
-    #   지우는 게 아니라 **PUT 기반 쇼핑 전용 경로를 신설**해야 한다(가드를 지우면 실패할 요청을
-    #   계속 쏜다). 그 경로는 Jino 별도 승인 대상이다.
+    # ★쓰기 경로 게이트 — 「SHOPPING 명시 거부」에서 **라우팅**으로 바뀌었다 (D-NAO-181 ③).
+    #
+    # 종전(§실측-0): campaign_type이 SHOPPING이면 무조건 거부했다. 근거는 「쇼핑은
+    # `POST restricted-keywords`가 HTTP 400/3728」이었고 **그 관측 자체는 지금도 사실이다.**
+    # 틀렸던 것은 그 거부를 «쇼핑 제외는 못 쓴다»로 일반화한 것이다(교훈 #299) — 쇼핑은
+    # `PUT /ncc/targets/{targetId}`로 **쓸 수 있다**(2026-08-17 실증: 전문 PUT이면 기존 보존).
+    # 그래서 가드를 «지우는» 게 아니라 **경로를 고르는 것**으로 바꾼다. 지우기만 하면 실패할
+    # 요청(POST)을 쇼핑에 계속 쏘게 되고, 그건 종전 가드가 막던 바로 그 낭비다.
+    #
+    # ★여기서 **최종 판정을 내리지 않는다.** `campaign_type`(캠페인 축)과 `adgroupType`
+    #   (광고그룹 축)은 **다른 축**이고, 그 둘을 섞은 게이트가 D-NAO-179에서 723건 중 711건을
+    #   시야 밖에 뒀다. 그래서 여기서는 «쓸 줄 아는 유형인가»만 조기 판별해 무의미한 왕복을
+    #   막고, 실제 경로 선택은 `naver_sa_writer.add_exclusions`가 **라이브 adgroupType**으로 한다
+    #   (이중 방벽 유지 — writer 쪽 관문은 그대로 있다).
     entity = (
         db.query(NaverEntity)
         .filter(NaverEntity.entity_type == "adgroup", NaverEntity.entity_id == proposal.adgroup_id)
         .first()
     )
-    if entity is not None and (entity.campaign_type or "") == "SHOPPING":
+    entity_campaign_type = (entity.campaign_type or "") if entity is not None else ""
+    if entity_campaign_type and entity_campaign_type not in _WRITABLE_EXCLUSION_CAMPAIGN_TYPES:
         reason = (
-            "SHOPPING 광고그룹은 restricted-keywords 쓰기 불가(§실측-0, HTTP 400 code 3728) — "
-            "이 경로로는 자동 제외가 안 된다(fail-closed 명시 거부, writer WEB_SITE 관문과 "
-            "이중 방벽). ※쇼핑 제외 «읽기»는 /ncc/targets로 열려 있고 쓰기도 PUT으로는 "
-            "가능하다(D-NAO-180) — 열려면 그 전용 경로를 신설한다"
+            f"campaign_type={entity_campaign_type!r}에 제외를 쓰는 경로를 모른다 — 조용히 넘기지 "
+            f"않고 거부한다(fail-closed). 쓸 줄 아는 유형: "
+            f"{sorted(_WRITABLE_EXCLUSION_CAMPAIGN_TYPES)} "
+            f"(WEB_SITE=POST restricted-keywords · SHOPPING=PUT /ncc/targets, D-NAO-181)"
         )
         _guard_failure(db, proposal, now, "exclude_search_term", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
@@ -1367,8 +1379,12 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     try:
-        result = naver_sa_writer.add_restricted_keywords(proposal.adgroup_id, [proposal.target_id])
-    except Exception as exc:  # WriteValidationError(SHOPPING/중복 등)/WriteError/WriteVerificationError
+        # ★유형이 경로를 고른다(D-NAO-181 ③): WEB_SITE→POST restricted-keywords /
+        #   SHOPPING→PUT /ncc/targets(전문 전송·낙관적 잠금·보존 검증). adgroup_type을 넘기지
+        #   않는 것은 의도다 — writer가 **라이브 adgroupType**으로 판정한다(캠페인 축과 광고그룹
+        #   축을 섞지 않는다, D-NAO-179).
+        result = naver_sa_writer.add_exclusions(proposal.adgroup_id, [proposal.target_id])
+    except Exception as exc:  # WriteValidationError/WriteConcurrentEditError/WriteError/WriteVerificationError
         proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
         fail_entry = NaverChangeLog(
             entity_type=proposal.target_type, entity_id=proposal.target_id,

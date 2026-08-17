@@ -1306,3 +1306,168 @@ def test_get_live_exclusions_returns_none_for_unreadable_types(unknown_type):
     with patch.object(writer.fetcher, "_get",
                       side_effect=AssertionError("읽을 소스를 모르면 호출조차 하지 않는다")):
         assert writer.get_live_exclusions(ADGROUP_ID, unknown_type) is None
+
+
+# ═══ D-NAO-181 ③ — 쇼핑 제외 **쓰기** (`PUT /ncc/targets/{targetId}`) ═══
+#
+# ★이 경로의 고유 위험은 「추가 실패」가 아니라 **「기존 유실」**이다. 교체(replace) 의미론이라
+#   요청 body가 곧 최종 상태이고, 대상 계정엔 대행사가 2024년부터 쌓은 3,880건이 있는데
+#   **백업이 없다.** 아래 테스트는 전부 그 한 문장을 지킨다.
+
+_EXISTING = [
+    {"keyword": "기존A", "type": 1, "date": 1745346227},
+    {"keyword": "기존B", "type": None, "date": 1700000000},
+]
+
+
+def _target_row(items=_EXISTING, edit_tm="2025-04-22T18:23:47.000Z"):
+    return {"nccTargetId": "tgt-2", "ownerId": ADGROUP_ID,
+            "targetTp": "RESTRICT_KEYWORD_TARGET", "target": items,
+            "delFlag": False, "regTm": "2024-12-30T06:45:34.000Z", "editTm": edit_tm}
+
+
+def _targets_resp(items=_EXISTING, edit_tm="2025-04-22T18:23:47.000Z"):
+    return FakeResp(200, [
+        {"nccTargetId": "tgt-1", "targetTp": "MEDIA_TARGET", "delFlag": False, "target": {}},
+        _target_row(items, edit_tm),
+    ])
+
+
+class _FakePut:
+    """PUT을 받아 기록하고 200을 돌려주는 스텁."""
+
+    def __init__(self, status=200):
+        self.status, self.calls = status, []
+
+    def __call__(self, url, headers=None, json=None, timeout=None):  # noqa: A002
+        self.calls.append(json)
+        return FakeResp(self.status, json)
+
+
+def test_shopping_write_sends_the_whole_list_not_just_the_new_one():
+    """★★부분 전송은 나머지를 지운다 — 이 경로에서 가장 비싼 실수다.
+
+    PUT은 교체 의미론이므로 「신규 1건」만 보내면 기존 전건이 사라진다. 보낸 body를 직접 검사해
+    **기존이 원문 그대로(=`date`까지) 실려 있는지**를 본다. `date`가 보존돼야 서버가 등록시각을
+    유지한다(2026-08-17 라이브 실증).
+    """
+    put = _FakePut()
+    after = _EXISTING + [{"keyword": "신규", "type": 1, "date": 1786937658}]
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),   # _get_adgroup
+        _targets_resp(), _targets_resp(),             # before · 낙관적 잠금 재확인
+        _targets_resp(after),                         # after 검증
+    ]), patch.object(writer.requests, "put", put):
+        result = writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+
+    sent = put.calls[0]["target"]
+    assert [k["keyword"] for k in sent] == ["기존A", "기존B", "신규"], "기존이 빠지면 그게 유실이다"
+    assert sent[0] == _EXISTING[0], "기존 항목은 원문 그대로(date 포함) 보내야 한다"
+    assert result.created_ids == [], "이 리소스엔 키워드 단위 id가 없다 — 위조하면 개방이 엉뚱해진다"
+
+
+def test_shopping_write_refuses_when_someone_edited_between_read_and_write():
+    """★낙관적 잠금 — before 조회 뒤 남이 1건을 추가하면 우리 「전문」은 옛것이고, 그대로 쓰면
+    **그 조치를 지운다.** `editTm`이 바뀌면 쓰지 않고 거부한다."""
+    put = _FakePut()
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(),                                        # before
+        _targets_resp(edit_tm="2026-08-17T03:34:18.000Z"),      # 그 사이 남이 씀
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(writer.WriteConcurrentEditError):
+            writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+
+    assert put.calls == [], "경합을 감지했으면 **쓰지 않아야** 한다"
+
+
+def test_shopping_write_fails_closed_when_existing_keywords_vanish():
+    """★★보존 검증 — 「추가됐나」만 보면 유실을 못 본다.
+
+    after에 신규는 있는데 기존이 사라진 상황(서버가 교체를 다르게 처리했거나 경합)에서
+    **성공으로 돌려주면 3,880건이 조용히 날아간 채 초록이 된다.** 사라진 키워드 전문을 메시지에
+    실어야 사람이 복구할 수 있다.
+    """
+    put = _FakePut()
+    after = [{"keyword": "신규", "type": 1, "date": 1786937658}]  # 기존 2건 증발
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(), _targets_resp(), _targets_resp(after),
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(WriteVerificationError) as e:
+            writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+
+    msg = str(e.value)
+    assert "기존A" in msg and "기존B" in msg, "무엇이 사라졌는지 모르면 복구할 수 없다"
+
+
+def test_shopping_write_fails_closed_when_new_keyword_not_reflected():
+    """PUT이 2xx여도 재조회에 없으면 실패다(쓰기 응답이 아니라 재조회가 진실이다)."""
+    put = _FakePut()
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}),
+        _targets_resp(), _targets_resp(), _targets_resp(),  # after에 신규 없음
+    ]), patch.object(writer.requests, "put", put):
+        with pytest.raises(WriteVerificationError):
+            writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+
+
+def test_shopping_write_refuses_non_shopping_adgroup():
+    """파워링크에 이 경로를 쓰면 안 된다 — 리소스가 다르다(이중 방벽의 writer 쪽 관문)."""
+    with patch.object(writer.fetcher, "_get",
+                      return_value=FakeResp(200, {"adgroupType": "WEB_SITE"})):
+        with pytest.raises(WriteValidationError):
+            writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+
+
+def test_shopping_write_refuses_duplicate_and_empty():
+    """이미 있는 키워드 재등록·빈 입력·요청 내 중복은 진입 차단(서버 동작이 문서에 없다)."""
+    with pytest.raises(WriteValidationError):
+        writer.add_shopping_exclusions(ADGROUP_ID, [])
+    with pytest.raises(WriteValidationError):
+        writer.add_shopping_exclusions(ADGROUP_ID, ["같은것", "같은것"])
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}), _targets_resp(),
+    ]):
+        with pytest.raises(WriteValidationError):
+            writer.add_shopping_exclusions(ADGROUP_ID, ["기존A"])
+
+
+@pytest.mark.parametrize("n_rows", [0, 2])
+def test_shopping_write_refuses_when_target_row_is_not_unique(n_rows):
+    """쓸 대상을 특정 못 하면 추측하지 않는다 — 0개면 쓸 곳이 없고 2개면 어디에 쓸지 모른다."""
+    row = _target_row()
+    payload = [row] * n_rows
+    with patch.object(writer.fetcher, "_get", side_effect=[
+        FakeResp(200, {"adgroupType": "SHOPPING"}), FakeResp(200, payload),
+    ]):
+        with pytest.raises(WriteValidationError):
+            writer.add_shopping_exclusions(ADGROUP_ID, ["신규"])
+
+
+def test_add_exclusions_picks_write_path_by_live_adgroup_type():
+    """유형이 경로를 고른다 — 읽기(`get_live_exclusions`)와 같은 모양."""
+    with patch.object(writer, "_get_adgroup", return_value={"adgroupType": "WEB_SITE"}), \
+         patch.object(writer, "add_restricted_keywords", return_value="웹") as rk:
+        assert writer.add_exclusions(ADGROUP_ID, ["k"]) == "웹"
+        rk.assert_called_once_with(ADGROUP_ID, ["k"])
+    with patch.object(writer, "_get_adgroup", return_value={"adgroupType": "SHOPPING"}), \
+         patch.object(writer, "add_shopping_exclusions", return_value="쇼핑") as sh:
+        assert writer.add_exclusions(ADGROUP_ID, ["k"]) == "쇼핑"
+        sh.assert_called_once_with(ADGROUP_ID, ["k"])
+
+
+@pytest.mark.parametrize("unknown", [None, "BRAND_SEARCH", "PLACE", ""])
+def test_add_exclusions_refuses_unknown_type_instead_of_skipping(unknown):
+    """★쓰기에서 «모름»은 조용히 넘기면 안 된다 — 읽기의 `None`과 대칭이 아니다.
+
+    읽기에서 모름은 관측이 한 칸 비는 것으로 끝나지만, 쓰기에서 조용히 넘기면 **조치가 실행되지
+    않았는데 실행된 것처럼** 흘러간다(제안은 executed로, 원장엔 행이 서는데 네이버엔 없다).
+    """
+    with patch.object(writer, "_get_adgroup", return_value={"adgroupType": unknown}), \
+         patch.object(writer.requests, "put",
+                      side_effect=AssertionError("모르면 쓰지 않는다")), \
+         patch.object(writer, "add_restricted_keywords",
+                      side_effect=AssertionError("모르면 쓰지 않는다")):
+        with pytest.raises(WriteValidationError):
+            writer.add_exclusions(ADGROUP_ID, ["k"])

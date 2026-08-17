@@ -91,7 +91,7 @@ def test_websites_exclude_success_records_change_log(db):
     _settings(db)
     _entity(db, "grp-web", "WEB_SITE")
     p = _proposal(db, adgroup_id="grp-web", term="무관검색어")
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                       return_value=_write_result("무관검색어")) as mock_write:
         log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_called_once_with("grp-web", ["무관검색어"])
@@ -103,20 +103,54 @@ def test_websites_exclude_success_records_change_log(db):
     assert p.status == "approved"
 
 
-# ── ① 쇼핑 실쓰기 부재(SHOPPING 명시 거부, fail-closed) ──
-def test_shopping_exclude_rejected_before_writer(db):
+# ── ① 쇼핑은 이제 «거부»가 아니라 «라우팅»이다 (D-NAO-181 ③) ──
+def test_shopping_exclude_now_routes_to_the_shopping_writer(db):
+    """★종전 `test_shopping_exclude_rejected_before_writer`를 대체한다.
+
+    그 테스트는 「SHOPPING이면 writer에 닿기 전에 거부」를 지켰고, 근거는 「쇼핑은
+    `POST restricted-keywords`가 HTTP 400/3728」이었다. **그 관측은 지금도 사실이다** — 틀렸던
+    것은 그 거부를 «쇼핑 제외는 못 쓴다»로 일반화한 것이다(교훈 #299). 쇼핑은
+    `PUT /ncc/targets/{targetId}`로 쓸 수 있다.
+
+    그래서 지금 지켜야 할 것은 「거부되는가」가 아니라 **「올바른 경로로 가는가」**다.
+    """
     _settings(db)
     _entity(db, "grp-shop", "SHOPPING")
     p = _proposal(db, adgroup_id="grp-shop", term="쇼핑검색어")
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as post_write, \
+         patch.object(harness.naver_sa_writer, "add_shopping_exclusions") as put_write, \
+         patch.object(harness.naver_sa_writer, "_get_adgroup",
+                      return_value={"adgroupType": "SHOPPING"}):
+        put_write.return_value = naver_sa_writer.WriteResult(
+            action="add_shopping_exclusions", before=[], response=None,
+            after=[{"keyword": "쇼핑검색어"}], created_ids=[],
+        )
+        log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
+
+    put_write.assert_called_once_with("grp-shop", ["쇼핑검색어"])
+    post_write.assert_not_called()  # ★쇼핑에 POST를 쏘면 400이다 — 경로가 갈려 있어야 한다
+    assert log_entry.action == "exclude_search_term" and log_entry.dry_run is False
+    db.refresh(p)
+    assert p.executed_change_log_id == log_entry.id  # 실쓰기가 change_log까지 이어졌다
+
+
+def test_exclude_refuses_campaign_type_it_cannot_write(db):
+    """쓸 줄 모르는 유형(브랜드검색 등)은 **여전히 거부**한다 — 종전 가드가 지키던 성질을 옮겼다.
+
+    쓰기에서 «모름»을 조용히 넘기면 조치가 실행되지 않았는데 실행된 것처럼 흘러간다.
+    """
+    _settings(db)
+    _entity(db, "grp-brand", "BRAND_SEARCH")
+    p = _proposal(db, adgroup_id="grp-brand", term="브랜드어")
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
-    mock_write.assert_not_called()  # writer 미호출 = 실쓰기 부재
+    mock_write.assert_not_called()  # writer에 닿기 전에 막힌다
     db.refresh(p)
     assert p.status == "failed"
     row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
     assert harness.GUARD_BLOCK_MARKER in row.rationale
-    assert "SHOPPING" in row.rationale
+    assert "BRAND_SEARCH" in row.rationale
     assert row.after_value is None  # 실쓰기 없음(광고 확실히 안 바뀜)
 
 
@@ -127,7 +161,7 @@ def test_exclude_over_maxlen_target_id_blocked_before_writer(db):
     _entity(db, "grp-web", "WEB_SITE")
     long_term = "가" * (harness._TARGET_ID_MAXLEN + 1)  # 51자
     p = _proposal(db, adgroup_id="grp-web", term=long_term)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_not_called()  # 잘린/초과 텍스트로 실쓰기 없음
@@ -152,7 +186,7 @@ def test_daily_cap_blocks_over_limit(db):
         ))
     db.commit()
     p = _proposal(db, adgroup_id="grp-web", term="11번째")
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_not_called()
@@ -203,7 +237,7 @@ def test_daily_cap_toctou_rollback_on_concurrent_commit(db):
         db.commit()
         return _write_result(keywords[0])
 
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                        side_effect=_write_then_race) as mock_write, \
          patch.object(harness.naver_sa_writer, "delete_restricted_keywords") as mock_delete:
         with pytest.raises(naver_sa_writer.WriteError):
@@ -236,7 +270,7 @@ def test_daily_cap_toctou_rollback_failure_records_honestly(db):
         db.commit()
         return _write_result(keywords[0])
 
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                        side_effect=_write_then_race), \
          patch.object(harness.naver_sa_writer, "delete_restricted_keywords",
                        side_effect=naver_sa_writer.WriteVerificationError("삭제 후 재조회에 잔존")):
@@ -263,7 +297,7 @@ def test_stale_conversion_reverify_rejects_before_writer(db):
     ))
     db.commit()
     p = _proposal(db, adgroup_id="grp-web", term="전환붙은검색어")
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_not_called()  # 쓰기 미호출(전환 보호)
@@ -284,7 +318,7 @@ def test_stale_conversion_reverify_allows_when_no_conversion(db):
     ))
     db.commit()
     p = _proposal(db, adgroup_id="grp-web", term="무전환검색어")
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                       return_value=_write_result("무전환검색어")) as mock_write:
         log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_called_once()
@@ -303,7 +337,7 @@ def test_atomic_cap_reservation_blocks_on_concurrent_executing(db):
     # 다른 executing 제안 + 자기 — 둘 다 오늘(_NOW KST일) 생성분(캡 예약 오늘-한정 필터 안)
     _proposal(db, adgroup_id="grp-web", term="동시진행", status="executing", created_at=_TODAY_UTC)
     p = _proposal(db, adgroup_id="grp-web", term="원자예약후보", created_at=_TODAY_UTC)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_not_called()  # 쓰기 미호출(캡 관통 원천 차단)
@@ -322,7 +356,7 @@ def test_atomic_cap_reservation_allows_exactly_at_cap(db):
         _committed_exclude(db, f"seed{i}")
     db.commit()
     p = _proposal(db, adgroup_id="grp-web", term="10번째", created_at=_TODAY_UTC)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                       return_value=_write_result("10번째")) as mock_write:
         log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_called_once()
@@ -342,7 +376,7 @@ def test_atomic_cap_reservation_ignores_stale_yesterday_executing(db):
     _proposal(db, adgroup_id="grp-web", term="어제잔존", status="executing",
               created_at=_TODAY_UTC - timedelta(days=1))
     p = _proposal(db, adgroup_id="grp-web", term="오늘10번째", created_at=_TODAY_UTC)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                       return_value=_write_result("오늘10번째")) as mock_write:
         log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_called_once()  # 어제 stale 미포함 → 캡 여유 있음 → 쓰기 허용
@@ -367,7 +401,7 @@ def test_ss_exclude_approval_source_respects_killswitch(db):
     _entity(db, "grp-web", "WEB_SITE")
     p = _proposal(db, adgroup_id="grp-web", term="자동검색어",
                   approval_source=judge.APPROVAL_SOURCE_SS_EXCLUDE)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         with pytest.raises(harness.KillSwitchEngagedError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_not_called()
@@ -378,7 +412,7 @@ def test_console_approval_not_killswitch_gated(db):
     _settings(db, optimizer="ours", auto_operate=False)
     _entity(db, "grp-web", "WEB_SITE")
     p = _proposal(db, adgroup_id="grp-web", term="수동검색어", approval_source=None)
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+    with patch.object(harness.naver_sa_writer, "add_exclusions",
                       return_value=_write_result("수동검색어")):
         log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
     assert log_entry.action == "exclude_search_term"
@@ -437,7 +471,7 @@ def test_lane_powerlink_out_of_scope_never_fires(db):
     # 파워링크 후보라도 auto_operate 스코프 밖(settings 없음)이면 자동 발사 0(§0 3 대행사 무실쓰기).
     _map_product(db, "grp-web", "PW")
     _term(db, term="파워손실", source="expkeyword", adgroup_id="grp-web")
-    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
         res = lane.run_search_term_ss_lane(db, now=_NOW)
     mock_write.assert_not_called()
     assert res["powerlink_fired"] == 0
