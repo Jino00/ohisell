@@ -1658,6 +1658,64 @@ def run_naver_nbaesong_return_probe_job():
         db.close()
 
 
+# ══════════════════════════════════════════════════════════════════
+# 크론 요일 규약 (교훈 #297, 2026-08-17)
+# ══════════════════════════════════════════════════════════════════
+# ★요일은 **이름으로만** 적는다(`sun`·`mon`…). 숫자를 쓰면 안 된다.
+#   표준 crontab은 **0=일요일**인데 APScheduler의 `day_of_week`는 **0=월 … 6=일**이고,
+#   `CronTrigger.from_crontab()`은 5번째 필드를 **규약 변환 없이 그대로** day_of_week에 넣는다.
+#   그래서 `"20 9 * * 0"`은 일요일이 아니라 **월요일**에 발화한다(prod venv APScheduler 3.10.4
+#   실측: '20 9 * * 0'→2026-08-03(월) / '20 9 * * 6'→2026-08-02(일) / '20 9 * * sun'→08-23(일)).
+#
+#   라이브 사고: bm_deep(`20 9 * * 0`)이 「일요일 09:20 레인」으로 문서화된 채 **3주 내내
+#   월요일에** 돌았다(negative_kw_count 기입일 전수 07-27·08-03·08-10·08-17 전부 월요일,
+#   일요일 0회). 놓친 실행은 0건 — 주 1회 리듬이 유지되고 잡은 매번 `ok`로 끝나므로
+#   **로그·상태 어디에도 흔적이 없었다.** 깨진 것은 실행이 아니라 「언제 도는가」에 대한
+#   믿음이고, 그 믿음은 주석·문서에만 산다. 그래서 관측이 아니라 **이름**으로 막는다.
+_NUMERIC_DOW_HINT = (
+    "요일은 이름으로 적으세요(sun/mon/tue/wed/thu/fri/sat). 숫자는 crontab(0=일)과 "
+    "APScheduler(0=월)에서 뜻이 달라 하루 어긋납니다 — 교훈 #297."
+)
+
+
+def _assert_weekday_crons_are_named(defaults) -> None:
+    """요일을 지정한 크론이 숫자를 쓰면 **기동을 거부**한다(교훈 #297의 집행 지점).
+
+    `*`(매일)은 대상이 아니다 — 규약 차이가 드러나지 않기 때문이다. 숫자·범위·목록이
+    5번째 필드에 오는 경우만 막는다. 주석이나 문서로는 세 번 다 못 막았으므로 여기서 막는다.
+    """
+    bad = []
+    for name, cron in defaults:
+        parts = str(cron).split()
+        if len(parts) < 5:
+            continue
+        dow = parts[4]
+        if dow == "*":
+            continue
+        if any(ch.isdigit() for ch in dow):
+            bad.append(f"{name}={cron!r}")
+    if bad:
+        raise ValueError(f"숫자 요일 크론 금지: {', '.join(bad)} — {_NUMERIC_DOW_HINT}")
+
+
+# 코드가 cron_expression의 정본인 잡 — 여기 든 이름만 기존 DB 행까지 조정한다.
+#
+# ★왜 전량이 아니라 명단인가: `_ensure_default_states`는 원래 «없는 행만 insert»라
+#   시드를 고쳐도 prod의 기존 행은 옛 크론으로 계속 발화한다(retired 주석이 같은 함정을
+#   이미 적어 뒀다). 그렇다고 전량을 시드로 덮으면 의도적으로 갈라 둔 행까지 되돌린다 —
+#   실측(2026-08-17, prod 51행 전수 대조)에서 `sync_coupang_rg_orders`가 시드
+#   `0 */2 * * *` vs prod `55 5 * * *`로 **73일째** 갈라져 있었고, 전량 덮기는 그 잡을
+#   하루 1회에서 12회로 올린다(days=30 동기화라 부하가 유의하다). 어느 쪽이 옳은지는
+#   운영 판단이므로 그 잡은 **명단 밖**에 두고 Jino 결정 대기로 남긴다.
+#   → 명단 편입이 곧 «이 잡의 스케줄은 코드가 정한다»는 명시적 결정이다.
+_CRON_OWNED_BY_CODE: frozenset[str] = frozenset({
+    # 교훈 #297로 요일 표기를 숫자→이름으로 고친 두 잡. prod 기존 행이 `* * 0`(=월요일)이라
+    # 코드만 고쳐서는 영영 반영되지 않으므로 여기 넣어 조정한다.
+    "run_naver_bm_deep",
+    "sync_naver_keyword_volume",
+})
+
+
 def _ensure_default_states(db):
     """기본 스케줄러 상태 DB 레코드 생성"""
     defaults = [
@@ -1676,9 +1734,9 @@ def _ensure_default_states(db):
         ("snapshot_naver_ad_hourly", "5 * * * *"),  # 네이버 SA 시간별 스냅샷 (빠른 루프)
         ("trigger_watch", "7 * * * *"),             # 조건발동 즉시알림(페이싱·CPC급등, 트랙 P4)
         ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1) — 완료 직후 BM 레이어 체이닝(구 07:37 크론 폐지)
-        ("run_naver_bm_deep", "20 9 * * 0"),        # BM 벤치마크 레이어 주간 deep(제외키워드·소재수, D-NAO-78, 관찰 전용·catch-up 제외)
+        ("run_naver_bm_deep", "20 9 * * sun"),      # BM 벤치마크 레이어 주간 deep(제외키워드·소재수, D-NAO-78, 관찰 전용·catch-up 제외). ★요일은 이름으로 — 숫자 `0`은 APScheduler에서 월요일이라 3주간 하루 어긋나 있었다(교훈 #297)
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
-        ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
+        ("sync_naver_keyword_volume", "0 9 * * sun"), # 저클릭 키워드 월검색량 (주1회, 일요일 — 이름 표기 이유는 교훈 #297)
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
@@ -1746,12 +1804,23 @@ def _ensure_default_states(db):
     #   (구조적 경합으로 스냅샷이 항상 entity_sync D-1 값을 담던 문제, 2026-07-23~27 5/5일 실측).
     retired = ("run_naver_bm_layer",)
 
+    _assert_weekday_crons_are_named(defaults)
+
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
             SchedulerState.job_name == name
         ).first()
         if not existing:
             db.add(SchedulerState(job_name=name, cron_expression=cron, is_enabled=True))
+        elif name in _CRON_OWNED_BY_CODE and existing.cron_expression != cron:
+            # ★_CRON_OWNED_BY_CODE에 든 잡만 조정한다(그 상수 주석에 이유가 있다).
+            #   is_enabled·last_run_at은 건드리지 않는다 — 켜고 끄는 것은 운영 판단이고,
+            #   실행 이력을 지우면 워치독의 stale 판정 근거가 함께 사라진다.
+            log.warning(
+                "[스케줄러] cron 조정(코드 정본): %s %r → %r",
+                name, existing.cron_expression, cron,
+            )
+            existing.cron_expression = cron
     for name in retired:
         db.query(SchedulerState).filter(SchedulerState.job_name == name).delete()
     db.commit()
