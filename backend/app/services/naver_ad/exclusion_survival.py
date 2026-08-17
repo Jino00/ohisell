@@ -47,14 +47,15 @@ STATE_ALIVE = "alive"
 STATE_MISSING = "missing"
 STATE_DELETED = "deleted"
 STATE_UNKNOWN = "unknown"
-# ★대조 자체가 불가능한 조치(2026-08-11 실측). 쇼핑 광고그룹은 콘솔에 제외 검색어가 43건
-# 등록돼 있어도 `GET restricted-keywords`가 200/**0건**을 돌려준다 — 즉 이 API는 쇼핑에서
-# 「없다」고 거짓말한다. 이걸 missing으로 세면 **콘솔에서 자른 쇼핑 검색어가 매일 「우리 조치가
-# 사라졌다」로 뜬다**(상시 빨강 = 이 감시가 죽는 방식). 「사라졌다」와 「볼 수 없다」는 다르다.
+# ★대조 자체가 불가능한 조치. 「사라졌다」와 「볼 수 없다」는 다르다 — 볼 수 없는 것을 missing
+# 으로 세면 상시 빨강이 되고, 그게 이 계열 감시가 실제로 죽는 방식이다.
+#
+# ★2026-08-17(D-NAO-180)로 **범위가 크게 줄었다.** 종전엔 「WEB_SITE가 아닌 전부」였고 그 근거는
+#   「쇼핑은 `GET restricted-keywords`가 200/0건을 돌려준다(콘솔 43건인데)」였다. 그 관측은 맞았
+#   지만 **결론이 과잉 일반화였다**: 거짓말을 한 것은 그 **리소스**였지 쇼핑 제외 자체가 아니다.
+#   `/ncc/targets`로는 같은 계정에서 3,880건이 읽히고 콘솔 캡처분과 차집합 0으로 일치한다.
+#   그래서 이제 여기 남는 것은 **소스를 아직 모르는 유형**(브랜드검색·플레이스 등)뿐이다.
 STATE_UNVERIFIABLE = "unverifiable"
-
-# 라이브 대조가 진실을 말하는 유일한 광고그룹 유형.
-_VERIFIABLE_ADGROUP_TYPE = "WEB_SITE"
 
 # 되돌림·복구 경로(화면·API가 같은 문장을 쓴다 — 두 벌이 되면 갈라진다).
 # ★탭 이름이 광고 유형마다 다르다(2026-08-12 Jino가 콘솔 화면으로 확인): 파워링크는
@@ -149,7 +150,8 @@ def _classify(row: NaverSearchTermExclusion, live: list[dict]) -> tuple[str, str
 def check_survival(db: Session, *, now: datetime | None = None) -> dict:
     """status='excluded' 전 행을 라이브 재조회로 대조하고 결과를 DB에 적는다(잡 진입점).
 
-    네이버 API 호출은 **광고그룹당 1회**(GET /ncc/adgroups/{id}/restricted-keywords).
+    라이브 소스는 광고그룹 유형이 고른다(`naver_sa_writer.get_live_exclusions`) — 파워링크는
+    `restricted-keywords`, 쇼핑은 `/ncc/targets`다(D-NAO-180).
     한 그룹 조회가 실패해도 나머지 그룹은 계속 본다 — 한 그룹의 실패가 감시 전체를 지우면
     그 침묵이 «이상 없음»과 구별되지 않는다(교훈 #123).
 
@@ -203,19 +205,13 @@ def check_survival(db: Session, *, now: datetime | None = None) -> dict:
                 r.live_note = "광고그룹 유형 조회 실패 — 쇼핑 여부를 몰라 대조 보류"
                 counts[STATE_UNKNOWN] += 1
             continue
-        if adgroup_type != _VERIFIABLE_ADGROUP_TYPE:
-            for r in group_rows:
-                r.live_state = STATE_UNVERIFIABLE
-                r.live_checked_at = now
-                r.live_note = (
-                    f"광고그룹 유형이 {adgroup_type}이라 라이브 대조 불가 — 이 API는 쇼핑에서 "
-                    "제외 목록을 돌려주지 않는다(콘솔에서만 확인 가능)"
-                )
-                counts[STATE_UNVERIFIABLE] += 1
-            continue
-
         try:
-            live = naver_sa_writer.get_restricted_keywords(adgroup_id)
+            # ★유형에 맞는 소스로 읽는다 (D-NAO-180). 파워링크는 restricted-keywords,
+            #   **쇼핑은 `/ncc/targets`**다 — 종전엔 여기서 쇼핑을 통째로 unverifiable로
+            #   내려보냈는데, 그 전제(「쇼핑 제외는 API로 못 본다」)가 2026-08-17에 틀린 것으로
+            #   밝혀졌다. 안 보였던 것은 리소스 하나였지 쇼핑 제외가 아니다.
+            #   **읽을 수 없는 유형은 None**이고, 그건 아래에서 unverifiable로 처분한다.
+            live = naver_sa_writer.get_live_exclusions(adgroup_id, adgroup_type)
         except Exception as e:  # noqa: BLE001 — 그룹 하나의 실패가 나머지 감시를 죽이지 않는다
             log.exception("[제외생존] 라이브 조회 실패 adgroup=%s", adgroup_id)
             errors.append(f"{adgroup_id}: {type(e).__name__}: {e}")
@@ -226,6 +222,20 @@ def check_survival(db: Session, *, now: datetime | None = None) -> dict:
                 r.live_checked_at = now
                 r.live_note = f"라이브 조회 실패: {type(e).__name__}"
                 counts[STATE_UNKNOWN] += 1
+            continue
+
+        if live is None:
+            # ★«읽을 소스를 모르는 유형»만 여기 온다(브랜드검색·플레이스 등). 쇼핑은 이제
+            #   위에서 실제로 읽힌다. None을 []로 뭉개면 「제외가 0건」과 구별되지 않고, 그러면
+            #   우리 조치가 전부 missing으로 뒤집힌다 — 「사라졌다」와 「볼 수 없다」는 다르다.
+            for r in group_rows:
+                r.live_state = STATE_UNVERIFIABLE
+                r.live_checked_at = now
+                r.live_note = (
+                    f"광고그룹 유형이 {adgroup_type}이라 라이브 대조 불가 "
+                    "— 이 유형의 제외를 읽는 소스를 아직 모른다"
+                )
+                counts[STATE_UNVERIFIABLE] += 1
             continue
 
         for r in group_rows:

@@ -437,12 +437,17 @@ def test_job_is_registered_so_the_check_actually_runs():
     assert '("verify_search_term_exclusions", "25 8 * * *")' in src
 
 
-def test_shopping_exclusion_is_unverifiable_not_missing(db, monkeypatch):
-    """★★2026-08-11 실측: 쇼핑 광고그룹은 콘솔에 제외가 **43건** 등록돼 있어도
-    `GET restricted-keywords`가 200/**0건**을 돌려준다 — 이 API는 쇼핑에서 「없다」고 거짓말한다.
+def test_shopping_exclusion_is_actually_verified_now(db, monkeypatch):
+    """★★D-NAO-180(2026-08-17): 쇼핑 제외는 이제 **실제로 대조된다.**
 
-    그 거짓말을 missing으로 받으면 **우리가 콘솔에서 자른 검색어가 매일 「사라졌다」로 뜨고**
-    배너가 상시 빨강이 된다(= 이 감시가 실제로 죽는 방식). 「사라졌다」와 「볼 수 없다」는 다르다.
+    이 테스트는 종전 `test_shopping_exclusion_is_unverifiable_not_missing`을 대체한다. 그 쪽
+    전제(「쇼핑은 볼 수 없으니 unverifiable로 두는 것이 최선」)는 2026-08-11 관측에선 옳았지만
+    **과잉 일반화였다**: 「없다」고 거짓말한 것은 `restricted-keywords` **리소스**였지 쇼핑 제외
+    자체가 아니었다. `/ncc/targets`로는 같은 계정에서 3,880건이 읽히고 콘솔 캡처분 43건과
+    차집합 양쪽 0으로 일치했다.
+
+    그래서 지켜야 할 것이 하나 늘었다: 쇼핑 제외가 **unverifiable로 되돌아가면 회귀**다.
+    volume이 큰 쪽(3,880건)이 조용히 「볼 수 없음」으로 접히면 감시가 있는 척만 하게 된다.
     """
     from app.services.naver_ad import naver_sa_writer
 
@@ -450,20 +455,62 @@ def test_shopping_exclusion_is_unverifiable_not_missing(db, monkeypatch):
                 excluded_at=NOW - timedelta(days=5)))
     db.commit()
     monkeypatch.setattr(naver_sa_writer, "get_adgroup_type", lambda a: "SHOPPING")
-    monkeypatch.setattr(naver_sa_writer, "get_restricted_keywords",
-                        lambda a: (_ for _ in ()).throw(AssertionError("쇼핑이면 조회조차 하지 않는다")))
+    # 쇼핑 소스가 돌려주는 정규화 행 — 개별 키워드 id가 **없다**(그룹 단위 id뿐이라 일부러 비운다).
+    monkeypatch.setattr(
+        naver_sa_writer, "get_shopping_exclusions",
+        lambda a: [{"keyword": "골프", "type": 1, "delFlag": False,
+                    "nccAdgroupRestrictKwdId": None,
+                    "nccTargetId": "tgt-1", "regTm": "2026-08-11T14:26:56.000Z"}],
+    )
+    monkeypatch.setattr(
+        naver_sa_writer, "get_restricted_keywords",
+        lambda a: (_ for _ in ()).throw(AssertionError("쇼핑에 이 리소스를 쓰면 안 된다")),
+    )
+
+    result = es.check_survival(db, now=NOW)
+    assert result["alive"] == 1, "쇼핑 제외가 라이브에 있으면 alive다"
+    assert result["unverifiable"] == 0, "★회귀 감시: 쇼핑이 다시 «볼 수 없음»으로 접히면 안 된다"
+    assert result["missing"] == 0
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.live_state == es.STATE_ALIVE
+    # ★그룹 단위 id를 키워드 id인 척 회수하면 나중에 개방(delete)이 엉뚱한 대상을 지운다.
+    assert row.restrict_kwd_id is None, "쇼핑 행에서 id를 회수하면 안 된다"
+
+    s = es.survival_summary(db, now=NOW)
+    assert s["breached"] == [] and s["healthy"] is True
+
+
+def test_unknown_adgroup_type_is_unverifiable_not_missing(db, monkeypatch):
+    """소스를 아직 모르는 유형(브랜드검색·플레이스 등)은 여전히 «볼 수 없음»이다.
+
+    쇼핑이 열렸다고 해서 이 처분까지 없애면, 읽을 줄 모르는 유형의 제외가 전부 missing으로
+    뒤집혀 배너가 상시 빨강이 된다 — 「사라졌다」와 「볼 수 없다」는 다르다. 종전 쇼핑 테스트가
+    지키던 성질을 여기로 옮겨 둔다.
+    """
+    from app.services.naver_ad import naver_sa_writer
+
+    db.add(_row(adgroup_id="grp-brand", search_term="브랜드어", restrict_kwd_id=None,
+                excluded_at=NOW - timedelta(days=5)))
+    db.commit()
+    monkeypatch.setattr(naver_sa_writer, "get_adgroup_type", lambda a: "BRAND_SEARCH")
+    for name in ("get_restricted_keywords", "get_shopping_exclusions"):
+        monkeypatch.setattr(
+            naver_sa_writer, name,
+            lambda a: (_ for _ in ()).throw(AssertionError("소스를 모르면 조회조차 하지 않는다")),
+        )
 
     result = es.check_survival(db, now=NOW)
     assert result["unverifiable"] == 1 and result["missing"] == 0
 
     row = db.query(NaverSearchTermExclusion).one()
     assert row.live_state == es.STATE_UNVERIFIABLE
-    assert "SHOPPING" in row.live_note
+    assert "BRAND_SEARCH" in row.live_note
 
     s = es.survival_summary(db, now=NOW)
     assert s["breached"] == [], "볼 수 없는 것을 어긋남으로 세면 안 된다"
     assert s["unverifiable"] == 1, "대신 «못 보는 몫»이 숫자로 드러나야 한다"
-    assert s["healthy"] is True, "쇼핑 제외 하나 때문에 배너가 상시 빨강이 되면 안 된다"
+    assert s["healthy"] is True
 
 
 def test_powerlink_group_is_still_verified_normally(db, monkeypatch):

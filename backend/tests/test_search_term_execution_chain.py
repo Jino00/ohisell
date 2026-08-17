@@ -685,7 +685,49 @@ def test_detect_counts_unknown_adgroup_type_apart_from_zero(db, monkeypatch):
 
     assert out["type_unknown_groups"] == 2
     assert out["groups_with_zero"] == 0, "«못 봤다»가 «0건»에 섞이면 안 된다"
-    assert out["unverifiable_groups"] == 0, "쇼핑(=대조 불가)과 조회 실패(=모름)도 서로 다르다"
+    assert out["unverifiable_groups"] == 0, "읽을 소스를 모르는 유형과 조회 실패도 서로 다르다"
+
+
+def test_detect_finds_shopping_exclusions_without_a_console_capture(db, monkeypatch):
+    """★★D-NAO-180: 쇼핑 제외가 **자동 발견에 들어온다** — 사람의 콘솔 캡처 없이.
+
+    종전엔 `adgroup_type != "WEB_SITE"`에서 통째로 건너뛰었고, 그 근거는 「쇼핑은
+    `restricted-keywords`가 200/0건」이었다. 관측은 맞았지만 결론이 과잉 일반화였다 — 거짓말한
+    것은 그 **리소스**였지 쇼핑 제외가 아니다. `/ncc/targets`로는 3,880건이 읽힌다.
+    그 결과 S5(그룹마다 화면 3장 캡처)의 존재 이유가 사라진다.
+
+    ★그래도 **일기는 0건이어야 한다.** 여기 걸리는 행은 정의상 「남이 이미 해 둔 것」이지
+      「오늘 우리가 한 조치」가 아니다 — 그걸 학습 사슬에 태우면 남의 조치가 우리 승률이 된다.
+    """
+    from app.services.naver_ad import naver_sa_writer
+
+    _spend(db, day=NOW.date() - timedelta(days=1), cost=1000)  # camp_of 매핑을 만든다
+    db.commit()
+
+    monkeypatch.setattr(naver_sa_writer, "get_adgroup_type", lambda a: "SHOPPING")
+    monkeypatch.setattr(
+        naver_sa_writer, "get_restricted_keywords",
+        lambda a: (_ for _ in ()).throw(AssertionError("쇼핑에 이 리소스를 쓰면 안 된다")),
+    )
+    monkeypatch.setattr(naver_sa_writer, "get_shopping_exclusions", lambda a: [
+        # `date`(epoch)가 UTC ISO로 정규화돼 온다 — 2026-08-10T05:14:56Z → KST 14:14:56
+        {"keyword": TERM, "type": 1, "delFlag": False, "nccAdgroupRestrictKwdId": None,
+         "nccTargetId": "tgt-1", "regTm": "2026-08-10T05:14:56.000Z"},
+    ])
+
+    out = ste.detect_new_exclusions(db, adgroup_ids=[ADGROUP], now=NOW)
+
+    assert out["unverifiable_groups"] == 0, "★회귀 감시: 쇼핑이 다시 건너뛰기로 접히면 안 된다"
+    assert out["imported"] == 1
+
+    row = db.query(NaverSearchTermExclusion).one()
+    assert row.search_term == TERM and row.status == "excluded"
+    assert row.source == "console_import", "남이 해 둔 것은 우리 조치와 다른 문으로 들어온다"
+    assert row.restrict_kwd_id is None, "그룹 단위 id를 키워드 id로 저장하면 개방이 엉뚱해진다"
+    # ★캡처 없이 시각까지 채워진다 — D-NAO-176이 「시점 미상」을 전제로 만들었던 칸이다.
+    assert row.console_excluded_at == datetime(2026, 8, 10, 14, 14, 56)
+
+    assert db.query(OpsDiaryEntry).count() == 0, "★편입은 학습 사슬에 태우지 않는다"
 
 
 def test_void_takes_the_row_out_of_every_consumer_and_neutralizes_the_diary(db):
