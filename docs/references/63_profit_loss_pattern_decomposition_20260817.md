@@ -7,7 +7,7 @@
 > **지표 정의**: `ad_profit(원) = conv_amt / 1.711 − cost` (BEP RoAS 1.711 = Jino 확정, 공헌이익률 = 1/1.711). ROAS ≥ 1.711 ⟺ ad_profit ≥ 0.
 > **집계 정본 규칙**: `naver_ad_daily`에서 `adgroup_id <> '__backfill__'` 전 행, `keyword_id` 필터 없음, `cart_*` 미혼입. 성숙 컷 = `ad_date ≤ 2026-08-09`(성적표 성숙 규칙과 정합).
 > **신뢰도 라벨**(ref 62와 동일 4값 + 구조): `[실측]` / `[실측(구조)]` / `[강한 가설]` / `[약한 가설]` / `[미상]`. **미상 칸은 왜 미상인지만 적고 방향·크기를 비워 둔다.**
-> **재현**: 산출 스크립트·CSV는 세션 스크래치패드에 있다(`build_panel.py` 패널 구축 → `analyze_residual.py` 분해·게이트·민감도 → `analyze_x0.py` X0 4법 → `analyze_agency_actions.py` 조치 시점 → `vacation_window_tuning.py` F7). 입력은 prod DB 읽기 전용 조회([[ssh-heredoc-strips-quotes-use-scp]] 규약)·API 0콜. ⚠️스크래치패드는 세션 소멸성이다 — 재현성을 세션 밖으로 보존하려면 스크립트의 repo 편입이 별도 작업으로 필요하다(§13).
+> **재현**: 산출 스크립트·CSV는 세션 스크래치패드에 있다(`build_panel.py` 패널 구축 → `analyze_residual.py` 분해·게이트·민감도 → `analyze_x0.py` X0 4법 → `analyze_agency_actions.py` 조치 시점 → `vacation_window_tuning.py` F7). 입력은 prod DB 읽기 전용 조회([[ssh-heredoc-strips-quotes-use-scp]] 규약)·API 0콜. ✅**세션 종료 시 repo로 편입 완료**: 스크립트·METHOD·README = `scripts/analysis/63_band_decomposition/` · 산출 CSV 24종 + `FINDING_vacation_window.md` = `docs/references/data/63_band_decomposition/`. ⚠️스크립트의 경로 상수는 스크래치패드로 하드코딩돼 있어 그대로는 안 돈다(그 폴더 README 참조). 패널 원본(`panel_labeled.csv` 21MB·`panel_daily.csv` 13MB)은 크기 때문에 편입하지 않았다 — `build_panel.py`로 재생성한다.
 > **금지선**: 전략 제안·운영 지시 없음([[no-ad-strategy-recommendations]] — 전략은 Jino 몫). 인과 단정 없음(횡단면·전후 비교뿐이다 — 「~한 단위에서 ~가 관측된다」까지만). 개인·담당자 평가 없음(«운영 패턴»으로만 기술).
 
 ---
@@ -22,7 +22,7 @@
 
 ## 1. 방법 — 왜 이렇게 쪼갰나
 
-상세 설계 근거는 세션 스크래치패드 `METHOD_residual_profit.md`. 여기엔 논리만 압축한다.
+상세 설계 근거는 `scripts/analysis/63_band_decomposition/METHOD_residual_profit.md`. 여기엔 논리만 압축한다.
 
 ### 1-1. 축은 ROAS가 아니라 이익 절대액이다
 
@@ -80,6 +80,8 @@ ref 62 §5-1과 그 세션 완료 QA는 「391/391일 온전, 결측 0」이라 
 | WEB_SITE(그룹 grain) | 364일 | 〃 | 〃 |
 
 결측 10일(달력 기준): `2026-02-16` · `2026-03-03 · 04 · 05 · 10 · 11 · 26 · 27 · 28 · 29` — 전부 data_gap 라벨로 전 계산에서 제외했다.
+
+⚠️**`data_gap` 창은 결측 10일보다 넓다** `[실측(구조)]`: 코드(`build_panel.py`의 `DATA_GAP_START`/`END`)는 **2026-03-02~03-29 = 28일**을 통째로 제외한다. 행이 아예 없는 10일 외에, 행은 있으나 **일 3~17행**(평시 2,500행)뿐인 저활동 구간(03-06~09의 S26 스파이크, 03-12~24의 갤럭시탭 15그룹 생존)이 그 안에 있고 — 그 구간을 평시 표본에 넣으면 baseline이 통째로 오염되기 때문이다(§3). 즉 **「제외 = 28일」, 「달력상 완전 공백 = 10일」**이고 둘은 다른 숫자다. 이 제외 때문에 §11의 F7 프로파일에서 2026년 3월이 통째로 빠져 있다는 것도 같이 읽어야 한다.
 
 검산 2종 통과 `[실측]`: ①sentinel 존재 54일 전건 ±20원 이내(`verification_sentinel_check.csv`) ②패널 cost 합 = 원천 non-sentinel 합 = **228,696,229원** (SHOPPING 172,295,790 + WEB_SITE 56,400,439, `total_cost_check.csv`). → ref 62·완료 QA의 해당 문장은 정정 대상이다(§14 목록 1).
 
@@ -274,7 +276,7 @@ X0 분해 중 발견 `[실측]`: 폴드8·플립8 21그룹 중 **15개가 2026-0
 
 ## 11. 휴가창(F7) — 두 해의 방향이 반대, 부호 미확정
 
-상세: 스크래치패드 `FINDING_vacation_window.md` · `vacation_window_profile.csv`. 계정 일별 집계(7/1~8/31 두 해분, data_gap 제외).
+상세: `docs/references/data/63_band_decomposition/FINDING_vacation_window.md` · 같은 폴더의 `vacation_window_profile.csv`. 계정 일별 집계(7/1~8/31 두 해분, data_gap 제외).
 
 | 해 | 구간 | 일수 | ROAS | ad_profit/일(원) |
 |---|---|---:|---:|---:|
@@ -342,7 +344,7 @@ X0 분해 중 발견 `[실측]`: 폴드8·플립8 21그룹 중 **15개가 2026-0
 | 7 | 연휴 축 홀드아웃 | 검증창(2026-05-11~08-09)에 연휴 0일 — 판정불능(§4-2) | — |
 | 8 | S26의 F2 | 2026-03 리포트 부재(§3) — 실질 관측 불가 | — |
 | 9 | 인계 숫자 실측 정정 2건 | entity 미존재 그룹 43개 → **27개** · `adgroup_id=''` 15행 → **0건**(실체는 `campaign_type=''` 16행, 2026-01-14, cost 0) — [[handoff-lists-must-be-remeasured]]의 이번 회차분 | — |
-| 10 | 재현성의 세션 밖 보존 | 산출 스크립트 5본이 스크래치패드(세션 소멸성)에 있다 — repo 편입은 별도 작업 | — |
+| 10 | ~~재현성의 세션 밖 보존~~ **해소(2026-08-17 18:4x)** | 스크립트 5본 + METHOD + README를 `scripts/analysis/63_band_decomposition/`에, CSV 24종 + `FINDING_vacation_window.md`를 `docs/references/data/63_band_decomposition/`에 편입했다. **잔여**: 스크립트 경로 상수가 스크래치패드로 하드코딩돼 있고(README에 자백), 패널 원본 2종(34MB)은 미편입 — `build_panel.py` 재실행으로 재생성 | — |
 
 ---
 
