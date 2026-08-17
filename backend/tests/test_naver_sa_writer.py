@@ -1250,6 +1250,28 @@ def test_shopping_exclusions_skip_soft_deleted_target():
         assert writer.get_shopping_exclusions(ADGROUP_ID) == []
 
 
+@pytest.mark.parametrize("empty_repr,label", [
+    (None, "미설정 — 한 번도 편집 안 된 그룹(regTm==editTm)"),
+    ([], "비움 — 설정했다가 목록을 비운 그룹"),
+])
+def test_shopping_exclusions_treat_both_empty_representations_as_zero(empty_repr, label):
+    """★`None`과 `[]`는 **표현만 다른 0건**이다 — 어느 쪽도 에러가 아니다.
+
+    2026-08-17 라이브 대조군으로 확정: `None`인 3그룹(Z플립8·Z폴드8 와이드/울트라)은
+    `regTm == editTm`이라 **한 번도 편집된 적이 없고**, `[]`인 `S26`은 우리가 PUT으로 비워
+    `editTm`이 갱신돼 있다.
+
+    ★이 테스트가 막는 것: 초판은 `None`을 `raise`로 받아 그 3그룹을 **매 스윕 영구 에러**로
+      만들었다(배포 후 라이브 detect 1회전에 errors 3건이 전부 이것). 지금은 그 그룹에 제외가
+      없어 손실이 없지만, 거기 제외가 생기는 순간 **영영 못 본다.**
+      0건을 에러로 세는 것도 모름을 0건으로 세는 것만큼 나쁘다 — 방향만 반대다.
+    """
+    payload = [{"nccTargetId": "tgt-2", "targetTp": "RESTRICT_KEYWORD_TARGET", "delFlag": False,
+                "target": empty_repr}]
+    with patch.object(writer.fetcher, "_get", return_value=FakeResp(200, payload)):
+        assert writer.get_shopping_exclusions(ADGROUP_ID) == [], label
+
+
 def test_shopping_exclusions_raise_when_shape_changes():
     """★스키마가 바뀌면 «0건»이라 말하지 않고 **예외로 올린다**(교훈 #123: 모름≠0건).
 
