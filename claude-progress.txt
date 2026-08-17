@@ -1788,3 +1788,71 @@
     08-12 776,520원 vs 직전 7일 평균 734,458원(+5.7%) · 레인 error 0. 킬스위치 대리 불필요.
   · ★이 루틴의 전제(04 auto_operate=1 집행 검증)는 14일째 무효다 — 태스크 정의 갱신 또는 종료를
     Jino가 판단할 시점(08-10 감사부터 5회 연속 동일 지적).
+
+[2026-08-14 08:5x] 04 자동운영 감사 D+15 (스케줄 태스크 — 감사 전용, 쓰기 0건)
+  · 서버 레인 정상: run_naver_auto_operator_daily 08:50:03 ok · hourly 08:20:00 ok ·
+    scheduler_state 51개 잡 전부 last_status=ok(non-ok 0건).
+  · 집행 0건: auto_op/auto_op_hr 승인분 0 · 오늘 change_log 37행 중 dry_run=0은 11행뿐이고
+    전량 external_bid_change(외부 관측 기록) — 우리 실쓰기 0건. 15일째 소프트웨어 정지 유지
+    (7개 캠페인 전부 optimizer=none·auto_operate=0).
+  · 04 라이브 재조회: PAUSED · statusReason=CAMPAIGN_PAUSED · userLock=true · budget 50,000 ·
+    editTm 2026-07-30T01:50:07Z 그대로(15일 무변동). 소진 14일 연속 0원(07-31~08-13),
+    마지막 비영(非零)일 07-30 2,682원.
+  · 보류 분포: 오늘 생성 제안 63건(expired 39 = trigger_pacing 38 + account_brief 1 /
+    pending 24 = search_term_promote 20 + anomaly 4). auto_op 계열 0건 — 좌초가 아니라
+    게이트가 생성 자체를 막은 상태. trigger_pacing 만료 사유 전건 '페이싱 이탈 저속'.
+  · 외부 조작 탐지: 오늘 11건(external_bid_change, ○ 갤럭시 파워링크 07:37:08) —
+    03·04 대상은 21일 창 0건. '탐지 0'과 '안 돌았다'를 sync_naver_entity 07:37:23 ok +
+    entity 스냅샷 07:37:08 갱신(92,235행)으로 구분해 확인(교훈 #123).
+  · A/B: DEAD 15일차 — 04 분자 0이라 lift/DiD 산출 안 함. 03만 D-8~D-2(08-06~12)
+    cost 212,978 · clk 104 · CPC 2,047.9 · roas_sentinel 5.113(상한 프록시).
+  · 17E(grp-…65140028): 리드아웃 불가 — 라이브 PAUSED/CAMPAIGN_PAUSED, bidAmt 1400,
+    editTm 2026-07-26T00:20:11Z.
+  · 폴드8울트라_사생활(grp-a001-01-000000071340962) 5일째 미복구 — ELIGIBLE·userLock=false·
+    bidAmt 70, editTm 08-10T07:05:09Z 무변동. 소진 9,695(08-12) → 9,817원(08-13)로 «반등 후
+    고착»(정지 직전 08-07 46,203원의 21%). 재잠금은 Jino 결정(이 루틴은 04 외 쓰기 권한 없음).
+  · 중단 조건 전건 미발동: 소진 3배 해당없음(04=0) · ROAS 붕괴 판정불가(분모 0) · 계정 소진
+    08-13 699,952원 vs 직전 7일 평균 748,948원(−6.5%) · 레인 error 0. 킬스위치 대리 불필요.
+  · 데이터 신선도 주의: naver_keyword_hourly max ad_date 08-12는 stale이 아니다 —
+    sweep_naver_keyword_hourly가 매일 09:21 KST에 D-1을 채우는데 감사 시각(08:55)이 그보다
+    이르다. synced_at은 UTC·scheduler_state.last_run_at은 KST라 9시간 어긋나 보인다.
+  · ⚠️ 루틴 사고: 감사 도중 iCloud SSH 키 읽기가 'Operation not permitted'로 막혀 prod 접속이
+    끊겼고, repo 디렉터리 listing·git도 같은 오류(파일 단건 읽기는 정상). ~/.ssh/oracle_cloud_legacy
+    (동일 1675바이트 로컬 사본)로 우회해 전 항목 관측 완주. git 커밋 단계만 영향.
+  · ★이 루틴의 전제(04 auto_operate=1 집행 검증)는 15일째 무효다 — 태스크 정의 갱신 또는 종료를
+    Jino가 판단할 시점(08-10 감사부터 6회 연속 동일 지적).
+
+[2026-08-17 08:5x] 04 자동운영 감사 D+18 (스케줄 태스크 — 감사 전용, 쓰기 0건)
+  · ⚠️ 기록 공백 2일: 08-15·08-16 감사 항목이 jsonl·이 파일 둘 다 없다(태스크 2회 미실행 또는
+    기록 실패). 08-14분 기록도 그날 iCloud SSH 권한 사고로 커밋 못 한 채 워킹트리에 남아
+    있었고 이번 커밋에 함께 실린다.
+  · 서버 레인 정상: run_naver_auto_operator_daily 08:50:04 ok · hourly 08:20:00 ok ·
+    오늘 돈 레인 42개 전부 last_status=ok(테이블 전체 non-ok 0건).
+  · 집행 0건: auto_op/auto_op_hr 승인분 0 · 오늘 change_log 12행 전량 flight_pacing dry_run=1
+    (08:15:00) — 우리 실쓰기 0건. 최근 3일 dry_run=0 행 자체가 0건. 18일째 소프트웨어 정지
+    유지(7개 캠페인 전부 optimizer=none·auto_operate=0).
+  · 04 라이브 재조회: PAUSED · statusReason=CAMPAIGN_PAUSED · userLock=true · budget 50,000 ·
+    editTm 2026-07-30T01:50:07Z 그대로(18일 무변동 = 외부 조작 0). 소진 17일 연속 0원
+    (07-31~08-16), 마지막 비영일 07-30 2,682원.
+  · 03 라이브: ELIGIBLE · userLock=false · budget 200,000 · editTm 2026-08-03T05:32:37Z
+    (14일 무변동). MOP 팔은 계속 가동 중 — 08-16 소진 28,417원·클릭 14·전환 134,300원.
+  · 보류 분포: 오늘 생성 제안 3건 전부 trigger_pacing/pending. auto_op 계열 0건 — 좌초가
+    아니라 게이트(auto_operate=0)가 생성 자체를 막은 상태.
+  · 외부 조작 탐지: 03·04 대상 7일 창 0건. 계정 전체로는 08-14 11건·08-11 33건이 있으나
+    전부 cmp-a001-01-000000010206612(파워링크). '탐지 0'과 '안 돌았다'는 sync_naver_entity
+    07:37:41 ok + entity 스냅샷 07:37:22 갱신(92,235행)으로 구분(교훈 #123).
+  · A/B: DEAD 18일차 — 04 분자 0이라 lift/DiD는 형식상 산출만 하고 인과 해석 금지.
+    pre(07-05~11) 03 cost 223,394·clk 112 / 04 cost 60,443·clk 44.
+    recent7(08-10~16) 03 cost 190,529·clk 91·CPC 2,094 / 04 전부 0.
+    lift 03 = cost 0.853·clk 0.813·CPC 1.050 / 04 = 0.000. DiD(cost) −0.853은
+    «우리 팔이 없다»의 재진술일 뿐 성능 비교가 아니다.
+    ROAS 창(08-09~15) 03 sentinel 5.107(상한 프록시) / 04 산출 불가.
+  · 17E(grp-…65140028) 리드아웃 불가 — 04 PAUSED로 노출·클릭·소진 전부 0.
+    naver_keyword_hourly max ad_date 08-15는 stale 아님(sweep 09:21 KST > 감사 08:55).
+  · 03 avg_rank 관측 불가 — sentinel 행의 rank_sum이 전일 0이라 avg_rank가 0.0으로 계산된다.
+    순위 곡선 감시는 sentinel로는 원리적으로 안 되고 실단위 행이 필요하다(다음 감사 이월).
+  · 중단 조건 전건 미발동: 소진 3배 해당없음(04=0) · ROAS 붕괴 판정불가(분모 0) ·
+    외부/수동 변경 0 · 레인 error 0 · 계정 소진 08-16 611,631원 vs 직전 7일 평균 711,091원
+    (−14.0%). 킬스위치 대리 불필요.
+  · ★이 루틴의 전제(04 auto_operate=1 집행 검증)는 18일째 무효다 — 태스크 정의 갱신 또는
+    종료를 Jino가 판단할 시점(08-10 감사부터 6회 연속 동일 지적).
