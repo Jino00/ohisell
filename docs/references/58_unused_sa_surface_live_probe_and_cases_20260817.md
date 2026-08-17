@@ -9,6 +9,8 @@
 
 「우리 코드가 안 부른다」는 **「계정에 그 기능이 없다」가 전혀 아니었다.** 타겟팅 **1,271행**, 확장소재 **413개**, 브랜드검색 계약 **35건(2,100만원)**, 쇼핑 브랜드형·카탈로그형 채널과 상품그룹까지 **이미 걸려 있는데 우리 시스템은 하나도 안 본다.** 그중 일부는 **우리 최적화의 전제를 직접 깨는 값**이다(입찰 가중치·연령 제외·시간대 제한).
 
+★**그리고 가장 큰 것은 맨 마지막에 나왔다(§13)**: 완료 QA가 「`/ncc/targets`를 안 불렀다」를 잡아 보완 호출한 결과, **쇼핑 제외 검색어 3,880건(116그룹)이 그 엔드포인트로 읽힌다.** 「쇼핑 제외는 API로 안 보인다」는 우리 전제가 **틀렸다** — 안 보였던 것은 `restricted-keywords` **리소스**였다. 콘솔 캡처분 43건과 1:1로 대조해 확인했다.
+
 ## 1. 호출 결과 전수 (2026-08-17 09:3x KST, GET only)
 
 | 엔드포인트 | 결과 | 우리 계정 실태 |
@@ -23,6 +25,7 @@
 | `/ncc/brand-new/contracts` | 200 · 0건 | 신제품검색 이력 없음 |
 | `/ncc/criterion-dictionary/{type}` | 200 | SD 2,100 · RL 5,354 · AG 12 · GN 3 · AD 87 · **RP 0 · DV 0 · CA 0** |
 | `/ncc/criterion/{adgroupId}` | 200 | **실설정 1,271행**(§3) |
+| `/ncc/targets?ownerId=…` | 200 | ★**쇼핑 제외 3,880건 · 매체 블랙리스트**(§13 — 완료 QA 지적으로 뒤늦게 호출) |
 | `/master-reports` | **204**(내용 없음) | 마스터 리포트 잡 0건 |
 | `/stat-reports` | 200 · 15건 | **이미 쓰고 있었다**(§7 정정) |
 
@@ -366,3 +369,61 @@ MasterReport는 성과가 아니라 **구조 스냅샷**이고 타입 29종에 *
 5. 자동입찰 확장 옵션(TARGET_ROAS 등)의 실제 UI 노출 여부·대상 유형.
 6. 공유예산 계정당 상한(외부 2023년 자료에 40개 언급, 공식 재확인 실패).
 7. 확장소재 유형별 성과 영향의 **공식 계량 자료** — 존재하지 않는 것으로 보임.
+
+---
+
+# 13. ★★ 완료 QA가 잡은 gap을 메우다 — 그리고 **쇼핑 제외 3,880건이 API로 보인다**
+
+> 완료 QA(별도 Sonnet, 읽기 전용) 1R 판정 **부분달성**. ①에서 실제 gap을 잡았다: **`/ncc/targets`를 부르지 않았고 「못 부른 것」에도 안 적었다.** 게다가 §10 C-4가 `Criterion.AD`(관심사)와 `Target.AD_TAG`(카탈로그 태그)를 **이름 유사성으로 섞었다**고 지적했다. 둘 다 옳은 지적이라 재작업했다.
+
+## 13-1. `Target`은 `Criterion`과 별개 리소스다 (C-4 정정)
+
+공식 스펙 `Target.targetTp` enum 12종:
+```
+TIME_WEEKLY_TARGET · REGIONAL_TARGET · MEDIA_TARGET · PC_MOBILE_TARGET ·
+RESTRICT_KEYWORD_TARGET · NON_SEARCH_KEYWORD_TARGET · GENDER_TARGET · AGE_TARGET ·
+PERIOD_TARGET · AD_TAG · GENDER_WEIGHT_TARGET · PLACE_ADGROUP_TAG
+```
+엔드포인트: `GET /ncc/targets?ownerId=…` · `GET /ncc/targets?ownerIds=…` · `PUT /ncc/targets/{targetId}`.
+
+→ **§10 C-4의 「관심사 축은 `AD_TAG` 제약을 받는다」는 서술은 틀렸다.** `Criterion.AD`(관심사, `AD0101…` 사전 87개)와 `Target.AD_TAG`(쇼핑 카탈로그 소재 태그)는 **다른 개념**이다. C-4의 관심사 소급 리뷰(177그룹 측정 중)는 그 제약과 무관하다.
+
+## 13-2. 전수 호출 결과 (385그룹, GET only, errors 0)
+
+| campaign_type | targetTp | 그룹 |
+|---|---|---|
+| SHOPPING | `MEDIA_TARGET` | 195 |
+| SHOPPING | `PC_MOBILE_TARGET` | 195 |
+| SHOPPING | `NON_SEARCH_KEYWORD_TARGET` | 195 |
+| SHOPPING | **`RESTRICT_KEYWORD_TARGET`** | **195** |
+| WEB_SITE | `MEDIA_TARGET` | 190 |
+| WEB_SITE | `PC_MOBILE_TARGET` | 190 |
+
+`MEDIA_TARGET` 표본: `{"type":2,"contents":[],"search":["naver"],"black":{"media":[118495,118496,335738,612593,612594]}}` → **매체 블랙리스트가 걸려 있다**(그룹당 5개 매체 차단). 우리는 이 축도 안 본다.
+
+## 13-3. ★★ 「쇼핑 제외는 API로 안 보인다」가 **틀렸다**
+
+**검증 — 콘솔 캡처분과 직접 대조**: 그룹 `grp-a001-02-000000047005364`(`09.기타상품 / 01.버디필름`, 2026-08-13에 Jino가 화면 3장을 캡처해 43건을 원장에 편입한 바로 그 그룹).
+
+| 경로 | 결과 |
+|---|---|
+| `GET /ncc/adgroups/{id}/restricted-keywords` (우리가 쓰던 것) | **0건** |
+| `GET /ncc/targets?ownerId={id}` → `RESTRICT_KEYWORD_TARGET` | **43건** |
+
+그 43건의 표본 10개: `골프 · 골프선수스티커 · 골프용품쇼핑몰 · 드라이버랩핑 · 드라이버필름단점 · 박세리골프패치 · 버디필름후기 · 벨라룩스 · 붙이는선크림 · 붙이는썬크림` — **원장에 편입된 목록과 정확히 일치한다.**
+
+**전수 실측**: 쇼핑 **116그룹에 제외 키워드 3,880건**(`type` 분포: `1`=2,343 · `None`=1,477 · `2`=60 — 값의 뜻은 스펙에 없어 **미상**).
+
+### 무엇이 바뀌나
+
+- **[[shopping-exclusion-invisible-to-api]]는 과잉 일반화였다.** 참인 명제는 「`restricted-keywords` **리소스**로는 안 보인다」이고, 「API로 안 보인다」가 아니다. D-NAO-175 이래의 전제가 여기서 깨진다.
+- **S5 콘솔 캡처 병목이 사라질 수 있다.** Jino가 그룹마다 화면을 캡처하던 작업(다음 대상 `01.갤럭시_지문방지_TPU/Z폴드8와이드` 17건 등)이 **불필요**해질 가능성이 크다.
+- **자동 발견(`detect_new_exclusions`)이 쇼핑에 열린다.** 지금은 `adgroup_type != "WEB_SITE"`면 `unverifiable_groups`로 건너뛴다(오늘 배포 실측 195그룹).
+- **생존감시가 쇼핑 43건을 `unverifiable`로 두는 것도 풀린다** — 라이브 대조가 실제로 가능해진다.
+- 규모 대비: 오늘 아침 D-NAO-179로 고친 파워링크는 723건이었다. **쇼핑은 3,880건으로 5배가 넘고, 우리 원장엔 그중 42건만 있다.**
+
+⚠️ **아직 확인 안 된 것**: ①`PUT /ncc/targets/{targetId}`로 **쓰기**가 되는지(읽기만 확인했다 — 쓰기 프로브는 이 조사의 금지선 밖) ②`type` 1/2/None의 의미 ③`RESTRICT_KEYWORD_TARGET`의 키워드가 콘솔 「제외 검색어」 탭과 항상 1:1인지(1개 그룹에서만 대조했다) ④`date` 필드(예 `1785895306`)가 등록시각인지 — epoch로 보면 2026-08-04이라 `console_excluded_at` 후보다.
+
+## 13-4. ①의 커버리지 갱신
+
+ref 57 §5 미사용 목록 대비: **`/ncc/targets`까지 포함해 전건 호출 완료.** 남은 미해결은 `/ncc/label-refs`(400, 필수 파라미터 미해결) 하나이고 그 사유는 §8에 적혀 있다.

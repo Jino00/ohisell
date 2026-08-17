@@ -502,6 +502,15 @@
     - 계약 5건 밖 1건: `vault_export`에 `d1_st` 표시(↗️자백 후 진행). 「백엔드는 세는데 화면이 안 읽는다」가 이 리포의 반복 결함이라 같은 커밋에서 이었다.
     - **완료 QA(별도 Sonnet·읽기 전용) = 부분달성** — ④달성 / ③부분달성 / ①②⑤판정불능(관측일 미도래) / **미달 0건**. QA가 직접 실측한 것: prod 코드 sha256이 병합 커밋과 **완전 일치** · baseline 대비 **4,156행·8,311개 키 인스턴스 diff 0건**(합격기준 ④를 QA 세션에서 종결) · 금지선 §3-1~§3-8 전건 준수 · 후보 27 `pending` 불변. 판정 원문은 `docs/PLAN_naver-ad-d1st-additive.md` §9.
     - 교훈 **#290**(존재 게이트 ≠ 성숙 게이트 — `present`가 있다고 시계 문턱이 면제되지 않는다) · **#291**(접두 매칭의 「상한」 논증은 LIKE 이스케이프 없이는 성립하지 않는다).
+- **★★D-NAO-180 (2026-08-17) 「쇼핑 제외는 API로 안 보인다」가 틀렸다 — `/ncc/targets`에 3,880건이 있다.**
+  - **발단**: D-NAO-179 배포 후 Jino 요청으로 「스펙에 있는데 우리가 안 부르는 엔드포인트」를 전수 라이브 호출(ref 58). **완료 QA가 「`/ncc/targets`를 안 불렀고 못 부른 것 목록에도 없다」를 잡아** 보완 호출한 자리에서 나왔다 — 판정기가 아니었으면 이 세션에도 못 찾았다.
+  - **`Target`은 `Criterion`과 별개 리소스다.** `targetTp` 12종(`TIME_WEEKLY_TARGET`·`REGIONAL_TARGET`·`MEDIA_TARGET`·`PC_MOBILE_TARGET`·**`RESTRICT_KEYWORD_TARGET`**·`NON_SEARCH_KEYWORD_TARGET`·`GENDER_TARGET`·`AGE_TARGET`·`PERIOD_TARGET`·`AD_TAG`·`GENDER_WEIGHT_TARGET`·`PLACE_ADGROUP_TAG`).
+  - **★대조 검증**: 그룹 `grp-a001-02-000000047005364`(버디필름 — 2026-08-13 S5에서 Jino가 콘솔 3장을 캡처해 43건을 편입한 그 그룹)에 `GET /ncc/targets?ownerId=…` → `RESTRICT_KEYWORD_TARGET` **43건**, 표본 10개가 원장 목록과 **정확히 일치**. **같은 그룹에 `restricted-keywords` GET은 0건.**
+  - **전수 실측(비용 나가는 385그룹)**: 쇼핑 **116그룹 3,880건**(`type` 분포 `1`=2,343·`None`=1,477·`2`=60, 뜻은 스펙에 없음). 우리 원장엔 42건뿐. **파워링크 723건(D-NAO-179)의 5배가 넘는다.**
+  - **참/거짓을 다시 긋는다**: 참 = 「`restricted-keywords` **리소스**로는 쇼핑이 안 보인다」 / 거짓 = 「쇼핑 제외는 **API**로 안 보인다」. 후자가 D-NAO-175 이래 **S5 콘솔 캡처를 유일 입구로 만든 근거**였다. [[shopping-exclusion-invisible-to-api]] 정정 완료.
+  - **여전히 참**: 쓰기는 막혀 있다(`POST restricted-keywords` 400/3728, 두 타입 다·2회 관측). ⚠️**단 `PUT /ncc/targets/{targetId}` 쓰기 가능 여부는 미검증**(이번 조사 금지선이 GET only) — **열리면 쇼핑 제외 자동화 자체가 열린다.**
+  - **재검토 대상**: `detect_new_exclusions`의 `adgroup_type != WEB_SITE` 스킵(195그룹) · 생존감시 `STATE_UNVERIFIABLE`(쇼핑 43건 상시) · **S5 콘솔 캡처 병목**(다음 대상이던 Z폴드8와이드 17건 등이 불필요해질 가능성).
+  - 미상 3건: `type` 1/2/None의 뜻 · `date` 필드(`1785895306`→2026-08-04, `console_excluded_at` 후보) · 콘솔 탭과 항상 1:1인지(**1개 그룹에서만 대조**).
 - **★D-NAO-179 (2026-08-16, Jino 승인) 제외키워드 타입은 둘이고 우리는 그중 하나만 보고 있었다 — 723건 중 12건(1.7%).**
   - **라이브 프로브(2026-08-16 23:42~23:53 KST, Mac 로컬에서 SA API 직접 호출)**. Jino 승인 원문: *"진행하고 파워링크 EXP_SEARCH 전맹은 별건으로 고차자"*(8/14). D-NAO-13 예외로 진행(7개 캠페인 전부 `optimizer='none'`). **직접 호출이라 change_log에 안 남는다 — 이 기록이 유일한 흔적이다.**
   - **쇼핑 = 거부(재확인)**: `POST /ncc/adgroups/grp-a001-02-000000047005364/restricted-keywords` body `[{"keyword":"제외프로브임시9999","type":"EXP_SEARCH"}]` → **400** `{"code":3728,"title":"This is a campaign type that does not support keyword plus impression restricted keywords."}`. before/after 0건, **쓰기 미발생**.
