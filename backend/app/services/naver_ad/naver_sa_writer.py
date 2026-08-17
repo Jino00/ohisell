@@ -338,148 +338,205 @@ def _shopping_items(target: dict) -> list[dict]:
     return items
 
 
-def add_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult:
-    """PUT /ncc/targets/{targetId} — **쇼핑** 광고그룹 제외 검색어 추가 (D-NAO-181 ③).
+def _shopping_restrict_put(
+    adgroup_id: str, *, action: str, precheck, mutate, expect,
+) -> WriteResult:
+    """쇼핑 제외 목록을 **교체(PUT)**하는 공용 골격 — 추가·제거가 이 한 벌을 쓴다 (D-NAO-181).
 
-    파워링크의 `add_restricted_keywords`(POST, 추가 의미론)와 **위험의 성격이 다르다.**
-    이 엔드포인트는 **교체(replace)**라 요청 body가 곧 최종 상태다 — 즉 **쓰기의 고유 위험이
-    「추가 실패」가 아니라 「기존 유실」**이다. 대상 계정엔 대행사가 2024년부터 쌓은 3,880건이
-    있고 **백업이 없다.** 이 함수의 설계는 전부 그 한 문장에서 나온다.
+    ★왜 골격을 공유하나: 이 리소스의 위험(교체 의미론 + 백업 없는 3,880건)을 막는 세 겹이
+      **함수마다 한 벌씩** 있으면 반드시 갈라진다. 실제로 초판의 낙관적 잠금은 「검사만 하고
+      최신 결과는 안 쓰는」 반쪽이었고 적대 리뷰 P1을 맞았다(교훈 #301) — 그 수리를 한 곳에서만
+      하려고 여기로 모은다.
 
-    ## 세 겹의 방어
+    ## 세 겹 (여기가 유일한 구현이다)
+    ① **전문 전송** — `mutate(current_items)`가 돌려준 목록이 곧 최종 상태다. 기존 항목은
+       **원문 그대로**(`date` 포함) 넘겨야 서버가 등록시각을 보존한다.
+    ② **낙관적 잠금(`editTm`)** — before와 recheck 사이에 남이 쓰면 우리 「전문」은 옛것이다.
+       ★단 `editTm`은 **초 단위 해상도**라 같은 초의 편집은 못 잡는다. 그래서 잠금을 통과해도
+       **본문은 항상 `recheck`(최신)에서 만든다** — 못 잡는 창에서도 남의 조치가 보존되도록.
+    ③ **검증** — PUT 응답이 아니라 **재조회**가 진실이다. `expect_present`(있어야 할 것)와
+       `expect_absent`(없어야 할 것)를 **둘 다** 본다. 「의도한 변경이 됐나」만 보면 **의도하지
+       않은 유실**을 못 본다 — 이 리소스에서 그게 가장 비싼 실수다.
 
-    **① 전문 전송** — 기존 항목을 **원문 그대로**(`date` 포함) 실어 보내고 신규를 덧붙인다.
-      부분 전송은 나머지를 지운다. 2026-08-17 라이브 실증: 「기존 + 더미」를 보내면 기존이
-      살아남고 기존 항목의 `date`도 서버가 보존한다.
+    ★**사전 검증도 여기서 한다**(`precheck`). 중복·부재 판정을 호출자가 따로 조회해 하면
+      ⓐGET이 한 번 더 늘고 ⓑ그 판정이 **옛 스냅샷 기준**이 되어 잠금 수리(P1-1)와 같은 결함이
+      다시 생긴다. 세 콜백 전부 **`recheck`에서 온 최신 목록**을 받는다.
 
-    **② 낙관적 잠금(`editTm`)** — before 조회와 PUT 사이에 다른 행위자(콘솔의 사람·대행사·MOP)가
-      1건을 추가하면, 우리가 든 「전문」은 이미 옛것이라 **그 조치를 지운다.** 그래서 PUT 직전
-      한 번 더 조회해 `editTm`이 그대로인지 본다. 바뀌었으면 **쓰지 않고 거부**한다(호출자가
-      다시 시도하면 새 전문으로 다시 계산된다). 창을 0으로 만들지는 못하지만 — 서버가
-      compare-and-swap을 안 주므로 — 실제 위험 구간을 수백 ms로 줄인다.
-
-    **③ 보존 검증** — after 재조회에서 「요청 키워드가 들어왔나」만 보지 않고 **「before의 전건이
-      아직 있나」**를 본다. 이게 이 함수의 존재 이유다. 하나라도 사라졌으면
-      `WriteVerificationError`로 fail-closed 하고, 메시지에 **사라진 키워드 전문**을 싣는다 —
-      복구는 사람이 해야 하는데 무엇이 사라졌는지 모르면 복구할 수 없기 때문이다.
-
-    ## created_ids가 빈 이유
-    이 리소스엔 **키워드 단위 id가 없다**(`nccTargetId`는 그룹 단위다). 그룹 id를 키워드 id인 척
-    돌려주면 그 값이 `restrict_kwd_id`에 저장되고, 그 칸의 유일한 실쓰기 소비자가
-    개방(`delete_restricted_keywords`)이라 **나중에 엉뚱한 대상을 지운다.** 그래서 비운다.
-
-    Raises:
-        WriteValidationError: keywords 빈 값·요청 내 중복 / adgroup이 SHOPPING 아님 /
-            이미 등록된 키워드 재등록 / 타겟 행 특정 불가.
-        WriteConcurrentEditError: before 조회 뒤 PUT 전에 `editTm`이 바뀜(남의 쓰기와 경합).
-        WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
-        WriteVerificationError: PUT은 2xx인데 재조회에 신규가 없거나 **기존이 유실**됨.
+    Args:
+        precheck: `list[dict] -> None`. 최신 목록을 보고 사전 거부(중복·부재 등). 예외로 올린다.
+        mutate: `list[dict] -> list[dict]`. 최신 목록을 받아 **보낼 전문**을 돌려준다.
+        expect: `list[str] -> (present, absent)`. 최신 키워드 목록을 받아 재조회에 **있어야 할
+            것**과 **없어야 할 것**을 돌려준다. 둘 다 봐야 «의도한 변경»과 «의도 못한 유실»이
+            같이 잡힌다.
     """
-    if not keywords:
-        raise WriteValidationError("add_shopping_exclusions: keywords가 비었습니다")
-    if len(set(keywords)) != len(keywords):
-        raise WriteValidationError(
-            f"add_shopping_exclusions: 요청 내 중복 키워드 — 서버 동작이 문서에 없어 차단: {keywords}"
-        )
-
-    adgroup_type = _get_adgroup(adgroup_id).get("adgroupType")
-    if adgroup_type != SHOPPING_ADGROUP_TYPE:
-        raise WriteValidationError(
-            f"add_shopping_exclusions: adgroup {adgroup_id}는 SHOPPING이 아님"
-            f"(adgroupType={adgroup_type!r}) — 파워링크는 add_restricted_keywords를 쓴다"
-        )
-
     before_target = _shopping_restrict_target(adgroup_id)
     target_id = before_target.get("nccTargetId")
-    before_items = _shopping_items(before_target)
 
-    # ② 낙관적 잠금 — PUT 직전 재확인.
+    # ② 낙관적 잠금
     recheck = _shopping_restrict_target(adgroup_id)
     if recheck.get("editTm") != before_target.get("editTm"):
         raise WriteConcurrentEditError(
-            f"add_shopping_exclusions: 조회 뒤 PUT 전에 다른 행위자가 이 그룹을 수정했다 "
+            f"{action}: 조회 뒤 PUT 전에 다른 행위자가 이 그룹을 수정했다 "
             f"(editTm {before_target.get('editTm')} → {recheck.get('editTm')}) — 옛 목록을 쓰면 "
             f"그 조치가 지워지므로 쓰지 않고 거부한다(재시도하면 새 목록으로 다시 계산된다) "
             f"adgroup={adgroup_id}"
         )
 
-    # ★★PUT 본문·중복검사·보존검증의 기준은 **`recheck`(최신)**다 — `before_target`이 아니다
-    #   (적대 리뷰 1R P1-1).
-    #   초판은 `recheck`로 최신 목록을 **받아 놓고 그걸 버린 채** `before_items`로 본문을 만들었다.
-    #   그러면 낙관적 잠금이 «검사만 하고 그 결과인 신선한 데이터는 안 쓰는» 반쪽이 된다:
-    #   `editTm`은 **초 단위 해상도**라(naver_execution_harness도 같은 사실을 명문화해 뒀다)
-    #   before와 recheck 사이의 편집이 **같은 초**에 나면 문자열이 같아 잠금을 통과하고, 그때
-    #   남이 방금 추가한 키워드가 옛 스냅샷에 없으므로 **교체 PUT이 그것을 지운다.**
-    #   ★게다가 보존 검증도 못 잡는다 — `before`에 없던 키워드라 «유실»로 안 보인다.
-    #   즉 예외 없이 성공으로 끝나고 change_log에도 성공으로 남는다(fail-silent, 최악의 모양).
-    #   `recheck`에서 본문을 만들면 잠금이 못 잡는 그 창에서도 **남의 조치가 보존된다.**
-    #   잠금은 그대로 둔다 — 감지된 경합은 조용히 병합하지 않고 거부하는 쪽이 옳다(이중 방어).
+    # ① 전문 전송 — 본문은 **recheck(최신)** 기준이다(적대 리뷰 1R P1-1).
     current_items = _shopping_items(recheck)
-    current_keywords = [it.get("keyword") for it in current_items]
-    dup = [k for k in keywords if k in set(current_keywords)]
-    if dup:
-        raise WriteValidationError(
-            f"add_shopping_exclusions: 이미 등록된 키워드 재등록 시도 — 서버 동작이 문서에 없어 "
-            f"진입 자체를 차단함(추정 금지): {dup}"
-        )
-
-    # ① 전문 전송 — 기존은 **원문 그대로**(date 포함), 신규만 덧붙인다.
+    precheck(current_items)
+    expect_present, expect_absent = expect([it.get("keyword") for it in current_items])
     body = dict(recheck)
-    body["target"] = list(current_items) + [
-        {"keyword": k, "type": _SHOPPING_RESTRICT_TYPE} for k in keywords
-    ]
+    body["target"] = mutate(current_items)
     path = f"/ncc/targets/{target_id}"
     log.info(
-        "Naver SA 쓰기 시도: add_shopping_exclusions adgroup=%s target=%s 기존=%d건 추가=%s",
-        adgroup_id, target_id, len(current_items), keywords,
+        "Naver SA 쓰기 시도: %s adgroup=%s target=%s %d건 → %d건",
+        action, adgroup_id, target_id, len(current_items), len(body["target"]),
     )
     resp = requests.put(
         fetcher.BASE_URL + path,
         headers=fetcher._headers(path, method="PUT"),
-        json=body,
-        timeout=fetcher.HTTP_TIMEOUT_S,
+        json=body, timeout=fetcher.HTTP_TIMEOUT_S,
     )
     if not (200 <= resp.status_code < 300):
-        log.error(
-            "Naver SA 쓰기 실패: add_shopping_exclusions adgroup=%s status=%s body=%s",
-            adgroup_id, resp.status_code, resp.text[:300],
-        )
-        raise WriteError(
-            f"add_shopping_exclusions 실패: status={resp.status_code} body={resp.text[:300]}"
-        )
+        log.error("Naver SA 쓰기 실패: %s adgroup=%s status=%s body=%s",
+                  action, adgroup_id, resp.status_code, resp.text[:300])
+        raise WriteError(f"{action} 실패: status={resp.status_code} body={resp.text[:300]}")
     try:
         response_body = resp.json()
     except ValueError:
         response_body = None
 
-    # ③ 보존 검증 — 「추가됐나」보다 「기존이 남았나」가 먼저다.
-    #   ★기준은 `current_keywords`(PUT 직전 최신)다. `before_keywords`로 재면 before~recheck
-    #    사이에 남이 추가한 것을 «원래 없던 것»으로 취급해 유실을 못 잡는다(P1-1과 같은 뿌리).
+    # ③ 검증 — 재조회가 진실이다.
     after_items = _shopping_items(_shopping_restrict_target(adgroup_id))
     after_keywords = {it.get("keyword") for it in after_items}
-    lost = [k for k in current_keywords if k not in after_keywords]
+    lost = [k for k in expect_present if k not in after_keywords]
     if lost:
         raise WriteVerificationError(
-            f"add_shopping_exclusions: ★기존 제외가 유실됐다({len(lost)}건) — PUT이 교체 의미론이라 "
-            f"복구는 사람이 해야 한다. 사라진 키워드 전문: {lost} "
+            f"{action}: ★있어야 할 제외가 사라졌다({len(lost)}건) — PUT이 교체 의미론이라 복구는 "
+            f"사람이 해야 한다. 사라진 키워드 전문: {lost} "
             f"(adgroup={adgroup_id} target={target_id} before={len(current_items)}건 "
             f"after={len(after_items)}건)"
         )
-    missing = [k for k in keywords if k not in after_keywords]
-    if missing:
+    remained = [k for k in expect_absent if k in after_keywords]
+    if remained:
         raise WriteVerificationError(
-            f"add_shopping_exclusions: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 "
-            f"반영되지 않음(fail-closed): {missing}"
+            f"{action}: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 반영되지 않음"
+            f"(fail-closed): {remained}"
         )
 
     return WriteResult(
-        action="add_shopping_exclusions",
-        before=current_items,
-        response=response_body,
-        after=after_items,
-        # ★비운다 — 이 리소스엔 키워드 단위 id가 없다(위 독스트링 「created_ids가 빈 이유」).
+        action=action, before=current_items, response=response_body, after=after_items,
+        # ★비운다 — 이 리소스엔 키워드 단위 id가 없다(그룹 id를 키워드 id인 척 쓰면 개방이 엉뚱해진다).
         created_ids=[],
     )
+
+
+def add_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult:
+    """PUT /ncc/targets/{targetId} — **쇼핑** 광고그룹 제외 검색어 **추가** (D-NAO-181 ③).
+
+    파워링크의 `add_restricted_keywords`(POST, 추가 의미론)와 **위험의 성격이 다르다.** 이
+    엔드포인트는 **교체(replace)**라 요청 body가 곧 최종 상태다 — 즉 고유 위험이 「추가 실패」가
+    아니라 **「기존 유실」**이다. 대상 계정엔 대행사가 2024년부터 쌓은 3,880건이 있고 **백업이
+    없다.** 그 위험을 막는 세 겹은 `_shopping_restrict_put`에 **한 벌만** 있다(그 독스트링 참조).
+
+    ## created_ids가 빈 이유
+    이 리소스엔 **키워드 단위 id가 없다**(`nccTargetId`는 그룹 단위다). 그룹 id를 키워드 id인 척
+    돌려주면 그 값이 `restrict_kwd_id`에 저장되고, 그 칸의 유일한 실쓰기 소비자가 개방
+    (`delete_restricted_keywords`)이라 **나중에 엉뚱한 대상을 지운다.**
+    ★그 대가가 롤백이다 — 캡 경합 원복이 id 기반이라 쇼핑에선 안 돌았다. 그래서 키워드 기반
+      `remove_shopping_exclusions`(아래)를 따로 둔다.
+
+    Raises:
+        WriteValidationError: keywords 빈 값·요청 내 중복 / adgroup이 SHOPPING 아님 /
+            이미 등록된 키워드 재등록 / 타겟 행 특정 불가.
+        WriteConcurrentEditError: before 조회 뒤 PUT 전에 `editTm`이 바뀜.
+        WriteError: PUT이 2xx 아님. WriteVerificationError: 신규 미반영 또는 **기존 유실**.
+    """
+    keywords = _validate_shopping_keywords(adgroup_id, keywords, action="add_shopping_exclusions")
+
+    def _no_dup(items: list[dict]) -> None:
+        dup = [k for k in keywords if k in {it.get("keyword") for it in items}]
+        if dup:
+            raise WriteValidationError(
+                f"add_shopping_exclusions: 이미 등록된 키워드 재등록 시도 — 서버 동작이 문서에 "
+                f"없어 진입 자체를 차단함(추정 금지): {dup}"
+            )
+
+    def _append(items: list[dict]) -> list[dict]:
+        # 기존은 **원문 그대로**(date 포함), 신규만 덧붙인다.
+        return list(items) + [{"keyword": k, "type": _SHOPPING_RESTRICT_TYPE} for k in keywords]
+
+    return _shopping_restrict_put(
+        adgroup_id, action="add_shopping_exclusions", precheck=_no_dup, mutate=_append,
+        # 있어야 할 것 = 원래 있던 전부(유실 감시) + 방금 넣은 것 / 없어야 할 것은 없다.
+        expect=lambda current: (current + keywords, []),
+    )
+
+
+def remove_shopping_exclusions(adgroup_id: str, keywords: list[str]) -> WriteResult:
+    """PUT /ncc/targets/{targetId} — **쇼핑** 제외 검색어 **제거** (캡 경합 롤백 경로).
+
+    ## 왜 필요한가 — id가 없다는 설계의 대가
+    harness의 일일 캡 TOCTOU 롤백은 `delete_restricted_keywords(adgroup_id, created_ids)`로 돈다.
+    그런데 쇼핑은 `created_ids=[]`다(이 리소스엔 키워드 단위 id가 없고, **없는 id를 지어내지 않는
+    것**이 의도된 설계다). 그래서 캡 경합이 나면 **자동 원복이 구조적으로 작동하지 않았다** —
+    은닉은 아니었으나(`rolled_back=False` + 「수동 확인 필요」로 기록) 쓰기를 실제로 켜기 전엔
+    반드시 있어야 하는 구멍이었다. 이 함수가 그 자리를 **키워드 기반**으로 메운다.
+
+    ## ★롤백이 원래 사고보다 나빠지지 않게
+    제거도 **교체 PUT**이라 잘못하면 **그 그룹의 제외 전체가 날아간다.** 캡 경합 1건을 되돌리려다
+    3,880건을 지우면 원래 사고보다 훨씬 나쁘다. 그래서 `add`와 **똑같은 세 겹**
+    (`_shopping_restrict_put`)을 쓰고, 검증도 **「대상이 사라졌나」와 「나머지가 남았나」를 둘 다**
+    본다 — 전자만 보면 「전부 지우기」도 성공으로 통과한다.
+
+    ## 없는 키워드를 지우라고 하면 거부한다
+    멱등하게 넘기지 않는다. 롤백 대상이 라이브에 없다는 것은 **우리가 안다고 믿은 상태와 실제가
+    다르다**는 뜻이고, 그 상태로 교체 PUT을 쏘는 것이 위험하다(다른 행위자가 이미 손댔을 수 있다).
+
+    Raises:
+        WriteValidationError: keywords 빈 값·요청 내 중복 / adgroup이 SHOPPING 아님 /
+            라이브에 없는 키워드 제거 시도 / 타겟 행 특정 불가.
+        WriteConcurrentEditError · WriteError · WriteVerificationError: `add`와 같다.
+    """
+    keywords = _validate_shopping_keywords(adgroup_id, keywords, action="remove_shopping_exclusions")
+    drop = set(keywords)
+
+    def _must_exist(items: list[dict]) -> None:
+        absent = [k for k in keywords if k not in {it.get("keyword") for it in items}]
+        if absent:
+            raise WriteValidationError(
+                f"remove_shopping_exclusions: 라이브에 없는 키워드를 지우라고 한다 — 우리가 아는 "
+                f"상태와 실제가 다르다는 뜻이라 교체 PUT을 쏘지 않는다(fail-closed): {absent} "
+                f"adgroup={adgroup_id}"
+            )
+
+    def _filter(items: list[dict]) -> list[dict]:
+        # 남는 항목은 **원문 그대로** 되돌려 보낸다(date 보존).
+        return [it for it in items if it.get("keyword") not in drop]
+
+    return _shopping_restrict_put(
+        adgroup_id, action="remove_shopping_exclusions", precheck=_must_exist, mutate=_filter,
+        # ★둘 다 본다: 지울 것 말고는 전부 남아야 하고(유실 감시), 지울 것은 사라져야 한다.
+        expect=lambda current: ([k for k in current if k not in drop], list(keywords)),
+    )
+
+
+def _validate_shopping_keywords(adgroup_id: str, keywords: list[str], *, action: str) -> list[str]:
+    """추가·제거 공통 사전 검증 — 규칙을 두 벌로 만들지 않는다."""
+    if not keywords:
+        raise WriteValidationError(f"{action}: keywords가 비었습니다")
+    if len(set(keywords)) != len(keywords):
+        raise WriteValidationError(
+            f"{action}: 요청 내 중복 키워드 — 서버 동작이 문서에 없어 차단: {keywords}"
+        )
+    adgroup_type = _get_adgroup(adgroup_id).get("adgroupType")
+    if adgroup_type != SHOPPING_ADGROUP_TYPE:
+        raise WriteValidationError(
+            f"{action}: adgroup {adgroup_id}는 SHOPPING이 아님(adgroupType={adgroup_type!r}) "
+            f"— 파워링크는 restricted-keywords 경로를 쓴다"
+        )
+    return keywords
 
 
 def add_exclusions(
@@ -513,6 +570,36 @@ def add_exclusions(
     raise WriteValidationError(
         f"add_exclusions: adgroupType={adgroup_type!r}에 제외를 쓰는 경로를 모른다 "
         f"— 조용히 건너뛰지 않고 거부한다(fail-closed) adgroup={adgroup_id}"
+    )
+
+
+def rollback_exclusions(
+    adgroup_id: str, keywords: list[str], created_ids: list[str], adgroup_type: str | None = None
+) -> WriteResult:
+    """방금 건 제외를 **되돌린다** — 유형에 맞는 경로로 (캡 경합 원복 전용).
+
+      · `WEB_SITE`  → `delete_restricted_keywords(adgroup_id, created_ids)` — **종전 그대로**
+      · `SHOPPING`  → `remove_shopping_exclusions(adgroup_id, keywords)` — 키워드 기반
+
+    ★**파워링크 경로를 바꾸지 않는 것이 이 함수의 절반이다.** 그쪽은 id 기반으로 이미 검증돼
+      운영 중인 경로다. 「이왕 통일하는 김에」 키워드 기반으로 바꾸면 증명된 동작을 흔든다 —
+      그리고 롤백은 **원래 사고를 수습하는 자리**라 여기서 새 위험을 만들면 안 된다.
+
+    ★유형별로 **되돌리는 열쇠가 다르다**: 파워링크는 쓰기 응답에서 회수한 id, 쇼핑은 키워드
+      본문이다(그 리소스엔 키워드 단위 id가 없다). 하나로 합칠 수 없는 이유가 그것이다.
+
+    ★**쓸 줄 모르는 유형은 거부한다** — 롤백이 조용히 «안 함»으로 끝나면 원복되지 않은 조치가
+      원복된 것처럼 기록된다. 호출자가 그 실패를 사실대로 적을 수 있게 예외로 올린다.
+    """
+    if adgroup_type is None:
+        adgroup_type = _get_adgroup(adgroup_id).get("adgroupType")
+    if adgroup_type == WEB_SITE_ADGROUP_TYPE:
+        return delete_restricted_keywords(adgroup_id, created_ids)
+    if adgroup_type == SHOPPING_ADGROUP_TYPE:
+        return remove_shopping_exclusions(adgroup_id, keywords)
+    raise WriteValidationError(
+        f"rollback_exclusions: adgroupType={adgroup_type!r}의 제외를 되돌리는 경로를 모른다 "
+        f"— 조용히 «안 함»으로 끝내지 않고 거부한다(fail-closed) adgroup={adgroup_id}"
     )
 
 

@@ -1415,7 +1415,13 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
             f"(created_ids={result.created_ids}) 원복"
         )
         try:
-            naver_sa_writer.delete_restricted_keywords(proposal.adgroup_id, result.created_ids)
+            # ★유형이 되돌리는 열쇠를 고른다(파워링크=회수한 id / 쇼핑=키워드 본문).
+            #   쇼핑은 `created_ids`가 **구조적으로 비어 있어**(키워드 단위 id 없음) 이
+            #   롤백이 아예 돌지 않았다 — 은닉은 아니었으나(아래 except가 사실대로 적는다)
+            #   자동 원복이 없는 채였다. 파워링크 경로는 **바뀌지 않는다**.
+            naver_sa_writer.rollback_exclusions(
+                proposal.adgroup_id, [proposal.target_id], result.created_ids
+            )
             rolled_back = True
             rollback_reason += " | 롤백 성공(재조회로 삭제 확인, delete_restricted_keywords fail-closed)"
         except Exception as rollback_exc:  # noqa: BLE001 — 롤백 실패도 fail-open 금지, 사실대로 기록
