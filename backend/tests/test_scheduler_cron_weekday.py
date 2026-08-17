@@ -11,7 +11,7 @@
 #   갱신 ⑤reconcile이 명단 밖 잡을 **안 건드린다** ⑥is_enabled·last_run_at 보존 ⑦멱등.
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -210,11 +210,30 @@ def test_reconcile_preserves_enabled_and_last_run(db):
 
 
 def test_reconcile_does_not_touch_jobs_outside_the_ownership_list(db):
-    """★명단 밖 잡은 시드와 달라도 그대로 둔다.
+    """★명단 밖 잡은 시드와 달라도 그대로 둔다 — 발산을 확인 없이 되돌리지 않는다.
 
-    라이브 실측(2026-08-17): `sync_coupang_rg_orders`가 시드 `0 */2 * * *` vs prod
-    `55 5 * * *`로 73일째 갈라져 있다. 전량 덮기는 이 잡을 하루 1회에서 12회로 올린다
-    (days=30 동기화라 부하가 유의하다) — 그 판단은 운영 몫이라 코드가 삼키면 안 된다.
+    `auto_sync_orders`는 시드가 `0 6 * * *`인데 일부러 다른 값을 심어 둔다. 명단 밖이므로
+    조정 대상이 아니고, 그 «갈라짐»이 사고인지 의도인지는 코드가 판단하지 않는다.
+    """
+    db.add(SchedulerState(
+        job_name="auto_sync_orders", cron_expression="30 7 * * *", is_enabled=True,
+    ))
+    db.commit()
+
+    scheduler_service._ensure_default_states(db)
+
+    row = db.query(SchedulerState).filter(
+        SchedulerState.job_name == "auto_sync_orders"
+    ).one()
+    assert row.cron_expression == "30 7 * * *", "명단 밖 잡의 크론이 조용히 바뀌었다"
+    assert "auto_sync_orders" not in scheduler_service._CRON_OWNED_BY_CODE
+
+
+def test_rg_orders_is_reconciled_to_every_two_hours(db):
+    """★2026-08-17 Jino 결정 — `sync_coupang_rg_orders`를 2시간 주기로 확정.
+
+    시드는 `892405c3`(2026-06-05)에 이미 `0 */2 * * *`였는데 prod 기존 행이라 안 받아
+    **73일째** `55 5 * * *`(하루 1회)로 돌았다. 명단 편입으로 그 발산을 닫는다.
     """
     db.add(SchedulerState(
         job_name="sync_coupang_rg_orders", cron_expression="55 5 * * *", is_enabled=True,
@@ -226,14 +245,25 @@ def test_reconcile_does_not_touch_jobs_outside_the_ownership_list(db):
     row = db.query(SchedulerState).filter(
         SchedulerState.job_name == "sync_coupang_rg_orders"
     ).one()
-    assert row.cron_expression == "55 5 * * *", "명단 밖 잡의 크론이 조용히 바뀌었다"
-    assert "sync_coupang_rg_orders" not in scheduler_service._CRON_OWNED_BY_CODE
+    assert row.cron_expression == "0 */2 * * *"
+    # 표기가 아니라 «하루 몇 번 도는가»로 못박는다 — 05:55 하루 1회로 되돌아가면 실패한다.
+    trigger = CronTrigger.from_crontab(row.cron_expression, timezone="Asia/Seoul")
+    # get_next_fire_time은 커서 시각을 **포함**해 돌려주므로 매번 1초 밀어야 전진한다.
+    cursor = datetime(2026, 8, 18, 0, 0, tzinfo=KST)
+    fires = []
+    for _ in range(24):
+        nxt = trigger.get_next_fire_time(None, cursor)
+        if nxt is None or nxt.date().isoformat() != "2026-08-18":
+            break
+        fires.append(nxt.hour)
+        cursor = nxt + timedelta(seconds=1)
+    assert fires == [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22], f"하루 발화가 {fires}"
 
 
-def test_ownership_list_is_exactly_the_two_weekday_jobs():
+def test_ownership_list_is_exactly_the_declared_jobs():
     """명단 편입 = «이 잡의 스케줄은 코드가 정한다»는 명시적 결정. 늘어나면 리뷰에 걸려야 한다."""
     assert scheduler_service._CRON_OWNED_BY_CODE == frozenset({
-        "run_naver_bm_deep", "sync_naver_keyword_volume",
+        "run_naver_bm_deep", "sync_naver_keyword_volume", "sync_coupang_rg_orders",
     })
 
 
