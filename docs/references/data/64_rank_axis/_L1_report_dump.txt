@@ -1,0 +1,200 @@
+panel_labeled 로드: 136245행 (열 24개), 그룹수 854
+
+=== §7-8 검산: 제외 규모 ===
+  total_panel: 136245행, cost=228,696,229, conv_amt=458,171,660
+  excluded_immature_or_datagap: 3898행, cost=5,268,911, conv_amt=9,307,320
+  analysis_universe(mature&~data_gap): 132347행, cost=223,427,318, conv_amt=448,864,340
+  excluded_imp0_within_analysis: 22행, cost=0, conv_amt=379,220
+  ANOMALY_imp0_cost_gt0_within_analysis(subset of above): 0행, cost=0, conv_amt=0
+  rank_analysis_universe(analysis & imp>0): 132325행, cost=223,427,318, conv_amt=448,485,120
+  -> L1_excluded_rows.csv 저장: 6행
+
+9-bin 분포:
+rank_bin9
+[1,1.5)     5392
+[1.5,2)    14108
+[2,2.5)    22938
+[2.5,3)    16453
+[3,3.5)    11496
+[3.5,4)     8010
+[4,5)      14004
+[5,7)      19091
+[7,∞)      20833
+
+band3 분포:
+band3
+<2.5       42438
+[2.5,4)    35959
+≥4         53928
+
+평시 행: 74888 / 전체 rank_analysis_universe 132325
+  -> L1_rank_band_by_type.csv 저장: 18행
+  -> L1_rank_band3_by_type.csv 저장: 6행
+  -> L1_metric_identity_note.csv 저장: 4행
+
+=== 정본표(9-bin) ===
+campaign_type rank_bin  n_group_days  n_groups  sum_cost  sum_conv_amt  sum_ad_profit  sum_imp  sum_clk  sum_conv_cnt  roas  profit_per_group_day  cost_per_group_day  profit_per_cost_pct
+     SHOPPING  [1,1.5)           435       106   1949288       4719800      809215.80   192144     1521           258  2.42               1860.27             4481.12                41.51
+     SHOPPING  [1.5,2)           752       121   8646907      16088990      756360.10   556064     5915           894  1.86               1005.80            11498.55                 8.75
+     SHOPPING  [2,2.5)          1995       206  17795124      33526940     1799814.63   880205    11786          1882  1.88                902.16             8919.86                10.11
+     SHOPPING  [2.5,3)          3051       209  23264803      43942420     2417499.75  1254256    15290          2419  1.89                792.36             7625.30                10.39
+     SHOPPING  [3,3.5)          4633       282  24287680      46106880     2659649.05  1438109    16177          2681  1.90                574.07             5242.32                10.95
+     SHOPPING  [3.5,4)          5098       277  21899340      41027070     2079076.13  1777516    15904          2430  1.87                407.82             4295.67                 9.49
+     SHOPPING    [4,5)         11070       322  34884502      68010540     4864498.58  8208235    30824          3883  1.95                439.43             3151.26                13.94
+     SHOPPING    [5,7)         17317       338  26954442      50202510     2386592.48 14293785    31257          2892  1.86                137.82             1556.53                 8.85
+     SHOPPING    [7,∞)         20132       331   8497309      18381460     2245800.29 10272469    12691          1049  2.16                111.55              422.08                26.43
+     WEB_SITE  [1,1.5)          4957       291   3851111       7898650      765282.92   352131     4358           447  2.05                154.38              776.90                19.87
+     WEB_SITE  [1.5,2)         13356       381  12488856      33135060     6877046.98  1423641    16273          1791  2.65                514.90              935.07                55.07
+     WEB_SITE  [2,2.5)         20943       423  17455334      39746070     5774397.15  2446341    24857          2205  2.28                275.72              833.47                33.08
+     WEB_SITE  [2.5,3)         13402       432  11264564      26141850     4014132.67  1996900    16121          1426  2.32                299.52              840.51                35.64
+     WEB_SITE  [3,3.5)          6863       411   4733321       9149470      614119.09  1007367     6677           493  1.93                 89.48              689.69                12.97
+     WEB_SITE  [3.5,4)          2912       337   1934172       3755170      260550.38   511964     3075           204  1.94                 89.47              664.21                13.47
+     WEB_SITE    [4,5)          2934       282   1776464       3472450      253021.68   476653     2714           194  1.95                 86.24              605.48                14.24
+     WEB_SITE    [5,7)          1774       187   1174299       2091080       47840.10   334228     1954           117  1.78                 26.97              661.95                 4.07
+     WEB_SITE    [7,∞)           701       100    569802       1088710       66498.41   130546      985            59  1.91                 94.86              812.84                11.67
+
+=== 3구간(가설 검정용) ===
+campaign_type rank_bin  n_group_days  n_groups  sum_cost  sum_conv_amt  sum_ad_profit  sum_imp  sum_clk  sum_conv_cnt  roas  profit_per_group_day  cost_per_group_day  profit_per_cost_pct
+     SHOPPING     <2.5          3182       235  28391319      54335730     3365390.53  1628413    19222          3034  1.91               1057.63             8922.48                11.85
+     SHOPPING  [2.5,4)         12782       320  69451823     131076370     7156224.93  4469881    47371          7530  1.89                559.87             5433.56                10.30
+     SHOPPING       ≥4         48519       358  70336253     136594510     9496891.36 32774489    74772          7824  1.94                195.74             1449.66                13.50
+     WEB_SITE     <2.5         39256       426  33795301      80779780    13416727.05  4222113    45488          4443  2.39                341.78              860.90                39.70
+     WEB_SITE  [2.5,4)         23177       463  17932057      39046490     4888802.15  3516231    25873          2123  2.18                210.93              773.70                27.26
+     WEB_SITE       ≥4          5409       305   3520565       6652240      367360.19   941427     5653           370  1.89                 67.92              650.87                10.43
+  -> L1_holdout_gate.csv 저장: 24행
+
+=== 홀드아웃 게이트: row_scope(all/baseline_only) x metric(강도/효율) ===
+    row_scope campaign_type               metric   band3  explore_n_group_days  validate_n_group_days  validate_share_of_total   order_explore  order_validate gate_result
+          all      SHOPPING profit_per_group_day    <2.5                  2118                    912                    0.301 <2.5>[2.5,4)>≥4 [2.5,4)>≥4><2.5         미재현
+          all      SHOPPING profit_per_group_day [2.5,4)                  9141                   3237                    0.262 <2.5>[2.5,4)>≥4 [2.5,4)>≥4><2.5         미재현
+          all      SHOPPING profit_per_group_day      ≥4                 32145                  14836                    0.316 <2.5>[2.5,4)>≥4 [2.5,4)>≥4><2.5         미재현
+          all      SHOPPING                 roas    <2.5                  2118                    912                    0.301 <2.5>≥4>[2.5,4) ≥4>[2.5,4)><2.5         미재현
+          all      SHOPPING                 roas [2.5,4)                  9141                   3237                    0.262 <2.5>≥4>[2.5,4) ≥4>[2.5,4)><2.5         미재현
+          all      SHOPPING                 roas      ≥4                 32145                  14836                    0.316 <2.5>≥4>[2.5,4) ≥4>[2.5,4)><2.5         미재현
+          all      WEB_SITE profit_per_group_day    <2.5                 26434                  10933                    0.293 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+          all      WEB_SITE profit_per_group_day [2.5,4)                 16059                   6183                    0.278 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+          all      WEB_SITE profit_per_group_day      ≥4                  4151                   1059                    0.203 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+          all      WEB_SITE                 roas    <2.5                 26434                  10933                    0.293 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+          all      WEB_SITE                 roas [2.5,4)                 16059                   6183                    0.278 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+          all      WEB_SITE                 roas      ≥4                  4151                   1059                    0.203 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+baseline_only      SHOPPING profit_per_group_day    <2.5                  1263                    468                    0.270 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      SHOPPING profit_per_group_day [2.5,4)                  5546                   1583                    0.222 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      SHOPPING profit_per_group_day      ≥4                 20190                   7708                    0.276 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      SHOPPING                 roas    <2.5                  1263                    468                    0.270 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+baseline_only      SHOPPING                 roas [2.5,4)                  5546                   1583                    0.222 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+baseline_only      SHOPPING                 roas      ≥4                 20190                   7708                    0.276 <2.5>[2.5,4)>≥4 ≥4>[2.5,4)><2.5         미재현
+baseline_only      WEB_SITE profit_per_group_day    <2.5                 16151                   5436                    0.252 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      WEB_SITE profit_per_group_day [2.5,4)                 10157                   3481                    0.255 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      WEB_SITE profit_per_group_day      ≥4                  2432                    473                    0.163 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      WEB_SITE                 roas    <2.5                 16151                   5436                    0.252 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      WEB_SITE                 roas [2.5,4)                 10157                   3481                    0.255 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+baseline_only      WEB_SITE                 roas      ≥4                  2432                    473                    0.163 <2.5>[2.5,4)>≥4 [2.5,4)><2.5>≥4         미재현
+  -> L1_group_rank_profile.csv 저장: 854행
+  -> L1_sensitivity.csv 저장: 30행
+
+=== 민감도 3종: 변형별 순서 (베이스라인과 구조적으로 일치? 0=저순위밴드 1=중간밴드 2=고순위밴드) ===
+                   variant campaign_type        order_in_variant order_generic  matches_baseline_order
+0_baseline(그룹-일 가중, 경계 원본)      SHOPPING         <2.5>[2.5,4)>≥4         0>1>2                    True
+0_baseline(그룹-일 가중, 경계 원본)      WEB_SITE         <2.5>[2.5,4)>≥4         0>1>2                    True
+         1_bin_shift_-0.25      SHOPPING <2.25>[2.25,3.75)>≥3.75         0>1>2                    True
+         1_bin_shift_-0.25      WEB_SITE <2.25>[2.25,3.75)>≥3.75         0>1>2                    True
+         1_bin_shift_+0.25      SHOPPING <2.75>[2.75,4.25)>≥4.25         0>1>2                    True
+         1_bin_shift_+0.25      WEB_SITE <2.75>[2.75,4.25)>≥4.25         0>1>2                    True
+                    2_평시행만      SHOPPING         <2.5>[2.5,4)>≥4         0>1>2                    True
+                    2_평시행만      WEB_SITE         <2.5>[2.5,4)>≥4         0>1>2                    True
+         3_그룹가중(그룹별 평균 먼저)      SHOPPING         ≥4>[2.5,4)><2.5         2>1>0                   False
+         3_그룹가중(그룹별 평균 먼저)      WEB_SITE         <2.5>[2.5,4)>≥4         0>1>2                    True
+  -> L1_band_x_rank.csv 저장: 24행
+
+=== ROAS밴드(그룹단위) x 순위구간(band3) 교차표 ===
+campaign_type           band   band3  n_groups  sum_cost  sum_ad_profit
+     SHOPPING          band1    <2.5         2   5910399     2362844.72
+     SHOPPING          band1 [2.5,4)        26  39376264    13767570.02
+     SHOPPING          band1      ≥4        48  22986335    10785511.87
+     SHOPPING          band2    <2.5         1   4103720      527618.40
+     SHOPPING          band2 [2.5,4)        14  32920703     4208940.49
+     SHOPPING          band2      ≥4        29  14917132     1764901.90
+     SHOPPING          band3    <2.5         8    484979     -228690.29
+     SHOPPING          band3 [2.5,4)        40  12523315    -3309153.67
+     SHOPPING          band3      ≥4       178  34956548    -9861036.67
+     SHOPPING cost0_excluded    <2.5         1         0           0.00
+     SHOPPING cost0_excluded [2.5,4)         4         0           0.00
+     SHOPPING cost0_excluded      ≥4        15         0           0.00
+     WEB_SITE          band1    <2.5       141  19786875    15710220.17
+     WEB_SITE          band1 [2.5,4)        73   8413751     6481789.59
+     WEB_SITE          band1      ≥4         5   1750834      682713.65
+     WEB_SITE          band2    <2.5        30   8628328      964091.60
+     WEB_SITE          band2 [2.5,4)        17   2315281      237062.67
+     WEB_SITE          band2      ≥4         1     20740        1352.34
+     WEB_SITE          band3    <2.5        87   6216479    -1554363.35
+     WEB_SITE          band3 [2.5,4)        87   6833698    -3010004.25
+     WEB_SITE          band3      ≥4        38   1281937     -839973.24
+     WEB_SITE cost0_excluded    <2.5         1         0           0.00
+     WEB_SITE cost0_excluded [2.5,4)         2         0           0.00
+     WEB_SITE cost0_excluded      ≥4         6         0           0.00
+
+
+##################  선행 주장 4건 재검증  ##################
+  -> L1_prior_claim_A_roas_spread.csv 저장: 2행
+
+--- P-A: 3채점 최대구간 일치 + ROAS 스프레드(지배 vs 평탄 구분) ---
+campaign_type argmax_sum_conv_amt argmax_roas argmax_sum_ad_profit(절대액) argmax_profit_per_group_day(일평균, 강도 오염 주의)  3채점_일치(매출/ROAS/이익절대액)  dominant_in_25_40  roas_<2.5  roas_[2.5,4)  roas_≥4  roas_spread(max-min)  roas_spread_%of_mean      지배_vs_평탄
+     SHOPPING                  ≥4          ≥4                        ≥4                                       <2.5                   True              False       1.91          1.89     1.94                  0.05                   2.6  평탄(스프레드<10%)
+     WEB_SITE                <2.5        <2.5                      <2.5                                       <2.5                   True              False       2.39          2.18     1.89                  0.50                  23.2 약한 우위(10~25%)
+
+--- P-B: <2.5 vs [2.5,4) 볼륨·이익 배수 (참고: 원문 주장 볼륨 2.4배 / 이익 1/3) ---
+campaign_type  imp_lt25  imp_2540  imp_ratio(<2.5/[2.5,4))  clk_lt25  clk_2540  clk_ratio(<2.5/[2.5,4))  ad_profit_lt25  ad_profit_2540  profit_ratio(<2.5/[2.5,4))
+     SHOPPING   1628413   4469881                    0.364     19222     47371                    0.406      3365390.53      7156224.93                       0.470
+     WEB_SITE   4222113   3516231                    1.201     45488     25873                    1.758     13416727.05      4888802.15                       2.744
+  -> L1_prior_claim_C_ctr.csv 저장: 18행
+
+--- P-C: CTR 6버킷 1년 vs ref38(90일, SHOPPING) 대조 ---
+                 scope rank_bucket_ref38  imp_1yr  clk_1yr  ctr_1yr  imp_ref38(90일,SHOPPING)  clk_ref38  ctr_ref38  ctr_diff(1yr-ref38)
+              SHOPPING              ~2.0   748208     7436  0.00994                   106479       1001    0.00940              0.00054
+              SHOPPING               2~3  2134461    27076  0.01269                   273324       3476    0.01272             -0.00003
+              SHOPPING               3~4  3215625    32081  0.00998                   405072       4954    0.01223             -0.00225
+              SHOPPING               4~5  8208235    30824  0.00376                   488524       4267    0.00873             -0.00497
+              SHOPPING               5~7 14293785    31257  0.00219                  1078576       4433    0.00411             -0.00192
+              SHOPPING                7+ 10272469    12691  0.00124                  1266427       1924    0.00152             -0.00028
+              WEB_SITE              ~2.0  1775772    20631  0.01162                   106479       1001    0.00940              0.00222
+              WEB_SITE               2~3  4443241    40978  0.00922                   273324       3476    0.01272             -0.00350
+              WEB_SITE               3~4  1519331     9752  0.00642                   405072       4954    0.01223             -0.00581
+              WEB_SITE               4~5   476653     2714  0.00569                   488524       4267    0.00873             -0.00304
+              WEB_SITE               5~7   334228     1954  0.00585                  1078576       4433    0.00411              0.00174
+              WEB_SITE                7+   130546      985  0.00755                  1266427       1924    0.00152              0.00603
+ALL(SHOPPING+WEB_SITE)              ~2.0  2523980    28067  0.01112                   106479       1001    0.00940              0.00172
+ALL(SHOPPING+WEB_SITE)               2~3  6577702    68054  0.01035                   273324       3476    0.01272             -0.00237
+ALL(SHOPPING+WEB_SITE)               3~4  4734956    41833  0.00883                   405072       4954    0.01223             -0.00340
+ALL(SHOPPING+WEB_SITE)               4~5  8684888    33538  0.00386                   488524       4267    0.00873             -0.00487
+ALL(SHOPPING+WEB_SITE)               5~7 14628013    33211  0.00227                  1078576       4433    0.00411             -0.00184
+ALL(SHOPPING+WEB_SITE)                7+ 10403015    13676  0.00131                  1266427       1924    0.00152             -0.00021
+  -> L1_prior_claim_D_cpa.csv 저장: 9행
+
+--- P-D: 전환단가(CPA) 3버킷 1년 vs ref38(90일, SHOPPING) 대조 ---
+                 scope rank_bucket_ref38  cost_1yr  conv_cnt_1yr  cpa_1yr  cpa_ref38(90일,SHOPPING)  cpa_diff(1yr-ref38)
+              SHOPPING                ~3  51656122          5453   9473.0                     9383                 90.0
+              SHOPPING               3~5  81071522          8994   9014.0                     8858                156.0
+              SHOPPING                5+  35451751          3941   8995.6                     8122                873.6
+              WEB_SITE                ~3  45059865          5869   7677.6                     9383              -1705.4
+              WEB_SITE               3~5   8443957           891   9476.9                     8858                618.9
+              WEB_SITE                5+   1744101           176   9909.7                     8122               1787.7
+ALL(SHOPPING+WEB_SITE)                ~3  96715987         11322   8542.3                     9383               -840.7
+ALL(SHOPPING+WEB_SITE)               3~5  89515479          9885   9055.7                     8858                197.7
+ALL(SHOPPING+WEB_SITE)                5+  37195852          4117   9034.7                     8122                912.7
+  -> L1_sensitivity_bep.csv 저장: 12행
+
+--- BEP 민감도(1.711 vs 1.4758): 3구간 순서 ---
+           bep_value campaign_type    order_in_bep
+    1.711(현재 계정 BEP)      SHOPPING <2.5>[2.5,4)>≥4
+    1.711(현재 계정 BEP)      WEB_SITE <2.5>[2.5,4)>≥4
+1.4758(ref31 진짜 BEP)      SHOPPING <2.5>[2.5,4)>≥4
+1.4758(ref31 진짜 BEP)      WEB_SITE <2.5>[2.5,4)>≥4
+BEP 값 변경에도 순서 유지 여부: {'SHOPPING': True, 'WEB_SITE': True}
+  -> L1_prior_claims_verdict.csv 저장: 4행
+
+=== 선행 주장 4건 종합 판정 ===
+claim_id                  source                                                            claim verdict                                                                                                                                                                                                                                                                    evidence
+     P-A              ref31(12일)                   이익극대 스팟=2.5~4, 매출·ROAS·이익금액 3채점 일치, 쇼핑에서 완전 지배    부분지지 SHOPPING: argmax(매출)=≥4 argmax(ROAS)=≥4 argmax(이익절대액)=≥4 3채점일치=True ROAS(<2.5/[2.5,4)/≥4)=1.91/1.89/1.94 스프레드=0.05(2.6%, 평탄(스프레드<10%)) | WEB_SITE: argmax(매출)=<2.5 argmax(ROAS)=<2.5 argmax(이익절대액)=<2.5 ROAS(<2.5/[2.5,4)/≥4)=2.39/2.18/1.89 스프레드=0.5(23.2%, 약한 우위(10~25%))
+     P-B               ref41:174                          <2.5(1·2위) 볼륨 2.4배, 이익 1/3 (vs [2.5,4))    부분지지                                                                                                                                                                   SHOPPING imp배수=0.364 clk배수=0.406 이익배수=0.47 (원 주장 2.4배/1·3배) | WEB_SITE imp배수=1.201 clk배수=1.758 이익배수=2.744
+     P-C ref38 §1(90일, SHOPPING) 가시임계=순위4, 5위밖(5~7·7+) CTR 피크의 1/3~1/8 붕괴, 과열(~2.0)이 2~3보다 CTR 낮음      지지                                                                                                                SHOPPING 1yr CTR ~2.0=0.00994 2~3=0.01269 3~4=0.00998 4~5=0.00376 5~7=0.00219 7+=0.00124 | 5~7/피크=0.173 7+/피크=0.098 (원 주장 1/3~1/8 = 0.125~0.333) 과열역전재현=True
+     P-D ref38 §2(90일, SHOPPING)                                   전환단가(CPA)는 순위와 무관하게 평평(±15% 내)      지지                                                                                                                                                                                                    SHOPPING 1yr CPA ~3=9473.0 3~5=9014.0 5+=8995.6 스프레드=5.2% (원 주장 ±15% 평평)

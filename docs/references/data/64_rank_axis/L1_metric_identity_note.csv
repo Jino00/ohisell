@@ -1,0 +1,5 @@
+metric,role,identity_or_caution
+profit_per_group_day,강도(볼륨×효율 합성) — 효율지표 아님,cost_per_group_day와 사실상 비례(둘 다 상단 구간에서 같이 크다) — 이 값이 높은 건 «그 구간이 좋아서»가 아니라 «그 구간 그룹-일이 하루에 더 많이 써서»일 수 있다.
+profit_per_cost_pct,★효율 축(비용당 이익률),항등식: profit_per_cost_pct = (roas/1.711 - 1) * 100. 즉 roas의 아핀변환이라 독립적인 새 지표가 아니다 — roas만 봐도 같은 정보.
+cost_per_group_day,볼륨(소진강도) 축,n_group_days 대비 sum_cost.
+sum_ad_profit,절대이익(=Σcost × profit_per_cost_pct/100),노출·지출량이 큰 구간이 구조적으로 유리 — 「최댓값 구간」을 「최고 구간」과 혼동하지 않는다.

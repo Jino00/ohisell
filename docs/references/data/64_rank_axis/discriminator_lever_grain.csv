@@ -1,0 +1,4 @@
+campaign_type,unit_grain,unit_grain_rows_nonempty_in_ad_daily,keyword_entities_in_naver_entity,distinct_campaigns_with_keyword_entity,lever_exists_at_unit_grain,source_note
+WEB_SITE,keyword(키워드),821622.0,91172.0,12.0,있음 — 키워드별 개별 bid_amt(naver_entity.bid_amt),sql/13_lever_summary.sql 실측(2026-08-17)
+SHOPPING,search_term(검색어),0.0,0.0,0.0,"없음 — naver_ad_daily SHOPPING 68,143행 전부 keyword_id=''(sentinel), naver_entity keyword행도 SHOPPING 0건(설계상 동기화 제외, models.py NaverEntity 도크스트링: 'SHOPPING은 keyword 행 동기화 제외')","레버는 (adgroup,mall_product_id)=소재 grain에만 존재 — 아래 별도 행"
+SHOPPING,mall_product_id(소재/상품 — search_term보다 상위),,,,"부분 — naver_adgroup_product 1,761행/238그룹/21캠페인 중 use_group_bid_amt=false(소재 개별입찰) 588행/221그룹, ad_user_lock=true 317행. 단 이 레버는 그 소재가 노출된 '모든 검색어'에 동일 적용 — 검색어별 조준 불가",sql/13_lever_summary.sql 실측(2026-08-17) — 문서(shopping-avg-rank-masks-head-keyword) 588/317과 일치

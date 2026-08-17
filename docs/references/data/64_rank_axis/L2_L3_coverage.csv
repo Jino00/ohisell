@@ -1,0 +1,5 @@
+layer,raw_rows,raw_min_date,raw_max_date,raw_distinct_dates,distinct_units,distinct_groups,sum_cost,sum_conv_cnt,rank_sum_gt0_rows,rank_sum_gt0_ratio,imp_gt0_rows,imp_gt0_ratio,raw_window_days_span,raw_covers_1y,analysis_rows,analysis_distinct_dates,analysis_min_date,analysis_max_date,analysis_window_days_span
+L2_WEB_SITE_keyword,821622,2025-07-22,2026-08-16,368,39068.0,486,42244556,5256,821427.0,0.9998,821427.0,0.9998,391,True,808253,355,2025-07-22,2026-08-09,384
+L1_WEB_SITE_group(ref),69748,2025-07-22,2026-08-16,368,,488,56400439,7087,,,,,391,True,67842,355,2025-07-22,2026-08-09,384
+L3_SHOPPING_searchterm,457400,2026-07-04,2026-08-16,44,126073.0,228,22366605,2093,457288.0,0.9998,457288.0,0.9998,44,False,361747,37,2026-07-04,2026-08-09,37
+L1_SHOPPING_group(ref),66497,2025-07-22,2026-08-16,381,,366,172295790,18851,,,,,391,True,64483,355,2025-07-22,2026-08-09,384

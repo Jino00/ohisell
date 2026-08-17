@@ -1,0 +1,5 @@
+label,n_rows,min_ts,max_ts,distinct_campaigns,distinct_entities,dry_run_true_n,occurred_at_filled_ratio
+"우리_실집행(dry_run=0, action not external_*)",477,2026-07-17 08:15:26.656870,2026-08-11 09:18:40.317545,8,104,0,0.0042
+외부_관측_bid(action=external_bid_change),443,2026-07-22 07:37:08.955270,2026-08-14 07:37:08.599428,9,370,0,0.228
+외부_관측_전체(action LIKE external_*),4757,2026-07-11 07:37:40.273387,2026-08-14 07:37:08.599428,20,4359,4106,0.0574
+change_log_전체,6458,2026-07-11 07:37:40.273387,2026-08-17 18:15:00.000926,27,4466,5330,0.0426

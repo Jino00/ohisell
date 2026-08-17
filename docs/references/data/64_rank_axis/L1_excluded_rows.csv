@@ -1,0 +1,7 @@
+stage,n_rows,sum_cost,sum_conv_amt
+total_panel,136245,228696229,458171660
+excluded_immature_or_datagap,3898,5268911,9307320
+analysis_universe(mature&~data_gap),132347,223427318,448864340
+excluded_imp0_within_analysis,22,0,379220
+ANOMALY_imp0_cost_gt0_within_analysis(subset of above),0,0,0
+rank_analysis_universe(analysis & imp>0),132325,223427318,448485120
