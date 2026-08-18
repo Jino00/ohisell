@@ -1,3 +1,32 @@
+[2026-08-18 10:2x~11:2x] probe_revert 출혈밸브 상시-0 결함 수리 — 배포·라이브 확정 (D-NAO-193)
+  · 결함(D-NAO-192 발견분): `probe_revert._conv_direct_today`가 D−1까지만 적재되는
+    `naver_ad_daily`에서 `ad_date==오늘`을 읽어 **구조적 상시 0** → CD3 출혈밸브(매시) 되돌림
+    조건 절반이 영원히 참. 라이브 확인: MAX(`ad_date`)=08-17, 당일 행 0건.
+  · ★실제 피해 0건: `naver_proposals.approval_source='probe_op'` 통틀어 **1건**(07-21,
+    executed_change_log_id NULL) → standing probe 0건, 밸브가 돈 적 없다. 「19일 되돌림」은
+    과장이었고 커밋 `beb8f78a`에서 정정.
+  · 수리(ref 72 §2-①) = **2신호 2단 판정**: 주신호=밸브가 이미 받은 `curve`(fetch_entity_hh24)의
+    시간별 conv_cnt(탐침과 같은 grain·비용과 같은 창) / 보강=상품 전부의 당일 매출(상한 프록시,
+    0쪽만 결정적). 4값: 확정0/잠정0/전환있음/미관측. `NaverAdgroupHourlyToday`는 폴백(회수
+    막는 방향으로만).
+  · ★★초판 설계를 적대 리뷰가 뒤집음(P1 2건 재현): P1-1 — 초판 주신호 `NaverAdgroupHourlyToday`는
+    파워링크(키워드 grain)에 원리적으로 행 없음(어제 imp>0 키워드 1,439건 중 오늘 그룹 행 16건,
+    98.9% 부재) — 「항상 0→항상 발화」가 「항상 미관측→절대 미발화」로 뒤집힐 뿐 같은 구조적
+    상수 부류. P1-2 — 스윕 크론(`57 * * * *`) < 밸브(`20 * * * *`) → 최신 완결 시간의 비용은
+    세고 전환은 안 셈. 둘 다 **한 수리로 닫힘**(이미 손에 있던 curve.conv_cnt로 grain·창 동시
+    해결). 라운드2 = 해소·P1 0건.
+  · 재발 방지: `backend/app/services/naver_ad/load_window.py` 신설(적재 창 레지스트리, 창
+    밖 읽으면 `LoadWindowError`, 미등재 fail-closed). CI 가드는 기각(결제 정지로 미가동).
+  · 부수: `today_proxy_revenue._revenue_by_product` → 공개 `revenue_by_product`.
+  · 배포: 커밋 `5bb20af9`→`beb8f78a`. 2026-08-18 11:0x KST safe_deploy.sh, 무중단 재시작
+    (:8001→:8011, 다운타임 0초). **origin 미푸시**(Jino 지시).
+  · 라이브 증거(배포 후): 완결 187그룹 중 전환>0 13그룹 = 구경로0/신경로positive(hh24_curve
+    ad_conv 5·3·2·1·1). 전환0 174그룹 = 확정0 137/잠정0 37. `load_window`가 08-18을 적재 창
+    밖(lag=1일)로 지목.
+  · 테스트: `test_naver_probe_revert.py` 33 + `test_naver_load_window.py` 5. 전체 5,652
+    passed/1 failed(기존 부채, 변경 전에도 실패). 변이주입 R1 12건(생존4)→R2 전건 검출.
+  · PAO 상태 불변(optimizer 7/7 none, auto_operate 7/7 0). 교훈 #312.
+
 [2026-08-18 09:1x~09:4x] 스마트스토어 시간 단위 축 — 표면 전수·라이브 확정·설계 (D-NAO-192)
   · 읽기 전용(커머스 GET만). 배포 0 · `backend/` 0 · 광고 API 0 · push 0 · PAO 정지 유지.
   · 발단: Jino 「PAO는 스마트스토어 시간단위 데이터를 받아올 수 있는 걸 항상 잊는다 …

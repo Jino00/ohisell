@@ -16,6 +16,7 @@
 | [[prove-the-guard-catches-this-input]] | `test` | 가드는 **사고 입력**과 **정상 입력 전수** 양쪽으로 돌린다 — 전자는 «잡는가», 후자는 «안 깨뜨리는가» |
 | [[write-to-the-binding-layer]] | `discriminator` | 쓰기 전에 **실효 레이어를 데이터에서 판별**한다. API 200 ≠ 옥션 반영 |
 | [[read-external-values-before-writing]] | `tool` | 외부가 정하는 값(번호·해시·ID)은 **먼저 읽고 그 다음 쓴다**. pre-commit §3이 중복 번호를 거부 |
+| [[load-window-is-the-judgment-input-spec]] | `tool`(부분·3곳 중 1곳) | 판정 입력에는 적재 창을 물어라 — 상한 프록시는 0쪽에서만 결정적이다. `backend/app/services/naver_ad/load_window.py`(읽기 헬퍼, 가동 중) · `safe_deploy.sh` 정적 가드(미설치·부채) · 주기 감사 「writer 있는데 reader 0」 인벤토리(미설치·부채) |
 
 ## 패턴 (미처분 = 지식 부채, `enforcement: none`) ⚠️ **1건**
 
