@@ -159,3 +159,61 @@ LEFT JOIN (SELECT DISTINCT mall_product_id FROM naver_adgroup_product) m
 `docs/references/data/68_band_x_api_matrix/performance_band_x_api_inventory_20260817.md` §0.
 BEP RoAS = 1.711(계정 블렌디드) · BEP+20% = 2.0532. band1/2/3/4 + cost0. 성숙분 ≤2026-08-09 기준, SHOPPING/WEB_SITE 층화.
 밴드별 그룹 목록 원자료: `docs/references/data/63_band_decomposition/band_group_total.csv`(`adgroup_id` 컬럼 보유, 391일 창).
+
+---
+
+## E. ★정정 — C-2의 비용 점유율이 틀렸다 (2026-08-18 12:5x, 코디네이터 자기정정)
+
+**무엇이 틀렸나**: §C-2의 90일 비용 집계가 `__backfill__` **센티널 행을 제외하지 않았다**. 이 센티널은 실제 광고그룹이 아니라 캠페인 백필용 표식이고(`campaign_backfill.BACKFILL_SENTINEL_ADGROUP`, `probe_revert` 등 다른 판정 경로는 전부 명시적으로 배제한다), 90일 창에서 혼자 **31,550,746원 / 2,062행**을 차지한다. 그것이 「미매핑 SHOPPING」 쪽에 통째로 실려 매핑 비용 점유율을 끌어내렸다.
+
+**정정된 값** (센티널 제외, 90일, 실행 SQL 아래):
+
+| campaign_type | groups | mapped_groups | cost_all | cost_mapped | **cost_pct** |
+|---|---|---|---|---|---|
+| SHOPPING | 238 | 228 | 38,728,684 | 37,442,453 | **96.7** (초판 60.0 — 틀림) |
+| WEB_SITE | 256 | 0 | 18,316,763 | 0 | 0.0 |
+
+```sql
+WITH a AS (
+  SELECT adgroup_id, campaign_type, SUM(cost) cost FROM naver_ad_daily
+  WHERE adgroup_id<>'' AND adgroup_id<>'__backfill__'
+    AND ad_date >= date('now','+9 hours','-90 day')
+  GROUP BY adgroup_id, campaign_type
+), m AS (SELECT DISTINCT adgroup_id FROM naver_adgroup_product)
+SELECT a.campaign_type, COUNT(*) groups,
+       SUM(CASE WHEN m.adgroup_id IS NOT NULL THEN 1 ELSE 0 END) mapped_groups,
+       ROUND(SUM(a.cost),0) cost_all,
+       ROUND(SUM(CASE WHEN m.adgroup_id IS NOT NULL THEN a.cost ELSE 0 END),0) cost_mapped,
+       ROUND(100.0*SUM(CASE WHEN m.adgroup_id IS NOT NULL THEN a.cost ELSE 0 END)/NULLIF(SUM(a.cost),0),1) cost_pct
+FROM a LEFT JOIN m ON m.adgroup_id=a.adgroup_id GROUP BY a.campaign_type ORDER BY cost_all DESC;
+```
+
+**파급**: 매트릭스 §2부 **F5(「미매핑 SHOPPING 11그룹이 SHOPPING 비용의 40%」)는 이 오류 위에 서 있다.** 교차 계산이 독립적으로 같은 것을 짚었다 — 미매핑 11그룹의 90일 비용 24.9M원 중 **94.8%(23.6M원)가 센티널 1행**이고, 나머지 10개 실그룹은 **전부 `status ∈ {off, deleted}`**(활성 0). 즉 「고비용 그룹이 매핑에서 빠져 있다」가 아니라 **「센티널과 꺼진 그룹이 미매핑으로 잡혔다」**가 사실이다. 커머스 교차의 금액 대표성은 60%가 아니라 **쇼핑 비용의 96.7%**이고, 전체 SA 비용 기준으로는 37,442,453 / (38,728,684+18,316,763) = **65.6%**다.
+
+**교훈(발생 지점)**: 이 저장소는 `__backfill__` 센티널을 **판정 경로마다 개별적으로** 배제한다 — 공용 필터가 없다. 그래서 새로 쓰는 집계 SQL은 매번 그 배제를 다시 적어야 하고, 잊으면 조용히 틀린다(에러가 나지 않는다). 실측 ①·②는 기존 좌표를 따라가서 안 걸렸고, **코디네이터가 새로 쓴 SQL만 걸렸다.**
+
+## F. fan-out — 상품 1개가 여러 광고그룹에 걸린다 (교차 계산이 발견, 미해결)
+
+`naver_adgroup_product`의 상품당 광고그룹 수 분포(전 702상품):
+
+| 광고그룹 수 | 상품 수 |
+|---|---|
+| 1 | 122 |
+| 2 | 268 |
+| 3 | 216 |
+| 4 | 51 |
+| 5 | 22 |
+| 6 | 20 |
+| 7 | 3 |
+
+```sql
+SELECT n_groups, COUNT(*) products FROM (
+  SELECT mall_product_id, COUNT(DISTINCT adgroup_id) n_groups
+  FROM naver_adgroup_product GROUP BY mall_product_id) GROUP BY n_groups ORDER BY n_groups;
+```
+
+**2개 이상에 걸린 상품 = 580 / 702 (82.6%)**. 서로 다른 밴드의 그룹에 같은 상품이 걸리므로, 밴드별 커머스 금액을 그냥 합산하면 **원래 매칭 총액을 3.2~3.24배 부풀린다**(교차 계산 실측).
+
+⚠️ **미해결 불일치**: 교차 계산 산출물은 다중 그룹 상품을 **390개(55.6%)**로 적었고 위 쿼리는 **580개(82.6%)**다. 정의가 다른 지점(SHOPPING 한정 여부·정산 매칭분 한정 여부 등)을 **아직 특정하지 못했다 — 둘 중 무엇이 맞는지 확정 전에는 어느 쪽도 인용하지 않는다.**
+
+**배분 방법은 미결**: 이 저장소엔 선례가 있다 — `today_proxy_revenue.build()`가 `product_campaign_share.campaigns_per_product`로 **균등 분할**하고, 그 분모는 「요청 범위와 무관하게 그 상품을 매핑한 **모든** 캠페인 수」여야 한다고 docstring에 명시돼 있다(범위가 좁으면 과대 계상). 다만 그 선례는 **캠페인** grain이고 여기 필요한 것은 **광고그룹** grain이다. 어느 배분을 쓸지는 이 문서에서 정하지 않는다.
