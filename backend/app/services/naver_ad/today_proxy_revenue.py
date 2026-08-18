@@ -64,8 +64,14 @@ def product_ids_by_campaign(db: Session, campaign_ids: list[str]) -> dict[str, l
     return {cid: sorted(pids) for cid, pids in by_campaign.items()}
 
 
-def _revenue_by_product(db: Session, product_ids: list[str], day: date) -> dict[str, Decimal]:
-    """당일(KST) 상품별 실주문 매출 합 — 1쿼리. 주문이 없는 상품은 키가 없다(=0원)."""
+def revenue_by_product(db: Session, product_ids: list[str], day: date) -> dict[str, Decimal]:
+    """당일(KST) 상품별 실주문 매출 합 — 1쿼리. 주문이 없는 상품은 키가 없다(=0원).
+
+    ★공개 함수다(D-NAO-193): probe_revert의 출혈밸브가 «상한 프록시» 보강 신호로 같은 값을
+      쓴다. 회계 규약(채널6·매출제외 상태·selling_price=라인총액)이 **이 한 곳에만** 있어야
+      한다 — budget_pacing.py:213이 동명의 로컬 함수로 Order를 직접 쿼리해 규약을 병렬
+      재구현한 전례가 있다(ref 72 §0 행 D). 새 소비처는 이 함수를 부른다.
+    ⚠️캠페인 배분(균등 분할)은 여기 없다 — build()가 한다. 상품 단위 원값이다."""
     if not product_ids:
         return {}
     rows = (
@@ -108,7 +114,7 @@ def build(db: Session, campaign_ids: list[str], day: date) -> dict[str, dict]:
     #   달라진다(범위가 좁으면 분모가 작아져 과대 계상).
     all_pids = sorted({pid for pids in pids_by_campaign.values() for pid in pids})
     shares = product_campaign_share.campaigns_per_product(db, all_pids)
-    revenue_by_product = _revenue_by_product(db, all_pids, day)
+    revenue_by_pid = revenue_by_product(db, all_pids, day)
 
     for cid, pids in pids_by_campaign.items():
         total = Decimal(0)
@@ -117,7 +123,7 @@ def build(db: Session, campaign_ids: list[str], day: date) -> dict[str, dict]:
             share = shares.get(pid, 1) or 1
             if share > 1:
                 shared += 1
-            total += revenue_by_product.get(pid, Decimal(0)) / Decimal(share)
+            total += revenue_by_pid.get(pid, Decimal(0)) / Decimal(share)
         result[cid] = {
             "revenue": int(total),
             "product_count": len(pids),

@@ -2,9 +2,16 @@
 # 역할: CD2가 능동 상향한 클릭 탐침(approval_source=probe_op)이 성적을 냈는지 사후 판정하고,
 #   근거 없이 올려둔 입찰가는 before_value로 원위치(되돌림)한다. 두 단계:
 #   ①Stage 1 실시간 출혈 밸브(run_bleed_valve, D-58-8) — 시간당 레인 말미에 당일 standing
-#     probe의 소진이 정착창 시간당평균×3을 넘고(비용 급등) 당일 즉시구매가 0이면 즉시 회수.
+#     probe의 소진이 정착창 시간당평균×3을 넘고(비용 급등) 당일 전환이 0이면 즉시 회수.
 #     "돈 새는 걸 하루 내내 방치하지 않는다"의 안전판(보수적 되돌림 — 애매하면 hold, 확실한
 #     출혈만 회수).
+#     ★2026-08-18 수리(D-NAO-193, ref 72 §2-①): "당일 전환 0" 판정이 **구조적으로 항상 참**
+#       이었다 — 옛 `_conv_direct_today`가 **D−1까지만 적재되는** naver_ad_daily에서
+#       `ad_date == 오늘`을 읽어 언제나 0을 돌려줬다(라이브 확인 2026-08-18: 그 테이블의
+#       MAX(ad_date)=08-17, 당일 행 0건). 즉 밸브는 19일간 "비용만 보고" 회수하고 있었다.
+#       → **2신호 2단 판정**(_today_conversion_verdict)으로 교체: 주신호는 매시 적재되는
+#       naver_adgroup_hourly_today의 당일 광고 전환(광고 귀속 신호), 보강은 그 그룹이 광고하는
+#       상품들의 당일 매출(상한 프록시). 어휘는 «확정 0 / 잠정 0 / 전환 있음 / 미관측» 4값.
 #   ②Stage 2 성과 정산 판정(run_settlement, D-58-9) — 매일 08:55, D+1 정산 완료 데이터로
 #     standing probe를 유지(kept)/되돌림(reverted)/보류(deferred) 판정. 선행지표(즉시구매 +
 #     장바구니×전환율, probe_signal SA)와 보정 ROAS로 "클릭 살았나·전환 났나"를 본다.
@@ -23,14 +30,23 @@ from datetime import datetime, timedelta
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverAdgroupProduct, NaverChangeLog, NaverProposal, OpsDiaryEntry
+from app.models import (
+    NaverAdDaily,
+    NaverAdgroupHourlyToday,
+    NaverAdgroupProduct,
+    NaverChangeLog,
+    NaverProposal,
+    OpsDiaryEntry,
+)
 from app.services.naver_ad import (
     auto_operator,
     cart_conversion_rate,
     diagnosis,
     diary,
+    load_window,
     naver_execution_harness,
     probe_signal,
+    today_proxy_revenue,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_sa_ad_fetcher import fetch_entity_hh24
@@ -44,20 +60,143 @@ log = logging.getLogger(__name__)
 _LOOKBACK_DAYS = 7
 
 
+def _mapped_product_ids(db: Session, adgroup_id: str) -> list[str]:
+    """그 광고그룹이 광고하는 판매상품 id 전부(정렬·중복 제거, 없으면 빈 리스트) — 1쿼리."""
+    rows = db.query(NaverAdgroupProduct.mall_product_id).filter(
+        NaverAdgroupProduct.adgroup_id == adgroup_id
+    ).all()
+    return sorted({r[0] for r in rows if r[0]})
+
+
 def _one_to_one_product(db: Session, adgroup_id: str) -> str | None:
     """adgroup_id가 정확히 하나의 mall_product_id에 매핑될 때만 그 상품 id 반환(다상품/미매핑은
     None). cart_conversion_rate._one_to_one_adgroup_product와 동일 판정(1:1만) — 그 함수는
     전체 스캔이라 단건 조회로 국소화(같은 규약, 결합 회피)."""
-    rows = db.query(NaverAdgroupProduct.mall_product_id).filter(
-        NaverAdgroupProduct.adgroup_id == adgroup_id
-    ).all()
-    pids = {r[0] for r in rows}
-    return next(iter(pids)) if len(pids) == 1 else None
+    pids = _mapped_product_ids(db, adgroup_id)
+    return pids[0] if len(pids) == 1 else None
 
 
-def _conv_direct_today(db: Session, target_type: str, target_id: str, today) -> int:
-    """당일 즉시구매(conv_direct_cnt) 합 — grain 필터는 probe_signal/_settlement_agg와 동일
-    (BACKFILL 센티넬 제외, keyword grain은 WEB_SITE 한정). 행 없으면 0."""
+# ══════════════════ 당일 전환 판정 — 2신호 2단 (D-NAO-193, ref 72 §2-①) ══════════════════
+#
+# ★원리(ref 72 §1): 스마트스토어 상품 매출은 **광고 귀속 매출의 상한**이다. 그러므로
+#   «상한이 0이면 참값도 0»은 추정이 아니라 산술이고, 반대로 «상한이 양수»는 광고가 벌었다는
+#   증거가 되지 못한다. 그래서 이 프록시는 **손절(0쪽) 판정에만** 쓴다 — 확장 판정에 쓰면 안 된다.
+#
+# 신호 둘:
+#   주신호 = naver_adgroup_hourly_today의 당일 광고 전환(conv_cnt). **광고 귀속 신호**이고
+#            매시 수집된다(today_hourly_sweep). ⚠️conv_cnt는 전체 전환 건수라 즉시구매
+#            (conv_direct)의 **상위집합**이다 → conv_cnt==0 ⇒ 즉시구매도 0(옛 조건보다 강하다).
+#   보강   = 그 그룹이 광고하는 상품들의 당일 매출 합(today_proxy_revenue.revenue_by_product).
+#            네이버 자체 당일 집계 지연에 의한 «거짓 0»을 걸러내는 교차 확인용.
+#
+# 4값 어휘:
+#   확정 0(certain_zero)   광고 전환 0 ∧ 상품 매출 0 — 산술적으로 확실 → 즉시 회수 가능
+#   잠정 0(tentative_zero) 광고 전환 0인데 상품은 팔렸다(또는 매핑이 없어 교차 확인 불가)
+#                          → 거짓 0 가능 → **다음 시각 재확인 후 발화**(_bleed_watch)
+#   전환 있음(positive)     광고 전환 > 0 → 출혈 아님(hold)
+#   미관측(unknown)        주신호 행 자체가 없다(콜 상한 회전·스윕 실패·광고그룹 미상)
+#                          → 근거 없이 회수하지 않는다(fail-open, skip)
+_VERDICT_CERTAIN_ZERO = "certain_zero"
+_VERDICT_TENTATIVE_ZERO = "tentative_zero"
+_VERDICT_POSITIVE = "positive"
+_VERDICT_UNKNOWN = "unknown"
+
+
+def _probe_adgroup_id(probe: dict) -> str | None:
+    """주신호(그룹 grain)를 조회할 광고그룹 id. keyword 탐침은 제안의 adgroup_id를 쓴다 —
+    그룹 전환은 그 안의 키워드 전환의 **상위집합**이라 «그룹 0 ⇒ 키워드 0»이 성립한다
+    (0쪽으로만 쓰는 이 판정에서 상위집합은 안전한 방향이다). 없으면 None."""
+    if probe["target_type"] == "adgroup":
+        return probe["target_id"] or None
+    return probe.get("adgroup_id") or None
+
+
+def _today_ad_conversions(db: Session, adgroup_id: str, today, *, before_hour: int) -> int | None:
+    """당일 완결 시간(hour < before_hour)의 광고 전환 합. **행이 하나도 없으면 None**(=미관측).
+
+    ★0과 None을 반드시 구분한다 — 이 테이블은 lag=0이지만 콜 상한(_CALL_CAP=800) 회전 때문에
+      그 시각에 조회되지 않은 그룹은 행이 없다. «행 없음»을 0으로 읽는 것이 바로 이번에 고치는
+      결함의 모양이다(load_window 모듈 docstring 참조).
+    ★hour < before_hour인 이유: 밸브가 비용을 재는 창(cost_accrued)과 **같은 창**을 봐야 한다.
+      진행 중인 시간 버킷은 today_hourly_sweep이 애초에 저장하지 않지만, 창을 명시해 둔다."""
+    load_window.require_loaded(
+        "naver_adgroup_hourly_today", today, today, reader="probe_revert._today_ad_conversions"
+    )
+    n_rows, conv = (
+        db.query(
+            sqlfunc.count(NaverAdgroupHourlyToday.id),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdgroupHourlyToday.conv_cnt), 0),
+        )
+        .filter(
+            NaverAdgroupHourlyToday.ad_date == today,
+            NaverAdgroupHourlyToday.adgroup_id == adgroup_id,
+            NaverAdgroupHourlyToday.hour < before_hour,
+        )
+        .one()
+    )
+    if int(n_rows or 0) == 0:
+        return None
+    return int(conv or 0)
+
+
+def _today_proxy_revenue(db: Session, adgroup_id: str, today) -> tuple[int | None, int]:
+    """(그 그룹이 광고하는 상품들의 당일 매출 합, 상품 수). 매핑이 없으면 (None, 0).
+
+    ★캠페인 균등 분할을 **하지 않는다**(today_proxy_revenue.build과 다른 점): 여기서 필요한 건
+      «이 그룹의 광고 전환 상한»이라 분할 전 원값이 맞다. 분할은 캠페인별 배분용이고, 나누면
+      상한이 실제보다 낮아져 «확정 0»이 잘못 뜰 수 있다.
+    ★회계 규약(채널6·매출제외 상태·selling_price)은 today_proxy_revenue 한 곳에서만 온다 —
+      여기서 Order를 직접 쿼리하면 규약이 갈라진다(ref 72 §0 행 D의 budget_pacing 전례)."""
+    pids = _mapped_product_ids(db, adgroup_id)
+    if not pids:
+        return None, 0
+    load_window.require_loaded("orders", today, today, reader="probe_revert._today_proxy_revenue")
+    by_pid = today_proxy_revenue.revenue_by_product(db, pids, today)
+    return int(sum(by_pid.values())), len(pids)
+
+
+def _today_conversion_verdict(db: Session, probe: dict, now: datetime) -> dict:
+    """당일 전환 2신호 2단 판정 — {"verdict", "ad_conv", "proxy_revenue", "product_count",
+    "adgroup_id", "note"}. 판정만 하고 집행하지 않는다."""
+    today = now.date()
+    adgroup_id = _probe_adgroup_id(probe)
+    out: dict = {
+        "verdict": _VERDICT_UNKNOWN, "adgroup_id": adgroup_id, "ad_conv": None,
+        "proxy_revenue": None, "product_count": 0, "note": "",
+    }
+    if not adgroup_id:
+        out["note"] = "광고그룹 미상(제안에 adgroup_id 없음) — 주신호 조회 불가"
+        return out
+
+    ad_conv = _today_ad_conversions(db, adgroup_id, today, before_hour=now.hour)
+    out["ad_conv"] = ad_conv
+    if ad_conv is None:
+        out["note"] = "naver_adgroup_hourly_today에 당일 행 없음(콜 상한 회전·스윕 미도달)"
+        return out
+    if ad_conv > 0:
+        out["verdict"] = _VERDICT_POSITIVE
+        return out
+
+    proxy, product_count = _today_proxy_revenue(db, adgroup_id, today)
+    out["proxy_revenue"], out["product_count"] = proxy, product_count
+    if proxy is None:
+        out["verdict"] = _VERDICT_TENTATIVE_ZERO
+        out["note"] = "판매상품 매핑 없음 — 상한 프록시로 교차 확인 불가"
+    elif proxy == 0:
+        out["verdict"] = _VERDICT_CERTAIN_ZERO
+    else:
+        out["verdict"] = _VERDICT_TENTATIVE_ZERO
+        out["note"] = "상품은 팔렸는데 광고 전환 0 — 당일 집계 지연에 의한 거짓 0 가능"
+    return out
+
+
+def _conv_direct_today_legacy(db: Session, target_type: str, target_id: str, today) -> int:
+    """★폐기 예정 — 판정에 쓰지 않는다. 배포 후 «구경로 vs 신경로» 1회 대조 로그 전용이다.
+
+    naver_ad_daily는 D−1까지만 적재되므로(load_window 레지스트리) `ad_date == 오늘` 조회는
+    **구조적으로 항상 0**이다. 그 0이 19일간 밸브의 «당일 즉시구매 0» 조건을 영원히 참으로
+    만들었다(D-NAO-192 발견 → D-NAO-193 수리). 라이브 대조가 끝나면 이 함수와 호출부를 지운다.
+    grain 필터는 옛 동작을 그대로 보존한다(대조가 의미를 가지려면 옛 쿼리 그대로여야 한다)."""
     q = db.query(sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_cnt), 0)).filter(
         NaverAdDaily.ad_date == today,
         NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
@@ -142,7 +281,14 @@ def _standing_probes(db: Session, now: datetime) -> list[dict]:
 def run_bleed_valve(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
     """Stage 1 실시간 출혈 밸브(D-58-8) — 시간당 레인 말미 호출. 당일(probe_date==today)
     standing probe 중 소진이 정착창 시간당평균×_PROBE_BLEED_COST_MULTIPLE(=3)을 넘고 당일
-    즉시구매가 0인 것을 즉시 되돌림(보수적 — 확실한 출혈만 회수, 애매하면 hold).
+    전환이 0인 것을 즉시 되돌림(보수적 — 확실한 출혈만 회수, 애매하면 hold).
+
+    ★당일 전환 판정은 _today_conversion_verdict의 2신호 2단(D-NAO-193) — 4값 분기:
+      확정 0 → 즉시 회수 · 잠정 0 → **오늘 더 이른 시각에도 같은 조건이 관측됐을 때만** 회수
+      (그 전엔 _bleed_watch에 기록하고 hold) · 전환 있음 → hold · 미관측 → skip(fail-open).
+    ★「잠정 0」의 재확인을 «직전 시각»이 아니라 «오늘 더 이른 아무 시각»으로 둔 이유: 레인이
+      매시 반드시 도는 보장이 없어(실패·배포·정지) 엄격한 연속 조건은 밸브를 조용히 죽인다.
+      하루 안에 출혈 조건이 두 번 관측되면 지연에 의한 거짓 0로 보기 어렵다.
 
     fetch_intraday 미주입 시 fetch_entity_hh24(테스트 주입, 원칙18-8). now.hour==0이면 완료
     버킷이 없어 조기 반환(_probe_trigger/_is_pacing_slow의 자정 경계 처리와 동일 철학).
@@ -182,25 +328,50 @@ def run_bleed_valve(db: Session, *, now: datetime | None = None, fetch_intraday=
                 continue
             settlement_hourly_avg = settlement_daily_avg / 24
             cost_spike = hourly_rate > settlement_hourly_avg * auto_operator._PROBE_BLEED_COST_MULTIPLE
-            conv_today = _conv_direct_today(db, probe["target_type"], probe["target_id"], today)
 
-            if cost_spike and conv_today == 0:
-                reason = (
-                    f"실시간 출혈 — 시간당소진 {hourly_rate:.0f}원 > 정착창 시간당평균"
-                    f"×{auto_operator._PROBE_BLEED_COST_MULTIPLE}({settlement_hourly_avg:.0f}원)"
-                    f"∧당일즉시구매0"
-                )
-                if _execute_revert(db, probe, now, reason=reason, stage="bleed"):
-                    result["reverted"] += 1
-                else:
-                    result["held"].append({
-                        "target_id": probe["target_id"], "reason": "되돌림 skip(킬스위치/가드레일)"
-                    })
-            else:
+            verdict = _today_conversion_verdict(db, probe, now)
+            _log_path_comparison(db, probe, now, verdict, cost_spike=cost_spike,
+                                 hourly_rate=hourly_rate, baseline_hourly=settlement_hourly_avg)
+
+            spike_note = (
+                f"시간당소진 {hourly_rate:.0f}원 > 정착창 시간당평균"
+                f"×{auto_operator._PROBE_BLEED_COST_MULTIPLE}({settlement_hourly_avg:.0f}원)"
+            )
+            v = verdict["verdict"]
+            if not cost_spike:
                 result["held"].append({
                     "target_id": probe["target_id"],
-                    "reason": f"출혈 아님(cost_spike={cost_spike}, conv_today={conv_today})",
+                    "reason": f"출혈 아님(cost_spike=False, 당일전환판정={v})",
                 })
+            elif v == _VERDICT_POSITIVE:
+                result["held"].append({
+                    "target_id": probe["target_id"],
+                    "reason": f"당일 광고 전환 있음(ad_conv={verdict['ad_conv']}) — 출혈 아님",
+                })
+            elif v == _VERDICT_UNKNOWN:
+                # fail-open: 근거 없이 회수하지 않는다(settlement_daily_avg<=0 skip과 같은 규약).
+                result["skipped"] += 1
+                log.info("probe_revert: 당일 전환 미관측 — 되돌림 보류 target=%s: %s",
+                         probe["target_id"], verdict["note"])
+            elif v == _VERDICT_CERTAIN_ZERO:
+                _revert_or_hold(db, probe, now, result,
+                                reason=f"실시간 출혈 — {spike_note}∧당일전환0(확정 — 상품매출도 0)")
+            else:  # _VERDICT_TENTATIVE_ZERO — 다음 시각 재확인 후 발화
+                seen = _bleed_watch_hours(db, probe, today)
+                earlier = [h for h in seen if h < now.hour]
+                if earlier:
+                    _revert_or_hold(
+                        db, probe, now, result,
+                        reason=(f"실시간 출혈 — {spike_note}∧당일전환0(잠정, {verdict['note']}) "
+                                f"— {earlier[-1]}시에도 같은 조건 관측되어 재확인 완료"),
+                    )
+                else:
+                    _bleed_watch_record(db, probe, today, now.hour)
+                    result["held"].append({
+                        "target_id": probe["target_id"],
+                        "reason": (f"잠정 0 — 다음 시각 재확인 대기({verdict['note']}, "
+                                   f"proxy_revenue={verdict['proxy_revenue']})"),
+                    })
         except Exception as e:  # noqa: BLE001 — 한 유닛 실패가 밸브를 못 죽인다
             result["errors"] += 1
             log.exception("probe_revert: 출혈밸브 유닛 실패 target=%s: %s", probe["target_id"], e)
@@ -267,6 +438,107 @@ def run_settlement(db: Session, *, now: datetime | None = None) -> dict:
             result["errors"] += 1
             log.exception("probe_revert: 정산 유닛 실패 target=%s: %s", probe["target_id"], e)
     return result
+
+
+def _revert_or_hold(db: Session, probe: dict, now: datetime, result: dict, *, reason: str) -> None:
+    """되돌림 1건 집행 시도 후 result 집계 — 되돌림/hold 두 갈래를 한 곳에 모은다."""
+    if _execute_revert(db, probe, now, reason=reason, stage="bleed"):
+        result["reverted"] += 1
+    else:
+        result["held"].append({
+            "target_id": probe["target_id"], "reason": "되돌림 skip(킬스위치/가드레일)",
+        })
+
+
+def _log_path_comparison(
+    db: Session, probe: dict, now: datetime, verdict: dict, *,
+    cost_spike: bool, hourly_rate: float, baseline_hourly: float,
+) -> None:
+    """★배포 후 라이브 합격 증거(ref 72 §2-① 합격기준) — 구경로/신경로 1회 병기 로그.
+
+    구경로는 **판정에 쓰이지 않는다**(대조 표시 전용). 옛 값이 0이고 신 값이 실제 전환을
+    가리키는 것이 관측되면 이 함수와 _conv_direct_today_legacy를 함께 지운다.
+    fail-open: 로그 산출 실패가 밸브 판정을 되돌리지 않는다."""
+    try:
+        today = now.date()
+        legacy = _conv_direct_today_legacy(db, probe["target_type"], probe["target_id"], today)
+        try:
+            load_window.require_loaded("naver_ad_daily", today, today,
+                                       reader="probe_revert._conv_direct_today_legacy")
+            window_note = "적재창 안"
+        except load_window.LoadWindowError as e:
+            window_note = f"적재창 밖 — {e}"
+        log.info(
+            "[출혈밸브·경로대조] now=%s KST target=%s(%s) adgroup=%s | "
+            "구경로 naver_ad_daily.conv_direct=%s (%s) | "
+            "신경로 판정=%s ad_conv=%s proxy_revenue=%s products=%s %s | "
+            "cost_spike=%s(시간당 %.0f원 vs 기준 %.0f원)",
+            now.isoformat(), probe["target_id"], probe["target_type"], verdict["adgroup_id"],
+            legacy, window_note,
+            verdict["verdict"], verdict["ad_conv"], verdict["proxy_revenue"],
+            verdict["product_count"], verdict["note"],
+            cost_spike, hourly_rate, baseline_hourly,
+        )
+    except Exception as e:  # noqa: BLE001 — 대조 로그 실패가 판정을 오염시키지 않는다
+        log.warning("probe_revert: 경로대조 로그 실패(fail-open): %s", e)
+
+
+def _probe_diary_entry(db: Session, probe: dict) -> OpsDiaryEntry | None:
+    """원 탐침의 execute 일기 행(source_ref=probe change_log id) — 없으면 None."""
+    return (
+        db.query(OpsDiaryEntry)
+        .filter(
+            OpsDiaryEntry.source_ref == probe["change_log_id"],
+            OpsDiaryEntry.event_type == "execute",
+            OpsDiaryEntry.actor == diary.ACTOR_PROBE,
+        )
+        .first()
+    )
+
+
+_BLEED_WATCH_KEY = "bleed_watch"
+
+
+def _bleed_watch_hours(db: Session, probe: dict, today) -> list[int]:
+    """오늘 이미 «출혈 ∧ 잠정 0»으로 관측된 시각 목록(오름차순). 기록이 없거나 날짜가 다르면 [].
+
+    ★저장소를 일기 outcome_json으로 둔 이유: 마이그레이션 없이 시간 간 상태를 나르기 위해서다
+      (probe 상태는 원래 change_log/일기에서 파생한다는 이 모듈의 규약을 따른다).
+    ★일기 행이 없으면 기록도 조회도 못 하므로 잠정 0은 **영원히 hold**가 된다 —
+      fail-toward-hold(보수적 되돌림 계약과 같은 방향)이고, 조용한 오발보다 낫다."""
+    try:
+        entry = _probe_diary_entry(db, probe)
+        if entry is None or not entry.outcome_json:
+            return []
+        watch = (json.loads(entry.outcome_json) or {}).get(_BLEED_WATCH_KEY) or {}
+        if watch.get("date") != today.isoformat():
+            return []
+        return sorted({int(h) for h in watch.get("hours", [])})
+    except Exception as e:  # noqa: BLE001 — fail-toward-hold
+        log.warning("probe_revert: bleed_watch 조회 실패(hold): %s", e)
+        return []
+
+
+def _bleed_watch_record(db: Session, probe: dict, today, hour: int) -> None:
+    """오늘 시각 `hour`에 «출혈 ∧ 잠정 0»을 관측했음을 기록(같은 시각 중복 기입 없음).
+    날짜가 바뀌면 목록을 새로 시작한다. fail-open(기입 실패가 hold 판정을 되돌리지 않는다)."""
+    try:
+        entry = _probe_diary_entry(db, probe)
+        if entry is None:
+            log.warning("probe_revert: bleed_watch 기입 대상 일기 없음 target=%s(잠정 0 유지)",
+                        probe["target_id"])
+            return
+        outcome: dict = json.loads(entry.outcome_json) if entry.outcome_json else {}
+        watch = outcome.get(_BLEED_WATCH_KEY) or {}
+        hours = sorted({int(h) for h in watch.get("hours", [])}) \
+            if watch.get("date") == today.isoformat() else []
+        if hour not in hours:
+            hours.append(hour)
+        outcome[_BLEED_WATCH_KEY] = {"date": today.isoformat(), "hours": sorted(hours)}
+        entry.outcome_json = json.dumps(outcome, ensure_ascii=False)
+        db.commit()
+    except Exception as e:  # noqa: BLE001 — fail-open
+        log.warning("probe_revert: bleed_watch 기입 실패(fail-open): %s", e)
 
 
 def _resolve_cart_rate(db: Session, probe: dict, bundle: dict) -> float:
@@ -340,15 +612,7 @@ def _write_probe_outcome(
     ★되돌림 집행 자체가 남기는 새 execute 일기(source_ref=되돌림 change_log id)와는 다른 행이다
     (원 탐침 행만 source_ref로 특정) — 그래서 result='reverted'도 원 탐침 행에 정확히 붙는다."""
     try:
-        entry = (
-            db.query(OpsDiaryEntry)
-            .filter(
-                OpsDiaryEntry.source_ref == probe["change_log_id"],
-                OpsDiaryEntry.event_type == "execute",
-                OpsDiaryEntry.actor == diary.ACTOR_PROBE,
-            )
-            .first()
-        )
+        entry = _probe_diary_entry(db, probe)
         if entry is None:
             return
         outcome: dict = json.loads(entry.outcome_json) if entry.outcome_json else {}
