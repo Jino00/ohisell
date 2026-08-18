@@ -205,7 +205,7 @@
 다음 슬라이스(ⓒ n-gram) 착수 전 필요하다.
 §6-b는 전부 라이브 관측이 합격기준이라 배포 가능한 세션이 필요하다 — 이 전 세션은
 Jino 취침 중 무인 진행이라 배포를 의도적으로 보류했다(§5).
-★origin 미푸시 13커밋 상태다(Jino 지시) — push 다시 묻지 말 것.
+★origin 미푸시 25커밋 상태다(Jino 지시) — push 다시 묻지 말 것. ※이 줄의 초판 값 13은 야간 시점이라 낡았다(§10-6이 최신).
 ```
 
 ---
@@ -214,7 +214,7 @@ Jino 취침 중 무인 진행이라 배포를 의도적으로 보류했다(§5).
 
 - **main 기준**, 배포 없음, prod 무변경, **PAO 완전 정지 유지**(`optimizer='none'` 7/7, 이 세션 내 3회 재확인)
 - 다음 번호: **D-NAO-191 / 교훈 #311**(2026-08-18 00:3x `./scripts/next_ids.sh --no-fetch` 직접 확인)
-- origin 대비 미푸시 **13커밋**(`git rev-list --count origin/main..main`, 2026-08-18 00:3x 직접 확인) — Jino 지시로 보류, 다시 묻지 말 것
+- origin 대비 미푸시 **25커밋**(`git rev-list --count origin/main..main`, 2026-08-18 10:0x 재실측) — Jino 지시로 보류, 다시 묻지 말 것. ※야간 시점 값 13에서 갱신
 - 이 세션이 쓴 서브에이전트: 읽기 전용 Sonnet(D-NAO-190 진단)·Sonnet(매트릭스 조립)·Sonnet(완료 QA 1라운드)·Sonnet(완료 QA 재판정) — 전량 읽기 전용, 상태 변경 도구 미사용
 
 ---
@@ -281,7 +281,7 @@ Jino 취침 중 무인 진행이라 배포를 의도적으로 보류했다(§5).
 
 > 이 구간 커밋 7건: 슬라이스 5(D-NAO-191) = `55a21ba8`·`f2356099` / 슬라이스 6(D-NAO-192) = `33ed9fe7`·`4fa355f6`·`51ea1028`·`6d0201ec`·`934caf02`.
 > 배포 0 · `backend/`·`alembic/`·`frontend/` 변경 0 · 네이버 SA API 콜 0(커머스 GET만, 라이브 확정용) · push 0 · `optimizer` 7/7 `none`·`auto_operate` 7/7 `0` 유지.
-> ★**origin 미푸시 = 24커밋**(`git rev-list --count origin/main..main`, 2026-08-18 직접 확인). Jino 지시로 push 보류 상태가 계속된다 — **다시 묻지 말 것**.
+> ★**origin 미푸시 = 25커밋**(`git rev-list --count origin/main..main`, 2026-08-18 10:0x 재실측). ⚠️초판 24는 **이 HANDOFF 커밋 자신이 빠진 자기참조 오차**였다 — §5에서 13→14로 고쳤던 것과 **같은 실수의 재발**이다(교훈 #309 계열). Jino 지시로 push 보류 상태가 계속된다 — **다시 묻지 말 것**.
 > ⚠️이 범위에는 `557a8af8`(`chore(04-audit): D+19 정지 상태 감사`, 09:00)도 포함돼 있으나 **이 세션 §10의 서술 대상이 아니다** — 저자·목적이 다른 별도 산출물이라 여기서 다루지 않는다(`git show --stat 557a8af8`로 직접 확인: `claude-progress.txt`·`docs/references/data/ab_03_vs_04_daily.jsonl` 변경, 04 캠페인 정지 상태 감사). 「인계 숫자는 실측 전엔 못 믿는다」에 따라 존재를 숨기지 않고 병기한다.
 
 ### 10-0. Jino 지시 원문 대장 (이 구간, 시각은 근사 KST)
@@ -358,6 +358,6 @@ Jino 취침 중 무인 진행이라 배포를 의도적으로 보류했다(§5).
 
 ### 10-6. 환경·번호
 
-- **origin 대비 미푸시 24커밋**(`git rev-list --count origin/main..main`, 2026-08-18 직접 확인) — Jino 지시로 push 보류, **다시 묻지 말 것**.
+- **origin 대비 미푸시 25커밋**(`git rev-list --count origin/main..main`, 2026-08-18 10:0x 재실측 — 초판 24는 자기참조 오차) — Jino 지시로 push 보류, **다시 묻지 말 것**.
 - **다음 번호**: **D-NAO-193 / 교훈 #312**(`./scripts/next_ids.sh --no-fetch` 직접 실행 확인, origin/main=186·306 / 내 브랜치=192·311 중 큰 쪽 +1).
 - **새 세션 시작 시**: 이 HANDOFF §10부터 읽고, §6-a(기존)와 10-4(신규 #7)를 함께 확인 — 다음 착수는 10-3 우선순위 ①(`probe_revert` 수리)이 `optimizer` 해제보다 먼저다.
