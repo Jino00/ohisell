@@ -130,8 +130,20 @@ def _ad_row(db, *, campaign_type="WEB_SITE", adgroup_id="grp-1", keyword_id="nkw
     db.commit()
 
 
-def _hour(h, *, imp=10, clk=0, cost=100, avg_rank=3.0):
-    return {"hour": h, "imp": imp, "clk": clk, "cost": cost, "avg_rank": avg_rank}
+def _hour(h, *, imp=10, clk=0, cost=100, avg_rank=3.0, conv_cnt=0):
+    """fetch_entity_hh24의 반환 모양 그대로 — **conv_cnt를 반드시 포함한다.**
+
+    ★2026-08-18 적대 리뷰에서 드러난 것: 이 헬퍼가 conv_cnt를 빼먹고 있었고, 밸브의 주신호를
+      곡선으로 옮기자 모든 밸브 테스트가 «미관측»으로 떨어졌다. prod의 fetch_entity_hh24는
+      항상 conv_cnt를 채운다(naver_sa_ad_fetcher._STATS_HH24_FIELDS에 ccnt 포함) —
+      픽스처가 prod보다 **빈약**해도 결함을 못 잡는다([[test-fixture-must-match-prod-session]])."""
+    return {"hour": h, "imp": imp, "clk": clk, "cost": cost, "avg_rank": avg_rank,
+            "conv_cnt": conv_cnt}
+
+
+def _curve(*, hours=8, cost=250, conv_cnt=0):
+    """spike를 만드는 표준 곡선(8시간×cost). conv_cnt는 시간당 전환 건수."""
+    return [_hour(h, imp=20, clk=1, cost=cost, conv_cnt=conv_cnt) for h in range(hours)]
 
 
 ADGROUP = "grp-1"
@@ -379,11 +391,10 @@ def test_bleed_valve_certain_zero_reverts(db):
     """spike ∧ 광고전환 0 ∧ 상품매출 0(= 확정 0) → 즉시 되돌림."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)  # 당일 탐침
-    _hourly_today(db, conv_cnt=0)          # 주신호 관측됨 · 전환 0
-    _mapped_product(db)                    # 보강 신호 조회 가능 · 당일 주문 없음 → 매출 0
+    _mapped_product(db)  # 보강 신호 조회 가능 · 당일 주문 없음 → 매출 0
     now_midday = datetime(2026, 7, 20, 10, 20, 0)  # now.hour=10
-    # 완료 버킷 [0..9] 소진 합 2000 → 시간당 200 > 125 → spike.
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]  # 8×250=2000
+    # 완료 버킷 [0..9] 소진 합 2000 → 시간당 200 > 125 → spike. 곡선 전환 0(관측됨).
+    curve = _curve(conv_cnt=0)  # 8×250=2000
     with patch.object(harness, "_build_guardrail_context", return_value={}), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid",
@@ -405,11 +416,10 @@ def test_bleed_valve_ignores_naver_ad_daily_today_rows(db):
     넣고도 확정 0 판정이 유지되는지 못박는다(옛 코드였다면 hold로 갈라졌다)."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
-    _hourly_today(db, conv_cnt=0)
     _mapped_product(db)
     _ad_row(db, keyword_id="nkw-p", ad_date=TODAY, clk=3, cost=2000, conv_direct_cnt=7)
     now_midday = datetime(2026, 7, 20, 10, 20, 0)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
+    curve = _curve(conv_cnt=0)
     with patch.object(harness, "_build_guardrail_context", return_value={}), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid",
@@ -418,40 +428,142 @@ def test_bleed_valve_ignores_naver_ad_daily_today_rows(db):
     assert result["reverted"] == 1
 
 
-def test_bleed_valve_unknown_signal_skips(db):
-    """주신호 행이 아예 없으면(콜 상한 회전·스윕 미도달) 근거 없이 회수하지 않는다."""
+def test_bleed_valve_curve_without_conv_field_is_unknown_not_zero(db):
+    """★곡선에 conv_cnt **필드가 없으면** 0이 아니라 «미관측» — 이번에 고치는 사고의 부류 그 자체.
+
+    폴백 테이블에도 당일 전환이 없으니 회수 근거가 없다 → skip(fail-open). 상품 매출이 0이어도
+    «확정 0»으로 승격되면 안 된다(광고 귀속 신호가 없기 때문)."""
     _bleed_settings_and_baseline(db)
-    _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)  # hourly_today 시드 없음
-    now_midday = datetime(2026, 7, 20, 10, 20, 0)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
+    _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
+    _mapped_product(db)
+    curve = [{"hour": h, "imp": 20, "clk": 1, "cost": 250, "avg_rank": 3.0} for h in range(8)]
     with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
-        result = probe_revert.run_bleed_valve(db, now=now_midday, fetch_intraday=lambda tid, d: curve)
+        result = probe_revert.run_bleed_valve(
+            db, now=datetime(2026, 7, 20, 10, 20, 0), fetch_intraday=lambda tid, d: curve)
     mock_write.assert_not_called()
     assert result["reverted"] == 0
     assert result["skipped"] == 1
 
 
-def test_bleed_valve_no_adgroup_on_keyword_probe_skips(db):
-    """keyword 탐침에 adgroup_id가 없으면 주신호를 못 물어본다 → 미관측 skip."""
+def test_bleed_valve_empty_curve_is_unknown(db):
+    """곡선 자체가 비면(창 안 실적 0) 미관측 — cost_spike도 성립 못 하지만 판정 어휘를 못박는다."""
+    _bleed_settings_and_baseline(db)
+    _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
+    _mapped_product(db)
+    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        result = probe_revert.run_bleed_valve(
+            db, now=datetime(2026, 7, 20, 10, 20, 0), fetch_intraday=lambda tid, d: [])
+    mock_write.assert_not_called()
+    assert result["reverted"] == 0
+
+
+def test_bleed_valve_conv_window_matches_cost_window(db):
+    """★전환 창 = 비용 창 (적대 리뷰 변이 M2 방어 · P1-2가 고친 것).
+
+    진행 중인 시간(now.hour) 버킷은 비용에서 제외되므로 전환에서도 제외해야 한다. 여기 전환을
+    실어 두고 «전환 있음»으로 넘어가면 두 창이 어긋난 것이다."""
+    _bleed_settings_and_baseline(db)
+    _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
+    _mapped_product(db)  # 당일 주문 없음
+    now_h10 = datetime(2026, 7, 20, 10, 20, 0)  # now.hour=10 → 완결 창 [0..9]
+    curve = _curve(conv_cnt=0) + [_hour(10, imp=5, clk=1, cost=100, conv_cnt=9)]  # 진행 중 버킷
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                      return_value=_revert_writer()) as mock_write:
+        result = probe_revert.run_bleed_valve(db, now=now_h10, fetch_intraday=lambda tid, d: curve)
+    # 진행 중 버킷의 전환 9건은 세지 않는다 → 완결 창 전환 0 ∧ 상품매출 0 = 확정 0 → 회수
+    assert result["reverted"] == 1
+    mock_write.assert_called_once_with("nkw-p", 1000)
+
+
+def test_bleed_valve_table_fallback_only_blocks_never_triggers(db):
+    """곡선에 전환 정보가 없을 때 폴백 테이블은 «전환 있음»만 받는다(hold 방향 전용).
+
+    같은 테이블의 0은 스윕 지연(:57 vs 밸브 :20)일 수 있어 되돌림 근거로 쓰지 않는다 —
+    위 테스트가 그 절반(0 → skip)이고, 이 테스트가 나머지 절반(>0 → hold)이다."""
+    _bleed_settings_and_baseline(db)
+    _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
+    _hourly_today(db, hours=(0,), conv_cnt=4)  # 테이블엔 당일 전환이 있다
+    curve = [{"hour": h, "imp": 20, "clk": 1, "cost": 250, "avg_rank": 3.0} for h in range(8)]
+    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        result = probe_revert.run_bleed_valve(
+            db, now=datetime(2026, 7, 20, 10, 20, 0), fetch_intraday=lambda tid, d: curve)
+    mock_write.assert_not_called()
+    assert result["reverted"] == 0 and result["skipped"] == 0
+    assert "전환 있음" in result["held"][0]["reason"]
+
+
+def test_bleed_valve_no_adgroup_on_keyword_probe_is_tentative(db):
+    """keyword 탐침에 adgroup_id가 없으면 상품 매핑을 찾을 키가 없다 → 확정 0 승격 금지."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=None)
-    _hourly_today(db, conv_cnt=0)  # 그룹 행은 있어도 이 탐침과 이을 키가 없다
-    now_midday = datetime(2026, 7, 20, 10, 20, 0)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
-    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
-        result = probe_revert.run_bleed_valve(db, now=now_midday, fetch_intraday=lambda tid, d: curve)
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                      return_value=_revert_writer()) as mock_write:
+        result = probe_revert.run_bleed_valve(
+            db, now=datetime(2026, 7, 20, 10, 20, 0),
+            fetch_intraday=lambda tid, d: _curve(conv_cnt=0))
     mock_write.assert_not_called()
-    assert result["skipped"] == 1
+    assert result["reverted"] == 0
+    assert "잠정 0" in result["held"][0]["reason"]
+
+
+def test_bleed_valve_multi_product_union_blocks_certain_zero(db):
+    """★상한 프록시는 그 그룹이 광고하는 상품 **전부**의 합이다(적대 리뷰 변이 M8 방어).
+
+    상품 하나만 봤다면 «매출 0 → 확정 0 → 즉시 회수»로 갈라졌을 상황에서, 합집합을 보면
+    다른 상품이 팔렸으므로 잠정 0에 머물러야 한다(거짓 정지 방지)."""
+    _bleed_settings_and_baseline(db)
+    _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
+    _mapped_product(db, product_id="pid-1")   # 당일 주문 없음
+    _mapped_product(db, product_id="pid-2")   # 당일 주문 있음
+    _order(db, product_id="pid-2", amount=21000)
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                      return_value=_revert_writer()) as mock_write:
+        result = probe_revert.run_bleed_valve(
+            db, now=datetime(2026, 7, 20, 10, 20, 0),
+            fetch_intraday=lambda tid, d: _curve(conv_cnt=0))
+    mock_write.assert_not_called()  # 확정 0이었다면 여기서 PUT이 나갔다
+    assert result["reverted"] == 0
+    assert "잠정 0" in result["held"][0]["reason"]
+
+
+def test_bleed_watch_from_another_day_does_not_escalate(db):
+    """★어제의 잠정 0 기록으로 오늘 첫 관측에 발화하면 안 된다(적대 리뷰 변이 M6 방어)."""
+    _bleed_settings_and_baseline(db)
+    _, cl = _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
+    _mapped_product(db)
+    _order(db, amount=30000)  # 상품은 팔림 → 잠정 0
+    entry = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.source_ref == cl.id).first()
+    entry.outcome_json = json.dumps(
+        {"bleed_watch": {"date": (TODAY - timedelta(days=1)).isoformat(), "hours": [3, 4]}})
+    db.commit()
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                      return_value=_revert_writer()) as mock_write:
+        result = probe_revert.run_bleed_valve(
+            db, now=datetime(2026, 7, 20, 10, 20, 0),
+            fetch_intraday=lambda tid, d: _curve(conv_cnt=0))
+    mock_write.assert_not_called()
+    assert result["reverted"] == 0
+    watch = json.loads(
+        db.query(OpsDiaryEntry).filter(OpsDiaryEntry.source_ref == cl.id).first().outcome_json
+    )["bleed_watch"]
+    assert watch == {"date": TODAY.isoformat(), "hours": [10]}  # 어제 기록은 승계되지 않는다
 
 
 def test_bleed_valve_tentative_zero_holds_then_reverts_next_hour(db):
     """광고전환 0인데 상품은 팔림 = 잠정 0 → 첫 시각 hold, 더 이른 시각 기록이 생긴 뒤 발화."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
-    _hourly_today(db, conv_cnt=0)
     _mapped_product(db)
     _order(db, amount=30000)  # 당일 상품 매출 > 0 → 거짓 0 가능
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
+    curve = _curve(conv_cnt=0)
 
     with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
         first = probe_revert.run_bleed_valve(
@@ -474,12 +586,16 @@ def test_bleed_valve_tentative_zero_same_hour_does_not_escalate(db):
     """같은 시각에 두 번 돌아도 발화하지 않는다(«더 이른 시각» 조건 — 재확인의 의미 보존)."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
-    _hourly_today(db, conv_cnt=0)
     _mapped_product(db)
     _order(db, amount=30000)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
+    curve = _curve(conv_cnt=0)
     now_midday = datetime(2026, 7, 20, 10, 20, 0)
-    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+    # ★가드레일을 열어 둔다 — 안 그러면 «되돌림이 막혀서» 0인지 «판정이 hold라서» 0인지
+    #   구별이 안 된다(적대 리뷰의 변이 M10이 정확히 이 구멍으로 살아남았다).
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                      return_value=_revert_writer()) as mock_write:
         probe_revert.run_bleed_valve(db, now=now_midday, fetch_intraday=lambda tid, d: curve)
         again = probe_revert.run_bleed_valve(db, now=now_midday, fetch_intraday=lambda tid, d: curve)
     mock_write.assert_not_called()
@@ -490,8 +606,7 @@ def test_bleed_valve_no_product_mapping_is_tentative_not_certain(db):
     """매핑이 없으면 상한 프록시로 교차 확인을 못 하므로 확정 0으로 승격하지 않는다."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
-    _hourly_today(db, conv_cnt=0)  # 매핑 시드 없음
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
+    curve = _curve(conv_cnt=0)  # 매핑 시드 없음
     with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
         result = probe_revert.run_bleed_valve(
             db, now=datetime(2026, 7, 20, 10, 20, 0), fetch_intraday=lambda tid, d: curve)
@@ -505,15 +620,14 @@ def test_bleed_valve_logs_legacy_vs_new_path(db, caplog):
     import logging as _logging
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
-    _hourly_today(db, hours=(0,), conv_cnt=3)  # 신경로는 전환을 본다(1시간 × 3건)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
+    curve = [_hour(0, imp=20, clk=1, cost=2000, conv_cnt=3)]  # 신경로는 전환을 본다
     with caplog.at_level(_logging.INFO, logger="app.services.naver_ad.probe_revert"):
         probe_revert.run_bleed_valve(
             db, now=datetime(2026, 7, 20, 10, 20, 0), fetch_intraday=lambda tid, d: curve)
     line = next(r.getMessage() for r in caplog.records if "[출혈밸브·경로대조]" in r.getMessage())
     assert "구경로 naver_ad_daily.conv_direct=0" in line   # 당일 행 없음 → 구조적 0
     assert "적재창 밖" in line                              # load_window가 창 위반을 지목
-    assert "신경로 판정=positive ad_conv=3" in line
+    assert "신경로 판정=positive 신호=hh24_curve ad_conv=3" in line
 
 
 def test_bleed_valve_no_spike_holds(db):
@@ -521,7 +635,7 @@ def test_bleed_valve_no_spike_holds(db):
     _probe(db, probe_date=TODAY, changed_hour=6)
     now_midday = datetime(2026, 7, 20, 10, 20, 0)
     # 낮은 소진: 8×50=400 → 시간당 40 < 125 → spike 아님
-    curve = [_hour(h, imp=20, clk=1, cost=50) for h in range(8)]
+    curve = _curve(cost=50)
     with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
         result = probe_revert.run_bleed_valve(db, now=now_midday, fetch_intraday=lambda tid, d: curve)
     mock_write.assert_not_called()
@@ -533,9 +647,8 @@ def test_bleed_valve_spike_but_conversion_present_holds(db):
     """당일 광고 전환이 실재하면(주신호 > 0) 출혈 아님 — 상품 매출을 볼 것도 없다."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)
-    _hourly_today(db, conv_cnt=2)  # 당일 광고 전환 있음
     now_midday = datetime(2026, 7, 20, 10, 20, 0)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]  # spike
+    curve = _curve(conv_cnt=1)  # spike ∧ 당일 광고 전환 있음(주신호 = 곡선)
     with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
         result = probe_revert.run_bleed_valve(db, now=now_midday, fetch_intraday=lambda tid, d: curve)
     mock_write.assert_not_called()
@@ -554,7 +667,7 @@ def test_bleed_valve_missing_baseline_skips(db):
     _settings(db, auto_operate=True)  # 정착창 소진 시드 없음 → baseline 0
     _probe(db, probe_date=TODAY, changed_hour=6)
     now_midday = datetime(2026, 7, 20, 10, 20, 0)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]
+    curve = _curve(conv_cnt=0)
     with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
         result = probe_revert.run_bleed_valve(db, now=now_midday, fetch_intraday=lambda tid, d: curve)
     mock_write.assert_not_called()
@@ -569,14 +682,13 @@ def test_hourly_lane_populates_bleed_and_reverts_same_day_probe(db):
     당일 출혈 탐침을 되돌린다(핫셋은 비워 레인 자체 제안은 0)."""
     _bleed_settings_and_baseline(db)
     _probe(db, probe_date=TODAY, changed_hour=6, adgroup_id=ADGROUP)  # 핫셋 엔티티 시드 안 함 → 레인 제안 0
-    _hourly_today(db, conv_cnt=0)  # 주신호: 당일 전환 0(관측됨)
-    _mapped_product(db)            # 보강: 당일 주문 없음 → 매출 0 → 확정 0
+    _mapped_product(db)  # 보강: 당일 주문 없음 → 매출 0 → 곡선 전환 0과 합쳐 확정 0
     # 당일 소진 스냅샷(서킷브레이커 신선도 통과) — bleed valve와 무관하나 레인 캠페인 루프용
     db.add(NaverHourlySnapshot(snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23,
                                campaign_id=CAMPAIGN, campaign_type="", cost=0, clk=0, imp=0))
     db.commit()
     now_midday = datetime(2026, 7, 20, 10, 20, 0)
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]  # spike
+    curve = _curve(conv_cnt=0)  # spike ∧ 곡선 전환 0
     with patch.object(harness, "_build_guardrail_context", return_value={}), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=_revert_writer()):
@@ -633,9 +745,10 @@ def test_real_guardrail_cooldown_blocks_same_day_bleed_revert(db):
     _settings(db, auto_operate=True)
     window_from, window_to = auto_operator._settlement_window(TODAY)
     _ad_row(db, keyword_id="nkw-p", ad_date=window_to, clk=10, cost=700)  # 일평균100→시간당4.17→×3≈12.5
-    _, cl = _probe(db, probe_date=TODAY, changed_hour=9)  # 오늘 09:00 상향
+    _, cl = _probe(db, probe_date=TODAY, changed_hour=9, adgroup_id=ADGROUP)  # 오늘 09:00 상향
+    _mapped_product(db)  # 당일 주문 없음 → 상품 매출 0 → 곡선 전환 0과 합쳐 «확정 0»(되돌림 시도)
     now_h10 = datetime(2026, 7, 20, 10, 20, 0)  # 10:20 — 09:00과 1h20m<2h 쿨다운 창
-    curve = [_hour(h, imp=20, clk=1, cost=250) for h in range(8)]  # 완료 8h×250=2000 → 시간당200>12.5 spike
+    curve = _curve(conv_cnt=0)  # 완료 8h×250=2000 → 시간당200>12.5 spike
 
     with patch.object(harness.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": 1150, "userLock": False}), \

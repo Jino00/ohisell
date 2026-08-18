@@ -111,32 +111,48 @@ def _probe_adgroup_id(probe: dict) -> str | None:
     return probe.get("adgroup_id") or None
 
 
-def _today_ad_conversions(db: Session, adgroup_id: str, today, *, before_hour: int) -> int | None:
-    """당일 완결 시간(hour < before_hour)의 광고 전환 합. **행이 하나도 없으면 None**(=미관측).
+def _conv_from_curve(curve, *, before_hour: int) -> int | None:
+    """★주신호 — 밸브가 **이미 받아 둔** hh24 곡선의 당일 전환 합. 없으면 None(미관측).
 
-    ★0과 None을 반드시 구분한다 — 이 테이블은 lag=0이지만 콜 상한(_CALL_CAP=800) 회전 때문에
-      그 시각에 조회되지 않은 그룹은 행이 없다. «행 없음»을 0으로 읽는 것이 바로 이번에 고치는
-      결함의 모양이다(load_window 모듈 docstring 참조).
-    ★hour < before_hour인 이유: 밸브가 비용을 재는 창(cost_accrued)과 **같은 창**을 봐야 한다.
-      진행 중인 시간 버킷은 today_hourly_sweep이 애초에 저장하지 않지만, 창을 명시해 둔다."""
+    ★왜 이것이 주신호인가(적대 리뷰 P1-1·P1-2, 2026-08-18): 이 곡선은
+      fetch_entity_hh24(probe.target_id)의 결과라 **탐침과 정확히 같은 grain**(키워드 탐침이면
+      키워드, 그룹 탐침이면 그룹)이고, 비용(cost_accrued)을 재는 **바로 그 자료·바로 그 창**이다.
+      초판은 주신호를 naver_adgroup_hourly_today로 잡았는데 그 테이블은
+      ①`today_hourly_sweep.build_today_targets`가 keyword grain을 버려 **파워링크 그룹 행이
+        원리적으로 없고**(prod 실측: 어제 imp>0 키워드 유닛 1,439건 중 오늘 그룹 행 16건)
+      ②스윕(:57)이 밸브(:20)보다 늦어 **최신 완결 시간이 한 칸 빠진다**(비용은 세고 전환은 안 셈).
+      둘 다 «구조적 상수»를 만드는 부류라 이번에 고치는 결함과 같은 모양이었다.
+    ★conv_cnt 키가 없는 행이 창 안에 하나라도 있으면 **0이 아니라 None**을 돌려준다 —
+      «필드 없음»을 «전환 0»으로 읽는 것이 정확히 이 사고의 부류다."""
+    rows = [h for h in (curve or []) if int(h["hour"]) < before_hour]
+    if not rows:
+        return None
+    if any("conv_cnt" not in h for h in rows):
+        return None
+    return sum(int(h["conv_cnt"] or 0) for h in rows)
+
+
+def _positive_conv_from_table(db: Session, adgroup_id: str, today, *, before_hour: int) -> bool:
+    """폴백 — naver_adgroup_hourly_today에 당일 전환이 **있는지만** 본다(D-NAO-192 C-2 배선).
+
+    ★«전환 있음»만 받아들이고 «0»은 미관측으로 취급하는 이유: 이 테이블은 곡선보다 한 시간
+      뒤처지고(스윕 :57 vs 밸브 :20) 그룹 grain이라, 여기서 읽는 0은 «정말 0»이 아니라
+      «아직 안 들어옴»일 수 있다. 뒤처진 0을 되돌림 근거로 쓰면 **거짓 정지**(계약이 감수하기로
+      한 방향의 반대)가 된다. 반대로 여기서 전환이 보이면 그건 이미 확정된 사실이라 hold
+      쪽으로만 쓰면 안전하다 — 폴백이 오직 «회수를 막는» 방향으로만 작동한다."""
     load_window.require_loaded(
-        "naver_adgroup_hourly_today", today, today, reader="probe_revert._today_ad_conversions"
+        "naver_adgroup_hourly_today", today, today, reader="probe_revert._positive_conv_from_table"
     )
-    n_rows, conv = (
-        db.query(
-            sqlfunc.count(NaverAdgroupHourlyToday.id),
-            sqlfunc.coalesce(sqlfunc.sum(NaverAdgroupHourlyToday.conv_cnt), 0),
-        )
+    conv = (
+        db.query(sqlfunc.coalesce(sqlfunc.sum(NaverAdgroupHourlyToday.conv_cnt), 0))
         .filter(
             NaverAdgroupHourlyToday.ad_date == today,
             NaverAdgroupHourlyToday.adgroup_id == adgroup_id,
             NaverAdgroupHourlyToday.hour < before_hour,
         )
-        .one()
+        .scalar()
     )
-    if int(n_rows or 0) == 0:
-        return None
-    return int(conv or 0)
+    return int(conv or 0) > 0
 
 
 def _today_proxy_revenue(db: Session, adgroup_id: str, today) -> tuple[int | None, int]:
@@ -155,26 +171,36 @@ def _today_proxy_revenue(db: Session, adgroup_id: str, today) -> tuple[int | Non
     return int(sum(by_pid.values())), len(pids)
 
 
-def _today_conversion_verdict(db: Session, probe: dict, now: datetime) -> dict:
-    """당일 전환 2신호 2단 판정 — {"verdict", "ad_conv", "proxy_revenue", "product_count",
-    "adgroup_id", "note"}. 판정만 하고 집행하지 않는다."""
+def _today_conversion_verdict(db: Session, probe: dict, now: datetime, curve) -> dict:
+    """당일 전환 2신호 2단 판정 — {"verdict", "ad_conv", "signal", "proxy_revenue",
+    "product_count", "adgroup_id", "note"}. 판정만 하고 집행하지 않는다."""
     today = now.date()
     adgroup_id = _probe_adgroup_id(probe)
     out: dict = {
         "verdict": _VERDICT_UNKNOWN, "adgroup_id": adgroup_id, "ad_conv": None,
-        "proxy_revenue": None, "product_count": 0, "note": "",
+        "signal": "none", "proxy_revenue": None, "product_count": 0, "note": "",
     }
-    if not adgroup_id:
-        out["note"] = "광고그룹 미상(제안에 adgroup_id 없음) — 주신호 조회 불가"
+
+    ad_conv = _conv_from_curve(curve, before_hour=now.hour)
+    if ad_conv is not None:
+        out["ad_conv"], out["signal"] = ad_conv, "hh24_curve"
+        if ad_conv > 0:
+            out["verdict"] = _VERDICT_POSITIVE
+            return out
+    else:
+        # 곡선에 전환 정보가 없다 → 테이블 폴백은 «전환 있음»만 받는다(hold 방향 전용).
+        if adgroup_id and _positive_conv_from_table(db, adgroup_id, today, before_hour=now.hour):
+            out["verdict"], out["signal"] = _VERDICT_POSITIVE, "adgroup_hourly_today"
+            out["note"] = "곡선에 전환 정보 없음 — 테이블에서 당일 전환 확인"
+            return out
+        out["note"] = ("hh24 곡선에 conv_cnt 없음(창 안 행 없음 또는 필드 부재) — "
+                       "되돌림 근거로 쓸 당일 전환 신호가 없다")
         return out
 
-    ad_conv = _today_ad_conversions(db, adgroup_id, today, before_hour=now.hour)
-    out["ad_conv"] = ad_conv
-    if ad_conv is None:
-        out["note"] = "naver_adgroup_hourly_today에 당일 행 없음(콜 상한 회전·스윕 미도달)"
-        return out
-    if ad_conv > 0:
-        out["verdict"] = _VERDICT_POSITIVE
+    if not adgroup_id:
+        # 곡선 전환 0은 잡았으나 상품 매핑을 찾을 키(광고그룹)가 없다 → 교차 확인 불가.
+        out["verdict"] = _VERDICT_TENTATIVE_ZERO
+        out["note"] = "광고그룹 미상(제안에 adgroup_id 없음) — 상한 프록시로 교차 확인 불가"
         return out
 
     proxy, product_count = _today_proxy_revenue(db, adgroup_id, today)
@@ -329,7 +355,7 @@ def run_bleed_valve(db: Session, *, now: datetime | None = None, fetch_intraday=
             settlement_hourly_avg = settlement_daily_avg / 24
             cost_spike = hourly_rate > settlement_hourly_avg * auto_operator._PROBE_BLEED_COST_MULTIPLE
 
-            verdict = _today_conversion_verdict(db, probe, now)
+            verdict = _today_conversion_verdict(db, probe, now, curve)
             _log_path_comparison(db, probe, now, verdict, cost_spike=cost_spike,
                                  hourly_rate=hourly_rate, baseline_hourly=settlement_hourly_avg)
 
@@ -375,6 +401,10 @@ def run_bleed_valve(db: Session, *, now: datetime | None = None, fetch_intraday=
         except Exception as e:  # noqa: BLE001 — 한 유닛 실패가 밸브를 못 죽인다
             result["errors"] += 1
             log.exception("probe_revert: 출혈밸브 유닛 실패 target=%s: %s", probe["target_id"], e)
+
+    # ★후보 0건이면 위 루프가 한 번도 안 돌아 «밸브가 돌았다»는 흔적이 남지 않는다.
+    #   실행 사실과 후보 수는 항상 남긴다(라이브에서 «안 돌았다»와 «후보가 없었다»를 구별).
+    log.info("[출혈밸브] now=%s KST 후보=%d %s", now.isoformat(), result["checked"], result)
     return result
 
 
@@ -450,6 +480,10 @@ def _revert_or_hold(db: Session, probe: dict, now: datetime, result: dict, *, re
         })
 
 
+# 라이브 «구경로 vs 신경로» 1회 대조가 끝나면 False로 내린다(그 다음 배포에서 함수째 삭제).
+_LEGACY_PATH_COMPARISON = True
+
+
 def _log_path_comparison(
     db: Session, probe: dict, now: datetime, verdict: dict, *,
     cost_spike: bool, hourly_rate: float, baseline_hourly: float,
@@ -458,7 +492,11 @@ def _log_path_comparison(
 
     구경로는 **판정에 쓰이지 않는다**(대조 표시 전용). 옛 값이 0이고 신 값이 실제 전환을
     가리키는 것이 관측되면 이 함수와 _conv_direct_today_legacy를 함께 지운다.
-    fail-open: 로그 산출 실패가 밸브 판정을 되돌리지 않는다."""
+    fail-open: 로그 산출 실패가 밸브 판정을 되돌리지 않는다.
+    ★삭제 트리거: 라이브에서 «구=0 / 신=실제값» 1회 관측이 끝나면 _LEGACY_PATH_COMPARISON을
+      False로 내리고, 다음 배포에서 이 함수와 _conv_direct_today_legacy를 함께 지운다."""
+    if not _LEGACY_PATH_COMPARISON:
+        return
     try:
         today = now.date()
         legacy = _conv_direct_today_legacy(db, probe["target_type"], probe["target_id"], today)
@@ -471,11 +509,11 @@ def _log_path_comparison(
         log.info(
             "[출혈밸브·경로대조] now=%s KST target=%s(%s) adgroup=%s | "
             "구경로 naver_ad_daily.conv_direct=%s (%s) | "
-            "신경로 판정=%s ad_conv=%s proxy_revenue=%s products=%s %s | "
+            "신경로 판정=%s 신호=%s ad_conv=%s proxy_revenue=%s products=%s %s | "
             "cost_spike=%s(시간당 %.0f원 vs 기준 %.0f원)",
             now.isoformat(), probe["target_id"], probe["target_type"], verdict["adgroup_id"],
             legacy, window_note,
-            verdict["verdict"], verdict["ad_conv"], verdict["proxy_revenue"],
+            verdict["verdict"], verdict["signal"], verdict["ad_conv"], verdict["proxy_revenue"],
             verdict["product_count"], verdict["note"],
             cost_spike, hourly_rate, baseline_hourly,
         )
