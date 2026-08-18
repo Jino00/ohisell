@@ -1030,3 +1030,71 @@ grep -n "^class \|hour: Mapped\|conv_cnt: Mapped\|conv_amt: Mapped" backend/app/
 9. **`naver_keyword_hourly`의 128행(hourly_today엔 없고 keyword_hourly에만 있는 (adgroup,date,hour))이 왜 생기는지**는 확인하지 않았다 — 활동 그룹 로스터(observation_campaign_ids)가 두 수집 경로에서 완전히 같지 않을 가능성이 있으나 코드 추적은 스코프 밖.
 10. **밴드 4주창/전체창 CPA 차이의 방향성**(예: band1 CPA 4주창 4,573원 vs 전체창 5,737원)은 순수 관측값 병기만 했다 — 두 창의 차이가 추세인지 표본 변동인지 **해석하지 않았다**(지시대로).
 11. **SHOPPING이 WEB_SITE보다 CPA 계산이 더 안정적인지**(표본 크기: SHOPPING 3,259건 vs WEB_SITE 179건 전환) 등 통계적 신뢰도 판정은 하지 않았다 — 건수만 병기.
+
+---
+
+## ★부록 Z — 코디네이터 사후 실측: M5의 WEB_SITE 커버리지 구멍 (2026-08-18 14:1x KST, 읽기 전용)
+
+M5는 이중계상을 피하려고 `entity_type='adgroup'` 행만 썼다. **SHOPPING엔 옳고 WEB_SITE엔
+구멍이 있다** — 두 grain이 부모/자식이 아니라 **서로 다른 부분 커버리지**이기 때문이다.
+
+```sql
+-- ★__backfill__ 센티널 배제(공용 필터 없음 — 매번 다시 적는다)
+SELECT campaign_type, entity_type, COUNT(*) rows_all, COUNT(DISTINCT entity_id) n_entity,
+       SUM(CASE WHEN adgroup_id='' OR adgroup_id IS NULL THEN 1 ELSE 0 END) adgroup_id_blank,
+       SUM(cost) cost_sum, SUM(conv_cnt) conv_sum, MIN(ad_date) d_min, MAX(ad_date) d_max
+FROM naver_keyword_hourly
+WHERE entity_id <> '__backfill__' AND adgroup_id <> '__backfill__'
+GROUP BY campaign_type, entity_type;
+```
+| campaign_type | entity_type | 행수 | entity 수 | `adgroup_id` 빈값 | cost | conv | 창 |
+|---|---|---|---|---|---|---|---|
+| SHOPPING | adgroup | 125,181 | 236 | **125,181(전건)** | 20,244,111 | 3,259 | 07-11~08-17 |
+| WEB_SITE | adgroup | 28,513 | 102 | **28,513(전건)** | 1,645,560 | 179 | 07-11~08-17 |
+| WEB_SITE | keyword | 163,340 | 6,778 | 0 | **5,028,137** | **846** | 07-11~08-17 |
+
+★**SHOPPING에는 keyword grain 행이 0건**이다 → M5의 SHOPPING 판은 온전하다.
+
+### WEB_SITE 두 grain의 관계 — 계층이 아니다
+
+```sql
+WITH ag AS (SELECT DISTINCT entity_id gid FROM naver_keyword_hourly
+            WHERE campaign_type='WEB_SITE' AND entity_type='adgroup' AND entity_id<>'__backfill__'),
+     kw AS (SELECT DISTINCT adgroup_id gid FROM naver_keyword_hourly
+            WHERE campaign_type='WEB_SITE' AND entity_type='keyword'
+              AND adgroup_id<>'__backfill__' AND adgroup_id<>'')
+SELECT (SELECT COUNT(*) FROM ag) ag_groups, (SELECT COUNT(*) FROM kw) kw_groups,
+       (SELECT COUNT(*) FROM ag JOIN kw USING(gid)) both_groups,
+       (SELECT COUNT(*) FROM ag WHERE gid NOT IN (SELECT gid FROM kw)) ag_only,
+       (SELECT COUNT(*) FROM kw WHERE gid NOT IN (SELECT gid FROM ag)) kw_only;
+```
+| ag_groups | kw_groups | both | ag_only | **kw_only** |
+|---|---|---|---|---|
+| 102 | 232 | 79 | 23 | **153** |
+
+같은 그룹·같은 날·같은 시각 대조(비용 상위, adgroup 기준):
+
+| gid | ad_date | hour | adgroup cost | keyword 합 |
+|---|---|---|---|---|
+| `grp-…070512941` | 2026-07-23 | 17 | 8,312 | 1,231 |
+| `grp-…071340962` | 2026-08-07 | 9 | 6,772 | **0** |
+| `grp-…071340962` | 2026-08-06 | 19 | 6,675 | **0** |
+| `grp-…070094275` | 2026-07-15 | 16 | 5,694 | **0** |
+| `grp-…031116306` | 2026-07-27 | 23 | 5,182 | **0** |
+
+keyword 합이 **0인 칸이 태반**이다 — 계층이면 나올 수 없는 모양이다.
+
+### 결론 (M5를 뒤집는 게 아니라 **적용 범위를 좁힌다**)
+
+1. **SHOPPING 168칸·밴드 CPA는 유효**하다(keyword grain 자체가 없다). 밴드 총계의 **92.5%**가
+   SHOPPING이므로 밴드 단위 결론은 대체로 견딘다.
+2. ★**WEB_SITE 168칸·CPA는 원장의 일부만 본 값이다** — 그 지면 그룹 255개 중 `adgroup` 행이
+   있는 **102개만** 봤고 **153개 그룹은 통째로 빠졌다**. 「WEB_SITE CPA = 1,645,560 / 179」를
+   그 지면의 대표값으로 인용하면 안 된다.
+3. `entity_type='adgroup'` 행은 **`adgroup_id` 컬럼이 전건 빈 문자열**이다(153,694건). 이 테이블의
+   grain 키는 `entity_id`이고, 모델 docstring도 `(ad_date, entity_id, hour)`라고 적는다. 다행히
+   기존 코드(`bid_rank_curve`·`probe_cell_aggregate`)는 `entity_id`를 읽어 **라이브 버그는 없다.**
+4. ⚠️ 모델 docstring(`models.py:2468-2469`)은 「WEB_SITE=키워드 / SHOPPING·BRAND_SEARCH=애드그룹」
+   이라고 **단정**하는데, 실제 WEB_SITE는 **두 grain을 동시에** 갖는다. 어느 쪽이 정본인지
+   (수집기가 언제부터 왜 adgroup 행도 넣는지)는 **이번에 재지 않았다 `[미상]`** — 수집 경로를
+   읽어야 답이 나온다. 다음 세션 몫.
