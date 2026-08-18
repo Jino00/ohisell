@@ -1918,6 +1918,14 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "run_naver_diary_reflection",  # 08:35 크론이지만 catch-up은 집행(08:50) *뒤*(P2 리뷰 P2-1: LLM 재시도 최대 9분이 돈 잡 복구를 지연시키면 안 됨 — 관찰 전용이라 어제/D-2/D-8 버킷은 순서 무관. fail-open은 영구 블록만 막고 지연은 못 막는다)
     "run_naver_profit_scorecard",  # 08:40 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-85/ref39 P7): reflection이 어제 일기를 소급 해석한 뒤라야 같은 날짜의 볼트 노트가 정합적이고, 관찰 전용 잡이 집행 복구를 지연시키면 안 된다. fail-open은 영구 블록만 막고 지연은 못 막는다
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
+    # ★검색량 기준선(09:50) — 이 목록의 기준(위 주석)이 「복구 가능성」인데, 이 잡은 그 기준의
+    #   **극단**이다: keywordstool은 «오늘 값»만 주므로 놓친 날은 **원리적으로 못 채운다**
+    #   (D-NAO-186이 이 적재를 「소급 불가·마감 있음」으로 승인한 바로 그 성질). 다른 수집 잡은
+    #   다음 발화가 30일 창을 다시 긁어 구멍을 메우지만 이 잡은 못 메운다 — 광고비 3잡이
+    #   편입된 이유(「어제 하루치만 적재」)와 같은 부류이고 정도는 더 심하다.
+    #   상류 의존 없음 · 같은 날 재실행은 멱등(upsert) → 재시작 다중 실행에도 안전.
+    #   맨 뒤 근처인 이유: 외부 API 왕복(약 800콜 상한)이라 돈 잡(집행) 복구를 지연시키면 안 된다.
+    "sync_naver_keyword_baseline",  # 09:50
     "run_naver_wisdom",  # 08:45 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-54 P3): reflection이 outcome을 소급 기입해야 후보 수확 결과가 최신 + LLM 판사(최대 회당 5×재시도)가 집행 복구를 지연시키면 안 됨. 관찰·보고 전용이라 맨 뒤 배치(diary_outcome 60일 하한 내면 하루 늦어도 무관). fail-open은 영구 블록만 막고 지연은 못 막는다
     "run_naver_vault_export",  # 09:05 크론이지만 catch-up은 맨 뒤(D-NAO-54 P5): 일기·지혜를 마크다운으로 재생성하는 열람 전용 잡이라 wisdom(승격)까지 끝난 뒤에 도는 게 볼트 최신성에 맞고, 파일 IO가 집행 복구를 지연시키면 안 된다. 매 실행 전체 재생성(멱등)이라 하루 늦어도 무해. fail-open은 영구 블록만 막고 지연은 못 막는다
     "sync_naver_entity",  # 07:35 크론이지만 catch-up은 맨 뒤: 전량 fetch(45캠페인+1,004그룹+~91k 키워드, 수 분)가 돈 잡(집행) 복구를 지연시키면 안 된다(위 관찰 잡들과 같은 원칙). 맨 뒤라 실패해도 끊길 하류가 없다(체인 중단=무해, last_run_at 미전진 → 다음 재시작 재시도). 성공하면 체이닝된 BM 스냅샷도 함께 따라잡힌다
@@ -2068,6 +2076,8 @@ def _catch_up_morning_batch():
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
         "run_naver_probe_learning": run_naver_probe_learning_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        # 목록에만 넣고 여기 빠지면 funcs.get()이 None을 돌려주고 조용히 스킵된다.
+        "sync_naver_keyword_baseline": sync_naver_keyword_baseline_job,
         "sweep_naver_today_hourly": sweep_naver_today_hourly_job,
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,

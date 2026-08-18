@@ -39,13 +39,21 @@ log = logging.getLogger(__name__)
 # ★임계를 클릭>0이 아니라 «비용 또는 클릭»으로 잡는 이유: 클릭 0인데 비용이 잡히는 행이
 #   원장에 존재할 수 있고(집계 그레인 차이), 우리가 알고 싶은 것은 «돈이 닿은 검색어»다.
 _LOOKBACK_DAYS = 30
-# 1회 실행 상한. 5개/콜이므로 1,500개 = 300콜. D-NAO-186 승인 콜 예산(약 2,200콜) 안.
-_DEFAULT_LIMIT = 1500
+# 1회 실행 상한. 5개/콜이므로 4,000개 = 800콜(D-NAO-186 승인 예산 약 2,200콜 안).
+# ★초판은 1,500이었고 적대 리뷰가 P1으로 잡았다: prod 12개월을 한 달씩 뒤로 밀며 실측하니
+#   대상이 1,500을 넘는 창이 **6개**였고 그중 하나가 **직전 아이폰 출시 창(2025-09-22, 2,006건)**,
+#   최대는 2,243건이었다. 이 슬라이스의 존재 이유가 「9월 출시 때 수요/우리 조치를 가르는
+#   기준선」인데 **출시철에 정확히 약 25%가 잘려 나가고 그 구멍은 소급 불가**였다.
+#   콜 예산 때문도 아니었다 — 2,243÷5 = 449콜로 승인분의 20%다.
+# ★그래도 상한을 없애지 않는 이유: 상한이 없으면 원장이 이상해졌을 때(센티널 누수·대량
+#   신규 유입) 콜이 무한정 나간다. 대신 ①실수요(최대 2,243)의 약 1.8배로 올리고
+#   ②잘릴 때 **반드시 로그**를 남기며 ③잘린다면 **비용이 큰 것부터 남긴다**(가나다순 금지).
+_DEFAULT_LIMIT = 4000
 
 
 def head_keywords(db: Session, *, lookback_days: int = _LOOKBACK_DAYS,
                   today: date | None = None) -> list[str]:
-    """최근 창에서 돈이 닿은 키워드의 **텍스트** 목록(중복 제거·정렬).
+    """최근 창에서 돈이 닿은 키워드의 **텍스트** 목록 — **30일 비용 내림차순**.
 
     원장은 `keyword_id`를 들고 있고 keywordstool은 **문자열**로 답하므로 `NaverEntity`로
     이름을 푼다. 이름을 못 찾은 id는 조용히 버리지 않고 호출부가 셀 수 있게 로그로 남긴다.
@@ -55,7 +63,10 @@ def head_keywords(db: Session, *, lookback_days: int = _LOOKBACK_DAYS,
     today = today or kst_today()
     cutoff = today - timedelta(days=lookback_days)
     rows = (
-        db.query(NaverAdDaily.keyword_id)
+        db.query(
+            NaverAdDaily.keyword_id,
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0).label("cost_sum"),
+        )
         .filter(
             NaverAdDaily.ad_date >= cutoff,
             NaverAdDaily.keyword_id != "",
@@ -69,50 +80,69 @@ def head_keywords(db: Session, *, lookback_days: int = _LOOKBACK_DAYS,
         )
         .all()
     )
-    kw_ids = [r[0] for r in rows if r[0]]
-    if not kw_ids:
+    cost_by_id = {r[0]: int(r[1] or 0) for r in rows if r[0]}
+    if not cost_by_id:
         return []
 
-    names: set[str] = set()
+    # 여러 keyword_id가 같은 이름을 가리킬 수 있다(그룹마다 별개 엔티티) → 이름 단위로 합산.
+    cost_by_name: dict[str, int] = {}
     resolved = 0
+    kw_ids = list(cost_by_id)
     for chunk_start in range(0, len(kw_ids), 500):  # IN 절 길이 방어
         chunk = kw_ids[chunk_start:chunk_start + 500]
-        for (name,) in (
-            db.query(NaverEntity.name)
+        for entity_id, name in (
+            db.query(NaverEntity.entity_id, NaverEntity.name)
             .filter(NaverEntity.entity_type == "keyword",
                     NaverEntity.entity_id.in_(chunk))
             .all()
         ):
             if name and name.strip():
-                names.add(name.strip())
+                cost_by_name[name.strip()] = (
+                    cost_by_name.get(name.strip(), 0) + cost_by_id.get(entity_id, 0)
+                )
                 resolved += 1
     if resolved < len(kw_ids):
         log.info("keyword_volume_baseline: keyword_id %d개 중 이름 해석 %d개 "
                  "(나머지는 naver_entity에 없음 — 삭제된 키워드 등)", len(kw_ids), resolved)
-    return sorted(names)
+    # ★비용 내림차순(동률은 이름순으로 결정적). 상한에 걸려 잘릴 때 **돈이 큰 쪽이 남아야**
+    #   한다 — 초판은 `sorted(names)`(가나다순)이라 출시철에 무작위나 다름없이 잘렸다.
+    return sorted(cost_by_name, key=lambda n: (-cost_by_name[n], n))
 
 
 def sync_baseline(db: Session, *, limit: int = _DEFAULT_LIMIT,
                   today: date | None = None) -> dict:
     """머리 키워드의 오늘자 검색량 1행씩 적재(멱등 — 같은 날 재실행은 갱신).
 
-    Returns: {"targeted", "fetched", "inserted", "updated", "unmatched"}
+    Returns: {"targeted", "fetched", "inserted", "updated", "unmatched", "truncated"}
     ★`unmatched`(요청했는데 응답에 없던 키워드)를 **버리지 말고 센다** — 0이 아닌 값이 계속
       나오면 그건 「검색량이 없다」가 아니라 「우리가 못 받고 있다」이고, 둘은 다른 문제다.
     """
     today = today or kst_today()
     targets = head_keywords(db, today=today)
     if not targets:
-        return {"targeted": 0, "fetched": 0, "inserted": 0, "updated": 0, "unmatched": 0}
+        return {"targeted": 0, "fetched": 0, "inserted": 0, "updated": 0,
+                "unmatched": 0, "truncated": 0}
 
+    # ★잘림은 반드시 로그로 표면화한다 — 「targeted=4000」만 돌려주면 「4,500 중 4,000」인지
+    #   「정확히 4,000」인지 구분이 안 된다(발견 0건과 실행 안 됨이 같은 숫자로 보이는 부류).
+    truncated = max(0, len(targets) - limit)
+    if truncated:
+        log.warning(
+            "keyword_volume_baseline: 대상 %d개가 상한 %d를 넘어 %d개를 버린다 — "
+            "버리는 쪽은 30일 비용이 작은 순이다. 이 값이 계속 0이 아니면 상한을 올려라"
+            "(소급 불가라 버린 날은 영영 못 채운다).", len(targets), limit, truncated)
     targets = targets[:limit]
     volumes = fetch_keyword_volumes_detailed(targets)
 
+    # ★날짜만으로 조회한다(요청 키 목록으로 좁히지 않는다) — 네이버가 요청과 다른 표기의
+    #   `relKeyword`를 돌려주면(공백·정규화 차이) 그 키는 `existing`에 안 잡혀 INSERT로 가고,
+    #   같은 날 재실행 시 UNIQUE 위반으로 **그 실행분 전체가 커밋 전에 날아간다**
+    #   (`db.commit()`이 루프 뒤 1회). 적대 리뷰 P2-1 — 라이브 유발 조건은 미입증이나
+    #   수정이 한 줄이고 잃는 것이 없다.
     existing = {
         row.keyword: row
         for row in db.query(NaverKeywordVolumeDaily)
-        .filter(NaverKeywordVolumeDaily.measured_date == today,
-                NaverKeywordVolumeDaily.keyword.in_(targets))
+        .filter(NaverKeywordVolumeDaily.measured_date == today)
         .all()
     }
 
@@ -139,6 +169,7 @@ def sync_baseline(db: Session, *, limit: int = _DEFAULT_LIMIT,
         "targeted": len(targets), "fetched": len(volumes),
         "inserted": inserted, "updated": updated,
         "unmatched": len(targets) - len(volumes),
+        "truncated": truncated,
     }
     log.info("keyword_volume_baseline(%s): %s", today, result)
     return result
