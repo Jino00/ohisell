@@ -136,6 +136,9 @@ SELECT (SELECT COUNT(*) FROM pg)                                     total_produ
 | 17 | A9 검색량·경쟁도(keywordstool) | 원료없음 | 소급 원리 불가 — 켠 날이 창의 시작 | 불가 | ★(개정 4) 적재 개통 **착수됨** — D-NAO-186 ① 검색량 기준선, 커밋 `b7b2b752`, **아직 미배포**(배포일이 창의 시작이 된다 — 소급 불가 성질은 불변) |
 | 18 | A10 계절성(월·분기) | **교차완료(경향 서술 한정)** ← 슬라이스 2 | `naver_ad_daily` 951,201행, 2025-07-22~2026-08-17 [측정 08-18] · 산출물 **CROSS_ads ③**(월·분기 × 밴드) | — | 1년=1주기 — 「패턴 확정」 원리 불가·D-NAO-183(출시×계절 준-공선) 각주 의무. ⚠️CROSS_ads의 「밴드미부여」 행은 **센티널 `__backfill__`이 원 단위까지 전액**(F15) — 「신규/미성숙 그룹 추정」 기각. 밴드 행 자체는 무오염(센티널은 밴드 조인에 원리적으로 못 붙음) |
 | 19 | B1 확장소재 성과 | ~~원료없음~~ → **미상(상충)** (개정 4 정정) | 관측 경로 자체 신설 필요. ~~주요 유형 API 생성 불가~~ ★정정: `/ncc/ad-extensions` CRUD 6종 + `reportTp=ADEXTENSION`/`ADEXTENSION_CONVERSION` 리포트 2종이 **문서상 존재**(ref 75 ADS §5-2, Swagger 직취) | 불가 | 옛 서술과 ref 75가 상충 — 원인(권한·상품 미가입 vs 문서 오독)은 실호출 금지라 [미상]. 접근 여부부터 Jino 결정(ref 68 §10-②)은 유지. 표면 상세는 1-A2 N3 |
+
+> ★**B1 추가 실측(2026-08-18 17:2x, PROBE_n3_n5_n6)**: 확장소재는 실계정에 5타입이 **살아 있고 조회(GET)가 완전히 작동하며 grain이 광고그룹에 정확히 닿는다**(190콜 200 OK). ⚠️단 B1 문구는 **생성(POST)**에 관한 주장이라 이번 프로브(GET only)로는 **확정도 반박도 못 했다** — 「생성 불가」의 진위는 여전히 `[미상]`이다. 확정된 것은 **「등급 교차의 장애물은 아니다」**뿐이다.
+
 | 20 | B2 예산·daily_budget | **교차완료(기술용)** ← 슬라이스 2 | `naver_entity_snapshot.daily_budget` 1,282행, 창 27일(391일의 약 7%) [측정 08-18] · 산출물 **CROSS_ads ④** | — | 창 7% + **캠페인 35/39(89.7%)가 다중 밴드** — §0-B 규약 적용: 밴드별 표는 기술용, 밴드 간 합산·비교 금지, 캠페인 총량은 밴드 축 없이 39캠페인으로만 |
 | 21 | B3 시장가 사다리 | **탈락** (ref 68 「미확정」 정정, 어긋남 ②) | `naver_bid_estimate_daily` 6,590행, **단 4일**(2026-07-27~07-30), 08-18 기준 19일째 갱신 정지 | 불가 | **ref 59 §B-1이 이미 「판정 불가·기술조차 불가」로 처분** — 승계. 재개 여부는 별도 결정 사안 |
 | 22 | B4 입찰 변경 이력 | **교차완료(기술용)** ← 슬라이스 2 | `naver_change_log` update_bid 425행(07-17~07-30) + external_bid_change 443행(07-22~08-14) · 산출물 **CROSS_ads ⑤**(롤업 868/868 성공) | — | 인과 오염 축(역인과 기본값, ref 59) — 경향판정 금지·기술용. action별 창이 달라 합산 금지. ★서술 정정: ad 287행의 부모 롤업은 「naver_entity 부모 링크」가 아니라 **`naver_adgroup_product.ad_id` 경유**다(`naver_entity`에 ad 행이 존재하지 않음 — CROSS_ads 5-1) |
@@ -163,8 +166,23 @@ SELECT (SELECT COUNT(*) FROM pg)                                     total_produ
 > `data/74_band_x_time_brand/CROSS_keyword_volume_20260818.md` §작업 B가 정본이다.
 > **개통 6건**(N1 `/ncc/criterion` · N2 MasterReport · N4 SharedBudget · N7 breakdown 3종 ·
 > N8 미요청 필드 + **`/ncc/targets` 폐기분**(추가 콜 0 — 후보가 아니라 기존 축 #13·#14의 원료)) ·
-> **Jino 결정 필요 3건**(N3 AdExtension = 매트릭스와 census가 상충해 실계정 가용성 미상 /
-> N5 ProductGroup·N6 InspectHistory = grain 미상) · 제외 0 · 불가 0.
+> ~~**Jino 결정 필요 3건**(N3·N5·N6)~~ ⚠️**정정(2026-08-18 17:2x, 개정 4-b)** — 그 3건은
+> **결정 사안이 아니라 측정 미실시**였다. 실계정 GET 190콜(전부 200 OK·쓰기 0)로 재니
+> 2건이 즉시 확정됐다. 정본 = `data/75_api_surface_census/PROBE_n3_n5_n6_20260818.md`.
+> ★이 오분류는 **D-NAO-191의 「화이트리스트 정책을 재지 않고 결정으로 올린」 사고의 반복**이다.
+> · **N3 AdExtension = 개통** — 실계정에 5타입 실재(SHOPPING_WEB·HEADLINE·POWER_LINK_IMAGE·
+>   DESCRIPTION·PRICE_LINKS), ★**grain이 정확히 광고그룹**(`ownerId` = `nccAdgroupId`,
+>   `band_group_total.csv`의 `adgroup_id`와 **형식 완전 동일·변환 불필요**). 캠페인/소재 owner 0건.
+>   선행조건 = 광고그룹당 1콜(482그룹 ≈ 482콜).
+> · **N5 ProductGroup = 불가(원리)** — 계정 전체 **3건**뿐이고 `/ncc/adgroups` **1,013건 전수**를
+>   훑어도 `productGroupId` 필드가 없다. 유일한 연결 후보(MasterReport `item=ProductGroupRel`)는
+>   POST가 필요해 이번 경계 밖이고, 규모(최대 3)도 실효성이 없다.
+> · **N6 InspectHistory = 측정했으나 판정불능** — 모든 id에 200이 오지만 `{"id": echo}`뿐이고
+>   코멘트 필드가 항상 빈값이며 **응답 스키마에 adgroup 연결 필드 자체가 없다.** 표본
+>   (광고 ~100 · 확장소재 253 중 PENDING 1)에 **DENIED 실물이 없었다** — 더 필요한 것은
+>   「DENIED 항목 실물」과 POST 배치 조회다. ★유보가 아니라 **측정 후의 판정불능**이다.
+> · 갱신 집계: **개통 6**(N1·N2·N4·N7·N8·**N3**) + `/ncc/targets` 폐기분 1(축 밖) ·
+>   **불가(원리) 1**(N5) · **판정불능 1**(N6) · 제외 0.
 > ★**억지로 3값을 채우지 않았다** — 근거 없는 처분이 유보보다 나쁘다.
 
 ### 1-B. 커머스(스마트스토어) 축 12행 (실측 A·C + 슬라이스 2 교차 CROSS_commerce)
