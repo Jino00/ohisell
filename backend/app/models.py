@@ -3194,8 +3194,13 @@ class NaverSearchTermDimDaily(Base):
     dim_type — 'h'=시간대(col7, '00'~'23') · 'r'=지역(col8) · 'm'=매체(col9).
     ★**코드의 «뜻»은 여전히 미상이다**(D-NAO-198 «안 함»): 지역 코드 사전·매체 id 사전을
     만들지 않고 리포트가 준 코드값을 **그대로** 저장한다. 지역엔 `-1`이 섞여 나오는 날이 있다
-    (뜻 미상 — 추정해서 채우지 않는다). 매체 id는 6자리로 MEDIA_TARGET 블랙리스트의 media id와
-    자릿수가 같으나 **동일성은 미확인**이다.
+    (뜻 미상 — 추정해서 채우지 않는다). ★매체 id는 **4~6자리 혼재**이고(`8753` 4자리 · 5자리 6종 ·
+    6자리 30종, 172일 창 37종 실측), `MEDIA_TARGET` 블랙리스트의 media id와 **같은 코드 공간임이
+    2026-08-19 실측으로 확정**됐다(D-NAO-201) — 「6자리」·「동일성 미확인」이라던 종전 서술은 둘 다
+    틀렸다. 근거는 집합 교집합(정황)이 아니라 **인과 검정**이다: 블랙 (그룹,매체) 쌍 1,864건 중
+    송출 실적이 있는 쌍은 1건뿐(imp 1)이고 그마저 블랙 등재 «당일»의 등재 전 노출인 반면, 같은
+    그룹집합의 비-블랙 쌍은 197,835행·cost 41,101,626원이다. 코드 공간이 달랐다면 블랙 쌍도
+    기저율로 송출됐어야 한다. 블랙리스트 원장은 `NaverAdgroupMediaBlack`.
 
     ★소실 시한: `SHOPPINGKEYWORD_DETAIL` 재생성 한도가 **정확히 180일**(day-180 BUILT ↔
     day-181 API 400/10004로 경계 실측 확정) — 매일 창이 굴러가 앞이 사라진다.
@@ -3254,6 +3259,123 @@ class NaverSearchTermDimCellDaily(Base):
     cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverAdgroupTargetCurrent(Base):
+    """광고그룹 타겟팅 설정의 **현재 상태** 1행 — `/ncc/targets` 적재 (D-NAO-201, 축 A5·A6).
+
+    grain: (adgroup_id). upsert — 이 표에 역사는 없다(역사는 `NaverAdgroupTargetChange`).
+
+    ★왜 일일 스냅샷이 아니라 현재상태+변경이력인가: prod 디스크가 **92%**이고(이 저장소는
+    디스크 포화로 배치를 유실한 전력이 있다) 타겟팅 설정은 거의 안 바뀐다 — 533그룹 실측에서
+    `MEDIA_TARGET.editTm`이 2026년 이후인 것이 83건뿐이다. 매일 스냅샷을 쌓으면 1년에 100만 행이
+    넘는데 그 대부분이 어제와 같은 값이다.
+
+    ★**소급이 원리적으로 불가능하다**: `/ncc/targets`는 «지금»만 준다. 이미 적재된 172일 성과축
+    (`NaverSearchTermDimDaily`)과의 교차는 전부 «지금의 설정» 기준이고, 개별 media가 언제
+    등재됐는지는 **[미상]**이다 — `media_edit_tm`은 그 그룹 MEDIA_TARGET의 **마지막 수정 시각**
+    이지 media 한 건의 등재 시각이 아니다. 이 표를 과거 성과에 붙일 땐 그 한계를 같이 적는다.
+
+    ★A6(pc/mobile)는 **축으로서 퇴화했다**(D-NAO-201 Jino 결정 = 저장하되 퇴화로 기록):
+    533그룹 실측에서 (pc=True, mobile=True)가 **525건(98.5%)**, (T,F) 4 · (F,T) 4다. 같은 응답에
+    실려 오므로 저장 비용은 0이지만, 등급 교차의 재료로는 분산이 없다. 나중에 설정이 갈리면
+    그때 살아난다.
+
+    ★`/ncc/targets` 응답에 실재하는 `targetTp`는 **4종뿐**이다(533그룹 전수 실측):
+    `MEDIA_TARGET` · `PC_MOBILE_TARGET` · `RESTRICT_KEYWORD_TARGET` · `NON_SEARCH_KEYWORD_TARGET`.
+    `GENDER_TARGET`·`AGE_TARGET`·`TIME_WEEKLY_TARGET`·`REGIONAL_TARGET`은 **0건**이다 — ref 75
+    §4-3의 「응답에 이미 포함돼 온다」는 Swagger 구조 추론이었고 실측과 어긋난다. 연령·성별은
+    이 표면이 아니라 `/ncc/criterion`(D-NAO-197 ②)에서 와야 한다.
+    """
+
+    __tablename__ = "naver_adgroup_target_current"
+    __table_args__ = (
+        UniqueConstraint("adgroup_id", name="uq_naver_adgroup_target_current"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    # 프로브 결과 — 200이 아니면 나머지 필드는 «모름»이지 «없음»이 아니다(fail-closed).
+    # 삭제된 광고그룹은 404 code:1018("No permission to access the resource")을 준다 —
+    # 2026-08-19 실측: 404가 난 4그룹은 전부 naver_entity에서 status='deleted'였다.
+    probe_status: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # ── MEDIA_TARGET (A5) ──
+    media_target_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    media_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    media_search: Mapped[Optional[str]] = mapped_column(Text, nullable=True)     # JSON 원문
+    media_contents: Mapped[Optional[str]] = mapped_column(Text, nullable=True)   # JSON 원문
+    media_white: Mapped[Optional[str]] = mapped_column(Text, nullable=True)      # JSON 원문
+    black_media_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 정렬된 JSON 배열
+    black_media_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    black_mediagroup_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    media_reg_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    media_edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # ── PC_MOBILE_TARGET (A6) ──
+    pcm_target_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    pc: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    mobile: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    pcm_edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # ── 관측 메타 ──
+    # 응답에 실재한 targetTp 목록(JSON). 「무엇이 없었나」를 나중에 되물을 수 있게 남긴다.
+    target_types_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class NaverAdgroupMediaBlack(Base):
+    """매체 블랙리스트 **현재 상태**를 조인 가능한 행으로 편 것 (D-NAO-201, 축 A5).
+
+    grain: (adgroup_id, media_code). `NaverAdgroupTargetCurrent.black_media_json`과 같은 사실을
+    담되, 이쪽은 **성과축과 조인하기 위한** 모양이다 — `naver_search_term_dim_daily`의
+    `dim_type='m'` × `dim_value`가 상대편이고, 두 코드가 같은 공간임은 실측으로 확정됐다
+    (그 근거는 `NaverSearchTermDimDaily` docstring).
+
+    ★`media_code`는 **문자열**로 넣는다(`str(code)`). ⚠️단 이유를 정확히 적는다 — 2026-08-19에
+    실측하니 **SQLite에서는 int로 넣어도 조인이 깨지지 않는다**(TEXT affinity가 저장 시 text로
+    변환한다, `typeof()` 확인). 「숫자로 두면 조인이 조용히 0건이 된다」는 초판 서술은 **틀렸다**.
+    진짜 이유는 둘이다: ①이 프로젝트의 DB 이행 목표가 PostgreSQL인데 거기선 VARCHAR 컬럼에
+    int 바인딩이 **에러**가 난다 ②커밋 전 Python 측 비교(`b.media_code == d.dim_value`)는
+    affinity의 보호를 못 받는다. ⇒ 이 규율을 지키는 변이 테스트는 SQLite에서 **원리적으로
+    못 만든다**(변이 M1이 살아남는 이유가 결함이 아니라 affinity다 — 그 사실을 여기 남긴다).
+
+    ★프로브가 200이 아닌 그룹은 이 표에 행이 없다 — 그건 「블랙이 0건」이 아니라 「모름」이다.
+    행 없음을 0으로 읽지 않으려면 `NaverAdgroupTargetCurrent.probe_status`를 같이 본다.
+    """
+
+    __tablename__ = "naver_adgroup_media_black"
+    __table_args__ = (
+        UniqueConstraint("adgroup_id", "media_code", name="uq_naver_adgroup_media_black"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    media_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    # 이 그룹 MEDIA_TARGET의 마지막 수정 시각. ★media 한 건의 등재 시각이 아니다(위 docstring).
+    source_edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverAdgroupTargetChange(Base):
+    """타겟팅 설정이 **바뀐 순간만** 남기는 이벤트 원장 (D-NAO-201).
+
+    grain: (adgroup_id, observed_at, field). 현재상태 표가 upsert라 역사를 잃는데, 「언제부터
+    이랬나」는 성과 교차의 전제다 — 그래서 바뀐 것만 여기 쌓는다. 안 바뀐 날은 **행이 없다**
+    (그래서 디스크 92%에서도 감당된다).
+
+    ⚠️이 원장의 시작은 **최초 적재일**이다. 그 전의 변경은 존재하지 않는 게 아니라 **관측되지
+    않았다** — 소급이 원리적으로 불가능하기 때문이다(API가 현재만 준다).
+    """
+
+    __tablename__ = "naver_adgroup_target_change"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    field: Mapped[str] = mapped_column(String(40), nullable=False)   # black_media / pc / mobile / media_type / probe_status …
+    old_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    new_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class NaverSearchTermExclusion(Base):

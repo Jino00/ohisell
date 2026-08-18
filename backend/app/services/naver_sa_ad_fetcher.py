@@ -760,6 +760,62 @@ def get_adgroups(campaign_id: str) -> list[dict]:
     } for a in resp.json()]
 
 
+def get_adgroup_targets(adgroup_id: str) -> dict:
+    """GET /ncc/targets?ownerId=… — 그 광고그룹의 **타겟팅 설정 전건**을 파싱해 돌려준다 (D-NAO-201).
+
+    쇼핑 제외 관리(`naver_ad/naver_sa_writer.py:237`·`:310`)가 부르는 것과 **같은 endpoint**지만,
+    그쪽은 `targetTp != RESTRICT_KEYWORD_TARGET`을 그 자리에서 버린다. 이 함수는 버리던 것을
+    — A5(매체 블랙리스트)·A6(PC/모바일) — 살린다.
+
+    ★응답에 실재하는 targetTp는 **4종뿐**이다(2026-08-19, 533그룹 전수 실측):
+    MEDIA_TARGET · PC_MOBILE_TARGET · RESTRICT_KEYWORD_TARGET · NON_SEARCH_KEYWORD_TARGET.
+    GENDER/AGE/TIME_WEEKLY/REGIONAL은 **0건** — ref 75 §4-3의 「응답에 이미 포함돼 온다」는
+    Swagger 구조 추론이었고 실측과 어긋난다. 설정되지 않은 타겟은 행 자체가 없다.
+
+    ★**삭제된 광고그룹은 404 `{"code":1018,...}`**를 준다("No permission to access the resource" —
+    권한 문제처럼 보이지만 실은 삭제다. 2026-08-19 실측: 404가 난 4그룹 전부 naver_entity에서
+    status='deleted'). 그래서 404를 예외로 올리지 않고 `status`에 실어 돌려준다 —
+    **「모름」과 「블랙 0건」을 부르는 쪽이 구분할 수 있어야** 하기 때문이다(교훈 #123).
+
+    Returns:
+      {"status": int,                  # HTTP status (200 / 404 / …)
+       "target_types": [str, ...],     # 응답에 실재한 targetTp (정렬)
+       "media": dict | None,           # MEDIA_TARGET 원본 항목
+       "pc_mobile": dict | None,       # PC_MOBILE_TARGET 원본 항목
+       "black_media": [int, ...],      # 정렬된 매체 블랙리스트 (없으면 [])
+       "black_mediagroup": [int, ...]}
+    """
+    resp = _get("/ncc/targets", {"ownerId": adgroup_id})
+    if resp.status_code != 200:
+        # 본문을 버리지 않는다 — 1018(삭제)인지 다른 사유인지 로그로 갈린다.
+        log.info("[targets] adgroup=%s HTTP %s body=%s", adgroup_id, resp.status_code, resp.text[:200])
+        return {"status": resp.status_code, "target_types": [], "media": None,
+                "pc_mobile": None, "black_media": [], "black_mediagroup": []}
+
+    items = resp.json() or []
+    media = pcm = None
+    types: list[str] = []
+    for it in items:
+        tp = it.get("targetTp")
+        if tp:
+            types.append(tp)
+        if tp == "MEDIA_TARGET":
+            media = it
+        elif tp == "PC_MOBILE_TARGET":
+            pcm = it
+
+    black = ((media or {}).get("target") or {}).get("black") or {}
+    return {
+        "status": 200,
+        "target_types": sorted(set(types)),
+        "media": media,
+        "pc_mobile": pcm,
+        # ★None과 []를 같은 것으로 뭉갠다 — 응답이 실제로 `"media": null`을 준다(white 쪽 관측).
+        "black_media": sorted(black.get("media") or []),
+        "black_mediagroup": sorted(black.get("mediaGroup") or []),
+    }
+
+
 def get_keywords(adgroup_id: str) -> list[dict]:
     """광고그룹의 키워드 목록 (P2-S1 entity_sync, WEB_SITE만 호출 — SHOPPING은 개별 키워드 무의미,
     실측: 계정 전체 등록 키워드 90,379건 중 90,150건이 WEB_SITE 소속, docs/references/22).

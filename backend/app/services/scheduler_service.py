@@ -1063,6 +1063,42 @@ def run_naver_probe_learning_job():
         db.close()
 
 
+def sync_naver_adgroup_targets_job():
+    """광고그룹 타겟팅 설정 전수 스윕 — 매체 블랙리스트(A5)·PC/모바일(A6) 적재 (09:30 KST, D-NAO-201).
+
+    `/ncc/targets`를 non-deleted 광고그룹(약 1,013개) 전건에 1회씩 GET한다. 네이버에 쓰지 않는다.
+
+    ★왜 전수 스윕인가(「추가 API 콜 0」을 포기한 이유): 같은 endpoint를 쇼핑 제외 관리가 이미
+    부르지만, 그 편승 지점(08:25 생존감시)은 **제외 원장에 행이 있는 131그룹만** 돈다 —
+    성과축 307그룹 중 116(37.8%)·계정 전체 대비 24.6%다(2026-08-19 실측). 편승만 하면
+    「적재했다」가 4분의 1을 뜻하게 된다. Jino 결정 = 커버리지를 산다.
+
+    ★09:30인 이유: 09:10 sweep_naver_keyword_hourly(3,500콜 ~12분, 09:10~09:22)와 09:20
+    auto_operator_hourly 뒤, 09:50 keyword_baseline 앞의 빈 슬롯이다. 스윕은 약 4~5분
+    (1,013콜 × 약 0.25s)이라 09:50과 겹치지 않는다. 상류 의존은 `naver_entity`(07:35 동기화)
+    하나뿐이라 오전 어느 시각이든 신선하다.
+
+    ★_CATCHUP_ORDER 제외 — 관측 전용이고 매일 전량을 다시 읽어 현재상태를 통째로 갱신하므로
+    하루 유실이 현재상태에 구멍을 남기지 않는다. (다만 그날 일어났다가 되돌아간 변경은
+    변경 원장에서 영구히 안 보인다 — 소급이 원리적으로 불가능한 자료의 대가다.)
+
+    fail-open(관찰 전용 — 실패가 catch-up 하류를 막지 않게 예외를 다시 던지지 않는다)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad import adgroup_target_ingest
+
+        result = adgroup_target_ingest.sync_adgroup_targets(db)
+        log.info(
+            "[스케줄러] 타겟팅 스윕: swept=%s ok=%s failed=%s new=%s changed=%s black_rows=%s",
+            result["swept"], result["ok"], result["failed"], result["new"],
+            result["changed"], result["black_rows"],
+        )
+    except Exception as e:  # noqa: BLE001 — fail-open(re-raise 안 함 — catch-up 하류 비블록)
+        log.exception("[스케줄러] sync_naver_adgroup_targets_job 에러(무시): %s", e)
+    finally:
+        db.close()
+
+
 def verify_search_term_exclusions_job():
     """조치 생존 감시 — 우리가 건 검색어 제외가 라이브에 아직 걸려 있나 (08:25 KST, D-NAO-173 P1-①).
 
@@ -1791,6 +1827,10 @@ def _ensure_default_states(db):
         # ★머리 키워드 검색량 기준선 시계열 (매일 09:50, D-NAO-186 ①). 위 주1회 잡과 대상·저장
         #   모양·목적이 전부 다르다(저클릭/덮어쓰기 vs 돈이닿은/시계열) — 합치지 않는다.
         #   콜 예산: 대상 약 1,193개 ÷ 5개/콜 = 약 239콜/일(승인분 2,200콜 안).
+        # ★광고그룹 타겟팅 전수 스윕(매체 블랙리스트 A5 · PC/모바일 A6, D-NAO-201).
+        #   09:10 키워드 hh24 스윕(~09:22)·09:20 시간별 관제 뒤, 09:50 검색량 기준선 앞의 빈 슬롯.
+        #   콜 예산: non-deleted 광고그룹 약 1,013개 × 1콜 = 약 1,013콜/일.
+        ("sync_naver_adgroup_targets", "30 9 * * *"),
         ("sync_naver_keyword_baseline", "50 9 * * *"),
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
@@ -2171,6 +2211,7 @@ def job_func_for(job_name: str):
         "generate_expert_desk": generate_expert_desk_job,
         # 조치 생존 감시(D-NAO-173 P1-①). catch-up 목록엔 없다 — 매일 전량 재대조라 하루 유실이
         # 구멍을 남기지 않고, 대조가 멈춘 사실은 요약의 stale이 배너로 띄운다.
+        "sync_naver_adgroup_targets": sync_naver_adgroup_targets_job,
         "verify_search_term_exclusions": verify_search_term_exclusions_job,
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,
