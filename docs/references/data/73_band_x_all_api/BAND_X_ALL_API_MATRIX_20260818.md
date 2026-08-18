@@ -159,6 +159,14 @@ SELECT (SELECT COUNT(*) FROM pg)                                     total_produ
 
 ★**개통 난이도 최저 자리 — `/ncc/targets` 폐기분(후보가 아니라 기존 축 #13·#14의 원료)**: 쇼핑 제외 관리(D-NAO-180/181)의 정규 경로가 **매 쓰기마다** `ownerId`만으로 `/ncc/targets`를 불러, 그 그룹의 전체 target 응답 — `MEDIA_TARGET`(#13 A5 원료)·`PC_MOBILE_TARGET`(#14 A6 원료)·`GENDER/AGE/TIME_WEEKLY/REGIONAL` 등 포함 — 을 **이미 받고서 `targetTp` 필터로 그 자리에서 폐기**한다(`naver_sa_writer.py:237`·`:310`, ref 75 ADS §4-3). **추가 API 콜 0으로 열린다** — F1(「병목은 호출이 아니라 적재」)의 코드 레벨 확증이자, 「이미 도착한 응답을 버린다」는 교훈 #312와 같은 모양의 재현. 일회성 프로브가 아니라 정규 운영 경로 상시 편승이므로, 위 어떤 후보보다 개통 비용이 낮다[구조 판단 — 배선 실행은 이 문서 범위 밖].
 
+> ★**처분 갱신(2026-08-18 16:5x, 개정 4-a)**: N1~N8의 「미착수 유보」에 **3값 처분을 달았다** —
+> `data/74_band_x_time_brand/CROSS_keyword_volume_20260818.md` §작업 B가 정본이다.
+> **개통 6건**(N1 `/ncc/criterion` · N2 MasterReport · N4 SharedBudget · N7 breakdown 3종 ·
+> N8 미요청 필드 + **`/ncc/targets` 폐기분**(추가 콜 0 — 후보가 아니라 기존 축 #13·#14의 원료)) ·
+> **Jino 결정 필요 3건**(N3 AdExtension = 매트릭스와 census가 상충해 실계정 가용성 미상 /
+> N5 ProductGroup·N6 InspectHistory = grain 미상) · 제외 0 · 불가 0.
+> ★**억지로 3값을 채우지 않았다** — 근거 없는 처분이 유보보다 나쁘다.
+
 ### 1-B. 커머스(스마트스토어) 축 12행 (실측 A·C + 슬라이스 2 교차 CROSS_commerce)
 
 ⚠️ **이 표의 모든 값은 「상한 프록시」다** — 광고 귀속 매출이 아니라 그 상한. 0쪽에서만 결정적(ref 72 §1).
