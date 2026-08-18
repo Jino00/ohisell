@@ -87,6 +87,44 @@ def test_past_day_is_fully_complete_and_future_day_has_nothing():
     assert today_proxy_revenue.last_complete_hour(now, date(2026, 8, 18)) is None
 
 
+@pytest.mark.parametrize(
+    "now,expected",
+    [
+        # ★적대 리뷰 P1(2026-08-18): 초판은 «과거 날짜면 무조건 23»이라 이 창에서 전날 23시를
+        #   완결로 선언했다. 전날 23시를 보증하는 회차는 **다음 날 00:45**인데 아직 안 돌았다.
+        #   라이브 근거: prod 채널6 hour=23·분≥45 주문이 30일 중 17일(57%)에 26건·398,200원.
+        (datetime(2026, 8, 18, 0, 0), 22),
+        (datetime(2026, 8, 18, 0, 10), 22),
+        (datetime(2026, 8, 18, 0, 44), 22),
+        (datetime(2026, 8, 18, 0, 45), 23),   # 회차가 돈 순간부터 23시가 완결
+        (datetime(2026, 8, 18, 9, 0), 23),
+        (datetime(2026, 8, 19, 0, 10), 23),   # 이틀 전이면 그 회차는 이미 지났다
+    ],
+)
+def test_yesterdays_last_hour_waits_for_the_midnight_run(now, expected):
+    """★이 경계는 «옳은 동작과 틀린 동작이 둘 다 통과»하던 자리다 — 리뷰가 역변이로 입증했다."""
+    assert today_proxy_revenue.last_complete_hour(now, date(2026, 8, 17)) == expected
+
+
+def test_incomplete_hours_reflect_the_midnight_boundary(session):
+    """순수함수만 고치고 소비층이 안 따라오면 반쪽이다 — 버킷 표시까지 잠근다."""
+    _order(session, pid=PRODUCT_A, at=datetime(2026, 8, 17, 23, 50), amount="398200")
+
+    before = today_proxy_revenue.revenue_by_hour(
+        session, [PRODUCT_A], DAY, now=datetime(2026, 8, 18, 0, 10)
+    )
+    assert before.complete_through_hour == 22
+    assert 23 in before.incomplete_hours
+    assert before.complete_total() == Decimal(0), "미수집 구간이 «측정된 0»으로 새면 안 된다"
+    assert before.total() == Decimal("398200"), "원값은 보존한다"
+
+    after = today_proxy_revenue.revenue_by_hour(
+        session, [PRODUCT_A], DAY, now=datetime(2026, 8, 18, 0, 45)
+    )
+    assert after.complete_through_hour == 23 and after.incomplete_hours == ()
+    assert after.complete_total() == Decimal("398200")
+
+
 # ── revenue_by_hour — 버킷 분리·검산·제외 규약 ───────────────────────────────────────
 
 
@@ -132,6 +170,21 @@ def test_revenue_excluded_status_and_other_channels_are_dropped_in_both_layers(s
     daily = today_proxy_revenue.revenue_by_product(session, [PRODUCT_A], DAY)
     assert hourly.hours[11] == Decimal("10000")
     assert hourly.total() == sum(daily.values(), Decimal(0))
+
+
+def test_midnight_exact_order_belongs_to_this_day(session):
+    """P2-1(적대 리뷰, 유일 생존 변이 M10) — 하루 시작 `>=` 경계가 테스트로 안 잠겨 있었다.
+
+    prod 채널6에 `order_date`가 정확히 `00:00:00`인 주문이 **15건** 실재하므로 도달 가능한
+    경계다. `>` 로 바뀌면 그 15건이 조용히 사라지고 검산 등식만 깨진다."""
+    _order(session, pid=PRODUCT_A, at=datetime(2026, 8, 17, 0, 0, 0), amount="12345")
+
+    r = today_proxy_revenue.revenue_by_hour(
+        session, [PRODUCT_A], DAY, now=datetime(2026, 8, 18, 10, 0)
+    )
+    daily = today_proxy_revenue.revenue_by_product(session, [PRODUCT_A], DAY)
+    assert r.hours[0] == Decimal("12345") and r.order_counts[0] == 1
+    assert r.total() == sum(daily.values(), Decimal(0)) == Decimal("12345")
 
 
 def test_other_days_do_not_leak_into_the_buckets(session):

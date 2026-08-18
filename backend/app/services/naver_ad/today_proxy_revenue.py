@@ -26,7 +26,7 @@ mall_product_id == orders.platform_product_id)으로만 성립하고, 그 매핑
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from sqlalchemy import extract
@@ -131,24 +131,32 @@ class HourlyRevenue:
 
 
 def last_complete_hour(now: datetime, day: date) -> int | None:
-    """`day`의 시 버킷 중 «수집이 지나간» 마지막 시. 과거 날짜면 23, 미완이면 그 이전, None=없음.
+    """`day`의 시 버킷 중 «수집이 지나간» 마지막 시. None = 아직 완결 버킷이 없다.
 
-    근거: 수집 크론이 매시 :45에 7일 창을 다시 훑으므로, S:45 회차가 돌고 나면 그 시각 이전
-    주문은 원장에 있다. 시 버킷 h는 h:59:59에 끝나므로 **(h+1):45 회차가 돈 뒤에야** 완결이다.
-      · now의 분 ≥ 45 → 마지막 회차 = now.hour:45 → 완결은 now.hour − 1 까지
-      · now의 분 < 45  → 마지막 회차 = (now.hour−1):45 → 완결은 now.hour − 2 까지
-    ⚠️**이것은 필요조건이지 충분조건이 아니다**: 우리 수집이 그 시각을 지났는지만 안다.
-      스마트스토어가 주문을 API에 노출하기까지의 플랫폼측 지연은 `[미상]`이라, 완결로 표시된
-      버킷도 뒤늦게 늘어날 수 있다. 그래서 이 값은 «끄는 판정»(상한 0 ⇒ 참값 0) 쪽으로만
-      안전하고, «켜는 판정»의 근거로 쓰면 안 된다(ref 72 §1의 비대칭).
+    ★규칙은 하나다 — **시 버킷 h는 그 다음 수집 회차가 돈 뒤에 완결이다.**
+      크론이 매시 :45에 7일 창을 다시 훑으므로, h가 끝나는 h:59:59 이후 첫 회차는
+      **(h+1):45**이고 h=23이면 그건 **다음 날 00:45**이다. 그래서 날짜별 특수분기 없이
+      회차 시각을 직접 만들어 비교한다.
+    ⚠️★**「과거 날짜면 무조건 23」으로 쓰면 안 된다**(초판이 그렇게 썼고 적대 리뷰가 P1로
+      잡았다): 자정~00:44 사이에는 전날 23시의 수집 회차(다음 날 00:45)가 **아직 안 돌았다.**
+      그 창에서 23시를 완결로 선언하면 «아직 안 들어온 것»이 «측정된 0»으로 섞인다 —
+      이 커밋이 막겠다고 선언한 D-NAO-193의 결함과 **같은 모양**이다. 라이브 실측:
+      prod 채널6 `hour=23`·분≥45 주문이 30일 중 **17일(57%)**에 걸쳐 26건·398,200원 실재한다.
+    ⚠️**필요조건이지 충분조건이 아니다**: 우리 수집이 그 시각을 지났는지만 안다. 스마트스토어가
+      주문을 API에 노출하기까지의 플랫폼측 지연은 `[미상]`이라 완결 버킷도 뒤늦게 늘 수 있다.
+      그래서 이 값은 «끄는 판정»(상한 0 ⇒ 참값 0) 쪽으로만 안전하다(ref 72 §1의 비대칭).
+    ⚠️`day`는 **KST 날짜**여야 한다 — 호출부가 `kst_today()` 대신 `date.today()`(prod 서버 TZ=UTC)를
+      넘기면 `day`가 상시 전날이 되어 이 창이 45분이 아니라 **09:00 KST까지 9시간**으로 벌어진다.
     """
-    if day < now.date():
-        return 23
     if day > now.date():
         return None
-    offset = 1 if now.minute >= _ORDERS_SYNC_MINUTE else 2
-    last = now.hour - offset
-    return last if last >= 0 else None
+    midnight = datetime.combine(day, time.min)
+    for hour in range(23, -1, -1):
+        # h의 완결을 보증하는 회차 = (h+1):45 (h=23이면 다음 날 00:45)
+        sync_at = midnight + timedelta(hours=hour + 1, minutes=_ORDERS_SYNC_MINUTE)
+        if now >= sync_at:
+            return hour
+    return None
 
 
 def revenue_by_hour(
