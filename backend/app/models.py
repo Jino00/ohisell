@@ -3535,3 +3535,50 @@ class OpsWisdomEntry(Base):
     __table_args__ = (
         Index("ux_ops_wisdom_entries_source_candidate", "source_candidate_id", unique=True),
     )
+
+
+class NaverKeywordVolumeDaily(Base):
+    """키워드 월검색량의 **시계열** — D-NAO-186 ①(2026-08-17 19:32 Jino 승인)의 실체.
+
+    ★왜 새 테이블인가(기존 `NaverEntity.monthly_volume`이 있는데도): 그 컬럼은 **덮어쓰기**라
+      과거가 남지 않는다. D-NAO-186이 이 적재를 「소급 불가·마감 있음」으로 승인한 이유가
+      정확히 «기준선(시계열)»인데, 덮어쓰기 컬럼은 기준선이 될 수 없다 — 오늘 값이 지난주
+      값을 지운다. **켠 날이 관측 창의 시작**이므로 안 켠 날은 협상 불가로 사라진다.
+
+    ★왜 대상을 넓히는가: 기존 `keyword_volume_sync`는 «저클릭 키워드»(30일 클릭<10)만 본다.
+      그래서 **비용이 실제로 나가는 키워드가 구조적으로 대상 밖**이다 — 2026-08-18 prod 실측:
+      최근 30일 클릭이 있는 키워드 **1,193개 · 비용 4,070,471원**의 검색량을 한 번도 받은 적이
+      없다. 아이폰 출시(매년 9월) 때 «수요가 움직였나 우리가 움직였나»를 가르려면 필요한 것이
+      바로 그 머리 키워드다(작년 아이폰 17 때 실제로 못 갈랐다 — D-NAO-186 마감 근거).
+      콜 예산: 1,193개 ÷ 5개/콜 = 약 239콜/일(승인분 2,200콜 안).
+
+    grain = (measured_date, keyword). ★`keyword`는 **텍스트**다 — `keyword_id`가 아니다.
+      keywordstool은 문자열로 답하고, 같은 문자열이 여러 광고그룹에 걸리며, 검색량은 계정과
+      무관한 **시장 수치**라 엔티티에 매달 값이 아니다.
+
+    ⚠️`monthly_volume`은 «월» 검색량이라 일 단위로 크게 안 움직인다. 그래도 일 적재하는 이유는
+      네이버가 이 값을 언제 어떻게 갱신하는지 `[미상]`이고, 출시 전후 급변을 놓치면 소급이
+      불가능하기 때문이다 — 값이 안 변하면 행이 같을 뿐 손해가 없다.
+    """
+
+    __tablename__ = "naver_keyword_volume_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # ★이 파일의 관례를 따른다 — 날짜 컬럼은 `Mapped[datetime]` + `Date`(models.py:146 등).
+    measured_date: Mapped[datetime] = mapped_column(Date, nullable=False)  # KST 조회일
+    keyword: Mapped[str] = mapped_column(String(200), nullable=False)  # 검색어 텍스트(정규화 전 원문)
+    # ★PC/모바일을 합치지 않고 나눠 둔다 — 기존 fetch_keyword_volumes는 합계만 돌려주는데,
+    #   출시 효과는 기기별로 다르게 나타날 수 있고 합치면 되돌릴 수 없다.
+    pc_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mobile_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # compIdx(높음/중간/낮음)
+    # ★하한 sentinel 표기: keywordstool은 저검색량을 '< 10' 문자열로 준다. 그걸 5로 접은 행은
+    #   여기 True — 「측정값 5」와 「10 미만이라는 것만 안다」를 구분해야 추세가 거짓말을 안 한다.
+    is_below_threshold: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("measured_date", "keyword", name="uq_naver_keyword_volume_daily"),
+        Index("ix_naver_keyword_volume_daily_kw", "keyword", "measured_date"),
+    )

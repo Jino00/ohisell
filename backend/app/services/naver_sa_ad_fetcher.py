@@ -1393,6 +1393,57 @@ def fetch_keyword_volumes(keywords: list[str]) -> dict[str, dict]:
     return out
 
 
+def _parse_qc_flagged(v) -> tuple[int, bool]:
+    """`_parse_qc`와 같은 값 + **하한 sentinel이었는지** 플래그.
+
+    ★왜 나누는가: keywordstool은 저검색량을 `'< 10'` 문자열로 준다. `_parse_qc`는 그걸 5로
+      접는데, 시계열에 5를 그냥 쌓으면 **「측정값 5」와 「10 미만이라는 것만 안다」가 구분되지
+      않는다.** 기준선의 추세를 볼 때 그 둘을 섞으면 없는 변동이 보인다.
+    """
+    below = isinstance(v, str) and (v or "").strip().startswith("<")
+    return _parse_qc(v), below
+
+
+def fetch_keyword_volumes_detailed(keywords: list[str]) -> dict[str, dict]:
+    """`fetch_keyword_volumes`의 시계열용 판 — **PC/모바일을 합치지 않고** 돌려준다.
+
+    Returns: {keyword: {"pc": int, "mobile": int, "total": int,
+                        "competition": str|None, "below_threshold": bool}}
+
+    ★기존 `fetch_keyword_volumes`를 안 고치는 이유: 그 함수의 소비처(`keyword_volume_sync`)는
+      합계만 쓰고 `NaverEntity.monthly_volume`에 넣는다. 반환 모양을 바꾸면 그 경로가 같이
+      흔들린다 — 「한 파일 수리 ≠ 규율 채택」의 반대 방향 실수(무관한 소비처를 끌어들이는 것)를
+      피한다. 대신 파싱·배치 상수는 공유한다.
+    ★출시 효과는 기기별로 다르게 나타날 수 있고, 합쳐 저장하면 되돌릴 수 없다.
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — keywordstool(detailed) 조회 건너뜀")
+        return {}
+
+    wanted = {kw.replace(" ", "").lower() for kw in keywords}
+    out: dict[str, dict] = {}
+    for i in range(0, len(keywords), _KEYWORDSTOOL_BATCH):
+        batch = keywords[i:i + _KEYWORDSTOOL_BATCH]
+        resp = _get("/keywordstool", {"hintKeywords": ",".join(batch), "showDetail": 1})
+        if resp.status_code != 200:
+            log.warning("keywordstool(detailed) 실패 %s: %d %s",
+                        batch, resp.status_code, resp.text[:200])
+            continue
+        for item in resp.json().get("keywordList", []) or []:
+            rel = item.get("relKeyword") or ""
+            if rel.replace(" ", "").lower() not in wanted:
+                continue
+            pc, pc_below = _parse_qc_flagged(item.get("monthlyPcQcCnt", "0"))
+            mo, mo_below = _parse_qc_flagged(item.get("monthlyMobileQcCnt", "0"))
+            out[rel] = {
+                "pc": pc, "mobile": mo, "total": pc + mo,
+                "competition": item.get("compIdx"),
+                "below_threshold": pc_below or mo_below,
+            }
+    log.info("keywordstool(detailed): 요청 %d개 중 %d개 매칭", len(keywords), len(out))
+    return out
+
+
 def extract_keyword(campaign_name: str, known_keywords: list[str]) -> str | None:
     """캠페인명에서 알려진 상품 키워드를 추출한다."""
     name_lower = campaign_name.lower()

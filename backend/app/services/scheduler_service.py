@@ -510,6 +510,34 @@ def sync_naver_search_term_job():
         db.close()
 
 
+def sync_naver_keyword_baseline_job():
+    """★머리 키워드 검색량 «기준선» 시계열 적재 (매일, D-NAO-186 ①).
+
+    ★위 `sync_naver_keyword_volume_job`과 **다른 잡이다 — 합치지 않는다**:
+      그 잡은 «저클릭 키워드»(30일 클릭<10)를 골라 `NaverEntity.monthly_volume` 한 칸을
+      **덮어쓴다**(D-NAO-18 3단분류 입력). 이 잡은 **돈이 닿은 머리 키워드**를 골라
+      `naver_keyword_volume_daily`에 **하루 한 행씩 쌓는다**(기준선). 대상도 저장 모양도
+      목적도 반대라, 한 함수로 비틀면 둘 다 애매해진다.
+    ★왜 매일인가: 검색량은 «월» 단위 수치라 하루로는 잘 안 움직인다. 그래도 매일 받는 이유는
+      네이버가 이 값을 언제 갱신하는지 `[미상]`이고, **아이폰 출시(매년 9월) 전후의 급변을
+      놓치면 소급이 원리적으로 불가능**하기 때문이다(D-NAO-186 마감). 값이 안 변하면 행이
+      같을 뿐 손해가 없다.
+    ★09:50인 이유: `sync_naver_ad_daily`(07:30, 대상 선정의 원료)와 `sync_naver_entity`
+      (07:35, keyword_id→이름 해석)가 끝난 뒤여야 한다. 그리고 :20·:45 혼잡대를 피한다.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.keyword_volume_baseline import sync_baseline
+
+        result = sync_baseline(db)
+        log.info("[스케줄러] keyword_volume_baseline: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_keyword_baseline_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): 실패를 EVENT_JOB_ERROR로 표면화
+    finally:
+        db.close()
+
+
 def sync_naver_keyword_volume_job():
     """저클릭 키워드 월검색량 갱신 (주1회, D-NAO-18 3단분류 입력)."""
     db = _get_own_db_session()
@@ -1752,6 +1780,10 @@ def _ensure_default_states(db):
         ("run_naver_bm_deep", "20 9 * * sun"),      # BM 벤치마크 레이어 주간 deep(제외키워드·소재수, D-NAO-78, 관찰 전용·catch-up 제외). ★요일은 이름으로 — 숫자 `0`은 APScheduler에서 월요일이라 3주간 하루 어긋나 있었다(교훈 #297)
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
         ("sync_naver_keyword_volume", "0 9 * * sun"), # 저클릭 키워드 월검색량 (주1회, 일요일 — 이름 표기 이유는 교훈 #297)
+        # ★머리 키워드 검색량 기준선 시계열 (매일 09:50, D-NAO-186 ①). 위 주1회 잡과 대상·저장
+        #   모양·목적이 전부 다르다(저클릭/덮어쓰기 vs 돈이닿은/시계열) — 합치지 않는다.
+        #   콜 예산: 대상 약 1,193개 ÷ 5개/콜 = 약 239콜/일(승인분 2,200콜 안).
+        ("sync_naver_keyword_baseline", "50 9 * * *"),
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
@@ -2094,6 +2126,7 @@ def job_func_for(job_name: str):
         "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "sync_naver_search_term": sync_naver_search_term_job,
         "sync_naver_keyword_volume": sync_naver_keyword_volume_job,
+        "sync_naver_keyword_baseline": sync_naver_keyword_baseline_job,
         "run_naver_forecast_engine": run_naver_forecast_engine_job,
         "generate_naver_proposals": generate_naver_proposals_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
