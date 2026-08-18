@@ -1,0 +1,5 @@
+source,is_brand_lowrisk,n_combo,n_daily_rows,clk,cost,conv_cnt,conv_amt
+expkeyword,True,619474,1802150,57911,43765177,0,0
+shopping,True,161889,288479,12627,17658138,1719,28583180
+expkeyword,False,330294,796608,18997,12274933,0,0
+shopping,False,100142,168921,3283,4708467,374,5858710

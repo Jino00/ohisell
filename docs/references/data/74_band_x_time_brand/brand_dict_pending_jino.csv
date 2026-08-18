@@ -1,0 +1,5 @@
+token,raw,substring_n_combo,substring_clk,substring_cost,reason,source_detail
+버디,버디,2409,710,398874,"galaxy_a:budi_unresolved(LG U+ 갤럭시 버디4/5 리브랜딩폰)의 series는 확인되나 match_confidence=unresolved라 모델 대조가 안 됐고, 동시에 골프필름 adgroup(grp-a001-01-000000043935093, 자사키워드 캠페인)의 검색어 '버디필름'·'오하이버디필름'은 골프 용어(버디=birdie)로 보이는 문맥과 공존한다(같은 검색어 표층형이 두 문맥에서 관측됨). 토큰 하나로 두 개념이 충돌해 사전에 넣으면 골프 검색어를 폰 브랜드로 오분류한다 — 사전에서 제외.",
+일미리케이스,일미리케이스,107,89,17779,"자사몰(○ 01. 자사몰) adgroup_name이나, '일미리'=1mm 두께 서술어로 보여 브랜드어가 아니라 제품 규격 서술어일 가능성 — 데이터만으로 판정 불가.",
+a73,A73,72,4,2847,device_launch_dates_kr.json 자체가 출처 상충으로 launch_kr=null(status=unreleased) 표기. adgroup_model_map.csv엔 2행 존재하나 match_confidence=unresolved.,
+소다케이스,소다케이스,51,6,2372,"자사 제품 캠페인명(소다케이스_갤럭시/아이폰)엔 있으나, naver_search_term_daily 실검색어에선 244건 중 대다수가 '오하이'와 결합된 형태로만 나타남(예: 오하이하이브리드소다케이스). 독립 자사 브랜드어인지 제품 스타일/재질 서술어(케이스 촉감 은유)인지 데이터만으로 못 가른다.",

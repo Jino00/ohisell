@@ -1,0 +1,5 @@
+source,is_selfbrand,n_combo,n_daily_rows,clk,cost,conv_cnt,conv_amt
+expkeyword,False,941149,2579036,73299,54953150,0,0
+shopping,False,257771,447592,15394,21738698,1949,31911960
+expkeyword,True,8619,19722,3609,1086960,0,0
+shopping,True,4260,9808,516,627907,144,2529930

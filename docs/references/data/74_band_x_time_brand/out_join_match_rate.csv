@@ -1,0 +1,4 @@
+source,matched_to_band,n_combo,n_daily_rows,clk,cost,conv_cnt,conv_amt
+expkeyword,True,949729,2598719,76908,56040110,0,0
+shopping,True,262031,457400,15910,22366605,2093,34441890
+expkeyword,False,39,39,0,0,0,0
