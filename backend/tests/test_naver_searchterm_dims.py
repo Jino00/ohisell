@@ -80,6 +80,40 @@ def test_marginals_each_axis_totals_match_raw(monkeypatch):
     assert (h09["imp"], h09["clk"], h09["cost"]) == (15, 1, 100)
 
 
+# ── ②-b 광고그룹은 절대 뭉개지면 안 된다 (적대 리뷰 살아남은 변이 M-A·M-D) ──
+def test_adgroup_is_part_of_both_grains(monkeypatch):
+    """등급(밴드)은 **광고그룹 단위**로 붙는다. 집계 키에서 adgroup_id가 빠지면 서로 다른
+    그룹의 값이 한 행으로 합쳐져 밴드 교차가 통째로 무의미해진다 — 그런데 리뷰의 변이
+    주입에서 adgroup_id를 빼도 기존 8종이 전부 통과했다(전 케이스가 단일 그룹이었다)."""
+    rows = [
+        _row("20260801", "c1", "g1", "a", "09", "01", "111111", 10, 1, 100),
+        _row("20260801", "c1", "g2", "b", "09", "01", "111111", 3, 1, 70),
+    ]
+    _patch(monkeypatch, {"2026-08-01": rows})
+    out = fetcher.fetch_search_term_dimensions(date(2026, 8, 1), date(2026, 8, 1))
+
+    h09 = [r for r in out["marginals"] if r["dim_type"] == "h" and r["dim_value"] == "09"]
+    assert {r["adgroup_id"] for r in h09} == {"g1", "g2"}, "마진 키에서 광고그룹이 뭉개졌다"
+    assert {r["imp"] for r in h09} == {10, 3}
+
+    cells = out["cells"]
+    assert {c["adgroup_id"] for c in cells} == {"g1", "g2"}, "결합 키에서 광고그룹이 뭉개졌다"
+    assert {c["cost"] for c in cells} == {100, 70}
+
+
+# ── ②-c 축이 서로 다른데 코드값이 같은 경우 (변이 M-C) ──────────────────
+def test_axes_with_colliding_code_values_stay_separate(monkeypatch):
+    """시간대·지역은 둘 다 2자리 코드라 값 공간이 겹친다(hour '05' vs region '05').
+    집계 키에서 dim_type이 빠지면 두 축이 한 행으로 합쳐진다."""
+    rows = [_row("20260801", "c1", "g1", "a", "05", "05", "050505", 10, 1, 100)]
+    _patch(monkeypatch, {"2026-08-01": rows})
+    out = fetcher.fetch_search_term_dimensions(date(2026, 8, 1), date(2026, 8, 1))
+    five = [r for r in out["marginals"] if r["dim_value"] == "05"]
+    assert sorted(r["dim_type"] for r in five) == ["h", "r"], "같은 코드값의 두 축이 합쳐졌다"
+    for r in five:
+        assert (r["imp"], r["clk"], r["cost"]) == (10, 1, 100)
+
+
 # ── ③ 결합표는 «돈이 난 칸»만 ────────────────────────────────────────────
 def test_cells_keep_only_money_bearing(monkeypatch):
     rows = [

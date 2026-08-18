@@ -1209,8 +1209,12 @@ def fetch_search_term_daily(report_tp: str, date_from: date, date_to: date) -> l
 
 # ── D-NAO-198: 위 함수가 버리는 col7/8/9(시간대·지역·매체) 축 ──────────────────────────
 # fetch_search_term_daily는 (일자×캠페인×그룹×검색어)로 뭉개면서 이 세 컬럼을 떨군다.
-# 같은 리포트를 축 grain으로 다시 집계한다 — **추가 네이버 API 콜은 리포트 다운로드 1회뿐**
-# (리포트 생성/조회는 위 함수와 같은 것을 재사용).
+# 같은 리포트를 축 grain으로 다시 집계한다.
+# ⚠️**「추가 API 콜 0」이 아니다**(적대 리뷰 지적, 2026-08-18): 이 함수는 자기 몫으로
+#   ensure_reports_built(GET 상태 조회)·_list_reports_by_type(GET 목록)·_download_tsv를
+#   **다시** 부른다. 07:40 잡이 둘을 잇달아 돌리므로 그 셋이 창 길이만큼 2배가 된다
+#   (리포트 «생성» POST만 dedup 덕에 중복이 없다). 데이터는 무해하나, 다음 사람이
+#   「이미 0콜」이라 믿고 더 얹으면 누적된다 — 줄이려면 다운로드 결과를 공유해야 한다.
 ST_COL_HOUR = 7     # '00'~'23'
 ST_COL_REGION = 8   # 2자리 코드(뜻 미상, '-1'이 섞이는 날 있음)
 ST_COL_MEDIA = 9    # 6자리 정수 id(뜻 미상)
