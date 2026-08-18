@@ -1949,6 +1949,14 @@ _CATCHUP_NON_BLOCKING: frozenset[str] = frozenset({
     "sync_naver_sa_ad_costs",
     "sync_meta_ad_costs",
     "sync_naver_display_ad_costs",
+    # ★검색량 기준선(2026-08-18, 적대 리뷰 P2 채택) — 위 광고비 3잡과 **같은 사유**이고 노출은
+    #   더 크다: 외부 API(keywordstool)를 최대 800콜 **순차**로 두드리므로 남의 장애를 만날
+    #   확률이 높은데, 이 잡은 catch-up 순서상 17/21이라 예외가 나면 뒤의 관찰 잡 3개
+    #   (wisdom·vault_export·entity)가 그날 통째로 복구되지 않는다. 이 잡의 원료는
+    #   `naver_ad_daily`·`naver_entity`뿐이고 하류에 아무도 의존하지 않는다 —
+    #   기준선 적재가 실패했다고 볼트 재생성까지 막는 것은 결합이 잘못된 것이다.
+    #   ★잡 자체의 raise는 유지(정상 크론에서는 실패가 last_status로 드러나야 한다).
+    "sync_naver_keyword_baseline",
 })
 
 
