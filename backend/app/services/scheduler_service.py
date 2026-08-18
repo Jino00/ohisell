@@ -494,15 +494,23 @@ def shopping_ad_product_sync_job():
 
 
 def sync_naver_search_term_job():
-    """네이버 SA 검색어 단위 성과 수집 (07:40 KST, P2-S1). 최근 3일 창(사후정정 흡수)."""
+    """네이버 SA 검색어 단위 성과 수집 (07:40 KST, P2-S1). 최근 3일 창(사후정정 흡수).
+
+    ★D-NAO-198: 같은 SHOPPINGKEYWORD_DETAIL 리포트의 col7/8/9(시간대·지역·매체) 축 적재를
+    **같은 잡·같은 창**에 붙였다. 별도 크론으로 떼면 두 표의 커버리지가 갈라지는데, 원료
+    리포트가 180일 뒤 사라지므로 그 갈라짐은 나중에 메울 수 없다.
+    """
     db = _get_own_db_session()
     try:
         from app.services.naver_ad.search_term_ingest import ingest_search_term_daily
+        from app.services.naver_ad.search_term_dim_ingest import ingest_search_term_dimensions
 
         end = kst_today() - timedelta(days=1)
         start = end - timedelta(days=2)
         result = ingest_search_term_daily(db, start, end)
         log.info("[스케줄러] naver_search_term_daily ingest: %s", result)
+        dim_result = ingest_search_term_dimensions(db, start, end)
+        log.info("[스케줄러] naver_search_term_dim ingest: %s", dim_result)
     except Exception as e:
         log.exception("[스케줄러] sync_naver_search_term_job 에러: %s", e)
         raise

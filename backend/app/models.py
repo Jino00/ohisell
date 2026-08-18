@@ -3173,6 +3173,89 @@ class NaverSearchTermDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverSearchTermDimDaily(Base):
+    """쇼핑 검색어 리포트의 «버리던 세 축» 마진 적재 — 시간대·지역·매체 (D-NAO-198).
+
+    grain: (ad_date, adgroup_id, dim_type, dim_value). 원료는 `NaverSearchTermDaily`와
+    **같은 SHOPPINGKEYWORD_DETAIL 리포트**(추가 API 콜 0)이고, 그 테이블이 (일자×캠페인×
+    그룹×검색어)로 뭉갤 때 버리는 col7/8/9를 축별로 살린다.
+
+    ★왜 별도 테이블인가(D-NAO-182 근거 승계): 기존 `naver_search_term_daily`에 축을 더하면
+    행이 수십 배가 되고, 성적표·SS레인·후보생성 등 **여러 소비자가 읽는 테이블의 의미가
+    바뀐다**. 소비자를 건드리지 않으려면 옆에 두는 수밖에 없다.
+
+    ★왜 결합(joint)이 아니라 마진인가(2026-08-18 실측): 결합 grain은 180일 3.43M행·**586MB**인데
+    그중 **98.2%가 clk=0·cost=0인 «노출만 있는 칸»**이다. prod 디스크가 92%라(이 저장소는
+    디스크 포화로 배치를 유실한 전력이 있다) 결합 전건은 못 싣는다. 그래서 **축별 마진은
+    전건**(약 197MB) 싣고, 결합은 돈이 움직인 칸만 `NaverSearchTermDimCellDaily`에 따로 싣는다.
+    ⚠️**버리는 것**: 노출만 있는 결합 칸의 «축 간 상호작용»은 저장되지 않고 180일 뒤 영구
+    소실된다(축별 노출 자체는 이 표에 전건 남는다).
+
+    dim_type — 'h'=시간대(col7, '00'~'23') · 'r'=지역(col8) · 'm'=매체(col9).
+    ★**코드의 «뜻»은 여전히 미상이다**(D-NAO-198 «안 함»): 지역 코드 사전·매체 id 사전을
+    만들지 않고 리포트가 준 코드값을 **그대로** 저장한다. 지역엔 `-1`이 섞여 나오는 날이 있다
+    (뜻 미상 — 추정해서 채우지 않는다). 매체 id는 6자리로 MEDIA_TARGET 블랙리스트의 media id와
+    자릿수가 같으나 **동일성은 미확인**이다.
+
+    ★소실 시한: `SHOPPINGKEYWORD_DETAIL` 재생성 한도가 **정확히 180일**(day-180 BUILT ↔
+    day-181 API 400/10004로 경계 실측 확정) — 매일 창이 굴러가 앞이 사라진다.
+    """
+
+    __tablename__ = "naver_search_term_dim_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_date", "adgroup_id", "dim_type", "dim_value",
+            name="uq_naver_search_term_dim_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    dim_type: Mapped[str] = mapped_column(String(1), nullable=False)   # h=시간대 r=지역 m=매체
+    dim_value: Mapped[str] = mapped_column(String(20), nullable=False)  # 리포트 원본 코드 그대로
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverSearchTermDimCellDaily(Base):
+    """위 세 축의 **결합** 셀 — 단 «돈이 움직인 칸»만 (D-NAO-198).
+
+    grain: (ad_date, adgroup_id, hour_code, region_code, media_code).
+    적재 조건: **clk > 0 또는 cost > 0**. 노출만 있는 칸(결합의 98.2%)은 싣지 않는다 —
+    사유·대가는 `NaverSearchTermDimDaily` docstring 참조.
+
+    ⚠️이 표만으로 «축별 합계»를 내면 틀린다(노출 칸이 빠져 있다). 축별 값은 반드시
+    `naver_search_term_dim_daily`에서 읽는다. 이 표의 용도는 «비용이 난 자리의 축 간
+    상호작용»(예: 어느 시간대·어느 매체에서 비용이 났나) 하나뿐이다.
+    """
+
+    __tablename__ = "naver_search_term_dim_cell_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_date", "adgroup_id", "hour_code", "region_code", "media_code",
+            name="uq_naver_search_term_dim_cell_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    hour_code: Mapped[str] = mapped_column(String(2), nullable=False)
+    region_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    media_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class NaverSearchTermExclusion(Base):
     """파워링크 검색어 자동 제외 in-out 상태기계 1행 (스프린트 PX,
     docs/PLAN_naver-ad-powerlink-autoexclude.md §2). grain: (adgroup_id, search_term) — Unique.

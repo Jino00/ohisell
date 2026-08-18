@@ -1207,6 +1207,118 @@ def fetch_search_term_daily(report_tp: str, date_from: date, date_to: date) -> l
     return list(agg.values())
 
 
+# ── D-NAO-198: 위 함수가 버리는 col7/8/9(시간대·지역·매체) 축 ──────────────────────────
+# fetch_search_term_daily는 (일자×캠페인×그룹×검색어)로 뭉개면서 이 세 컬럼을 떨군다.
+# 같은 리포트를 축 grain으로 다시 집계한다 — **추가 네이버 API 콜은 리포트 다운로드 1회뿐**
+# (리포트 생성/조회는 위 함수와 같은 것을 재사용).
+ST_COL_HOUR = 7     # '00'~'23'
+ST_COL_REGION = 8   # 2자리 코드(뜻 미상, '-1'이 섞이는 날 있음)
+ST_COL_MEDIA = 9    # 6자리 정수 id(뜻 미상)
+
+DIM_HOUR = "h"
+DIM_REGION = "r"
+DIM_MEDIA = "m"
+_DIM_COLS = ((DIM_HOUR, ST_COL_HOUR), (DIM_REGION, ST_COL_REGION), (DIM_MEDIA, ST_COL_MEDIA))
+
+
+def _num_or_flag(raw: str, bad: list[str]) -> int:
+    """_safe_int와 같은 값을 내되, «0이 아닌 것처럼 보이는데 0으로 떨어지는» 입력을 기록한다.
+
+    ★이 리포트는 재생성 한도가 180일이라 잘못 적재하면 원본이 사라진 뒤엔 고칠 수 없다.
+    `_safe_int`는 천단위 콤마('1,234')를 조용히 0으로 만든다(기존 부채 — 여기서 고치면 같은
+    리포트를 읽는 naver_search_term_daily와 값이 갈라지므로 **동작은 그대로 두고 관측만** 한다).
+    """
+    v = _safe_int(raw)
+    if v == 0 and raw not in ("", "0", "0.0", "-") and any(ch.isdigit() for ch in raw):
+        if len(bad) < 20:
+            bad.append(raw)
+    return v
+
+
+def fetch_search_term_dimensions(date_from: date, date_to: date) -> dict[str, list[dict]]:
+    """SHOPPINGKEYWORD_DETAIL을 «시간대·지역·매체» 축으로 집계 (D-NAO-198 ①).
+
+    Returns:
+      {"marginals": [{"date","campaign_id","adgroup_id","dim_type","dim_value",
+                      "imp","clk","cost","rank_sum"}, ...],
+       "cells":     [{"date","campaign_id","adgroup_id","hour_code","region_code",
+                      "media_code","imp","clk","cost","rank_sum"}, ...]}
+
+    - **marginals**: 축별 마진 3벌(dim_type h/r/m). 전건 — 노출만 있는 칸도 포함.
+    - **cells**: 세 축 결합. **clk>0 또는 cost>0인 칸만**(결합 전건은 180일 586MB인데 98.2%가
+      노출 전용 — prod 디스크 92%라 못 싣는다, D-NAO-198 계약).
+
+    집계 키에 campaign_id를 넣지 않는다(광고그룹→캠페인은 함수 관계라 중복 축이 되고,
+    테이블 UniqueConstraint도 campaign_id를 안 쓴다). campaign_id는 처음 본 값을 싣는다.
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — 검색어 축 수집 건너뜀")
+        return {"marginals": [], "cells": []}
+
+    ensure_reports_built("SHOPPINGKEYWORD_DETAIL", date_from, date_to)
+    reports = _list_reports_by_type("SHOPPINGKEYWORD_DETAIL", date_from, date_to)
+    if not reports:
+        log.warning("Naver SA: %s~%s SHOPPINGKEYWORD_DETAIL 보고서 없음(축 수집)", date_from, date_to)
+        return {"marginals": [], "cells": []}
+
+    marg: dict[tuple, dict] = {}
+    cells: dict[tuple, dict] = {}
+    seen_dates: set[str] = set()
+    n_raw = 0
+    bad_nums: list[str] = []
+    for rep in sorted(reports, key=lambda r: r["date"]):
+        if rep["date"] in seen_dates:
+            continue
+        seen_dates.add(rep["date"])
+        for cols in _download_tsv(rep["downloadUrl"]):
+            if len(cols) <= ST_COL_RANK_SUM:
+                continue
+            d = _row_date_iso(cols[ST_COL_DATE])
+            if d is None:
+                continue
+            n_raw += 1
+            campaign_id = cols[ST_COL_CAMPAIGN]
+            adgroup_id = cols[ST_COL_ADGROUP]
+            imp = _num_or_flag(cols[ST_COL_IMP], bad_nums)
+            clk = _num_or_flag(cols[ST_COL_CLK], bad_nums)
+            cost = _num_or_flag(cols[ST_COL_COST], bad_nums)
+            rank_sum = _num_or_flag(cols[ST_COL_RANK_SUM], bad_nums)
+
+            for dim_type, col_idx in _DIM_COLS:
+                key = (d, adgroup_id, dim_type, cols[col_idx])
+                row = marg.get(key)
+                if row is None:
+                    row = {"date": d, "campaign_id": campaign_id, "adgroup_id": adgroup_id,
+                           "dim_type": dim_type, "dim_value": cols[col_idx],
+                           "imp": 0, "clk": 0, "cost": 0, "rank_sum": 0}
+                    marg[key] = row
+                row["imp"] += imp
+                row["clk"] += clk
+                row["cost"] += cost
+                row["rank_sum"] += rank_sum
+
+            ckey = (d, adgroup_id, cols[ST_COL_HOUR], cols[ST_COL_REGION], cols[ST_COL_MEDIA])
+            crow = cells.get(ckey)
+            if crow is None:
+                crow = {"date": d, "campaign_id": campaign_id, "adgroup_id": adgroup_id,
+                        "hour_code": cols[ST_COL_HOUR], "region_code": cols[ST_COL_REGION],
+                        "media_code": cols[ST_COL_MEDIA],
+                        "imp": 0, "clk": 0, "cost": 0, "rank_sum": 0}
+                cells[ckey] = crow
+            crow["imp"] += imp
+            crow["clk"] += clk
+            crow["cost"] += cost
+            crow["rank_sum"] += rank_sum
+
+    money_cells = [c for c in cells.values() if c["clk"] > 0 or c["cost"] > 0]
+    if bad_nums:
+        log.warning("Naver SA 검색어 축: 숫자 파싱 0 낙하 %d종 표본=%s "
+                    "(콤마 표기 등 — 값이 소실됐을 수 있다)", len(bad_nums), bad_nums[:5])
+    log.info("Naver SA 검색어 축 집계 (%s~%s): raw %d행 → 마진 %d행 / 결합 %d칸 중 유료 %d칸",
+             date_from, date_to, n_raw, len(marg), len(cells), len(money_cells))
+    return {"marginals": list(marg.values()), "cells": money_cells}
+
+
 # ── SHOPPINGKEYWORD_CONVERSION_DETAIL 컬럼(15열, 헤더없음, 실측 확정
 #    docs/PLAN_naver-ad-searchterm-ss.md §0.5) — AD_CONVERSION(CONV_COL_*, 13컬럼) 대비 +2
 #    오프셋이지만 기기 컬럼이 끼어들어 단순 +2가 col9 이후는 깨진다(±2 오프셋 함정,
