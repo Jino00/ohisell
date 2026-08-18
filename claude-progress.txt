@@ -1,3 +1,22 @@
+[2026-08-18 13:4x~14:5x] 시간대 축·A3 텍스트 축 × 성과등급 교차 + 시간 해상도 층 배포 (D-NAO-195)
+  · 착수 실측이 인계 3건 정정: hourly_pattern은 죽지 않았다(writer 有·소비 2곳) / band는
+    prod DB에 없고 CSV가 정본 / next_ids.sh가 D-NAO-194를 재발급 중이었다(소급 기록 `974795cc`).
+  · 168칸 CPA 원료 교체: naver_keyword_hourly가 유일 4조건 동시충족 테이블(대조 100% 일치).
+    38일 창: band1 CPA 5,737 / band2 6,399 / band3 6,931(서열 보존, 4주판도 동일).
+  · 롤업 함정 2건: entity_id가 진짜 grain 키(adgroup_id 전건 공란) / WEB_SITE keyword·adgroup은
+    계층 아닌 부분커버리지(docstring과 불일치, [미상]).
+  · A3 브랜드어 사전 97토큰 전량 출처좌표, 추정등재 0. 애매 4건은 Jino 확인 대기(버디=폰/골프 동음).
+  · A3 결론력 정정: expkeyword 391일 전환 0 / shopping 45일뿐 — ref73 #11 「391일 온전」은
+    expkeyword에만 참, 성과판정 불가.
+  · 시간 해상도 층 신설(revenue_by_hour·last_complete_hour) — hour 추출 코드 0건이던 읽기공백 해소.
+  · ★적대 리뷰 P1 1건: 초판이 자정~00:44에 전날 23시를 완결로 오판(벽시계 지름길 분기).
+    재현 4건 확인 후 특수분기 소거·회차시각 직접유도로 수정. R2 해소·P1 0. 교훈 #313.
+  · 배포 14:4x safe_deploy --restart 무중단, prod 직접호출로 검산(total==일단위프록시 True).
+  · Fable 위임(경향성): 창민감도 20~25%는 2026-07-14~17 계정전체 이상치 구간([미상]) 탓 —
+    38일판 절대CPA는 조건부. 파워링크 3중 암흑(검색어0·시간102/255·제외14.7%).
+  · 매트릭스 개정3(74번 문서, 교차완료 12→14, 호출가능·미적재 10축 불변 명기).
+  · 완료 QA 달성. 커밋 12건, origin push 완료(누적 35+12). PAO 불변(optimizer 7/7 none).
+
 [2026-08-18 10:2x~11:2x] probe_revert 출혈밸브 상시-0 결함 수리 — 배포·라이브 확정 (D-NAO-193)
   · 결함(D-NAO-192 발견분): `probe_revert._conv_direct_today`가 D−1까지만 적재되는
     `naver_ad_daily`에서 `ad_date==오늘`을 읽어 **구조적 상시 0** → CD3 출혈밸브(매시) 되돌림
