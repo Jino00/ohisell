@@ -21,7 +21,7 @@
 - ✅ 트랙 `docs/tracks/active/track_naver-ad-optimization.md` — **D-NAO-202** 등재 + 진행 기록·QA 판정.
 - ✅ `.claude/memory/LESSONS_LEARNED.md` — **교훈 #319·#320**. `failures.jsonl` 1줄.
 - ✅ **배포** `a26a4491` — safe_deploy CAS 통과·무중단 재시작 다운타임 0초. 8/18 재동기화 `new_orders: 23`.
-- ✅ **PR #309** 생성 (https://github.com/Jino00/ohisell/pull/309) — **OPEN·미병합**
+- ✅ **PR #309 병합 완료** (2026-08-19 11:35 KST) — `scripts/safe_merge.sh 309 --force`. ★**강제 병합이고 자백이 남았다**(`verdict=FAIL`, `$TMPDIR/safe_merge.log`). CI 빨강은 코드 신호가 아님을 먼저 실증: 최근 워크플로 10건 전부 실패인데 그중 **9건이 코드 무관 문서 커밋**이고 모든 잡이 `steps=0`(잡 시작조차 못 함 = 결제 정지). Jino 승인 후 실행.
 - ✅ 트랙 커밋 `6adc37b9` (main, 미푸시)
 
 ## 2-1. 완료 QA
@@ -56,7 +56,7 @@
 | `.claude/anchors/9ebc5a40-…md` | 앵커 원문 + 이월 2건 + 판정 |
 
 ## 5. 알려진 이슈 / 주의사항
-- ⚠️ **PR #309 OPEN·미병합.** 코드는 이미 prod에 있다(브랜치 = prod 해시 일치). main에는 트랙 커밋(`6adc37b9`)만 있고 코드 커밋은 main 조상이 아니다. 병합은 `scripts/safe_merge.sh 309`.
+- ✅ **PR #309 병합됨**(강제, 위 참조). prod ↔ 로컬 main 해시 일치 확인(`naver.py` `7fa1df24…` · `sync_service.py` `559a8de2…`). 워크트리·원격 브랜치 정리 완료.
 - ⚠️ **main에 미푸시 커밋 8개** — D-NAO-201 세션 것 7개 + 내 트랙 커밋 1개. 내 것이 아닌 7개는 손대지 않았다.
 - ⚠️ **이월 ①(1순위 후보)**: **부분수집이 어떤 API 표면에도 안 나온다.** `frontend/src/pages/Orders.tsx:214-223`이 `status==="success"`면 `errors`를 안 그리고, `routers/sync.py:212-217`의 `/sync/realtime`(45분 크론)도 `errors`를 안 보며, `sync_status`·`channels` 라우터는 `error_message`를 반환하지 않는다. ⇒ 다음 절단이 나도 **로그를 직접 안 보면 또 모른다.** 교훈 `same-defect-three-times-fix-the-shape`의 **네 번째** 재발 모양.
 - ⚠️ **이월 ②**: 병리적 커서 시 창 단위 호출 캡 없음(일 상한 50은 작동. `fetch_pending_orders(days=90)` 최악 4,500 GET).
@@ -66,8 +66,7 @@
 
 ## 6. 다음에 할 작업 (미완료)
 - **이어지는 작업의 목적(원문)**: 네이버 커머스 `last-changed-statuses`의 300건 페이지 상한(`more` 커서)을 세 호출부 전부에서 따라가게 고쳐 배포한다 — 8/18 23건(상품 356,100원)이 조용히 유실된 결함의 수리. **(코드·배포는 끝났다. 남은 것은 아래 슬라이스뿐이다.)**
-- **남은 슬라이스**:
-- [ ] **PR #309 병합** (`scripts/safe_merge.sh 309`) → 워크트리 정리 → main push
+- **남은 슬라이스**: (PR 병합·정리는 2026-08-19 11:35에 완료됨)
 - [ ] **이월 ① 부분수집 표면 확장** — 별건 계약 후보. 백엔드가 이미 `errors`·`error_message`에 싣고 있으므로 프론트 1곳 + 라우터 2곳이면 닫힌다
 - [ ] ③ 표면화 실작동 라이브 관측 — 다음 절단일(하루 변경 300건 초과)에 `sync_log.error_message`에 `[부분수집]`이 뜨는지 확인. 9월 단말 출시철이 가장 유력
 - [ ] 이월 ② 창 단위 호출 캡(라이브에서 관측되면)
