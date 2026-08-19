@@ -31,7 +31,9 @@ from app.models import (
     AdCost, Channel, NaverAdCreativeDaily, NaverAdgroupProduct, Order,
     ProductChannelMapping, ProductMaster,
 )
-from app.routers.naver_ops import router, sales_summary
+from app.routers.naver_ops import (
+    logistics_by_product, logistics_totals, router, sales_summary,
+)
 from app.utils.kst import kst_today
 
 D = Decimal
@@ -297,3 +299,40 @@ def test_new_keys_survive_the_http_boundary(db):
         assert key in row, f"HTTP body의 상품 행에서 {key}가 사라졌다"
     assert body["summary"]["ad_allocated"] == "50000.00"
     assert body["summary"]["ad_unallocated"] == "0.00"
+
+
+# ── ⑥ 변이 주입에서 살아남은 구멍 (1차 15종 중 M1·M6) ────────────────
+
+def test_logistics_split_never_leaks(db):
+    """★M6이 살아남았던 자리 — 분배 합 + 잔액 = 원래 총액이 **정확히** 성립한다.
+
+    변이(마지막 라인 잔여 몰아주기 제거)는 3-라인 패키지에서 0.01원을 증발시킨다.
+    금액은 작지만 «어디에도 안 보이는 차이»가 이 패널의 반복 결함이라 등식으로 못 박는다.
+    ★end-to-end 검산(residual ≤ 1원)으로는 이 크기가 안 걸린다 — 그래서 헬퍼를 직접 잰다.
+    """
+    from datetime import time as _t
+    start = datetime.combine(_yesterday() - timedelta(days=7), _t.min)
+    end = datetime.combine(_yesterday(), _t.max)
+    # 같은 패키지에 세 상품, 매출이 3등분이라 비례가 나누어떨어지지 않는다(633.33…)
+    for i in (1, 2, 3):
+        _order(db, pid=f"P{i}", price="110000", no=f"ORD-{i}", pkg="PKG-X")
+
+    out_map, leftover = logistics_by_product(db, start, end)
+    _count, total = logistics_totals(db, start, end)
+    assert sum(out_map.values(), D("0")) + leftover == total   # 한 푼도 새지 않는다
+    assert len(out_map) == 3
+
+
+def test_package_with_no_product_id_is_not_swallowed(db):
+    """★M1이 살아남았던 자리 — 상품ID 없는 라인만 든 패키지의 택배비를 삼키지 않는다.
+
+    삼키면 요약(총 물류비)과 상품 합계가 그 액수만큼 갈리는데, 두 숫자를 나란히 보는
+    화면이 없으므로 아무도 모른다. 잔액으로 돌려주면 미배분 행에 반드시 나타난다.
+    """
+    _order(db, pid="P1", price="110000")
+    _mapped(db, pid="P1", cost="30000", master_id=901)
+    _order(db, pid="", price="55000", no="ORD-NOPID")   # 상품ID 없음 → 주문 집계에서 빠진다
+
+    out = sales_summary(days=7, db=db)
+    _closes(out)                                   # ★변이 시 residual이 1,727원 벌어져 깨진다
+    assert out["unallocated"]["logistics"] == "1727.27"

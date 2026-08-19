@@ -157,3 +157,31 @@ describe("미배분 행 (표 맨 아래)", () => {
     expect(container.querySelectorAll("tr").length).toBe(0);
   });
 });
+
+// ── 페이지가 이 컴포넌트들을 실제로 쓰는가 (변이 M11·M12) ──────────────
+//
+// ★왜 소스를 읽어서 재나: 위 테스트들은 컴포넌트를 «직접» 렌더해서 전부 초록인데,
+//   페이지에서 `<AdAllocationNotice/>`·`<UnallocatedRow/>` 호출을 지워도 **한 개도 안 깨졌다**
+//   (1차 변이 주입 15종 중 M11·M12 생존). 이게 정확히 이 저장소가 세 번 당한 모양이다 —
+//   «백엔드는 세는데 화면이 안 읽음»의 컴포넌트판([[same-defect-three-times-fix-the-shape]]).
+//   페이지 전체 렌더는 fetch 수십 개를 물고 와야 해서, 배선 사실 자체를 소스로 고정한다.
+//   리팩터로 이름이 바뀌면 여기서 빨간불이 난다 — 그건 오탐이 아니라 «배선을 다시 확인하라»다.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+describe("페이지 배선", () => {
+  // jsdom 환경에선 import.meta.url이 file: 스킴이 아니다 — vitest의 cwd(=frontend/) 기준으로 읽는다.
+  const src = readFileSync(resolve(process.cwd(), "src/pages/NaverOps.tsx"), "utf-8");
+
+  it("M11 — 배너를 실제로 렌더한다", () => {
+    expect(src).toMatch(/<AdAllocationNotice[\s>]/);
+  });
+
+  it("M12 — 미배분 행을 실제로 렌더한다", () => {
+    expect(src).toMatch(/<UnallocatedRow[\s>]/);
+  });
+
+  it("표에 광고비 열이 있다 — 얼마가 붙었는지 상품마다 보여야 한다", () => {
+    expect(src).toMatch(/label="광고비"\s+sk="ad_spend"/);
+  });
+});
