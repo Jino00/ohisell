@@ -16,6 +16,7 @@ from app.database import get_db
 from app.models import Channel, SyncLog
 from app.schemas import SyncRequest, SyncResult, SyncStatusOut
 from app.services.sync_service import sync_channel_orders
+from app.services.sync_service import PARTIAL_SYNC_MARKER
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
@@ -328,6 +329,22 @@ def sync_realtime(db: Session = Depends(get_db)):
     return results
 
 
+def _public_sync_message(msg: str | None) -> str | None:
+    """API로 내보낼 동기화 메시지 — 부분수집 표식만 원문으로, 나머지는 일반화(적대 리뷰 P2).
+
+    ★`sync_service`는 실패 시 `str(e)[:500]`을 그대로 넣는다. 그걸 이 라우터가 실으면
+      스택/내부 경로가 API 페이로드로 새어 나간다 — 헬스 라우터는 *"sanitized 한 줄 요약만
+      노출하고 전체 traceback은 DB에만"*을 명시하는데 이 경로만 반대가 된다.
+    ★부분수집 원문은 그대로 둔다: 「어느 날이 덜 들어왔나」가 재수집 대상을 고르는 좌표이고,
+      그 문자열은 우리가 만든 것이라 내부 정보가 없다.
+    """
+    if not msg:
+        return None
+    if msg.startswith(PARTIAL_SYNC_MARKER):
+        return msg
+    return "동기화 중 오류가 있었습니다(상세는 서버 로그)."
+
+
 @router.get("/status", response_model=list[SyncStatusOut])
 def sync_status(db: Session = Depends(get_db)):
     """채널별 마지막 동기화 상태"""
@@ -347,6 +364,7 @@ def sync_status(db: Session = Depends(get_db)):
             last_sync=last_log.completed_at if last_log else None,
             status=last_log.status if last_log else None,
             records_synced=last_log.records_synced if last_log else 0,
+            error_message=_public_sync_message(last_log.error_message if last_log else None),
         ))
 
     return statuses

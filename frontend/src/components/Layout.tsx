@@ -163,7 +163,35 @@ export function buildPipelineHealthBanner(
     }
   }
 
-  // 9) 잡 문제 (disabled 제외 — 정상)
+  // 9) 부분수집 — 주문 수집이 «성공»으로 끝났는데 실제로는 덜 들어왔다(D-NAO-202/204).
+  //    ★이게 이 배너에 오는 이유: 다른 어떤 감시로도 안 잡힌다. 잡은 돌았고(stale 아님),
+  //      상태는 success(failed 아님), 데이터도 «어제 것»이 있어(data_stale 아님) 나이로도
+  //      안 걸린다. 2026-08-18에 정확히 그 상태로 주문 23건·상품매출 356,100원이 사라졌고
+  //      그날 sync_log 네 회차가 전부 success였다 — **어디에도 신호가 없었다.**
+  //    ★그때 신호가 없던 진짜 이유는 백엔드가 안 센 게 아니라 **화면이 안 읽은 것**이다:
+  //      수집 수리(D-NAO-202) 후에도 표식은 sync_log와 로그에만 있었고 어떤 API 표면에도
+  //      안 나왔다. disk_low가 판정에만 있고 표시가 없어 통째로 숨었던 것과 같은 실패다
+  //      (교훈 #223) — 그래서 백엔드 판정과 **같은 커밋에** 이 분기를 넣는다.
+  //    ★`detail`은 백엔드 원문 그대로 쓴다. 여기서 요약하면 «어느 날이 덜 들어왔나»가
+  //      사라지는데, 그게 재수집 대상을 고르는 유일한 좌표다.
+  const partials = health.partial_sync ?? [];
+  if (partials.length > 0) {
+    // ★`[0]`은 «최악»이 아니라 «최신»이다(백엔드 `started_at.desc()`). 이름을 정확히 쓴다 —
+    //   worst라고 부르면 다음 사람이 «가장 큰 유실»로 읽고 우선순위를 잘못 판단한다.
+    const latest = partials[0];
+    // ★채널명은 잃지 않는다: 「외 N건」으로 접으면 다른 채널이 통째로 묻힌다(적대 리뷰 P2).
+    //   같은 채널이 여러 번이면 이름은 하나로 합친다.
+    const names = Array.from(new Set(partials.map((p) => p.channel_name)));
+    const who = names.length > 1 ? `${names.join("·")} 주문` : `${latest.channel_name} 주문`;
+    const more = partials.length > 1 ? ` (${partials.length}건)` : "";
+    parts.push(
+      `${who}이 덜 수집됨${more}` +
+        ` — 최근: ${latest.detail}` +
+        " (성공으로 기록됐지만 매출이 과소계상된다)",
+    );
+  }
+
+  // 10) 잡 문제 (disabled 제외 — 정상)
   const jobNames: string[] = [
     ...(health.failed ?? []).map((j) => j.job_name),
     ...(health.stale ?? []).map((j) => j.job_name),
