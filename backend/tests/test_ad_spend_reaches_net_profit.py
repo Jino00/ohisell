@@ -160,3 +160,31 @@ def test_no_ad_spend_and_no_net_stays_unknown():
     leaf = _by(out, "leaf", "회사 · 채널")
     assert leaf["net_profit"] is None and leaf["profit_rate"] is None
     assert leaf["net_scope"] is None
+
+
+def test_negative_ad_spend_never_becomes_phantom_profit():
+    """★적대 리뷰 2R 변이 A — 가드는 있는데 테스트가 없어 살아남았던 경로.
+
+    광고비가 음수로 기록되는 일이 있다(환급·크레딧 조정). 그때 `-ad` 하한을 그대로 만들면
+    **손익을 못 재는 행이 이익을 만들어낸다** — 원가도 매출도 모르는 행이 부모 순이익을
+    올리는 것은 이 작업이 없애려던 것(광고비 누출)의 거울상이다. 그래서 `ad <= 0`이면
+    하한을 만들지 않는다: 모르면 "—"가 정직하다.
+    """
+    rows = [
+        {"channel_id": 6, "channel_name": "네이버", "revenue": "1000000",
+         "product_revenue": "1000000", "shipping_revenue": "0", "ad_spend": "100000",
+         "net_profit": "200000", "order_count": 10, "unmapped_revenue": "0"},
+        {"channel_id": 9, "channel_name": "광고비 환급만 있는 채널", "revenue": "0",
+         "product_revenue": "0", "shipping_revenue": "0", "ad_spend": "-5000",
+         "net_profit": None, "order_count": 0, "unmapped_revenue": "0"},
+    ]
+    cmap = {6: ("회사", "회사 · 네이버", True), 9: ("회사", "회사 · 환급", True)}
+    out = group_summary_by_company(rows, cmap)
+
+    total = _by(out, "total")
+    assert Decimal(total["net_profit"]) == Decimal("200000")   # 205,000이 아니다
+    assert Decimal(total["net_floor_ad"]) == 0                 # 음수 하한을 만들지 않는다
+    assert total["net_scope"] == NET_SCOPE_FULL
+
+    refund = _by(out, "leaf", "회사 · 환급")
+    assert refund["net_profit"] is None and refund["net_scope"] is None
