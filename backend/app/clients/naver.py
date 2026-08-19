@@ -55,10 +55,21 @@ class NaverClient(BaseChannelClient):
     # 32일 구간 OK / 33일 구간부터 400. 공식 문서에 제한 명시가 없어 실측이 유일 근거다.
     SETTLE_DAILY_MAX_SPAN_DAYS = 32
 
+    # 변경상태 조회(last-changed-statuses) 경로 — 세 호출부가 공유한다.
+    LAST_CHANGED_PATH = "/v1/pay-order/seller/product-orders/last-changed-statuses"
+    # 하루치 스윕의 페이지 상한(무한 루프 차단용 안전판). 라이브 실측 2026-08-19: 1페이지 300건이라
+    # 50페이지 = 하루 15,000건이고, 우리 하루 최대 변경은 336건이다 — 정상 운영에선 절대 안 닿는다.
+    LAST_CHANGED_MAX_PAGES = 50
+
     def __init__(self, config: NaverAccountConfig, access_token: str | None = None):
         self.client_id = config.client_id
         self.client_secret = config.client_secret
         self._access_token = access_token
+        # 마지막 fetch_orders가 «전건»을 받았는지. sync_service가 읽는 기존 계약
+        # (`getattr(client, "last_fetch_complete", False)`)과 같은 이름·의미다.
+        self.last_fetch_complete = True
+        # 미완주한 날짜들(YYYY-MM-DD). 로그·sync_log 표면화용.
+        self.last_sweep_incomplete_days: list[str] = []
 
     def _generate_signature(self, client_id: str, client_secret: str, timestamp: int) -> str:
         """네이버 커머스 API bcrypt 전자서명 생성 (bcrypt → base64 인코딩)"""
@@ -217,42 +228,145 @@ class NaverClient(BaseChannelClient):
             return {"status": "ok", "message": "네이버 API 연결 성공"}
         return {"status": "error", "message": "네이버 API 인증 실패"}
 
+    def _sweep_last_changed(self, day: date) -> tuple[list[dict], bool]:
+        """하루치 변경상태를 `more` 커서 끝까지 훑는다. 반환 `(항목들, 완주여부)`.
+
+        ★존재 이유(2026-08-19 실사고, D-NAO-202): 이 API는 한 번에 **300건까지만** 주고 나머지는
+          `data.more`(`moreFrom`·`moreSequence`)로 알려준다. 종전 세 호출부(fetch_orders·
+          fetch_pending_orders·fetch_claims)는 전부 `data.lastChangeStatuses`만 읽고 `more`를
+          **무시**해, 하루 변경이 300건을 넘는 날에는 그 시점 이후가 조용히 사라졌다.
+          라이브 실측: 2026-08-18은 변경 336건인데 1페이지 300건에서 잘려 **20:30 이후 23건**이
+          유실됐다(상품매출 356,100원, 그날 스마트스토어 결제 20~22시가 DB에 0건). 그 시각의
+          `sync_log`는 20:45·21:45·22:45·23:45 전부 `success`였다 — 실패 신호가 어디에도 없었다.
+          최근 45일(07-06~08-19) 중 절단일은 이 하루뿐이지만, 재발 조건은 「하루 변경 300건 초과」
+          하나뿐이고 9월 단말 출시철이 그 조건에 가장 가깝다.
+
+        ★페이지 넘기는 법(라이브 실측이 유일 근거 — 공식 문서에 예시가 없다):
+          다음 요청 = 같은 `lastChangedTo` + `lastChangedFrom := more.moreFrom` + `moreSequence`.
+          이 왕복으로 2026-08-18이 300 → 336건으로 완결되는 것을 확인했다.
+
+        ★완주여부를 왜 돌려주나: 「못 받았다」와 「없다」는 같은 숫자로 보인다(교훈 #123). 호출부가
+          이 값을 보고 처분을 정해야 한다 — 조용히 삼키면 이 결함이 그대로 재발한다. 첫 페이지
+          실패도 미완주로 친다(그날 치를 통째로 못 본 것이므로).
+        """
+        base = {
+            "lastChangedFrom": f"{day.isoformat()}T00:00:00.000+09:00",
+            "lastChangedTo": f"{day.isoformat()}T23:59:59.999+09:00",
+        }
+        items: list[dict] = []
+        params = dict(base)
+        seen_cursors: set[str] = set()
+
+        for page in range(self.LAST_CHANGED_MAX_PAGES):
+            result = self._request("GET", self.LAST_CHANGED_PATH, params)
+            if not result:
+                log.error(
+                    "[naver] 변경상태 조회 실패 — %s %d페이지째, 누적 %d건에서 중단(미완주).",
+                    day, page + 1, len(items),
+                )
+                return items, False
+            data = result.get("data") or {}
+            items.extend(data.get("lastChangeStatuses") or [])
+
+            more = data.get("more") or {}
+            if not more:
+                return items, True   # more 없음 = 이 날짜 완주
+            # ★more는 있는데 커서 키가 비면 «완주»가 아니라 «못 이어받음»이다(적대 리뷰 P2).
+            #   API가 「더 있다」고 말한 것만은 확실하므로 fail-closed로 올린다. 라이브 실측
+            #   (2026-08-18)에서 둘 다 문자열로 왔지만, 스키마 변화를 완주로 오독하면 이 결함이
+            #   그대로 재발한다 — 이 함수의 존재 이유가 「못 받았다」를 「없다」로 안 읽는 것이다.
+            cursor = str(more.get("moreSequence") or "")
+            more_from = str(more.get("moreFrom") or "")
+            if not cursor or not more_from:
+                log.error(
+                    "[naver] 변경상태 more 커서 결측 — %s more=%r, 누적 %d건에서 중단(미완주).",
+                    day, more, len(items),
+                )
+                return items, False
+
+            # 커서가 안 움직이면 같은 페이지를 무한히 받는다 — 진행 없음은 미완주로 끊는다.
+            if cursor in seen_cursors:
+                log.error(
+                    "[naver] 변경상태 커서 정체 — %s moreSequence=%s 반복, 누적 %d건에서 중단(미완주).",
+                    day, cursor, len(items),
+                )
+                return items, False
+            seen_cursors.add(cursor)
+
+            params = dict(base)
+            params["lastChangedFrom"] = more_from
+            params["moreSequence"] = cursor
+            time.sleep(0.1)
+
+        log.error(
+            "[naver] 변경상태 페이지 상한 %d 도달 — %s 누적 %d건에서 중단(미완주).",
+            self.LAST_CHANGED_MAX_PAGES, day, len(items),
+        )
+        return items, False
+
     def fetch_orders(self, date_from: date, date_to: date) -> list[RawOrder]:
-        """네이버 주문 조회 (24시간 제한 → 하루 단위 분할 → 상세 조회)"""
-        status_path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
+        """네이버 주문 조회 (24시간 제한 → 하루 단위 분할 → 상세 조회)
+
+        ★1단계는 `_sweep_last_changed`로 **`more` 커서 끝까지** 훑는다(D-NAO-202) — 그 전엔
+          1페이지(300건)만 읽어 바쁜 날의 저녁 주문이 통째로 유실됐다. 사고 상세는 헬퍼 docstring.
+        ★부분 스윕은 «적재하되 표면화»한다: 받은 것은 그대로 넣고(버리면 멀쩡한 주문까지 잃는다),
+          `last_fetch_complete=False`와 `last_sweep_incomplete_days`로 호출부에 알린다. 예외를
+          던지지 않는 이유 — 30일 창의 하루가 실패했다고 나머지 29일 적재까지 무산시키면 부분
+          유실이 전면 정지로 커진다. 대신 sync_service가 이 플래그를 sync_log에 적어 «success인데
+          조용히 덜 들어옴»(이 결함의 본체)을 다시 만들지 않는다.
+        """
         detail_path = "/v1/pay-order/seller/product-orders/query"
         all_orders: list[RawOrder] = []
         seen_po_ids: set[str] = set()       # 1단계: 수집한 productOrderId (배치 중복 방지)
         emitted_po_ids: set[str] = set()    # 2단계: RawOrder로 내보낸 productOrderId (방어적 중복 방지)
         po_id_batch: list[str] = []
+        self.last_fetch_complete = True
+        self.last_sweep_incomplete_days = []
 
-        # 1단계: 하루씩 last-changed-statuses로 productOrderId 수집
+        # 1단계: 하루씩 last-changed-statuses로 productOrderId 수집 (페이지 전건)
         current = date_from
         while current <= date_to:
-            params = {
-                "lastChangedFrom": f"{current.isoformat()}T00:00:00.000+09:00",
-                "lastChangedTo": f"{current.isoformat()}T23:59:59.999+09:00",
-            }
-            result = self._request("GET", status_path, params)
-            if result:
-                for item in result.get("data", {}).get("lastChangeStatuses", []):
-                    po_id = item.get("productOrderId", "")
-                    if po_id and po_id not in seen_po_ids:
-                        seen_po_ids.add(po_id)
-                        po_id_batch.append(po_id)
+            items, complete = self._sweep_last_changed(current)
+            if not complete:
+                self.last_fetch_complete = False
+                self.last_sweep_incomplete_days.append(current.isoformat())
+            for item in items:
+                po_id = item.get("productOrderId", "")
+                if po_id and po_id not in seen_po_ids:
+                    seen_po_ids.add(po_id)
+                    po_id_batch.append(po_id)
             current += timedelta(days=1)
             time.sleep(0.2)
+
+        if not self.last_fetch_complete:
+            log.error(
+                "[naver] 주문 스윕 미완주 %d일(%s) — 이 구간 주문이 덜 수집됐다.",
+                len(self.last_sweep_incomplete_days),
+                ",".join(self.last_sweep_incomplete_days),
+            )
 
         if not po_id_batch:
             log.info("네이버 주문 0건 (%s ~ %s)", date_from, date_to)
             return []
 
         # 2단계: productOrderId 배치로 상세 조회 (최대 300건씩)
+        # ★청크 실패도 «부분 수집»이다(적대 리뷰 P1, 2026-08-19): 1단계 스윕이 완주해도 여기서
+        #   조용히 넘어가면 청크당 최대 300건이 사라지는데 `last_fetch_complete`는 True로 남아
+        #   「전건 받았다」고 거짓 주장한다 — 8/18 사고와 **같은 모양이고 폭은 더 크다**.
+        #   1단계 미완주와 같은 표면으로 올려서 sync_log까지 도달시킨다.
         chunk_size = 300
         for i in range(0, len(po_id_batch), chunk_size):
             chunk = po_id_batch[i:i + chunk_size]
             detail_result = self._request_post(detail_path, {"productOrderIds": chunk})
             if not detail_result:
+                self.last_fetch_complete = False
+                self.last_sweep_incomplete_days.append(
+                    f"detail-chunk[{i}:{i + len(chunk)}]"
+                )
+                log.error(
+                    "[naver] 주문 상세조회 실패 — 청크 %d~%d(%d건)이 통째로 빠졌다(부분 수집).",
+                    i, i + len(chunk), len(chunk),
+                )
                 continue
 
             for entry in detail_result.get("data", []):
@@ -639,30 +753,36 @@ class NaverClient(BaseChannelClient):
         last-changed-statuses(최근 days일) → 상세 조회 → PAYED 건을 placeOrderStatus로 분류.
         (prod raw_data 실측: PAYED+NOT_YET=발주확인 대기, PAYED+OK=발송 대기 — 원칙 22 라이브 증거)
         ※ 변경상태 기반이라 days 창 밖 미발송 건은 누락 가능 → 창은 넉넉히(기본 14일).
+        ★`more` 커서 전건 스윕(D-NAO-202) — 종전엔 1페이지(300건)만 읽어, 바쁜 날의 저녁 주문이
+          **발주확인 대기 목록에서 통째로 빠졌다**(미출고로 이어지는 경로다). 헬퍼 docstring 참조.
+          미완주는 목록을 비우지 않고 부분 반환 + log.error — 이 화면은 «그 순간의 처리 대상»이라
+          통째로 죽이는 쪽이 더 나쁘고, 다음 호출이 재기회다.
         반환: {"awaiting_place": [...], "awaiting_dispatch": [...]} (각 항목 dict).
         """
-        status_path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
         detail_path = "/v1/pay-order/seller/product-orders/query"
         today = datetime.now(timezone(timedelta(hours=9))).date()  # KST 기준 (서버 UTC 보정)
         dfrom = today - timedelta(days=days - 1)
 
         seen: set[str] = set()
         po_ids: list[str] = []
+        incomplete: list[str] = []
         current = dfrom
         while current <= today:
-            params = {
-                "lastChangedFrom": f"{current.isoformat()}T00:00:00.000+09:00",
-                "lastChangedTo": f"{current.isoformat()}T23:59:59.999+09:00",
-            }
-            result = self._request("GET", status_path, params)
-            if result:
-                for item in result.get("data", {}).get("lastChangeStatuses", []):
-                    poid = item.get("productOrderId", "")
-                    if poid and poid not in seen:
-                        seen.add(poid)
-                        po_ids.append(poid)
+            items, complete = self._sweep_last_changed(current)
+            if not complete:
+                incomplete.append(current.isoformat())
+            for item in items:
+                poid = item.get("productOrderId", "")
+                if poid and poid not in seen:
+                    seen.add(poid)
+                    po_ids.append(poid)
             current += timedelta(days=1)
             time.sleep(0.2)
+        if incomplete:
+            log.error(
+                "[naver] 발주/발송 대기 스윕 미완주 %d일(%s) — 목록이 실제보다 적다.",
+                len(incomplete), ",".join(incomplete),
+            )
 
         awaiting_place: list[dict] = []
         awaiting_dispatch: list[dict] = []
@@ -671,6 +791,14 @@ class NaverClient(BaseChannelClient):
             chunk = po_ids[i:i + 300]
             detail = self._request_post(detail_path, {"productOrderIds": chunk})
             if not detail:
+                # ★상세조회 실패도 미완주다(2R 리뷰 P1) — 여기서 조용히 넘어가면 목록이
+                #   비어 나가면서 `incomplete_days`는 «완주»라고 말한다. 발주확인 대기는
+                #   미출고로 이어지는 화면이라 거짓 「처리할 게 없다」의 대가가 크다.
+                incomplete.append(f"detail-chunk[{i}:{i + len(chunk)}]")
+                log.error(
+                    "[naver] 발주/발송 대기 상세조회 실패 — 청크 %d~%d(%d건) 누락.",
+                    i, i + len(chunk), len(chunk),
+                )
                 continue
             for entry in detail.get("data", []):
                 po = entry.get("productOrder", {})
@@ -706,7 +834,10 @@ class NaverClient(BaseChannelClient):
             "네이버 미발송 주문 조회: 발주확인대기 %d / 발송대기 %d (%s ~ %s)",
             len(awaiting_place), len(awaiting_dispatch), dfrom, today,
         )
-        return {"awaiting_place": awaiting_place, "awaiting_dispatch": awaiting_dispatch}
+        # 미완주를 반환값에도 싣는다(적대 리뷰 P2): 로그만 남기면 화면은 200 + 짧은 목록만
+        # 보고 「처리할 게 없다」로 읽는다. 빈 리스트면 호출부 동작 불변.
+        return {"awaiting_place": awaiting_place, "awaiting_dispatch": awaiting_dispatch,
+                "incomplete_days": incomplete}
 
     def confirm_orders(self, product_order_ids: list[str]) -> dict:
         """발주 확인 처리 (POST .../confirm). 최대 30건. 트랙 N6.
@@ -760,42 +891,47 @@ class NaverClient(BaseChannelClient):
         last-changed-statuses(최근 days)에서 claimStatus 있는 건 수집 → 상세로 상품명·주문자 보강.
         같은 productOrderId가 여러 번 변경되면 최신(lastChangedDate) 유지.
         claimStatus/claimType은 네이버 값 그대로 전달(추측 금지) — 처리대상 판별은 라우터/프론트.
+        ★`more` 커서 전건 스윕(D-NAO-202) — 종전엔 1페이지(300건)만 읽었다. 클레임은 하루 변경의
+          일부라 절단에 더 잘 걸린다(취소·반품이 저녁에 몰리면 그대로 안 보인다). 헬퍼 docstring 참조.
+          미완주는 부분 반환 + log.error(발주 대기와 같은 사유).
         반환: {"claims": [ {product_order_id, claim_type, claim_status, ...}, ... ]}
         """
-        status_path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
         detail_path = "/v1/pay-order/seller/product-orders/query"
         today = datetime.now(timezone(timedelta(hours=9))).date()
         dfrom = today - timedelta(days=days - 1)
 
         by_poid: dict[str, dict] = {}
+        incomplete: list[str] = []
         current = dfrom
         while current <= today:
-            params = {
-                "lastChangedFrom": f"{current.isoformat()}T00:00:00.000+09:00",
-                "lastChangedTo": f"{current.isoformat()}T23:59:59.999+09:00",
-            }
-            result = self._request("GET", status_path, params)
-            if result:
-                for item in result.get("data", {}).get("lastChangeStatuses", []):
-                    poid = item.get("productOrderId", "")
-                    cstatus = item.get("claimStatus")
-                    if not poid or not cstatus:
-                        continue  # 클레임 없는 일반 변경 제외
-                    # 최신 변경만 유지 (lastChangedDate 비교, 문자열 ISO는 사전식=시간순)
-                    prev = by_poid.get(poid)
-                    if prev and (item.get("lastChangedDate") or "") < (prev.get("_lcd") or ""):
-                        continue
-                    by_poid[poid] = {
-                        "product_order_id": poid,
-                        "order_id": item.get("orderId") or "",
-                        "claim_type": item.get("claimType") or "",
-                        "claim_status": cstatus,
-                        "last_changed_type": item.get("lastChangedType") or "",
-                        "product_order_status": item.get("productOrderStatus") or "",
-                        "_lcd": item.get("lastChangedDate") or "",
-                    }
+            items, complete = self._sweep_last_changed(current)
+            if not complete:
+                incomplete.append(current.isoformat())
+            for item in items:
+                poid = item.get("productOrderId", "")
+                cstatus = item.get("claimStatus")
+                if not poid or not cstatus:
+                    continue  # 클레임 없는 일반 변경 제외
+                # 최신 변경만 유지 (lastChangedDate 비교, 문자열 ISO는 사전식=시간순)
+                prev = by_poid.get(poid)
+                if prev and (item.get("lastChangedDate") or "") < (prev.get("_lcd") or ""):
+                    continue
+                by_poid[poid] = {
+                    "product_order_id": poid,
+                    "order_id": item.get("orderId") or "",
+                    "claim_type": item.get("claimType") or "",
+                    "claim_status": cstatus,
+                    "last_changed_type": item.get("lastChangedType") or "",
+                    "product_order_status": item.get("productOrderStatus") or "",
+                    "_lcd": item.get("lastChangedDate") or "",
+                }
             current += timedelta(days=1)
             time.sleep(0.2)
+        if incomplete:
+            log.error(
+                "[naver] 클레임 스윕 미완주 %d일(%s) — 클레임 목록이 실제보다 적다.",
+                len(incomplete), ",".join(incomplete),
+            )
 
         # 상세 보강 (상품명·주문자·수량)
         poids = list(by_poid.keys())
@@ -803,6 +939,13 @@ class NaverClient(BaseChannelClient):
             chunk = poids[i:i + 300]
             detail = self._request_post(detail_path, {"productOrderIds": chunk})
             if not detail:
+                # ★상세 보강 실패도 미완주다(2R 리뷰 P1). 클레임은 여기서 넘어가면 행은
+                #   남고 상품명·주문자만 공란이 되어 «불완전»이 «정상»처럼 보인다.
+                incomplete.append(f"detail-chunk[{i}:{i + len(chunk)}]")
+                log.error(
+                    "[naver] 클레임 상세 보강 실패 — 청크 %d~%d(%d건) 공란.",
+                    i, i + len(chunk), len(chunk),
+                )
                 continue
             for entry in detail.get("data", []):
                 po = entry.get("productOrder", {})
@@ -824,7 +967,7 @@ class NaverClient(BaseChannelClient):
             row.setdefault("orderer_name", "")
             claims.append(row)
         log.info("네이버 클레임 %d건 조회 (%s ~ %s)", len(claims), dfrom, today)
-        return {"claims": claims}
+        return {"claims": claims, "incomplete_days": incomplete}
 
     # ── N7 클레임 — 취소 (wave 1) ──────────────────────────────
     def approve_cancel(self, product_order_id: str) -> dict:
