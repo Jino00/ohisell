@@ -1090,9 +1090,10 @@ def sync_naver_adgroup_targets_job():
 
         result = adgroup_target_ingest.sync_adgroup_targets(db)
         log.info(
-            "[스케줄러] 타겟팅 스윕: swept=%s ok=%s failed=%s new=%s changed=%s black_rows=%s",
-            result["swept"], result["ok"], result["failed"], result["new"],
-            result["changed"], result["black_rows"],
+            "[스케줄러] 타겟팅 스윕: swept=%s ok=%s failed=%s(db=%s) new=%s changed=%s "
+            "black_rows=%s aborted=%s",
+            result["swept"], result["ok"], result["failed"], result["db_failed"],
+            result["new"], result["changed"], result["black_rows"], result["aborted"],
         )
     except Exception as e:  # noqa: BLE001 — fail-open(re-raise 안 함 — catch-up 하류 비블록)
         log.exception("[스케줄러] sync_naver_adgroup_targets_job 에러(무시): %s", e)

@@ -339,7 +339,12 @@ def test_db_error_on_one_group_does_not_kill_the_sweep(db, monkeypatch):
 
     monkeypatch.setattr(db, "commit", flaky_commit)
     stats = adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
-    assert stats["swept"] == 2 and stats["failed"] == 1 and stats["ok"] == 2
+    # ★ok/failed는 배타다(적대 리뷰 2R): 응답은 받았지만 저장에 실패한 그룹을 양쪽에 세면
+    #   로그 `swept=1013 ok=1013 failed=40`만 보고 그 40건이 조회 실패인지 저장 실패인지
+    #   못 가른다. 성공 카운터는 commit 뒤에 확정되고, 저장 실패는 db_failed로 갈린다.
+    assert stats["swept"] == 2 and stats["ok"] == 1 and stats["failed"] == 1
+    assert stats["db_failed"] == 1 and stats["new"] == 1 and stats["black_rows"] == 1
+    assert stats["ok"] + stats["failed"] == stats["swept"]
     monkeypatch.undo()
     assert [r.adgroup_id for r in db.execute(select(NaverAdgroupMediaBlack)).scalars()] == ["grp-2"]
 

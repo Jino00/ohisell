@@ -40,7 +40,7 @@ from app.models import (
     NaverEntity,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
-from app.services.naver_sa_ad_fetcher import MAX_CALL_DURATION_S, get_adgroup_targets
+from app.services.naver_sa_ad_fetcher import get_adgroup_targets
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -199,7 +199,10 @@ def sync_adgroup_targets(
     now = kst_now()
     started = time.monotonic()
     targets = list(adgroup_ids) if adgroup_ids is not None else list_sweep_adgroups(db)
-    stats: dict = {"swept": 0, "ok": 0, "failed": 0, "changed": 0, "new": 0,
+    # ★`ok`/`failed`는 **배타**여야 한다(적대 리뷰 2R): 「응답은 받았는데 저장에 실패한 그룹」을
+    #   양쪽에 세면 로그 `swept=1013 ok=1013 failed=40`만 보고는 그 40건이 조회 실패인지
+    #   저장 실패인지 못 가른다. `db_failed`를 따로 두고, 성공 카운터는 **commit 뒤에** 확정한다.
+    stats: dict = {"swept": 0, "ok": 0, "failed": 0, "db_failed": 0, "changed": 0, "new": 0,
                    "black_rows": 0, "aborted": False, "errors": [], "as_of": now.isoformat()}
 
     if not targets:
@@ -217,12 +220,13 @@ def sync_adgroup_targets(
             break
 
         stats["swept"] += 1
+        pending = {"ok": 0, "failed": 0, "new": 0, "changed": 0, "black_rows": 0}
         try:
             parsed = get_adgroup_targets(adgroup_id)
             if parsed["status"] == 200:
-                stats["ok"] += 1
+                pending["ok"] = 1
             else:
-                stats["failed"] += 1
+                pending["failed"] = 1
                 if len(stats["errors"]) < 20:
                     stats["errors"].append(f"{adgroup_id}: HTTP {parsed['status']}")
 
@@ -238,7 +242,7 @@ def sync_adgroup_targets(
                     first_seen_at=now, observed_at=now, **values,
                 )
                 db.add(row)
-                stats["new"] += 1
+                pending["new"] = 1
             else:
                 changes = _diff_fields(row, values)
                 for field, old, new in changes:
@@ -247,7 +251,7 @@ def sync_adgroup_targets(
                         field=field, old_value=old, new_value=new,
                     ))
                 if changes:
-                    stats["changed"] += 1   # 그룹 단위 카운트(필드 수가 아니다)
+                    pending["changed"] = 1   # 그룹 단위 카운트(필드 수가 아니다)
                 row.campaign_id = campaign_id
                 for k, v in values.items():
                     setattr(row, k, v)
@@ -256,16 +260,19 @@ def sync_adgroup_targets(
             # 블랙 행은 **200일 때만** 만진다. 조회 실패로 기존 행을 지우면
             # 「블랙이 사라졌다」는 거짓 관측이 된다(fail-closed).
             if parsed["status"] == 200:
-                stats["black_rows"] += _sync_black_rows(
+                pending["black_rows"] = _sync_black_rows(
                     db, adgroup_id, parsed["black_media"],
                     (parsed["media"] or {}).get("editTm"), now,
                 )
 
             # 그룹 단위 커밋 — 중간에 죽어도 여기까지는 남는다(백필 규율 승계).
             db.commit()
+            for k, v in pending.items():   # ★commit이 끝나야 «했다»고 센다
+                stats[k] += v
         except Exception as e:  # noqa: BLE001 — 한 그룹의 실패가 스윕 전체를 죽이지 않는다
             db.rollback()       # ★없으면 세션이 PendingRollbackError로 남아 뒤 그룹이 전멸한다
             stats["failed"] += 1
+            stats["db_failed"] += 1   # 조회 실패와 저장 실패를 갈라 센다
             if len(stats["errors"]) < 20:
                 stats["errors"].append(f"{adgroup_id}: {type(e).__name__}: {e}")
             log.exception("[targets] 처리 실패 adgroup=%s", adgroup_id)
