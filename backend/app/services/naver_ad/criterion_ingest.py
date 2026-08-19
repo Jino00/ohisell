@@ -92,45 +92,104 @@ def ingest_criterion_range(
     ★오래된 날부터인 이유: 365일 한도라 **가장 오래된 하루가 매일 한 개씩 사라진다.**
       중간에 멈추면 잃는 것은 「최근 하루」(내일 다시 받을 수 있다)여야지 「가장 오래된
       하루」(영원히 못 받는다)여선 안 된다.
-    ★카운터는 **배타**다: `ok + failed == attempted`(D-NAO-201 2R가 잡은 이중계상 재발 방지).
+
+    ★★**카운터는 3분이다: `ok` / `failed` / `skipped`.** 적대 리뷰 P1-2가 잡은 것 — 초판은
+      「리포트를 못 받았다」를 `ok`로 셌다. 재현하면 `attempted=364 ok=364 failed=0`인데
+      **테이블은 0행**이다. 「실행 안 됨」이 「발견 0건」과 같은 숫자로 보이는 교훈 #123의
+      정확한 재발이고, 하필 **복구 불가능한 자료**에서 났다.
+      `skipped` = 두 리포트 중 **하나라도** 못 받은 날(부분 성공을 성공으로 세지 않는다).
+
+    ★**이중계상이 원리적으로 불가능한 구조**: 날짜별 상태 맵(`status`)이 유일한 정본이고
+      카운터는 끝에서 그것을 세어 만든다. D-NAO-201 2R가 잡은 「try 확대로 ok·failed 동시
+      계상」은 카운터를 여러 곳에서 올려서 났다 — 올리는 자리를 아예 없앴다.
+
+    ★**재시도 1패스**: 리포트 생성은 429/5xx로 일시 실패할 수 있는데(백필은 POST를 730번
+      연달아 쏴 **그 조건을 스스로 만든다**) 재시도 경로가 없으면 그 날은 그대로 한도 밖으로
+      밀려난다. 1회전이 끝나면 ok가 아닌 날짜만 **한 번 더** 돈다. 더 늘리지 않는 이유는
+      §4 「라운드 증식 차단」과 같다 — 두 번째도 안 되면 그대로 보고한다.
+
     ★`deadline_s` 초과 시 `aborted=True`로 표면화하고 멈춘다 — 조용한 중단 금지.
       ⚠️초과분은 다음 실행이 덮지만, **한도 밖으로 밀려난 날은 영구 소실**이다.
     """
     if date_from > date_to:
         log.warning("CRITERION 적재: 빈 범위(%s > %s) — 할 일 없음", date_from, date_to)
-        return {"attempted": 0, "ok": 0, "failed": 0, "stat_rows": 0, "conv_rows": 0,
-                "skipped_days": [], "failed_days": [], "aborted": False}
+        return {"attempted": 0, "ok": 0, "failed": 0, "skipped": 0, "stat_rows": 0,
+                "conv_rows": 0, "skipped_days": [], "failed_days": [], "aborted": False,
+                "retried": 0, "retry_recovered": 0}
 
     started = time.monotonic()
-    out = {"attempted": 0, "ok": 0, "failed": 0, "stat_rows": 0, "conv_rows": 0,
-           "skipped_days": [], "failed_days": [], "aborted": False}
+    status: dict[date, str] = {}        # ★유일한 정본 — 'ok' | 'failed' | 'skipped'
+    detail: dict[date, str] = {}
+    rows = {"stat": 0, "conv": 0}
+    aborted = False
+
+    def _over_deadline() -> bool:
+        return deadline_s is not None and time.monotonic() - started >= deadline_s
+
+    def _run_day(d: date) -> None:
+        """한 날짜를 처리하고 status[d]를 «덮어쓴다». 카운터를 올리는 자리는 없다 —
+        세는 것은 맨 끝의 status 집계뿐이다(이중계상이 원리적으로 불가능)."""
+        try:
+            day = ingest_criterion_day(db, d)
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            status[d] = "failed"
+            detail[d] = f"{type(e).__name__}: {str(e)[:80]}"
+            log.exception("CRITERION %s 적재 실패(계속 진행): %s", d, e)
+            return
+        rows["stat"] += day["stat_rows"]
+        rows["conv"] += day["conv_rows"]
+        if day["stat_skipped"] or day["conv_skipped"]:
+            status[d] = "skipped"
+            detail[d] = ("stat" if day["stat_skipped"] else "") + \
+                        ("conv" if day["conv_skipped"] else "")
+        else:
+            status[d] = "ok"
+
     cur = date_from
     while cur <= date_to:
-        if deadline_s is not None and time.monotonic() - started >= deadline_s:
-            out["aborted"] = True
+        if _over_deadline():
+            aborted = True
             log.warning("CRITERION 적재 데드라인 초과 — %s부터 미처리(%s까지 남음). "
                         "★한도 밖으로 밀려나는 날은 영구 소실이다", cur, date_to)
             break
-        out["attempted"] += 1
-        try:
-            day = ingest_criterion_day(db, cur)
-            out["ok"] += 1
-            out["stat_rows"] += day["stat_rows"]
-            out["conv_rows"] += day["conv_rows"]
-            if day["stat_skipped"] or day["conv_skipped"]:
-                out["skipped_days"].append(
-                    f"{day['date']}({'stat' if day['stat_skipped'] else ''}"
-                    f"{'conv' if day['conv_skipped'] else ''})")
-        except Exception as e:  # noqa: BLE001
-            db.rollback()
-            out["failed"] += 1
-            out["failed_days"].append(cur.isoformat())
-            log.exception("CRITERION %s 적재 실패(계속 진행): %s", cur, e)
+        _run_day(cur)
         cur += timedelta(days=1)
 
-    assert out["ok"] + out["failed"] == out["attempted"], (
-        f"카운터 이중계상: ok={out['ok']} failed={out['failed']} attempted={out['attempted']}")
-    log.info("naver_criterion ingest %s~%s: %s", date_from, date_to, out)
+    attempted = len(status)
+
+    retry_targets = sorted(d for d, st in status.items() if st != "ok")
+    ok_before = sum(1 for st in status.values() if st == "ok")
+    for d in retry_targets:
+        if _over_deadline():
+            aborted = True
+            log.warning("CRITERION 재시도 중 데드라인 초과 — %s부터 미실행", d)
+            break
+        _run_day(d)      # status[d]를 덮어쓴다 — 상계 계산이 필요 없다
+    ok_after = sum(1 for st in status.values() if st == "ok")
+
+    out = {
+        "attempted": attempted,
+        "ok": ok_after,
+        "failed": sum(1 for st in status.values() if st == "failed"),
+        "skipped": sum(1 for st in status.values() if st == "skipped"),
+        "stat_rows": rows["stat"], "conv_rows": rows["conv"],
+        "skipped_days": [f"{d.isoformat()}({detail.get(d, '')})"
+                         for d in sorted(status) if status[d] == "skipped"],
+        "failed_days": [d.isoformat() for d in sorted(status) if status[d] == "failed"],
+        "aborted": aborted,
+        "retried": len(retry_targets),
+        "retry_recovered": max(0, ok_after - ok_before),
+    }
+    assert out["ok"] + out["failed"] + out["skipped"] == out["attempted"], (
+        f"카운터 이중계상: ok={out['ok']} failed={out['failed']} "
+        f"skipped={out['skipped']} attempted={out['attempted']}")
+
+    if out["failed"] or out["skipped"] or out["aborted"]:
+        log.warning("naver_criterion ingest %s~%s (주의 — ok가 아닌 날이 있다): %s",
+                    date_from, date_to, out)
+    else:
+        log.info("naver_criterion ingest %s~%s: %s", date_from, date_to, out)
     return out
 
 

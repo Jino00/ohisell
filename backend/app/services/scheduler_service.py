@@ -517,7 +517,7 @@ def sync_naver_search_term_job():
     finally:
         db.close()
 def sync_naver_criterion_job():
-    """연령·성별·관심사(CRITERION) 성과 분해 수집 (10:05 KST, D-NAO-203 · D-NAO-197 ②).
+    """연령·성별·관심사(CRITERION) 성과 분해 수집 (10:37 KST, D-NAO-203 · D-NAO-197 ②).
 
     ★창을 **`naver_ad_daily`와 똑같이 3일(D-1~D-3)로 맞춘다.** 이 표의 정합성 검산이
     「AG축 합계 ≡ `naver_ad_daily` 계정 합계」인데, 두 표의 사후정정 흡수 창이 다르면
@@ -541,7 +541,11 @@ def sync_naver_criterion_job():
         end = kst_today() - timedelta(days=1)
         start = end - timedelta(days=2)  # 3일 창 — naver_ad_daily와 동일(위 docstring 참조)
         result = ingest_criterion_range(db, start, end, deadline_s=10 * 60)
-        log.info("[스케줄러] naver_criterion ingest: %s", result)
+        # ★skipped(리포트를 못 받은 날)는 «성공»이 아니다 — 로그 레벨로 갈라 둔다(교훈 #123).
+        if result["skipped"] or result["failed"] or result["aborted"]:
+            log.warning("[스케줄러] naver_criterion ingest(주의): %s", result)
+        else:
+            log.info("[스케줄러] naver_criterion ingest: %s", result)
 
         try:
             log.info("[스케줄러] naver_criterion_dict: %s", sync_criterion_dict(db))
@@ -1876,12 +1880,19 @@ def _ensure_default_states(db):
         #     09:30 cafe24 토큰 · 09:50 검색량 기준선 — 이들을 다 피하는 자리가 :35다.
         ("sync_naver_adgroup_targets", "35 9 * * *"),
         ("sync_naver_keyword_baseline", "50 9 * * *"),
-        # D-NAO-203: CRITERION 벌크 리포트 2종(연령·성별·관심사) 3일 창. ★분 슬롯 근거 —
-        #   :00/:30은 cafe24_token_refresh(*/30)와 겹치고(적대 리뷰 P2-1이 09:30에서 잡은 것),
-        #   :20은 run_naver_auto_operator_hourly, :15는 run_naver_flight_loop(*/2h),
-        #   :57은 sweep_naver_today_hourly가 매시 쓴다. 10:05가 비어 있고 09:35 타겟 스윕
-        #   (약 3분 38초 실측)과도 멀다. ★_CATCHUP_ORDER 제외 — 3일 창이 하루 유실을 스스로 메운다.
-        ("sync_naver_criterion", "5 10 * * *"),
+        # D-NAO-203: CRITERION 벌크 리포트 2종(연령·성별·관심사) 3일 창.
+        # ★분 슬롯 = **37**. 매시 발화하는 잡이 쓰는 분은 0·5·7·20·30(*/30)·45·57이고
+        #   10시대엔 15(run_naver_flight_loop, `15 */2`)·0(`0 */2`)도 온다. 분 37은
+        #   이 파일의 어떤 크론 표현식에도 없다(전수 grep 확인) — 충돌 0.
+        #   ⚠️초판은 10:05였고 적대 리뷰가 P1으로 잡았다: `snapshot_naver_ad_hourly`가
+        #   `"5 * * * *"`로 **매시** :05에 발화한다(「10시대엔 비어 있다」가 반증됐다).
+        # ★★이 값은 **배포 전에만 무료로 고칠 수 있다.** `_ensure_default_states`는 기존
+        #   `scheduler_state` 행의 cron을 절대 조정하지 않고(예외는 `_CRON_OWNED_BY_CODE`
+        #   명단뿐), 그 명단은 «이미 잘못 seed된 것을 고치는» 용도다. 한 번 seed되면
+        #   **정본이 prod DB로 넘어간다** — 교훈 #297(의도는 코드에, 동작은 DB에)의 세 번째
+        #   사례가 되지 않으려면 지금 맞아야 한다.
+        # ★_CATCHUP_ORDER 제외 — 3일 창이 하루 유실을 스스로 메운다(D-1이 내일의 D-2가 된다).
+        ("sync_naver_criterion", "37 10 * * *"),
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
@@ -2262,7 +2273,7 @@ def job_func_for(job_name: str):
         # 조치 생존 감시(D-NAO-173 P1-①). catch-up 목록엔 없다 — 매일 전량 재대조라 하루 유실이
         # 구멍을 남기지 않고, 대조가 멈춘 사실은 요약의 stale이 배너로 띄운다.
         "sync_naver_adgroup_targets": sync_naver_adgroup_targets_job,
-        "sync_naver_criterion": sync_naver_criterion_job,  # D-NAO-203 (10:05)
+        "sync_naver_criterion": sync_naver_criterion_job,  # D-NAO-203 (10:37)
         "verify_search_term_exclusions": verify_search_term_exclusions_job,
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,

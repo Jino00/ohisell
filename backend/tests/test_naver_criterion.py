@@ -366,3 +366,185 @@ def test_adgroup_id_is_text_and_joins_the_performance_axis(db, monkeypatch):
             NaverAdDaily,
             NaverAdDaily.adgroup_id == NaverCriterionDaily.adgroup_id)).scalar()
     assert joined > 0, "성과축과 조인되지 않는다 — 타입/포맷 불일치"
+
+
+# ── P1-3(적대 리뷰): 파괴 경로 · ingest 배선 · 자격증명 부재 ──────────────────
+#
+# 초판은 파서만 촘촘했고 「파서 dict → ORM 컬럼」 배선과 「날짜 삭제」가 전 구간 무테스트라
+# 변이 11종이 살아남았다. 특히 conv 표는 삭제 where를 통째로 지워도(전 날짜 전멸) 25/25가
+# 통과했다. brief의 ±오프셋 함정이 한 계단 아래로 옮겨져 있었을 뿐이다.
+
+def test_conv_table_other_dates_are_untouched(db, monkeypatch):
+    """★변이 M9 봉쇄 — conv 삭제의 `.where(ad_date==d)`가 빠지면 **전 날짜가 전멸**한다.
+
+    기존 `test_other_dates_are_untouched`는 `NaverCriterionDaily`만 세어 이 경로가 무보호였다.
+    """
+    _wire(monkeypatch)
+    criterion_ingest.ingest_criterion_day(db, D)                      # 08-17: conv 2행
+    other = [["20260816", "1313769", "grp-a~AG3034", "M", "1", "purchase", "1", "500"]]
+    monkeypatch.setattr(fetcher, "_download_tsv",
+                        lambda url: [list(r) for r in ([] if "/CRITERION/" in url else other)])
+    criterion_ingest.ingest_criterion_day(db, date(2026, 8, 16))      # 08-16만 교체
+    assert db.scalar(select(func.count()).select_from(NaverCriterionConvDaily)) == 3, \
+        "08-17 conv 2행이 살아 있어야 한다(전 날짜 삭제 금지)"
+    left = db.scalars(select(NaverCriterionConvDaily.ad_date).distinct()).all()
+    assert sorted(str(x) for x in left) == ["2026-08-16", "2026-08-17"]
+
+
+def test_ingest_maps_every_stat_field_to_its_own_column(db, monkeypatch):
+    """★변이 M7(코드↔기기)·M6(노출↔클릭) 봉쇄 — 파서 dict → ORM 컬럼 배선을 값으로 고정."""
+    _wire(monkeypatch, stat=[["20260817", "1313769", "grp-zz~AG3034", "P", "11", "22", "3300"]],
+          conv=[])
+    criterion_ingest.ingest_criterion_day(db, D)
+    r = db.scalars(select(NaverCriterionDaily)).one()
+    assert (r.adgroup_id, r.criterion_type, r.criterion_code, r.device) == \
+           ("grp-zz", "AG", "AG3034", "P")
+    assert (r.imp, r.clk, r.cost) == (11, 22, 3300)
+    assert str(r.ad_date) == "2026-08-17"
+
+
+def test_ingest_maps_every_conv_field_and_reproduces_the_equation(db, monkeypatch):
+    """★변이 M8(conv_cnt↔conv_amt)·M2(conv_kind↔conv_type) 봉쇄.
+
+    **합격기준 ⓑ의 8값을 DB에서 직접 읽어** 단언한다. 실측 표본(2026-08-17 AG축):
+      (purchase,'1') 63/952,200 · (purchase,'2') 14/220,400
+      (add_to_cart,'1') 48/986,900 · (add_to_cart,'2') 4/95,500
+    초판은 이 8값이 통째로 뒤집혀도 25/25가 통과했다 — 검산 등식이 무보호였다.
+    """
+    conv = [
+        ["20260817", "1313769", "grp-a~AG3034", "M", "1", "purchase", "63", "952200"],
+        ["20260817", "1313769", "grp-a~AG3034", "M", "2", "purchase", "14", "220400"],
+        ["20260817", "1313769", "grp-a~AG3034", "M", "1", "add_to_cart", "48", "986900"],
+        ["20260817", "1313769", "grp-a~AG3034", "M", "2", "add_to_cart", "4", "95500"],
+    ]
+    _wire(monkeypatch, stat=[], conv=conv)
+    criterion_ingest.ingest_criterion_day(db, D)
+    got = {(r.conv_kind, r.conv_type): (r.conv_cnt, r.conv_amt)
+           for r in db.scalars(select(NaverCriterionConvDaily)).all()}
+    assert got == {
+        ("purchase", "1"): (63, 952200), ("purchase", "2"): (14, 220400),
+        ("add_to_cart", "1"): (48, 986900), ("add_to_cart", "2"): (4, 95500),
+    }
+
+
+def test_missing_credentials_preserve_existing_rows(db, monkeypatch):
+    """★변이 M1·M12 봉쇄 — 자격증명 사고가 «그 날짜 삭제»가 되면 안 된다(금지선).
+
+    `None`은 「리포트를 못 받았다」이고 `[]`는 「0행을 받았다」인데, 자격증명 부재에서
+    `[]`를 돌려주면 사고 한 번이 복구 불가능한 삭제가 된다.
+    """
+    _wire(monkeypatch)
+    criterion_ingest.ingest_criterion_day(db, D)
+    monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "")
+    monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "")
+    assert fetcher.fetch_criterion_day(D) is None
+    assert fetcher.fetch_criterion_conv_day(D) is None
+    out = criterion_ingest.ingest_criterion_day(db, D)
+    assert out["stat_skipped"] and out["conv_skipped"]
+    assert db.scalar(select(func.count()).select_from(NaverCriterionDaily)) == 4
+    assert db.scalar(select(func.count()).select_from(NaverCriterionConvDaily)) == 2
+
+
+def test_short_rows_are_dropped_not_crashing(monkeypatch):
+    """★변이 M3 봉쇄 — 짧은 행 가드가 `<=`여야 한다(`<`면 마지막 칸이 IndexError).
+
+    EXPKEYWORD가 2026-07-22까지 0행으로 죽어 있던 것이 이 부류의 사고였다.
+    """
+    short = [["20260817", "1313769", "grp-a~AG3034", "M", "5", "1"],          # 6열(1칸 모자람)
+             ["20260817", "1313769", "grp-b~GNF", "M", "5", "1", "700"]]      # 정상 7열
+    _wire(monkeypatch, stat=short)
+    got = fetcher.fetch_criterion_day(D)
+    assert len(got) == 1 and got[0]["criterion_code"] == "GNF"
+
+    short_c = [["20260817", "1313769", "grp-a~AG3034", "M", "1", "purchase", "2"],   # 7열
+               ["20260817", "1313769", "grp-b~GNF", "M", "1", "purchase", "2", "100"]]
+    _wire(monkeypatch, conv=short_c)
+    gotc = fetcher.fetch_criterion_conv_day(D)
+    assert len(gotc) == 1 and gotc[0]["criterion_code"] == "GNF"
+
+
+def test_rows_from_a_different_date_are_dropped(monkeypatch):
+    """★변이 M4 봉쇄(적대 리뷰 P2-1 채택) — 적재가 `ad_date=요청일`로 쓰므로, 다른 날짜 행을
+    안 거르면 남의 날짜가 조용히 재라벨된다."""
+    mixed = [["20260816", "1313769", "grp-a~AG3034", "M", "5", "1", "700"],   # 다른 날
+             ["notadate", "1313769", "grp-b~GNF", "M", "5", "1", "700"],      # 파싱 불가
+             ["20260817", "1313769", "grp-c~GNM", "M", "5", "1", "700"]]      # 요청일
+    _wire(monkeypatch, stat=mixed)
+    got = fetcher.fetch_criterion_day(D)
+    assert [r["criterion_code"] for r in got] == ["GNM"]
+
+
+def test_comma_numbers_are_flagged_not_silently_zero(monkeypatch, caplog):
+    """★변이 M5 봉쇄 — `_num_or_flag`가 «0으로 떨어진 숫자»를 표면화해야 한다.
+
+    `_safe_int`는 '1,234'를 조용히 0으로 만든다(저장소 기존 부채). 이 표는 365일 소급
+    한도라 조용한 0이 **영구화**된다 — 관측 장치가 사라지면 안 된다.
+    """
+    _wire(monkeypatch, stat=[["20260817", "1313769", "grp-a~AG3034", "M", "1,234", "1", "700"]])
+    with caplog.at_level("WARNING"):
+        got = fetcher.fetch_criterion_day(D)
+    assert got[0]["imp"] == 0, "동작은 기존 부채 그대로(값이 갈라지면 안 된다)"
+    assert any("0 낙하" in r.getMessage() for r in caplog.records), \
+        "0 낙하가 로그로 표면화되지 않았다"
+
+
+def test_separator_split_takes_the_last_tilde(monkeypatch):
+    """★변이 M10 봉쇄 — `rpartition`이어야 한다(광고그룹 쪽에 `~`가 섞여 와도 코드를 잃지 않게)."""
+    assert fetcher._split_owner_criterion("grp~weird~AG3034") == ("grp~weird", "AG3034")
+
+
+def test_dict_sync_survives_duplicate_codes(db, monkeypatch):
+    """★변이 M11 봉쇄 — 같은 코드가 두 번 오면 UNIQUE 위반으로 사전 동기화가 통째로 죽는다."""
+    monkeypatch.setattr(criterion_ingest, "fetch_criterion_dictionary", lambda: [
+        {"dictionary_code": "AG3034", "criterion_type": "AG", "name": "30세 ~ 34세"},
+        {"dictionary_code": "AG3034", "criterion_type": "AG", "name": "중복"},
+    ])
+    out = criterion_ingest.sync_criterion_dict(db)
+    assert out["rows"] == 1
+    assert db.scalar(select(func.count()).select_from(NaverCriterionDict)) == 1
+
+
+# ── P1-2(적대 리뷰): 「실행 안 됨」이 ok로 계상되던 것 ────────────────────────
+
+def test_unreachable_reports_are_skipped_not_ok(db, monkeypatch):
+    """★P1-2 회귀 봉쇄 — 초판은 `attempted=364 ok=364 failed=0` + **테이블 0행**이었다.
+
+    「리포트를 못 받았다」가 「성공」과 같은 숫자로 보이면 안 된다(교훈 #123). 하필
+    365일 소급 한도라 그 오독은 영구 소실로 굳는다.
+    """
+    _wire(monkeypatch, stat_reports=0, conv_reports=0)
+    out = criterion_ingest.ingest_criterion_range(db, date(2026, 8, 10), date(2026, 8, 12))
+    assert out["attempted"] == 3
+    assert out["ok"] == 0, "리포트를 못 받은 날이 ok로 세어졌다"
+    assert out["skipped"] == 3
+    assert out["ok"] + out["failed"] + out["skipped"] == out["attempted"]
+    assert len(out["skipped_days"]) == 3
+    assert db.scalar(select(func.count()).select_from(NaverCriterionDaily)) == 0
+
+
+def test_skipped_days_are_retried_once_and_can_recover(db, monkeypatch):
+    """★P1-2 재시도 1패스 — 429/5xx로 한 번 실패한 날이 그대로 한도 밖으로 밀려나면 안 된다."""
+    calls: dict[str, int] = {}
+
+    def _day(_db, d):
+        n = calls.get(d.isoformat(), 0) + 1
+        calls[d.isoformat()] = n
+        first_try_fails = (d == date(2026, 8, 11) and n == 1)
+        return {"date": d.isoformat(), "stat_rows": 0 if first_try_fails else 5,
+                "conv_rows": 0, "stat_skipped": first_try_fails, "conv_skipped": False}
+
+    monkeypatch.setattr(criterion_ingest, "ingest_criterion_day", _day)
+    out = criterion_ingest.ingest_criterion_range(db, date(2026, 8, 10), date(2026, 8, 12))
+    assert calls["2026-08-11"] == 2, "skipped 날짜가 재시도되지 않았다"
+    assert calls["2026-08-10"] == 1, "ok였던 날짜는 재시도하지 않는다"
+    assert out["ok"] == 3 and out["skipped"] == 0
+    assert out["retried"] == 1 and out["retry_recovered"] == 1
+    assert out["ok"] + out["failed"] + out["skipped"] == out["attempted"] == 3
+
+
+def test_retry_does_not_hide_a_persistent_failure(db, monkeypatch):
+    """재시도가 «성공으로 위장»하면 안 된다 — 두 번 다 안 되면 skipped로 남는다."""
+    _wire(monkeypatch, stat_reports=0)
+    out = criterion_ingest.ingest_criterion_range(db, date(2026, 8, 10), date(2026, 8, 10))
+    assert out["skipped"] == 1 and out["ok"] == 0 and out["retried"] == 1
+    assert out["retry_recovered"] == 0

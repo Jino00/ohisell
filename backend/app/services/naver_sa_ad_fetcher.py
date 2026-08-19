@@ -1025,15 +1025,35 @@ def create_stat_report(report_tp: str, stat_date: date) -> dict:
     AD·AD_CONVERSION·SHOPPINGKEYWORD_DETAIL·EXPKEYWORD 전부 이 방식으로 자체생성됨 —
     수집이 외부(MOP/네이버 UI 정기보고서)가 생성해준 보고서에 기생하던 것을 자족 구조로 전환.
     반환: {"reportJobId","status", ...}(생성 응답 원본).
+
+    ★429·일시 5xx는 `_get`과 **같은 지수 백오프로 재시도**한다(적대 리뷰 P1-2, D-NAO-203).
+    초판은 raw `requests.post` + `raise_for_status`라 재시도가 0이었는데, CRITERION 365일
+    백필은 POST를 730번 연달아 쏴 **그 조건을 스스로 만든다** — 그러면 리포트가 안 만들어진
+    옛날 하루가 재시도 경로 없이 소급 한도(365일) 밖으로 밀려난다.
+    ⚠️POST 재시도는 같은 날짜의 잡을 중복 생성할 수 있다(5xx가 실제로는 성공이었던 경우).
+      무해하다 — 소비 측(`_one_built_report`·`_report_status_by_kst_date`)이 날짜당 1건으로
+      좁히고, 그 성질을 `test_only_one_report_per_date_is_downloaded`가 지킨다.
     """
-    resp = requests.post(
-        BASE_URL + "/stat-reports",
-        headers=_headers("/stat-reports", method="POST"),
-        json={"reportTp": report_tp, "statDt": stat_date.strftime("%Y%m%d")},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    last: requests.Response | None = None
+    for attempt in range(MAX_ATTEMPTS):
+        resp = requests.post(
+            BASE_URL + "/stat-reports",
+            headers=_headers("/stat-reports", method="POST"),
+            json={"reportTp": report_tp, "statDt": stat_date.strftime("%Y%m%d")},
+            timeout=HTTP_TIMEOUT_S,
+        )
+        if resp.status_code not in _RETRY_STATUS:
+            resp.raise_for_status()
+            return resp.json()
+        last = resp
+        if attempt == MAX_ATTEMPTS - 1:
+            break
+        wait = 2 ** attempt
+        log.warning("Naver SA 리포트 생성 %s %s — %d, %ds 후 재시도(%d/%d)",
+                    report_tp, stat_date, resp.status_code, wait, attempt + 1, MAX_ATTEMPTS)
+        time.sleep(wait)
+    last.raise_for_status()   # type: ignore[union-attr]
+    return last.json()        # type: ignore[union-attr]
 
 
 def create_expkeyword_report(stat_date: date) -> dict:
@@ -1468,6 +1488,11 @@ def _one_built_report(report_tp: str, stat_date: date) -> dict | None:
     reports = _list_reports_by_type(report_tp, stat_date, stat_date)
     if not reports:
         return None
+    if len(reports) > 1:
+        # 같은 날짜·같은 타입은 같은 원천을 같은 조건으로 뽑은 것이라 내용이 같다고 본다 —
+        # 다만 «가정»이므로 조용히 넘어가지 않는다(적대 리뷰 P2-6). 목록 순서는 미정의다.
+        log.warning("Naver SA %s %s: BUILT 리포트 %d건 — 첫 건만 읽는다(내용 동일 가정)",
+                    report_tp, stat_date, len(reports))
     return reports[0]
 
 
@@ -1486,15 +1511,19 @@ def fetch_criterion_day(stat_date: date) -> list[dict] | None:
         log.warning("Naver SA CRITERION %s 리포트 없음 — 기존 적재분 보존", stat_date)
         return None
 
+    want = stat_date.isoformat()
     agg: dict[tuple, dict] = {}
     bad_nums: list[str] = []
     unknown: set[str] = set()
-    n_raw = n_bad_key = 0
+    n_raw = n_bad_key = n_bad_date = 0
     for cols in _download_tsv(rep["downloadUrl"]):
         if len(cols) <= CRIT_COL_COST:
             continue
         d = _row_date_iso(cols[CRIT_COL_DATE])
-        if d is None:
+        if d is None or d != want:
+            # ★요청과 다른 날짜(또는 파싱 불가)는 버린다 — 적재는 `ad_date=요청일`로 쓰므로
+            #   안 거르면 남의 날짜가 조용히 재라벨된다(적대 리뷰 P2-1 채택 · 변이 M4).
+            n_bad_date += 1
             continue
         adgroup_id, code = _split_owner_criterion(cols[CRIT_COL_OWNER_CRITERION])
         if not adgroup_id or not code:
@@ -1523,6 +1552,9 @@ def fetch_criterion_day(stat_date: date) -> list[dict] | None:
                     stat_date, len(unknown), sorted(unknown)[:5])
     if n_bad_key:
         log.warning("Naver SA CRITERION %s: '~' 구분자 없는 행 %d건 버림", stat_date, n_bad_key)
+    if n_bad_date:
+        log.warning("Naver SA CRITERION %s: 요청과 다른 날짜(또는 파싱 불가) %d행 버림",
+                    stat_date, n_bad_date)
     log.info("Naver SA CRITERION %s: raw %d행 → %d행", stat_date, n_raw, len(agg))
     return list(agg.values())
 
@@ -1539,14 +1571,18 @@ def fetch_criterion_conv_day(stat_date: date) -> list[dict] | None:
         log.warning("Naver SA CRITERION_CONVERSION %s 리포트 없음 — 기존 적재분 보존", stat_date)
         return None
 
+    want = stat_date.isoformat()
     agg: dict[tuple, dict] = {}
     bad_nums: list[str] = []
-    n_raw = n_bad_key = 0
+    n_raw = n_bad_key = n_bad_date = 0
     for cols in _download_tsv(rep["downloadUrl"]):
         if len(cols) <= CRITCONV_COL_VALUE:
             continue
         d = _row_date_iso(cols[CRITCONV_COL_DATE])
-        if d is None:
+        if d is None or d != want:
+            # ★요청과 다른 날짜(또는 파싱 불가)는 버린다 — 적재는 `ad_date=요청일`로 쓰므로
+            #   안 거르면 남의 날짜가 조용히 재라벨된다(적대 리뷰 P2-1 채택 · 변이 M4).
+            n_bad_date += 1
             continue
         adgroup_id, code = _split_owner_criterion(cols[CRITCONV_COL_OWNER_CRITERION])
         if not adgroup_id or not code:
@@ -1570,6 +1606,9 @@ def fetch_criterion_conv_day(stat_date: date) -> list[dict] | None:
                     stat_date, len(bad_nums), bad_nums[:5])
     if n_bad_key:
         log.warning("Naver SA CRITERION_CONVERSION %s: '~' 없는 행 %d건 버림", stat_date, n_bad_key)
+    if n_bad_date:
+        log.warning("Naver SA CRITERION_CONVERSION %s: 요청과 다른 날짜 %d행 버림",
+                    stat_date, n_bad_date)
     log.info("Naver SA CRITERION_CONVERSION %s: raw %d행 → %d행", stat_date, n_raw, len(agg))
     return list(agg.values())
 
