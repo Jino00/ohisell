@@ -52,8 +52,8 @@ const b = wrap.querySelector('button');
 
 ## 5. 스크린샷 (실렌더, headless Chrome)
 > ★**배포된 번들 `index-D8xSLZ6i.js`로 재촬영**(2026-08-19 19:09). 첫 촬영본은 적대 리뷰 P1 수정 «전» 빌드라 폐기했다 — 증거가 배포 코드와 어긋나면 증거가 아니다.
-- `banner_collapsed.png` — 접힘 기본. `⚠️ 파이프라인 경고  RG 정산비용(오픽스)이 net_profit에서 누락 중  외 11건 ▾`
-- `banner_expanded.png` — 펼침. `⚠️ 파이프라인 경고 (12건)  접기 ▴` + 전건 목록(`max-h-64` 스크롤)
+- `banner_collapsed.png` — 접힘 기본. `⚠️ 파이프라인 경고  RG 정산비용(오픽스)이 net_profit에서 누락 중  외 10건 ▾`
+- `banner_expanded.png` — 펼침. `⚠️ 파이프라인 경고 (11건)  접기 ▴` + 전건 목록(`max-h-64` 스크롤)
 
 캡처 명령:
 ```bash
@@ -62,7 +62,8 @@ CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   --window-size=1280,320 --screenshot=banner_collapsed.png "http://127.0.0.1:4599/"
 ```
 펼침은 같은 오리진 iframe에서 토글을 눌러 캡처했다(`expand.html`, 캡처 후 삭제).
-★경고 건수는 로컬 DB 상태에 따라 달라진다(11건/12건 등) — **건수가 아니라 «전건이 보이는가»가 관측 대상**이다.
+★경고 건수는 로컬 DB 상태에 따라 달라진다 — **건수가 아니라 «전건이 보이는가»가 관측 대상**이다.
+★**이 캡처의 한계**: 로컬 DB에 `cookies_stale`이 없어(`health_payload.json` 참조) 적대 리뷰 P1이 고친 **WING 쿠키 만료 케이스는 스크린샷에 없다** — 그건 단위 테스트(`등급 (분기별 고정)` describe)로만 증명된다. 다음 캡처 때 쿠키 만료를 시드에 넣으면 시각 증거까지 닫힌다.
 
 ★**종전 결함**: 11건을 ` · `로 이어 한 줄에 넣고 `truncate` → 화면 폭을 넘는 순간 뒤가 통째로 안 보였다.
 호버 `title`에는 있었지만 «호버해야 보이는 경고»는 배너가 아니다.
