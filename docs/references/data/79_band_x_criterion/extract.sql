@@ -30,7 +30,13 @@ from naver_criterion_daily c join band b on b.adgroup_id = c.adgroup_id
 group by b.band, b.campaign_type, c.criterion_type, c.criterion_code, h.half;
 
 -- (4) 기기(P/M) × 밴드 — CRITERION만 주는 축
+-- ★★초판 결함(2026-08-19, Fable이 잡음): `criterion_type`을 통제하지 않아 **전 축 합산**이
+--   나왔다. SHOPPING은 정확히 2.00배(AG+GN), WEB_SITE는 3.41배(AG+GN+AD+SD)였다.
+--   이 파일 머리말이 「축을 가로질러 합산하지 말라」고 스스로 적어 놓고 (4)절에서 어겼다 —
+--   교차 집계에서 축 통제를 빠뜨리는 것이 이 축의 기본 함정이다.
+--   ⇒ AG축으로 좁힌다(AG는 계정 100%를 덮으므로 기기 분해의 분모로 옳다).
 select 'DEV', b.band, b.campaign_type, c.device, '', count(distinct c.adgroup_id),
        sum(c.clk), sum(c.cost)
 from naver_criterion_daily c join band b on b.adgroup_id = c.adgroup_id
+where c.criterion_type = 'AG'
 group by b.band, b.campaign_type, c.device;
