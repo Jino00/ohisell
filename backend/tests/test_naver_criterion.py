@@ -548,3 +548,105 @@ def test_retry_does_not_hide_a_persistent_failure(db, monkeypatch):
     out = criterion_ingest.ingest_criterion_range(db, date(2026, 8, 10), date(2026, 8, 10))
     assert out["skipped"] == 1 and out["ok"] == 0 and out["retried"] == 1
     assert out["retry_recovered"] == 0
+
+
+# ── 2R P1-A · P2 봉쇄 ────────────────────────────────────────────────────────
+
+def test_retry_does_not_double_count_rows(db, monkeypatch):
+    """★2R P1-A 회귀 봉쇄 — 재시도한 날의 행수가 두 번 더해지면 안 된다.
+
+    `ingest_criterion_day`는 멱등(delete+insert)이라 DB는 멀쩡한데 **보고 숫자만 부푼다**.
+    하필 `stat_rows`는 1R P1-2를 드러낸 증거 필드다(`stat_rows=0` ↔ 테이블 0행) — 반대
+    방향으로 부풀면 완료 QA가 적재량을 과대 보고한다.
+    ★보고 숫자와 **실제 테이블 행수**를 함께 단언한다. 로그만 보면 못 잡는 종류다.
+    """
+    _wire(monkeypatch, stat=STAT_TSV, conv=CONV_TSV, conv_reports=0)  # conv만 미빌드 → skipped
+    out = criterion_ingest.ingest_criterion_range(db, D, D)
+    assert out["skipped"] == 1 and out["retried"] == 1
+    actual = db.scalar(select(func.count()).select_from(NaverCriterionDaily))
+    assert out["stat_rows"] == actual == 4, \
+        f"보고 {out['stat_rows']}행 ≠ 실제 {actual}행 — 재시도가 이중계상했다"
+
+
+def test_retried_counts_executions_not_targets(db, monkeypatch):
+    """★2R P2-3 — `retried`는 «대상 수»가 아니라 «실제 실행 수»다(교훈 #123의 축소판).
+
+    데드라인에 걸려 재시도가 한 번도 안 돌았는데 `retried=3`이면 「세 번 시도했다」로 읽힌다.
+    """
+    monkeypatch.setattr(criterion_ingest, "ingest_criterion_day",
+                        lambda _db, d: {"date": d.isoformat(), "stat_rows": 0, "conv_rows": 0,
+                                        "stat_skipped": True, "conv_skipped": False})
+    # 1회전은 돌고 재시도 진입 시점엔 이미 데드라인 초과가 되도록 monotonic을 밀어 준다.
+    # 소비 순서: started 1회 + 본 루프 _over_deadline 3회(3일) → 그 뒤부터 초과.
+    ticks = iter([0.0] * 4 + [999.0] * 50)
+    monkeypatch.setattr(criterion_ingest.time, "monotonic", lambda: next(ticks))
+    out = criterion_ingest.ingest_criterion_range(
+        db, date(2026, 8, 10), date(2026, 8, 12), deadline_s=100)
+    assert out["retry_targets"] == 3
+    assert out["retried"] == 0, "실행하지 않은 재시도가 실행한 것으로 보고됐다"
+    assert out["aborted"] is True
+
+
+def test_conv_rows_from_a_different_date_are_dropped(monkeypatch):
+    """★2R P2-1 — stat 쪽에만 있던 날짜 필터 테스트를 conv에도. 1R에서 conv 삭제 경로가
+    무보호였던 것과 정확히 같은 모양이라(쌍둥이 중 한쪽만 지킨다) 여기서 닫는다."""
+    mixed = [["20260816", "1313769", "grp-a~AG3034", "M", "1", "purchase", "2", "100"],
+             ["notadate", "1313769", "grp-b~GNF", "M", "1", "purchase", "2", "100"],
+             ["20260817", "1313769", "grp-c~GNM", "M", "1", "purchase", "2", "100"]]
+    _wire(monkeypatch, conv=mixed)
+    got = fetcher.fetch_criterion_conv_day(D)
+    assert [r["criterion_code"] for r in got] == ["GNM"]
+
+
+def test_create_stat_report_retries_429_and_5xx(monkeypatch):
+    """★2R P2-2 — 이번에 새로 쓴 재시도 루프가 무테스트였다(통째로 지워도 37/37 통과).
+
+    이 재시도는 365일 백필의 생명선이다: 백필은 POST를 730번 연달아 쏴 429/5xx 조건을
+    스스로 만들고, 그때 재시도가 없으면 그 날은 소급 한도 밖으로 밀려난다.
+    """
+    monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
+    monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "y")
+    monkeypatch.setattr(fetcher.time, "sleep", lambda _s: None)
+    calls: list[dict] = []
+
+    class _R:
+        def __init__(self, code, payload=None):
+            self.status_code, self._p = code, payload or {}
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+        def json(self):
+            return self._p
+
+    seq = [_R(503), _R(429), _R(200, {"reportJobId": 7, "status": "REGIST"})]
+
+    def _post(url, **kw):
+        calls.append(kw)
+        return seq[len(calls) - 1]
+
+    monkeypatch.setattr(fetcher.requests, "post", _post)
+    out = fetcher.create_stat_report("CRITERION", D)
+    assert len(calls) == 3, "429/5xx가 재시도되지 않았다"
+    assert out["reportJobId"] == 7
+    # ★statDt 포맷은 YYYYMMDD여야 한다(변이 M21) — 다른 포맷이면 API가 조용히 거부한다
+    assert calls[0]["json"] == {"reportTp": "CRITERION", "statDt": "20260817"}
+
+
+def test_create_stat_report_does_not_retry_4xx(monkeypatch):
+    """400(소급 한도 밖 `code:10004`)은 재시도해도 소용없다 — 즉시 raise해야 백필이 빨리 넘어간다."""
+    monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
+    monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "y")
+    calls: list[int] = []
+
+    class _R:
+        status_code = 400
+        def raise_for_status(self):
+            raise RuntimeError("HTTP 400")
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(fetcher.requests, "post",
+                        lambda url, **kw: (calls.append(1), _R())[1])
+    with pytest.raises(RuntimeError):
+        fetcher.create_stat_report("CRITERION", date(2025, 8, 18))
+    assert len(calls) == 1, "4xx를 재시도했다(백필이 한도 밖 날짜마다 3배 느려진다)"

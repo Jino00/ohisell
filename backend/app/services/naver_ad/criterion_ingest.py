@@ -115,12 +115,17 @@ def ingest_criterion_range(
         log.warning("CRITERION 적재: 빈 범위(%s > %s) — 할 일 없음", date_from, date_to)
         return {"attempted": 0, "ok": 0, "failed": 0, "skipped": 0, "stat_rows": 0,
                 "conv_rows": 0, "skipped_days": [], "failed_days": [], "aborted": False,
-                "retried": 0, "retry_recovered": 0}
+                "retry_targets": 0, "retried": 0, "retry_recovered": 0}
 
     started = time.monotonic()
     status: dict[date, str] = {}        # ★유일한 정본 — 'ok' | 'failed' | 'skipped'
     detail: dict[date, str] = {}
-    rows = {"stat": 0, "conv": 0}
+    # ★행수도 «날짜별로 덮어쓴다». 누적(+=)이면 재시도한 날이 두 번 더해진다 — 적대 리뷰
+    #   2R P1-A가 잡은 것(보고 stat_rows=4 ↔ 실제 테이블 2행). `ingest_criterion_day`가
+    #   멱등(delete+insert)이라 DB는 멀쩡한데 **보고 숫자만 부푼다**, 그리고 하필 이 필드가
+    #   1R P1-2를 드러낸 증거 필드다. status와 같은 모양으로 맞춘다.
+    rows_by_date: dict[date, tuple[int, int]] = {}
+    retry_executed = 0
     aborted = False
 
     def _over_deadline() -> bool:
@@ -135,10 +140,12 @@ def ingest_criterion_range(
             db.rollback()
             status[d] = "failed"
             detail[d] = f"{type(e).__name__}: {str(e)[:80]}"
+            # ★rows_by_date는 건드리지 않는다 — `ingest_criterion_day`는 끝에서 한 번
+            #   commit하므로 예외 시 그 날의 쓰기는 롤백된다. 즉 DB에 남아 있는 것은
+            #   «직전에 성공한 적재분»이고, 그 값이 지금도 맞는 값이다.
             log.exception("CRITERION %s 적재 실패(계속 진행): %s", d, e)
             return
-        rows["stat"] += day["stat_rows"]
-        rows["conv"] += day["conv_rows"]
+        rows_by_date[d] = (day["stat_rows"], day["conv_rows"])   # 누적 아니라 덮어쓰기
         if day["stat_skipped"] or day["conv_skipped"]:
             status[d] = "skipped"
             detail[d] = ("stat" if day["stat_skipped"] else "") + \
@@ -165,6 +172,7 @@ def ingest_criterion_range(
             aborted = True
             log.warning("CRITERION 재시도 중 데드라인 초과 — %s부터 미실행", d)
             break
+        retry_executed += 1      # ★«대상 수»가 아니라 «실제 실행 수»다(2R P2-3)
         _run_day(d)      # status[d]를 덮어쓴다 — 상계 계산이 필요 없다
     ok_after = sum(1 for st in status.values() if st == "ok")
 
@@ -173,12 +181,14 @@ def ingest_criterion_range(
         "ok": ok_after,
         "failed": sum(1 for st in status.values() if st == "failed"),
         "skipped": sum(1 for st in status.values() if st == "skipped"),
-        "stat_rows": rows["stat"], "conv_rows": rows["conv"],
+        "stat_rows": sum(v[0] for v in rows_by_date.values()),
+        "conv_rows": sum(v[1] for v in rows_by_date.values()),
         "skipped_days": [f"{d.isoformat()}({detail.get(d, '')})"
                          for d in sorted(status) if status[d] == "skipped"],
         "failed_days": [d.isoformat() for d in sorted(status) if status[d] == "failed"],
         "aborted": aborted,
-        "retried": len(retry_targets),
+        "retry_targets": len(retry_targets),
+        "retried": retry_executed,
         "retry_recovered": max(0, ok_after - ok_before),
     }
     assert out["ok"] + out["failed"] + out["skipped"] == out["attempted"], (
@@ -186,8 +196,13 @@ def ingest_criterion_range(
         f"skipped={out['skipped']} attempted={out['attempted']}")
 
     if out["failed"] or out["skipped"] or out["aborted"]:
+        # ★로그엔 표본만 — 365일 백필이 전량 실패하면 skipped_days가 364건(약 12KB)이라
+        #   단일 warning이 로그를 통째로 밀어낸다(2R P2-4). 반환값엔 전량이 그대로 있다.
+        brief = {k: v for k, v in out.items() if k not in ("skipped_days", "failed_days")}
+        brief["skipped_sample"] = out["skipped_days"][:10]
+        brief["failed_sample"] = out["failed_days"][:10]
         log.warning("naver_criterion ingest %s~%s (주의 — ok가 아닌 날이 있다): %s",
-                    date_from, date_to, out)
+                    date_from, date_to, brief)
     else:
         log.info("naver_criterion ingest %s~%s: %s", date_from, date_to, out)
     return out
