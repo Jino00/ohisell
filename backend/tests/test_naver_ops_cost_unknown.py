@@ -145,8 +145,13 @@ def test_known_cost_is_unchanged(db):
     assert r["cost_known"] is True
     assert r["cost_unknown_kind"] is None
     assert r["cost"] == "40000.00"          # 22,000 × 2 ÷ 1.1
-    assert r["profit"] == "60000.00"        # 100,000 − 0(수수료) − 40,000
-    assert r["profit_rate"] == "60.00"
+    # ★D-NAO-207: 상품 행이 매출총이익 → **순이익**으로 바뀌었다. 이 주문은 택배 1건(1,900원
+    #   VAT포함 = 1,727.27 공급가)이 붙고 광고비는 0(소재 원장 없음).
+    #   100,000 − 0(수수료) − 40,000(원가) − 1,727.27(물류비) − 0(광고비) = 58,272.73
+    assert r["logistics"] == "1727.27"
+    assert r["ad_spend"] == "0.00"
+    assert r["profit"] == "58272.73"
+    assert r["profit_rate"] == "58.27"
 
 
 # ── 요약: 계속 계산하되 얼마가 비었는지 말한다 ──────────────────────

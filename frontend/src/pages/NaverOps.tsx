@@ -19,6 +19,8 @@ import {
   NAVER_CANCEL_REASONS, NAVER_CLAIM_STATUS_LABELS,
   NAVER_RETURN_REASONS, NAVER_RETURN_HOLDBACK_TYPES, NAVER_COLLECT_DELIVERY_METHODS,
   type NaverSalesSummary, type NaverSalesProductRow, type GfaStatus,
+  type NaverSalesSummaryData, type NaverUnallocated, type NaverAdAlloc,
+  type NaverReconciliation,
   type NaverSettlement, type NaverInquiries,
   type NaverProductList, type NaverSellerInfo,
   type NaverPendingOrders, type NaverPendingOrder, type NaverWriteResult,
@@ -53,9 +55,9 @@ function hhmm(iso: string | null | undefined): string {
 //   1년을 넣으면 누르는 즉시 400이 된다. 못 쓰는 버튼은 두지 않는다.
 const NAVER_PERIOD_PRESETS: PeriodPreset[] = ["today", "yesterday", "7d", "15d", "30d", "90d"];
 
-type SortKey = "product_name" | "revenue" | "profit" | "profit_rate";
+type SortKey = "product_name" | "revenue_total" | "ad_spend" | "profit" | "profit_rate";
 type SortDir = "asc" | "desc";
-type ColKey = "revenue" | "profit" | "profit_rate";
+type ColKey = "revenue_total" | "ad_spend" | "profit" | "profit_rate";
 
 function won(s: string | null | undefined) {
   if (s == null) return "—";
@@ -72,9 +74,101 @@ function profitColor(s: string | null | undefined) {
   return n > 0 ? "text-blue-700" : n < 0 ? "text-red-600" : "text-gray-500";
 }
 function fmtVal(row: NaverSalesProductRow, col: ColKey): string {
-  if (col === "revenue") return won(row.revenue);
+  if (col === "revenue_total") return won(row.revenue_total ?? row.revenue);
+  if (col === "ad_spend") return won(row.ad_spend ?? "0");
   if (col === "profit") return won(row.profit);
   return row.profit_rate ? pct(row.profit_rate) : "—";
+}
+
+/** 정렬용 원값. 신설 열이 비어 있으면(구 응답) 옛 열로 떨어뜨린다 — 정렬이 통째로
+ *  «모름»이 되어 전 행이 끝으로 밀리는 것을 막는다. */
+function sortVal(row: NaverSalesProductRow, key: Exclude<SortKey, "product_name">): string | null {
+  if (key === "revenue_total") return row.revenue_total ?? row.revenue;
+  if (key === "ad_spend") return row.ad_spend ?? "0";
+  return row[key];
+}
+
+/** D-NAO-207 — 「상품 행이 무슨 이익인가」를 표 **위**에서 말한다.
+ *
+ * ★왜 표 위인가: 종전엔 «광고비·물류비 미반영»이 표 아래 11px 회색 각주 한 줄이었고, 열 이름은
+ *   그냥 「이익」이었다. 2026-08-19 Jino가 화면을 보고 «이익이 너무 높다»고 지적했다 — 상품 행
+ *   71.0% vs 계정 실제 21.1%. 훑는 눈에는 큰 숫자가 이긴다(이 저장소가 반복해서 배운 것).
+ * ★배분 비율을 **숫자로** 낸다: 「일부 배분됨」 같은 말은 얼마나인지를 안 말해서 안 읽힌다.
+ */
+export function AdAllocationNotice({ summary, adAlloc, recon }: {
+  summary?: NaverSalesSummaryData;
+  adAlloc?: NaverAdAlloc;
+  recon?: NaverReconciliation;
+}) {
+  const uncovered = adAlloc?.uncovered_dates ?? [];
+  const allocN = Number(summary?.ad_allocated ?? 0) || 0;
+  const unallocN = Number(summary?.ad_unallocated ?? 0) || 0;
+  const totalN = allocN + unallocN;
+  const pctAlloc = totalN > 0 ? (allocN / totalN) * 100 : 0;
+  return (
+    <>
+      {summary?.ad_allocated != null && (
+        <div className="mb-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+          <b>상품 행은 광고비·물류비까지 반영한 순이익입니다.</b>{" "}
+          광고비 {won(summary.ad_spend)} 중 <b>{won(summary.ad_allocated)}({pctAlloc.toFixed(0)}%)</b>가
+          쇼핑 캠페인 소재→상품 조인으로 실제 귀속됐고, 나머지 {won(summary.ad_unallocated)}는
+          상품 축이 없어 <b>맨 아래 「광고비 미배분」 행</b>에 있습니다.
+          {uncovered.length > 0 && (
+            <div className="mt-1 text-amber-800">
+              ⚠️ 이 구간 중 <b>{uncovered.length}일</b>은 광고 소재 원장이 없어 상품별 광고비를
+              배분할 수 없습니다({uncovered.slice(0, 3).join(", ")}
+              {uncovered.length > 3 ? ` 외 ${uncovered.length - 3}일` : ""}).
+              그 날의 광고비는 0원이 아니라 <b>전액 미배분</b>으로 들어가 있습니다
+              {adAlloc?.ledger_from && ` — 원장 보유 창은 ${adAlloc.ledger_from}~${adAlloc.ledger_to}입니다`}.
+            </div>
+          )}
+          {adAlloc && Number(adAlloc.ambiguous_cost) > 0 && (
+            <div className="mt-1 text-amber-800">
+              ⚠️ 소재 {adAlloc.ambiguous_ads}개가 두 상품에 매핑돼 있어 {won(adAlloc.ambiguous_cost)}는
+              <b> 어느 상품에도 붙이지 않았습니다</b>(아무거나 고르면 그 상품 이익이 조용히 틀린다).
+            </div>
+          )}
+        </div>
+      )}
+      {/* 검산이 깨지면 화면이 스스로 말한다 — 표 합계와 카드가 갈렸다는 뜻이다.
+          ★«조용히 어긋난 표»가 이 패널이 이미 두 번 낸 결함 모양이라 경고를 값 옆에 둔다. */}
+      {recon && !recon.closes && (
+        <div className="mb-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800">
+          ⚠️ <b>검산 불일치</b> — 상품 이익 합 + 미배분({won(recon.unallocated_profit)})이
+          요약 이익({won(recon.summary_profit)})과 {won(recon.residual)} 어긋납니다. 표를 근거로 쓰지 마세요.
+        </div>
+      )}
+    </>
+  );
+}
+
+/** D-NAO-207 — 상품에 못 붙인 광고비 한 행. 쿠팡 패널 「판매유형 미배분」과 같은 모양.
+ *
+ * ★이 행이 있어야 열 합계가 상단 카드와 일치한다 — 표가 스스로 검산된다.
+ *   빼면 상품 이익률이 다시 «전부 반영된 순이익»으로 읽힌다(이 작업이 고치려던 바로 그 오독).
+ * ★0원이어도 그린다 — «없다»와 «0»이 같아 보이면 안 된다. */
+export function UnallocatedRow({ unallocated, uncoveredDays = 0 }: {
+  unallocated?: NaverUnallocated;
+  uncoveredDays?: number;
+}) {
+  if (!unallocated) return null;
+  return (
+    <tr className="bg-amber-50/60 border-t-2 border-amber-200">
+      <td className="px-3 py-2">
+        <div className="text-amber-900 font-medium">광고비 미배분</div>
+        <div className="mt-0.5 text-[11px] text-amber-700">
+          파워링크(소재=키워드)·디스플레이는 상품 축이 없어 붙일 수 없다
+          {uncoveredDays > 0 && ` · 소재 원장 없는 날 ${uncoveredDays}일 포함`}
+        </div>
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums text-gray-400">—</td>
+      <td className="px-3 py-2 text-right tabular-nums text-amber-900">{won(unallocated.ad_spend)}</td>
+      <td className={`px-3 py-2 text-right tabular-nums font-medium ${profitColor(unallocated.profit)}`}>
+        {won(unallocated.profit)}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums text-gray-400">—</td>
+    </tr>
+  );
 }
 
 function SummaryCard({ label, value, sub, highlight }: {
@@ -160,7 +254,7 @@ export default function NaverOps() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [sortKey, setSortKey] = useState<SortKey>("revenue");
+  const [sortKey, setSortKey] = useState<SortKey>("revenue_total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [colFilters, setColFilters] = useState<Partial<Record<ColKey, Set<string>>>>({});
   const [openFilter, setOpenFilter] = useState<ColKey | null>(null);
@@ -792,7 +886,7 @@ export default function NaverOps() {
     }
     // ★«모름»(null)은 방향과 무관하게 항상 끝으로 — 0으로 접으면 원가 미상 상품이
     //   "이익 0원"인 것처럼 정렬 한가운데 섞여 들어간다(모름을 0으로 읽는 그 결함의 재발).
-    const an = a[sortKey], bn = b[sortKey];
+    const an = sortVal(a, sortKey), bn = sortVal(b, sortKey);
     if (an == null || bn == null) return an == null ? (bn == null ? 0 : 1) : -1;
     av = Number(an); bv = Number(bn);
     return sortDir === "asc" ? av - bv : bv - av;
@@ -800,6 +894,23 @@ export default function NaverOps() {
 
   const s = data?.summary;
   const profitN = s ? Number(s.profit) : 0;
+
+  // ── D-NAO-207 광고비 배분 ────────────────────────────────────────
+  // ★「상품별 미배분」이던 광고비가 이제 **일부만** 배분된다. 얼마가 붙었는지를 카드가
+  //   직접 말한다 — 안 그러면 표의 상품 이익이 «전부 반영된 순이익»으로 읽힌다.
+  const unalloc = data?.unallocated;
+  const adAlloc = data?.ad_alloc;
+  const recon = data?.reconciliation;
+  const adAllocatedN = Number(s?.ad_allocated ?? 0) || 0;
+  const adUnallocN = Number(s?.ad_unallocated ?? 0) || 0;
+  const adTotalN = adAllocatedN + adUnallocN;
+  const adAllocPct = adTotalN > 0 ? (adAllocatedN / adTotalN) * 100 : 0;
+  const adAllocSub = s?.ad_allocated == null
+    ? "검색+디스플레이 · 상품별 미배분"
+    : `검색+디스플레이 · 상품 배분 ${won(s.ad_allocated)}(${adAllocPct.toFixed(0)}%) · 미배분 ${won(s.ad_unallocated)}`;
+  // 소재 원장이 못 덮는 날 — 그 구간은 배분이 **원리적으로** 0이다. 0원이라고 내면 화면이
+  // 자신 있게 틀리므로 배너가 먼저 말한다.
+  const uncovered = adAlloc?.uncovered_dates ?? [];
   // 「오늘」 광고비가 «모름»인가 — 광고비·이익·이익률 세 카드가 같은 판정을 써야 한다.
   // (한 카드만 모름이라고 하면 나머지 카드가 그걸 부정한다.)
   const adPending = !!data?.ad_basis?.pending;
@@ -1046,8 +1157,8 @@ export default function NaverOps() {
                     ? `검색+디스플레이 · 오늘 검색광고 ${won(data.ad_basis.today_search_added)} 포함(${hhmm(data.ad_basis.as_of)} 확인) · 오늘 디스플레이는 원천에 당일치가 없어 빠짐`
                     : data.ad_basis.today_search_source === "pending"
                       ? "검색+디스플레이 · 오늘치는 아직 «모름»(수집 전) — 그만큼 이익이 과대"
-                      : "검색+디스플레이 · 상품별 미배분"
-                  : "검색+디스플레이 · 상품별 미배분"
+                      : adAllocSub
+                  : adAllocSub
             }
           />
           <SummaryCard
@@ -1127,6 +1238,8 @@ export default function NaverOps() {
 
       {/* 상품별 테이블 — 갱신 중에도 남겨두고 흐린다(사라졌다 나타나면 스크롤 위치를 잃는다) */}
       {sorted.length > 0 && (
+        <>
+        <AdAllocationNotice summary={s} adAlloc={adAlloc} recon={recon} />
         <div
           className={`overflow-x-auto rounded-lg border border-gray-200 transition-opacity duration-150 ${
             loading ? "opacity-40 pointer-events-none" : ""
@@ -1137,7 +1250,8 @@ export default function NaverOps() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <Th label="상품명" sk="product_name" />
-                <Th label="총매출" sk="revenue" col="revenue" />
+                <Th label="총매출" sk="revenue_total" col="revenue_total" />
+                <Th label="광고비" sk="ad_spend" col="ad_spend" />
                 <Th label="이익" sk="profit" col="profit" />
                 <Th label="이익률" sk="profit_rate" col="profit_rate" />
               </tr>
@@ -1159,21 +1273,32 @@ export default function NaverOps() {
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-right tabular-nums">{won(r.revenue)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{won(r.revenue_total ?? r.revenue)}</td>
+                  {/* ★광고비 0을 「—」로 쓰지 않는다 — «안 썼다»와 «못 붙였다»가 같아 보이면
+                      이 화면이 고치려던 오독이 그대로 재발한다. 0원이면 0원이라 쓰고,
+                      붙일 수 없었던 사유는 위 배너와 아래 미배분 행이 말한다. */}
+                  <td className="px-3 py-2 text-right tabular-nums text-gray-600">{won(r.ad_spend ?? "0")}</td>
                   <td className={`px-3 py-2 text-right tabular-nums font-medium ${profitColor(r.profit)}`}>{won(r.profit)}</td>
                   <td className={`px-3 py-2 text-right tabular-nums font-medium ${profitColor(r.profit)}`}>{pct(r.profit_rate)}</td>
                 </tr>
               ))}
+              {/* ★미배분 한 행 — 쿠팡 패널 「판매유형 미배분」과 같은 모양.
+                  이 행이 있어야 열 합계가 상단 카드와 정확히 일치한다(표가 스스로 검산된다).
+                  없애면 상품 이익률이 다시 «전부 반영된 순이익»으로 읽힌다. */}
+              <UnallocatedRow unallocated={unalloc} uncoveredDays={uncovered.length} />
             </tbody>
           </table>
           <div className="text-xs text-gray-400 px-3 py-2 border-t border-gray-100">
             * 모든 금액은 <b>공급가(부가세 제외)</b> 기준 — 부가세는 통과항목이라 매출·비용 모두 ÷1.1로 통일<br />
             * 요약 순이익 = (상품매출 + 고객배송비 − 수수료 − 원가 − 한진물류비) ÷ 1.1 − 광고비<br />
-            * 상품별 이익 = (상품매출 − 수수료 − 원가) ÷ 1.1 · 배송·물류·광고비는 배송/계정 단위라 요약에만 반영<br />
+            * 상품별 이익 = (상품매출 + 고객배송비 − 수수료 − 원가 − 한진물류비) ÷ 1.1 − <b>광고비</b> — 요약과 <b>같은 식</b>이다<br />
+            * 광고비는 쇼핑 캠페인만 소재→상품 조인으로 실측 귀속 · 파워링크·디스플레이는 상품 축이 없어 미배분 행으로<br />
+            * 물류비는 패키지 단위 → 단일상품 패키지는 전액, 다상품 패키지만 상품매출 비례<br />
             * 수수료 = 정산 완료분은 네이버 건별정산 <b>실측</b>, 미정산 최근 주문은 주문시점 <b>예상</b>(하이브리드)<br />
             * 원가를 모르는 상품은 이익·이익률을 <b>「—」</b>로 비운다 — 0원으로 계산하면 이익률이 90%대로 나온다
           </div>
         </div>
+        </>
       )}
       {!loading && data && sorted.length === 0 && (
         <p className="text-sm text-gray-500">해당 기간에 주문 데이터가 없습니다.</p>

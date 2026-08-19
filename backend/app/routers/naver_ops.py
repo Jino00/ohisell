@@ -3,7 +3,8 @@
 # 순이익 = (상품매출 + 고객배송비 − 수수료 − 원가 − 한진물류비) ÷ 1.1 − 광고비
 #   · 부가세는 통과항목 → VAT 포함 항목 전부 공급가(÷1.1)로 통일. 광고비만 이미 공급가(네이버 광고=세금계산서 별도).
 #   · 고객배송비(deliveryFeeAmount)=매출 가산, 한진물류비=packageNumber 배송건×1900(비용).
-#   · 수수료=건별정산 실측(미정산은 주문API 예상 폴백, D-6). 광고비·배송·물류는 요약만(상품 미배분).
+#   · 수수료=건별정산 실측(미정산은 주문API 예상 폴백, D-6).
+#   · 광고비(SHOPPING)·물류비·고객배송비는 상품 배분(D-NAO-207). 파워링크·디스플레이는 미배분 행.
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
@@ -22,6 +23,8 @@ from app.database import get_db
 from app.models import (
     AdCost,
     Channel,
+    NaverAdCreativeDaily,
+    NaverAdgroupProduct,
     NaverHourlySnapshot,
     NaverSettlementCase,
     NaverSettlementDaily,
@@ -151,6 +154,187 @@ def logistics_totals(db: Session, start, end) -> tuple[int, Decimal]:
     return count, total
 
 
+def logistics_by_product(db: Session, start, end) -> tuple[dict[str, Decimal], Decimal]:
+    """패키지 단위 택배비를 상품(platform_product_id)으로 배분 (D-NAO-207).
+
+    반환: ({상품ID: 택배비 VAT포함}, 배분 못 한 잔액).
+
+    ★왜 배분이 되는가: 택배비의 grain은 **패키지**인데 라이브 실측(2026-08-18) 103개 패키지
+      중 100개가 단일 상품이다 — 그 100개는 «비례»가 아니라 **전액 실측 귀속**이다. 나머지
+      3개(다상품 패키지)만 규칙이 필요하고, 상품매출 비례로 나눈다.
+    ★잔액을 버리지 않고 돌려주는 이유: 상품ID가 빈 라인(주문 집계에서 제외되는 행)만 든
+      패키지가 있으면 그 택배비는 어느 상품에도 못 붙는다. 0으로 접으면 요약과 상품 합계가
+      갈리고, 그 차이는 화면 어디에도 안 보인다 — 이 저장소가 반복해서 당한 모양이다.
+    ★단가·필터는 `logistics_totals`와 **같은 식**을 쓴다. 둘이 갈리면 같은 배송에 두 축이
+      생기고, 그때 «요약 − 상품합»이 원인 불명의 잔차가 된다.
+    """
+    pkg_key = case(
+        (
+            func.json_valid(Order.raw_data) == 1,
+            func.coalesce(
+                func.nullif(
+                    func.json_extract(Order.raw_data, "$.productOrder.packageNumber"), ""
+                ),
+                Order.order_number,
+            ),
+        ),
+        else_=Order.order_number,
+    )
+    unit_price = func.coalesce(
+        Order.shipping_cost_paid,
+        case(
+            (Order.delivery_attribute_type == order_delivery.NBAESONG_ATTR,
+             order_delivery.SHIPPING_COST_NBAESONG),
+            else_=_HANJIN_PER_SHIPMENT,
+        ),
+    )
+    rows = (
+        db.query(
+            pkg_key.label("pkg"),
+            Order.platform_product_id.label("pid"),
+            func.sum(Order.selling_price).label("rev"),
+            func.max(unit_price).label("unit"),
+        )
+        .filter(
+            Order.channel_id == _NAVER_CHANNEL_ID,
+            Order.status.notin_(tuple(REVENUE_EXCLUDED)),
+            Order.order_date >= start,
+            Order.order_date <= end,
+        )
+        .group_by(pkg_key, Order.platform_product_id)
+        .all()
+    )
+
+    # 패키지별로 모은다 — 단가는 패키지 전체의 max(보수), `logistics_totals`와 같은 규칙.
+    pkg_unit: dict[str, Decimal] = {}
+    pkg_lines: dict[str, list[tuple[str, Decimal]]] = {}
+    for pkg, pid, rev, unit in rows:
+        k = str(pkg)
+        u = _f(unit)
+        if u > pkg_unit.get(k, _Z):
+            pkg_unit[k] = u
+        pid_s = str(pid or "")
+        if pid_s:                       # 상품ID 없는 라인은 배분 대상이 아니다
+            pkg_lines.setdefault(k, []).append((pid_s, _f(rev)))
+
+    out: dict[str, Decimal] = {}
+    leftover = _Z
+    for k, unit in pkg_unit.items():
+        lines = pkg_lines.get(k) or []
+        if not lines:
+            leftover += unit          # 붙일 상품이 없다 — 삼키지 않고 돌려준다
+            continue
+        if len(lines) == 1:
+            pid_s = lines[0][0]
+            out[pid_s] = out.get(pid_s, _Z) + unit
+            continue
+        # 다상품 패키지 — 상품매출 비례. 매출이 전부 0이면 균등(분모 0 방어).
+        lines = sorted(lines, key=lambda x: (-x[1], x[0]))   # 결정적 순서(잔돈 귀속 고정)
+        denom = sum((r for _p, r in lines), _Z)
+        assigned = _Z
+        for i, (pid_s, rev) in enumerate(lines):
+            if i == len(lines) - 1:
+                share = unit - assigned          # ★마지막은 잔여 — 반올림 누수 0
+            elif denom > 0:
+                share = (unit * rev / denom).quantize(_Q2, rounding=ROUND_HALF_UP)
+            else:
+                share = (unit / len(lines)).quantize(_Q2, rounding=ROUND_HALF_UP)
+            assigned += share
+            out[pid_s] = out.get(pid_s, _Z) + share
+    return out, leftover
+
+
+def product_ad_spend(db: Session, ad_dfrom, ad_dto) -> tuple[dict[str, Decimal], dict]:
+    """네이버 SA 광고비를 상품(mall_product_id)으로 귀속 (D-NAO-207).
+
+    반환: ({상품ID: 광고비 공급가}, 진단 dict).
+
+    ★조인 경로: `naver_ad_creative_daily.ad_id` → `naver_adgroup_product.ad_id`
+      → `mall_product_id`( ≡ `Order.platform_product_id`, 모델 주석이 명시).
+      라이브 실측(2026-08-01~08-18): SHOPPING 비용 10,153,441원 **전액 조인**(100%).
+    ★SHOPPING만 붙는다 — 파워링크(WEB_SITE)는 소재가 키워드라 상품 축이 **원리적으로 없고**,
+      디스플레이(GFA·ADVoost)는 리포트에 상품 필드가 없다. 없는 것을 추정으로 만들지 않는다
+      (매출비례·균등분할은 D-NAO-194가 기각한 방식 — 상한 성질이 깨진다).
+    ★ad_id가 두 상품에 매핑되면(테이블 unique는 (adgroup_id, mall_product_id)라 구조상 가능)
+      **고르지 않고 미배분으로 떨군다** — 이 파일의 `cost_ambiguous`와 같은 의미론.
+      라이브 실측은 1,761건 전건 1:1(다중매핑 0)이지만, 규칙은 구조로 둔다.
+    ★소재 원장의 창이 조회 구간보다 짧으면 그 날은 배분이 **원리적으로 0**이다. 0원이라고
+      내면 화면이 자신 있게 틀리므로, 못 덮은 날짜를 진단에 실어 배너가 말하게 한다.
+    """
+    # ① ad_id → mall_product_id (1:1이어야 한다)
+    ad2prod: dict[str, str] = {}
+    ambiguous_ads: set[str] = set()
+    for ad_id, mall_pid in (
+        db.query(NaverAdgroupProduct.ad_id, NaverAdgroupProduct.mall_product_id)
+        .filter(NaverAdgroupProduct.ad_id.isnot(None), NaverAdgroupProduct.ad_id != "")
+        .distinct()
+        .all()
+    ):
+        k = str(ad_id)
+        v = str(mall_pid or "")
+        if not v:
+            continue
+        if k in ad2prod and ad2prod[k] != v:
+            ambiguous_ads.add(k)
+        else:
+            ad2prod[k] = v
+
+    # ② 소재별 일비용(SHOPPING)
+    cost_rows = (
+        db.query(NaverAdCreativeDaily.ad_id, func.sum(NaverAdCreativeDaily.cost))
+        .filter(
+            NaverAdCreativeDaily.ad_date >= ad_dfrom,
+            NaverAdCreativeDaily.ad_date <= ad_dto,
+            NaverAdCreativeDaily.campaign_type == "SHOPPING",
+        )
+        .group_by(NaverAdCreativeDaily.ad_id)
+        .all()
+    )
+    per_product: dict[str, Decimal] = {}
+    shopping_total = unmapped_cost = ambiguous_cost = _Z
+    for ad_id, cost in cost_rows:
+        c = _f(cost)
+        shopping_total += c
+        k = str(ad_id)
+        if k in ambiguous_ads:
+            ambiguous_cost += c        # 어느 상품이 맞는지 모른다 → 고르지 않는다
+            continue
+        pid_s = ad2prod.get(k)
+        if not pid_s:
+            unmapped_cost += c         # 소재는 돌았는데 상품 매핑이 없다
+            continue
+        per_product[pid_s] = per_product.get(pid_s, _Z) + c
+
+    # ③ 원장 창 — 조회 구간에서 소재 원장이 없는 날
+    covered = {
+        d for (d,) in db.query(NaverAdCreativeDaily.ad_date)
+        .filter(NaverAdCreativeDaily.ad_date >= ad_dfrom,
+                NaverAdCreativeDaily.ad_date <= ad_dto)
+        .distinct().all()
+    }
+    covered = {d.date() if isinstance(d, datetime) else d for d in covered}
+    uncovered = []
+    _d = ad_dfrom
+    while _d <= ad_dto:
+        if _d not in covered:
+            uncovered.append(str(_d))
+        _d += timedelta(days=1)
+    wmin, wmax = db.query(
+        func.min(NaverAdCreativeDaily.ad_date), func.max(NaverAdCreativeDaily.ad_date)
+    ).first()
+
+    return per_product, {
+        "ledger_from":     str(wmin) if wmin else None,   # 소재 원장 전체 보유 창
+        "ledger_to":       str(wmax) if wmax else None,
+        "uncovered_dates": uncovered,                     # 조회 구간 중 원장이 없는 날
+        "shopping_cost":   str(shopping_total.quantize(_Q2)),
+        "allocated":       str(sum(per_product.values(), _Z).quantize(_Q2)),
+        "unmapped_cost":   str(unmapped_cost.quantize(_Q2)),
+        "ambiguous_cost":  str(ambiguous_cost.quantize(_Q2)),
+        "ambiguous_ads":   len(ambiguous_ads),
+    }
+
+
 
 
 def _f(v) -> Decimal:
@@ -171,8 +355,9 @@ def sales_summary(
 ):
     """네이버 스마트스토어 매출 현황 — 기간별 집계.
 
-    반환: summary(합계) + by_product(상품명별).
-    광고비는 ad_costs(naver_sa:*) 기간 총합 — 상품별 배분 없음(product_id NULL).
+    반환: summary(합계) + by_product(상품명별) + unallocated(미배분) + reconciliation(검산).
+    광고비 총액은 ad_costs(naver_sa:* + gfa:*) 기간 총합이고, 그 중 SHOPPING분만 소재 원장
+    조인으로 상품에 귀속된다(D-NAO-207). 못 붙인 몫은 `unallocated`에 남아 화면에 보인다.
 
     기간은 `days` 프리셋 또는 `date_from`·`date_to` 임의 구간으로 준다(후자가 우선).
     확정된 구간은 응답 `period`에 그대로 실린다 — 화면이 그걸 보여줘야 «내가 고른 기간»과
@@ -522,11 +707,12 @@ def sales_summary(
         if acc is None:
             acc = prod_acc[pid_s] = {
                 "name": pname or pid_s, "rev": _Z, "fee": _Z,
-                "cost": _Z, "settled": 0, "est": 0,
+                "cost": _Z, "ship": _Z, "settled": 0, "est": 0,
             }
         acc["rev"]  += rev
         acc["fee"]  += fee
         acc["cost"] += cost
+        acc["ship"] += ship   # 고객배송비는 원래 라인 단위 — 배분 규칙이 필요 없다
         if actual is not None:
             acc["settled"] += 1
         else:
@@ -534,16 +720,33 @@ def sales_summary(
         if pname and acc["name"] == pid_s:
             acc["name"] = pname
 
-    # 상품별 = 순수 상품 손익(공급가): (상품매출 − 수수료 − 원가) ÷ 1.1.
-    # 고객배송비·한진물류비·광고비는 배송/계정 단위라 상품 미배분 → 요약에만 반영.
+    # ── 4b. 상품별 배분 (D-NAO-207) ────────────────────────────────
+    # ★종전: 상품 행 = (상품매출 − 수수료 − 원가) ÷ 1.1 = **매출총이익**이었다. 광고비·물류비가
+    #   통째로 빠져 있어 2026-08-18 라이브에서 상품 행 합계 이익률 71.0% vs 계정 실제 21.1%로
+    #   **50%p** 갈렸다(Jino가 화면을 보고 «이익이 너무 높다»고 지적). 열 이름은 그냥 「이익」이고
+    #   설명은 표 아래 11px 각주 한 줄이었다 — 훑는 눈에는 큰 숫자가 이긴다.
+    # ★이제 조인이 실측되는 것만 붙이고, 안 되는 것은 **미배분으로 남겨 화면에 보인다.**
+    #   그래서 이 아래 등식이 성립한다: Σ(상품 이익) + 미배분 이익 = 요약 이익.
+    ad_map, ad_diag       = product_ad_spend(db, ad_dfrom, ad_dto)
+    logi_map, logi_left   = logistics_by_product(db, start, end)
+
+    # 상품별 = 순수 상품 손익(공급가):
+    #   (상품매출 + 고객배송비 − 수수료 − 원가 − 한진물류비) ÷ 1.1 − 광고비(이미 공급가)
+    # 붙지 않는 것(파워링크·디스플레이·원장 창 밖·클레임)은 아래 `unallocated`로 간다.
     by_product = []
     unknown_supply_rev = _Z          # 원가 미상 상품들의 공급가 매출(요약 배너용)
     unknown_unmapped = unknown_zero = unknown_ambiguous = 0
+    sum_product_profit = _Z          # 화면에 이익이 나오는 상품들의 합
+    unknown_profit_excluded = _Z     # 원가 미상이라 「—」로 비운 상품들의 이익(검산용)
     for pid_s, acc in prod_acc.items():
         rev_s  = acc["rev"] / _VAT_DIVISOR        # 공급가
+        ship_s = acc["ship"] / _VAT_DIVISOR
         fee_s  = acc["fee"] / _VAT_DIVISOR
         cost_s = acc["cost"] / _VAT_DIVISOR
-        profit = rev_s - fee_s - cost_s
+        logi_s = logi_map.get(pid_s, _Z) / _VAT_DIVISOR
+        ad_s   = ad_map.get(pid_s, _Z)            # 네이버 광고는 이미 공급가(세금계산서 별도)
+        rev_total_s = rev_s + ship_s
+        profit = rev_total_s - fee_s - cost_s - logi_s - ad_s
         # ★원가를 모르면 그 상품의 이익도 모른다 — 원가·이익·이익률 셋 다 None으로 낸다.
         #   셋 중 하나라도 숫자로 남기면 그 카드가 나머지를 부정한다(오늘 광고비 카드와 같은 이유:
         #   훑는 눈에는 큰 숫자가 이긴다). 매출·수수료는 실측이므로 그대로 낸다.
@@ -556,21 +759,33 @@ def sales_summary(
                 unknown_ambiguous += 1
             else:
                 unknown_zero += 1
+        # ★검산은 «화면에 뭘 보이느냐»와 무관하게 성립해야 한다 — 원가 미상 상품도 이익을
+        #   계산해 두고(원가만 0), 화면에만 「—」를 낸다. 안 그러면 미상이 1건만 생겨도
+        #   Σ(상품) + 미배분 ≠ 요약이 되고, 그 차이가 결함인지 미상인지 구분되지 않는다.
+        if unknown_kind is None:
+            sum_product_profit += profit
+        else:
+            unknown_profit_excluded += profit
         by_product.append({
             "product_name":  acc["name"],
             "platform_id":   pid_s,
-            "revenue":       str(rev_s.quantize(_Q2)),
+            "revenue":       str(rev_s.quantize(_Q2)),          # 상품매출(공급가) — 종전 뜻 유지
+            "delivery_revenue": str(ship_s.quantize(_Q2)),      # 고객배송비(공급가)
+            "revenue_total": str(rev_total_s.quantize(_Q2)),    # 상품+배송 = 상단 카드와 같은 축
             "fee":           str(fee_s.quantize(_Q2)),
             "fee_actual":    acc["est"] == 0 and acc["settled"] > 0,  # 전부 실측이면 True
+            "logistics":     str(logi_s.quantize(_Q2)),         # 한진 택배비(공급가·패키지 배분)
+            "ad_spend":      str(ad_s.quantize(_Q2)),           # SHOPPING 실측 귀속분(공급가)
+            "ad_allocated":  pid_s in ad_map,                   # False면 이 상품엔 붙은 광고비 0
             "cost":          None if unknown_kind else str(cost_s.quantize(_Q2)),
             "cost_known":    unknown_kind is None,
-            "cost_unknown_kind": unknown_kind,   # "unmapped" | "zero_cost" | None
+            "cost_unknown_kind": unknown_kind,   # "unmapped" | "zero_cost" | "ambiguous" | None
             "profit":        None if unknown_kind else str(profit.quantize(_Q2)),
-            "profit_rate":   None if (unknown_kind or not rev_s)
-                             else str((profit / rev_s * 100).quantize(_Q2)),
+            "profit_rate":   None if (unknown_kind or not rev_total_s)
+                             else str((profit / rev_total_s * 100).quantize(_Q2)),
         })
 
-    by_product.sort(key=lambda x: -Decimal(x["revenue"]))
+    by_product.sort(key=lambda x: -Decimal(x["revenue_total"]))
 
     # ── 5. 요약 — 공급가(VAT 제외) 통일 ──────────────────────────────
     # 정확한 손익: 부가세는 통과항목(매출VAT−매입VAT 상쇄) → 모든 VAT 포함 항목을 ÷1.1.
@@ -589,10 +804,48 @@ def sales_summary(
     total_profit = supply_revenue - supply_fee - supply_cost - supply_logistics - total_ad_spend
     profit_rate  = (total_profit / supply_revenue * 100).quantize(_Q2) if supply_revenue else None
 
+    # ── 5b. 미배분 (D-NAO-207) — 상품에 못 붙는 비용을 «버리지 않고» 한 덩이로 낸다 ──
+    # 무엇이 여기로 오나:
+    #   ①파워링크(WEB_SITE) — 소재가 키워드라 상품 축이 원리적으로 없다
+    #   ②디스플레이(GFA·ADVoost) — 리포트에 상품 필드가 없다
+    #   ③소재 원장(`naver_ad_creative_daily`)이 못 덮는 날짜 — 배분이 원리적으로 0인 구간
+    #   ④오늘치 스냅샷 프록시 — 캠페인 grain이라 소재로 못 쪼갠다
+    #   ⑤상품ID 없는 라인만 든 패키지의 택배비 · ⑥반품·교환 배송 손익(날짜 grain)
+    # ★정의를 «요약 − 배분합»으로 둔 것이 핵심이다 — 사유를 열거해 빼는 방식이면 새 사유가
+    #   하나 생길 때마다 조용히 새고, 그 누수는 화면 어디에도 안 보인다. 잔차로 정의하면
+    #   무엇이 생기든 반드시 이 행에 나타난다(fail-safe).
+    allocated_ad   = sum(ad_map.values(), _Z)
+    unalloc_ad     = total_ad_spend - allocated_ad
+    unalloc_logi_v = logi_left + claim_cost          # VAT 포함
+    unalloc_profit = (
+        (claim_income - claim_fee - unalloc_logi_v) / _VAT_DIVISOR - unalloc_ad
+    )
+    # 검산 — 이 등식이 깨지면 화면이 스스로 말한다(자기 검산을 화면 안에 둔다).
+    residual = total_profit - (sum_product_profit + unknown_profit_excluded + unalloc_profit)
+
     return {
         "period":       {"from": str(dfrom), "to": str(dto)},
         "ad_ref_date":  ad_ref_date,
         "ad_basis":     ad_basis,
+        # 상품에 못 붙인 몫 — 표 맨 아래 한 행으로 낸다(쿠팡 패널 「판매유형 미배분」과 같은 모양).
+        "unallocated": {
+            "ad_spend":      str(unalloc_ad.quantize(_Q2)),
+            "logistics":     str((unalloc_logi_v / _VAT_DIVISOR).quantize(_Q2)),
+            "claim_income":  str((claim_income / _VAT_DIVISOR).quantize(_Q2)),
+            "claim_fee":     str((claim_fee / _VAT_DIVISOR).quantize(_Q2)),
+            "profit":        str(unalloc_profit.quantize(_Q2)),
+        },
+        # 광고비 배분 진단 — 배너가 이걸 읽어 «왜 못 붙였나»를 말한다.
+        "ad_alloc":       ad_diag,
+        # 화면 안의 자기 검산: Σ(상품) + 미상제외분 + 미배분 = 요약. 1원 넘게 벌어지면 결함이다.
+        "reconciliation": {
+            "sum_product_profit":      str(sum_product_profit.quantize(_Q2)),
+            "unknown_cost_profit":     str(unknown_profit_excluded.quantize(_Q2)),
+            "unallocated_profit":      str(unalloc_profit.quantize(_Q2)),
+            "summary_profit":          str(total_profit.quantize(_Q2)),
+            "residual":                str(residual.quantize(_Q2)),
+            "closes":                  abs(residual) <= 1,
+        },
         "summary": {
             "revenue":          str(supply_revenue.quantize(_Q2)),   # 공급가 매출(상품+배송)
             "revenue_vat_incl": str(gross_vat_incl.quantize(_Q2)),   # VAT 포함(소비자 결제) 병기
@@ -606,6 +859,8 @@ def sales_summary(
             "profit":       str(total_profit.quantize(_Q2)),
             "profit_rate":  str(profit_rate) if profit_rate is not None else None,
             "supply_basis": True,                                    # 전 금액 공급가(VAT 제외) 기준
+            "ad_allocated":     str(allocated_ad.quantize(_Q2)),     # 상품에 붙은 광고비
+            "ad_unallocated":   str(unalloc_ad.quantize(_Q2)),       # 못 붙인 광고비
             "sa_conv_revenue": str(sa_conv_revenue.quantize(_Q2)),
             "sa_ad_spend":     str(sa_ad_spend.quantize(_Q2)),
             "sa_roas":         sa_roas,
