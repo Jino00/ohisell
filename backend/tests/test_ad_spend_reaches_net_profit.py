@@ -116,3 +116,47 @@ def test_rows_without_the_new_fields_keep_old_behavior():
     assert Decimal(total["net_basis_revenue"]) == Decimal("2032700.00")
     assert total["net_scope"] == NET_SCOPE_FULL
     assert Decimal(total["net_floor_ad"]) == 0
+
+
+def test_any_row_with_ad_spend_but_no_net_still_leaks_nothing():
+    """★적대 리뷰 1R P1-1 — 하한을 만드는 곳이 **집계층 한 곳**이어야 하는 이유.
+
+    `calculate_channel_summary`의 수동매출-only 채널(profit_calculator.py, `manual_by_channel`
+    루프)은 `net_profit=None` + `ad_spend`(ad_costs 테이블에서 채움)를 그대로 낸다 — 이번에
+    고친 로켓1P와 **완전히 같은 모양**이다. producer마다 하한을 기억하게 두면 한 곳만 빠져도
+    그 채널의 광고비가 조용히 샌다. 그래서 `net_contribution`이 집계 시점에 만든다.
+    """
+    rows = [r for r in _rows() if r["channel_id"] != 5]
+    rows.append({           # net_scope도 net_basis_revenue도 없는 「구형·무지성」 행
+        "channel_id": 9, "channel_name": "수동매출 채널", "revenue": "500000",
+        "product_revenue": "500000", "shipping_revenue": "0", "ad_spend": "300000",
+        "net_profit": None, "profit_rate": None, "order_count": 0,
+    })
+    cmap = {**CMAP, 9: ("주식회사 오하이테크", "주식회사 오하이테크 · 수동매출", True)}
+    out = group_summary_by_company(rows, cmap)
+
+    leaf = _by(out, "leaf", "주식회사 오하이테크 · 수동매출")
+    assert Decimal(leaf["net_profit"]) == Decimal("-300000")   # 새지 않는다
+    assert leaf["net_scope"] == NET_SCOPE_AD_ONLY
+    assert Decimal(leaf["net_basis_revenue"]) == 0            # 원가를 모르므로 분모엔 안 들어간다
+
+    total = _by(out, "total")
+    assert Decimal(total["net_floor_ad"]) == Decimal("300000")
+    assert Decimal(total["net_profit"]) == (
+        Decimal("382809.5087818181818181818182")
+        + Decimal("186825.3636363636363636363636")
+        - Decimal("300000")
+    )
+
+
+def test_no_ad_spend_and_no_net_stays_unknown():
+    """광고비도 0이면 하한이랄 것도 없다 — 0원 손익을 지어내지 않는다."""
+    rows = [{
+        "channel_id": 9, "channel_name": "매출만 있는 채널", "revenue": "500000",
+        "product_revenue": "500000", "shipping_revenue": "0", "ad_spend": "0",
+        "net_profit": None, "profit_rate": None, "order_count": 0,
+    }]
+    out = group_summary_by_company(rows, {9: ("회사", "회사 · 채널", True)})
+    leaf = _by(out, "leaf", "회사 · 채널")
+    assert leaf["net_profit"] is None and leaf["profit_rate"] is None
+    assert leaf["net_scope"] is None

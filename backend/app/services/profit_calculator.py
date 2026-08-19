@@ -1230,7 +1230,10 @@ def calculate_channel_summary(
             "commission": "0",
             "ad_spend": str(ch_ad_spend),
             "shipping": "0",
-            "net_profit": None,  # 순이익 계산 불가 (매출-only)
+            # ★순이익 계산 불가(매출-only)지만 **광고비는 나갔다** — `net_contribution`이
+            #   집계 시 `-광고비` 하한을 만든다(D-22). 여기서 None을 유지하는 이유는
+            #   "원가·수수료를 모른다"가 이 행의 진실이기 때문이고, 하한 판정은 한 곳에만 둔다.
+            "net_profit": None,
             "profit_rate": None,
             "order_count": 0,
         })
@@ -1609,6 +1612,31 @@ def _agg_block() -> dict:
     }
 
 
+def net_contribution(row: dict, revenue: Decimal) -> tuple[Decimal | None, Decimal, Decimal]:
+    """이 채널 행이 부모 손익에 얹는 것 → (순이익, 이익률 분모, 하한으로 들어간 광고비).
+
+    ★`net_profit`이 None이어도 **광고비가 나갔으면 `-광고비` 하한을 만든다.**
+      이 판정을 producer(각 채널 엔진)가 아니라 **집계층 한 곳**에 두는 이유:
+      손익을 못 내는 행을 만드는 곳은 앞으로도 늘어나는데(로켓1P 계산서 축,
+      `calculate_channel_summary`의 수동매출-only 채널, 다음에 붙을 채널…),
+      각자 하한을 기억하게 하면 **한 곳만 빠져도 그 채널의 광고비가 조용히 샌다.**
+      실제로 그렇게 샜다 — 2026-08-18 하루 597,888원(D-22 적대 리뷰 1R P1-1).
+      여기서 막으면 「net=None인데 ad_spend가 있는 행」이라는 모양 자체가 불가능해진다.
+
+    ★광고비도 0이면 (None, 0, 0) — 아는 게 없으면 "—"가 정직하다.
+    """
+    net = row.get("net_profit")
+    ad = Decimal(row.get("ad_spend") or "0")
+    if net is None:
+        return (None, ZERO, ZERO) if ad <= ZERO else (-ad, ZERO, ad)
+    basis = row.get("net_basis_revenue")
+    return (
+        Decimal(net),
+        revenue if basis is None else Decimal(basis),
+        ad if row.get("net_scope") == NET_SCOPE_AD_ONLY else ZERO,
+    )
+
+
 def _add_net(block: dict, row: dict, revenue: Decimal) -> None:
     """집계 net은 '측정가능分 합' (기존 대시보드 의미론).
 
@@ -1623,14 +1651,12 @@ def _add_net(block: dict, row: dict, revenue: Decimal) -> None:
       그 전엔 광고비가 부모 `ad_spend`에는 더해지는데 부모 `net_profit`에서는 한 번도
       안 빠져서, 2026-08-18 하루에만 597,888원이 손익에서 증발했다(Jino 발견).
     """
-    net = row.get("net_profit")
+    net, basis_rev, floor_ad = net_contribution(row, revenue)
     if net is None:
         return
-    block["net_profit"] += Decimal(net)
-    basis = row.get("net_basis_revenue")
-    block["measurable_rev"] += revenue if basis is None else Decimal(basis)
-    if row.get("net_scope") == NET_SCOPE_AD_ONLY:
-        block["net_floor_ad"] += Decimal(row.get("ad_spend") or "0")
+    block["net_profit"] += net
+    block["measurable_rev"] += basis_rev
+    block["net_floor_ad"] += floor_ad
 
 
 # 로켓1P leaf에만 있는 부가 필드(축·원가 커버리지·분담금). 회사/전체로는 **올리지 않는다** —

@@ -34,7 +34,6 @@ from app.services.coupang.rocket_1p_channel_pnl import (
     rocket_1p_channel,
 )
 from app.services.profit_calculator import (
-    NET_SCOPE_AD_ONLY,
     NET_SCOPE_FULL,
     NET_SCOPE_PARTIAL,
     calculate_channel_daily_trend,
@@ -45,6 +44,7 @@ from app.services.profit_calculator import (
     get_rg_total_by_account,
     group_summary_by_company,
     group_trend_by_company,
+    net_contribution,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -402,13 +402,14 @@ def _kpi_totals(db: Session, rows: list[dict], rocket_ch_id: int | None) -> dict
     rev = net = basis_rev = floor_ad = Decimal("0")
     orders = 0
     for r in rows:
-        rev += Decimal(r["revenue"])
-        if r.get("net_profit") is not None:
-            net += Decimal(r["net_profit"])
-            nb = r.get("net_basis_revenue")
-            basis_rev += Decimal(r["revenue"]) if nb is None else Decimal(nb)
-        if r.get("net_scope") == NET_SCOPE_AD_ONLY:
-            floor_ad += Decimal(r.get("ad_spend") or "0")
+        row_rev = Decimal(r["revenue"])
+        rev += row_rev
+        # ★요약표와 **같은 함수**로 손익을 센다 — 규칙이 두 벌이면 카드와 표가 갈라진다.
+        r_net, r_basis, r_floor = net_contribution(r, row_rev)
+        if r_net is not None:
+            net += r_net
+            basis_rev += r_basis
+        floor_ad += r_floor
         if r["channel_id"] != rocket_ch_id:
             orders += r["order_count"]
     return {

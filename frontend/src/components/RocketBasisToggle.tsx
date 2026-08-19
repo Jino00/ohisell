@@ -23,7 +23,7 @@ export function RocketBasisToggle({
   const burdenUnknown = leaf ? leaf.promo_burden === null : false;
   // 손익을 못 잰 채 광고비만 반영된 금액(D-22). 전체 행이 그 합을 들고 있다.
   const total = rows.find((r) => r.kind === "total");
-  const floorAd = typeof total?.net_floor_ad === "number" ? total.net_floor_ad : 0;
+  const floorAd = Number(total?.net_floor_ad ?? 0);   // 호출부의 사전 파싱에 기대지 않는다
 
   return (
     <div className="flex items-center gap-2">
