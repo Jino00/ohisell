@@ -1397,6 +1397,214 @@ STCONV_COL_ACTION = 12      # purchase / add_to_cart
 STCONV_COL_CNT = 13
 STCONV_COL_VALUE = 14
 
+# ── CRITERION / CRITERION_CONVERSION 보고서 (D-NAO-203, 2026-08-19 실호출 실측 확정)
+#
+# ★ref 75 ADS §4-4가 「벌크 파일 경로다 — 문서상 존재 확인만, 실제 응답 스키마·성공 여부는
+#   미확인」으로 남긴 것을 실호출로 닫았다. 두 리포트 모두 POST /stat-reports로 자체생성되고
+#   수 초 만에 BUILT 된다. ⇒ 엔티티별 GET 스윕(광고그룹 1,013콜/일 감각) **불필요**.
+#
+# ★소급 한도 = **정확히 365일**: D-365(2025-08-19) BUILT ↔ D-366(2025-08-18) 400
+#   {"code":10004,"message":"선택하신 조건에 지표가 확인되지 않습니다..."}. 두 리포트 동일.
+#   SHOPPINGKEYWORD_DETAIL의 180일과 같은 «매일 하루씩 사라지는» 모양이고 한도만 다르다.
+#
+# CRITERION 7열: 0일자 1고객ID 2"{광고그룹}~{criterion코드}" 3기기(P/M) 4노출 5클릭 6비용
+CRIT_COL_DATE = 0
+CRIT_COL_CUSTOMER = 1
+CRIT_COL_OWNER_CRITERION = 2
+CRIT_COL_DEVICE = 3
+CRIT_COL_IMP = 4
+CRIT_COL_CLK = 5
+CRIT_COL_COST = 6
+
+# CRITERION_CONVERSION 8열: 0일자 1고객ID 2"{그룹}~{코드}" 3기기 4직간접(1/2) 5행동 6전환수 7전환매출
+# ⚠️`STCONV_COL_*`(SHOPPINGKEYWORD_CONVERSION_DETAIL, 15열)과 **배치가 전혀 다르다**
+#   (거긴 기기 col10·직간접 col11·행동 col12). 상수 재사용 절대 금지 — ±오프셋 함정.
+CRITCONV_COL_DATE = 0
+CRITCONV_COL_CUSTOMER = 1
+CRITCONV_COL_OWNER_CRITERION = 2
+CRITCONV_COL_DEVICE = 3
+CRITCONV_COL_DIRINDIR = 4   # "1"=직접 / "2"=간접
+CRITCONV_COL_ACTION = 5     # purchase / add_to_cart
+CRITCONV_COL_CNT = 6
+CRITCONV_COL_VALUE = 7
+
+# 리포트에 실제로 등장하는 type(2026-08-17 실측: AG 3,733 · GN 1,549 · AD 304 · SD 16행).
+# RL(지역)은 이 리포트에 안 나오고 RP·DV는 사전 자체가 0건이다.
+CRITERION_DICT_TYPES = ("AG", "GN", "AD", "SD")
+_CRITERION_TYPE_UNKNOWN = "XX"
+
+
+def _split_owner_criterion(raw: str) -> tuple[str, str]:
+    """`"{adgroupId}~{criterionCode}"` → (adgroup_id, criterion_code).
+
+    광고그룹 ID(`grp-a001-01-…`)에는 `~`가 없으므로 마지막 `~`로 가른다. 구분자가 없으면
+    ("", "")를 돌려 호출측이 그 행을 버리게 한다 — **모르는 모양을 그럴듯하게 채우지 않는다.**
+    """
+    if "~" not in raw:
+        return "", ""
+    adgroup_id, _, code = raw.rpartition("~")
+    return adgroup_id, code
+
+
+def _criterion_type_of(code: str) -> str:
+    """코드 앞 2글자가 알려진 type이면 그것, 아니면 'XX'(미상).
+
+    ★사전에 없는 코드를 **추정해서 분류하지 않는다**(D-NAO-203 금지선). 'XX'가 나오면
+    적재는 하되 로그로 표면화한다 — 조용히 AG로 넣으면 축 합계가 틀어진다.
+    """
+    prefix = code[:2]
+    return prefix if prefix in CRITERION_DICT_TYPES else _CRITERION_TYPE_UNKNOWN
+
+
+def _one_built_report(report_tp: str, stat_date: date) -> dict | None:
+    """해당 날짜의 BUILT 리포트 **1건**을 보장·반환. 못 얻으면 None.
+
+    ★날짜당 1건으로 좁히는 것이 요점이다 — `/stat-reports` 목록엔 같은 날짜의 잡이 여러 개
+    있을 수 있고(재생성·프로브), 전부 다운로드하면 **행이 그대로 두 배가 된다.**
+    ★None은 「그 날 데이터가 0」이 아니라 「리포트를 못 받았다」다 — 호출측은 이 날짜의
+    기존 적재분을 **지우면 안 된다**(365일 한도라 복구 불가).
+    """
+    ensure_reports_built(report_tp, stat_date, stat_date)
+    reports = _list_reports_by_type(report_tp, stat_date, stat_date)
+    if not reports:
+        return None
+    return reports[0]
+
+
+def fetch_criterion_day(stat_date: date) -> list[dict] | None:
+    """CRITERION 하루치 → [{"date","adgroup_id","criterion_type","criterion_code","device",
+    "imp","clk","cost"}]. 리포트를 못 받으면 **None**(빈 리스트와 구별 — 교훈 #123).
+
+    같은 (그룹,코드,기기)가 여러 행으로 오면 합산한다(리포트가 그렇게 주는지는 [미확인]이라
+    방어만 해 둔다 — 중복이 오면 UNIQUE 위반으로 적재가 죽는 대신 합쳐진다).
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — CRITERION 수집 건너뜀")
+        return None
+    rep = _one_built_report("CRITERION", stat_date)
+    if rep is None:
+        log.warning("Naver SA CRITERION %s 리포트 없음 — 기존 적재분 보존", stat_date)
+        return None
+
+    agg: dict[tuple, dict] = {}
+    bad_nums: list[str] = []
+    unknown: set[str] = set()
+    n_raw = n_bad_key = 0
+    for cols in _download_tsv(rep["downloadUrl"]):
+        if len(cols) <= CRIT_COL_COST:
+            continue
+        d = _row_date_iso(cols[CRIT_COL_DATE])
+        if d is None:
+            continue
+        adgroup_id, code = _split_owner_criterion(cols[CRIT_COL_OWNER_CRITERION])
+        if not adgroup_id or not code:
+            n_bad_key += 1
+            continue
+        n_raw += 1
+        ctype = _criterion_type_of(code)
+        if ctype == _CRITERION_TYPE_UNKNOWN:
+            unknown.add(code)
+        device = cols[CRIT_COL_DEVICE]
+        key = (d, adgroup_id, code, device)
+        row = agg.get(key)
+        if row is None:
+            row = {"date": d, "adgroup_id": adgroup_id, "criterion_type": ctype,
+                   "criterion_code": code, "device": device, "imp": 0, "clk": 0, "cost": 0}
+            agg[key] = row
+        row["imp"] += _num_or_flag(cols[CRIT_COL_IMP], bad_nums)
+        row["clk"] += _num_or_flag(cols[CRIT_COL_CLK], bad_nums)
+        row["cost"] += _num_or_flag(cols[CRIT_COL_COST], bad_nums)
+
+    if bad_nums:
+        log.warning("Naver SA CRITERION %s: 숫자 파싱 0 낙하 %d종 표본=%s",
+                    stat_date, len(bad_nums), bad_nums[:5])
+    if unknown:
+        log.warning("Naver SA CRITERION %s: 사전 밖 코드 접두 %d종 표본=%s (type='XX'로 적재)",
+                    stat_date, len(unknown), sorted(unknown)[:5])
+    if n_bad_key:
+        log.warning("Naver SA CRITERION %s: '~' 구분자 없는 행 %d건 버림", stat_date, n_bad_key)
+    log.info("Naver SA CRITERION %s: raw %d행 → %d행", stat_date, n_raw, len(agg))
+    return list(agg.values())
+
+
+def fetch_criterion_conv_day(stat_date: date) -> list[dict] | None:
+    """CRITERION_CONVERSION 하루치 → [{"date","adgroup_id","criterion_type","criterion_code",
+    "device","conv_kind","conv_type","conv_cnt","conv_amt"}]. 못 받으면 **None**.
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — CRITERION_CONVERSION 수집 건너뜀")
+        return None
+    rep = _one_built_report("CRITERION_CONVERSION", stat_date)
+    if rep is None:
+        log.warning("Naver SA CRITERION_CONVERSION %s 리포트 없음 — 기존 적재분 보존", stat_date)
+        return None
+
+    agg: dict[tuple, dict] = {}
+    bad_nums: list[str] = []
+    n_raw = n_bad_key = 0
+    for cols in _download_tsv(rep["downloadUrl"]):
+        if len(cols) <= CRITCONV_COL_VALUE:
+            continue
+        d = _row_date_iso(cols[CRITCONV_COL_DATE])
+        if d is None:
+            continue
+        adgroup_id, code = _split_owner_criterion(cols[CRITCONV_COL_OWNER_CRITERION])
+        if not adgroup_id or not code:
+            n_bad_key += 1
+            continue
+        n_raw += 1
+        key = (d, adgroup_id, code, cols[CRITCONV_COL_DEVICE],
+               cols[CRITCONV_COL_ACTION], cols[CRITCONV_COL_DIRINDIR])
+        row = agg.get(key)
+        if row is None:
+            row = {"date": d, "adgroup_id": adgroup_id,
+                   "criterion_type": _criterion_type_of(code), "criterion_code": code,
+                   "device": cols[CRITCONV_COL_DEVICE], "conv_kind": cols[CRITCONV_COL_ACTION],
+                   "conv_type": cols[CRITCONV_COL_DIRINDIR], "conv_cnt": 0, "conv_amt": 0}
+            agg[key] = row
+        row["conv_cnt"] += _num_or_flag(cols[CRITCONV_COL_CNT], bad_nums)
+        row["conv_amt"] += _num_or_flag(cols[CRITCONV_COL_VALUE], bad_nums)
+
+    if bad_nums:
+        log.warning("Naver SA CRITERION_CONVERSION %s: 숫자 파싱 0 낙하 %d종 표본=%s",
+                    stat_date, len(bad_nums), bad_nums[:5])
+    if n_bad_key:
+        log.warning("Naver SA CRITERION_CONVERSION %s: '~' 없는 행 %d건 버림", stat_date, n_bad_key)
+    log.info("Naver SA CRITERION_CONVERSION %s: raw %d행 → %d행", stat_date, n_raw, len(agg))
+    return list(agg.values())
+
+
+def fetch_criterion_dictionary() -> list[dict]:
+    """`GET /ncc/criterion-dictionary/{type}` — 1차 출처 코드 사전(AG·GN·AD·SD).
+
+    실패한 type은 건너뛰고 나머지를 반환한다(부분 실패가 전체를 죽이지 않게). 반환이 비면
+    호출측이 기존 사전을 **지우지 않는다** — 사전은 갱신이 드물어 낡은 편이 빈 것보다 낫다.
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — criterion 사전 수집 건너뜀")
+        return []
+    out: list[dict] = []
+    for t in CRITERION_DICT_TYPES:
+        try:
+            resp = _get(f"/ncc/criterion-dictionary/{t}")
+            resp.raise_for_status()
+            items = resp.json()
+        except Exception as e:
+            log.warning("Naver SA criterion 사전 type=%s 조회 실패(건너뜀): %s", t, e)
+            continue
+        if not isinstance(items, list):
+            log.warning("Naver SA criterion 사전 type=%s 응답이 리스트가 아님(건너뜀)", t)
+            continue
+        for it in items:
+            code = it.get("dictionaryCode")
+            if not code:
+                continue
+            out.append({"dictionary_code": code,
+                        "criterion_type": it.get("type") or t,
+                        "name": it.get("name") or ""})
+    log.info("Naver SA criterion 사전: %d행 (type %s)", len(out), ",".join(CRITERION_DICT_TYPES))
+    return out
+
 
 def fetch_search_term_conversion(date_from: date, date_to: date) -> list[dict]:
     """SHOPPINGKEYWORD_CONVERSION_DETAIL 보고서에서 (일자×캠페인×그룹×검색어) grain 전환을 집계.

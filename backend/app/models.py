@@ -3381,6 +3381,131 @@ class NaverAdgroupTargetChange(Base):
     new_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class NaverCriterionDaily(Base):
+    """연령·성별·관심사·요일시간(CRITERION) 성과 분해 — StatReport 벌크 경로 (D-NAO-203).
+
+    grain: (ad_date, adgroup_id, criterion_code, device).
+
+    ★**«엔티티별 GET 스윕»이 아니라 «리포트 1건»에서 온다.** `/ncc/criterion/{ownerId}` GET을
+    광고그룹마다 도는 경로(1,013콜/일 감각)가 매트릭스의 기존 서술이었는데, 2026-08-19 실측으로
+    StatReport `CRITERION` 벌크 경로가 **작동함이 확인**됐다(ref 75 ADS §4-4가 「존재 확인만,
+    응답 스키마·성공 여부 미확인」으로 남긴 것을 실호출로 닫았다). ⇒ 하루 리포트 2건이면 끝난다.
+    ★단 그 두 경로는 **다른 것**을 준다 — 이 표는 «성과 분해»이고, `/ncc/criterion` GET은
+    «설정»(어느 세그먼트를 타겟팅하나 + bidWeight)이다. ref 73 #12의 bidWeight [미상]은
+    이 표로 풀리지 않는다.
+
+    ★★**축을 가로질러 합산하면 3중 계상된다.** AG(연령)·GN(성별)은 **같은 성과를 각각 100%
+    분해**한 것이다 — 2026-08-17 실측: AG축 합계 imp 54,749·clk 540·cost 705,849 / GN축 합계
+    54,749·540·705,851 / prod `naver_ad_daily` 계정 전체 705,847·540. 반드시
+    `where criterion_type = 'AG'`처럼 **한 축으로 좁혀** 집계한다. D-NAO-194의 「fan-out을
+    배분하지 않는다」와 같은 결.
+
+    ★**이 축은 총이익에 닿는다** — 비용(이 표)과 전환매출(`NaverCriterionConvDaily`)이 같은
+    grain에 있다. D-NAO-198(시간대·지역·매체)이 「전환·매출이 없어 총이익에 못 닿는다」로
+    막혔던 지점을 넘는 첫 축이다.
+
+    criterion_type — 'AG'=연령(12종) · 'GN'=성별(3종) · 'AD'=관심사(87종) · 'SD'=요일·시간.
+    코드의 «뜻»은 추정하지 않는다 — `NaverCriterionDict`(1차 출처 `/ncc/criterion-dictionary`)에
+    한글명이 있고, 2026-08-17 실측에서 리포트 코드 18종이 **전건 사전에 존재**했다(미상 0건).
+
+    실측 분포(2026-08-17): AG 3,733행 · GN 1,549행 · AD 304행(= WEB_SITE 유형 비용 100%,
+    쇼핑엔 관심사 타겟팅이 없다) · SD 16행(4,008원 — 매트릭스 #10의 「사실상 탈락」 재확인).
+
+    ★**campaign_id를 싣지 않는다** — 이 리포트는 주지 않는다(7열: 일자·고객ID·`{그룹}~{코드}`·
+    기기·노출·클릭·비용). 캠페인 유형 통제가 필요한 분석은 `naver_ad_daily`·`naver_entity`와
+    조인해서 얻는다. ⚠️**유형 통제 없이 밴드를 비교하지 말 것**(ref 78 F20 — 유형 혼합 분모가
+    A5 발견 하나를 죽였다).
+
+    ★**소실 시한: 정확히 365일**(D-365 BUILT ↔ D-366 API 400 `{"code":10004}`로 경계 실측 확정,
+    2026-08-19). 매일 창이 굴러가 앞이 사라진다 — 안 받은 날은 영구 소실이다.
+    """
+
+    __tablename__ = "naver_criterion_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_date", "adgroup_id", "criterion_code", "device",
+            name="uq_naver_criterion_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    criterion_type: Mapped[str] = mapped_column(String(2), nullable=False)   # AG/GN/AD/SD
+    criterion_code: Mapped[str] = mapped_column(String(32), nullable=False)  # 리포트 원본 코드 그대로
+    device: Mapped[str] = mapped_column(String(1), nullable=False)           # P=PC M=모바일
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverCriterionConvDaily(Base):
+    """CRITERION 전환 분해 — 연령·성별·관심사 × 직접/간접 × 구매/장바구니 (D-NAO-203).
+
+    grain: (ad_date, adgroup_id, criterion_code, device, conv_kind, conv_type).
+
+    ★**계정 전환을 100% 분해한다** — 2026-08-17 AG축 합계와 prod `naver_ad_daily` 8값이
+    자릿수까지 일치:
+      (purchase, '1') 63건/952,200원 ≡ conv_direct_cnt/amt
+      (purchase, '2') 14건/220,400원 ≡ conv_indirect_cnt/amt
+      (add_to_cart, '1') 48건/986,900원 ≡ cart_direct_cnt/amt
+      (add_to_cart, '2')  4건/ 95,500원 ≡ cart_indirect_cnt/amt
+    ⇒ 이 등식이 적재 정합성의 **검산식**이다(합격기준 ⓑ). 어긋나면 파싱이 틀린 것이다.
+
+    ★`NaverCriterionDaily`와 같은 중복분해 함정을 공유한다 — 축을 가로질러 더하지 말 것.
+
+    conv_type — '1'=직접(전환 당일) · '2'=간접. conv_kind — 'purchase' · 'add_to_cart'.
+    ⚠️`STCONV_COL_*`(SHOPPINGKEYWORD_CONVERSION_DETAIL, 15열)과 **컬럼 배치가 다르다**
+    (기기 col10·직간접 col11·행동 col12 vs 여기 col3·col4·col5). 상수 재사용 금지.
+    """
+
+    __tablename__ = "naver_criterion_conv_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_date", "adgroup_id", "criterion_code", "device", "conv_kind", "conv_type",
+            name="uq_naver_criterion_conv_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    criterion_type: Mapped[str] = mapped_column(String(2), nullable=False)
+    criterion_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    device: Mapped[str] = mapped_column(String(1), nullable=False)
+    conv_kind: Mapped[str] = mapped_column(String(20), nullable=False)  # purchase / add_to_cart
+    conv_type: Mapped[str] = mapped_column(String(1), nullable=False)   # 1=직접 2=간접
+    conv_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverCriterionDict(Base):
+    """criterion 코드 사전 — 1차 출처 `GET /ncc/criterion-dictionary/{type}` (D-NAO-203).
+
+    ★**추정 등재 0건**이 이 표의 규약이다. 네이버가 `dictionaryCode`와 한글 `name`을 직접
+    주므로 사전을 «만들» 필요가 없다(D-NAO-198의 「매체 코드 뜻 사전 안 만듦」과 상황이 다르다 —
+    거긴 1차 출처가 아예 없었다). 사전에 없는 코드가 리포트에 나오면 **[미상]으로 두고**
+    이 표에 추정 행을 넣지 않는다.
+
+    적재 범위 = **AG(12) · GN(3) · AD(87) · SD(2,100)** = 2,202행. 리포트에 실제로 나오는
+    네 type만 싣는다. RL(지역, 5,354종)은 CRITERION 리포트에 등장하지 않아 제외하고,
+    RP·DV는 실물 0건이다(2026-08-19 실측 — ref 75가 「swagger에 코드값만 있고 설명 없음」으로
+    남긴 RL·RP 중 RP는 사전 자체가 비어 있다).
+    """
+
+    __tablename__ = "naver_criterion_dict"
+    __table_args__ = (
+        UniqueConstraint("dictionary_code", name="uq_naver_criterion_dict"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dictionary_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    criterion_type: Mapped[str] = mapped_column(String(2), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
 class NaverSearchTermExclusion(Base):
     """파워링크 검색어 자동 제외 in-out 상태기계 1행 (스프린트 PX,
     docs/PLAN_naver-ad-powerlink-autoexclude.md §2). grain: (adgroup_id, search_term) — Unique.
