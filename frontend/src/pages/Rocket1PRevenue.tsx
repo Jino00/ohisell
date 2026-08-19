@@ -49,7 +49,10 @@ function OptionRow({ o }: { o: Rocket1PRevenueOption }) {
   return (
     <tr className="hover:bg-gray-50">
       <Td>
-        <div className="max-w-md truncate text-gray-900" title={o.product_name ?? o.option_id}>
+        {/* ★한 줄 truncate였다 — 이 상품명들은 「필름 2p + EZ 툴 세트, 아이폰17 Pro, 1세트」처럼
+            뒤쪽에 **기종·수량**이 붙어서 잘리면 서로 구분이 안 됐다(2026-08-19 Jino 지적).
+            2줄까지 펼치고, 그래도 넘치면 말줄임 + title로 전문을 남긴다. */}
+        <div className="max-w-md line-clamp-2 break-words text-gray-900" title={o.product_name ?? o.option_id}>
           {o.product_name ?? o.option_id}
         </div>
         <div className="mt-0.5 text-xs text-gray-400">
@@ -458,7 +461,7 @@ export default function Rocket1PRevenue() {
                         {p.uncosted.top.map((u) => (
                           <tr key={u.sku_id ?? u.product_name} className="hover:bg-gray-50">
                             <Td>
-                              <div className="max-w-md truncate text-gray-900"
+                              <div className="max-w-md line-clamp-2 break-words text-gray-900"
                                 title={u.product_name ?? u.sku_id ?? ""}>
                                 {u.product_name ?? u.sku_id}
                               </div>
@@ -538,7 +541,7 @@ export default function Rocket1PRevenue() {
                         {p.uncosted.excluded_top.map((u) => (
                           <tr key={u.sku_id ?? u.product_name} className="hover:bg-gray-50">
                             <Td>
-                              <div className="max-w-md truncate text-gray-700"
+                              <div className="max-w-md line-clamp-2 break-words text-gray-700"
                                 title={u.product_name ?? u.sku_id ?? ""}>
                                 {u.product_name ?? u.sku_id}
                               </div>
