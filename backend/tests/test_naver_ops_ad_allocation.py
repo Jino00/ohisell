@@ -336,3 +336,72 @@ def test_package_with_no_product_id_is_not_swallowed(db):
     out = sales_summary(days=7, db=db)
     _closes(out)                                   # ★변이 시 residual이 1,727원 벌어져 깨진다
     assert out["unallocated"]["logistics"] == "1727.27"
+
+
+# ── ⑦ 적대 리뷰 1R P1 + 리뷰어 변이 생존분 ──────────────────────────
+
+def test_ad_on_product_with_no_orders_still_closes(db):
+    """★적대 리뷰 1R P1 — 광고는 돌았는데 이 기간 판매가 0건인 상품.
+
+    `ad_map`은 광고 원장(소재→상품) 기준이고 상품 행은 **주문** 기준이라 모집단이 다르다.
+    배분 합을 원장 기준으로 세면 그 상품의 광고비가 상품 행에도 미배분에도 안 잡혀
+    **조용히 증발**한다(리뷰어 재현: residual −30,000원인데 `ad_allocated`는 전액 배분 보고).
+    `NaverAdgroupProduct`는 역대 관측의 누적이라 이건 특수 케이스가 아니라 흔한 정상 상태다.
+    """
+    _order(db, pid="P1", price="110000")
+    _mapped(db, pid="P1", cost="30000", master_id=901)
+    _creative(db, ad_id="nad-1", cost=50000)
+    _ad_product(db, ad_id="nad-1", mall_pid="P1", adgroup_id="grp-1")
+    # P2 — 소재도 매핑도 있고 광고비도 나갔는데 이 기간 주문이 없다
+    _creative(db, ad_id="nad-2", cost=30000)
+    _ad_product(db, ad_id="nad-2", mall_pid="P2", adgroup_id="grp-2")
+    _ad_cost(db, spend="80000")
+
+    out = sales_summary(days=7, db=db)
+    _closes(out)                                       # ★수정 전엔 residual −30,000
+    assert out["summary"]["ad_allocated"] == "50000.00"   # 화면에 실린 것만 «배분»이다
+    assert out["unallocated"]["ad_spend"] == "30000.00"   # 나머지는 반드시 미배분에 뜬다
+    # 덩어리로 숨기지 않는다 — 순수한 손실이라 몇 개·얼마인지 말한다
+    assert out["ad_alloc"]["no_sale_products"] == 1
+    assert out["ad_alloc"]["no_sale_cost"] == "30000.00"
+    assert out["ad_alloc"]["allocated"] == "50000.00"      # 진단도 화면과 같은 축
+
+
+def test_closes_flag_actually_reports_false(db):
+    """★리뷰어 P2-1 — `closes`를 True로 하드코딩해도 안 걸리던 자리.
+
+    기존 테스트가 전부 «닫힌다»만 재서, 판정 함수 자체가 죽어도 초록이었다.
+    닫히지 않는 상태를 직접 만들어 False가 나오는지 본다(판정기가 살아 있는지의 문제다).
+    """
+    from app.routers import naver_ops as mod
+    _order(db, pid="P1", price="110000")
+    _mapped(db, pid="P1", cost="30000", master_id=901)
+    _ad_cost(db, spend="10000")
+
+    # 요약 광고비만 부풀려 잔차를 강제로 만든다(상품 배분은 그대로) — 판정 경로만 격리해 본다.
+    real = mod.logistics_totals
+    mod.logistics_totals = lambda db_, s_, e_: (real(db_, s_, e_)[0], real(db_, s_, e_)[1] + D("100000"))
+    try:
+        out = sales_summary(days=7, db=db)
+    finally:
+        mod.logistics_totals = real
+
+    rec = out["reconciliation"]
+    assert rec["closes"] is False, rec
+    assert abs(D(rec["residual"])) > 1
+
+
+def test_uncovered_dates_include_the_last_day(db):
+    """★리뷰어 변이 D — `uncovered_dates` 루프의 off-by-one(마지막 날 누락).
+
+    구간의 **양 끝**이 다 들어가야 한다. 끝날이 빠지면 어제 하루만 조회했을 때
+    (이 패널에서 가장 흔한 조회) 경고가 통째로 사라진다.
+    """
+    _order(db, pid="P1", price="110000")
+    _mapped(db, pid="P1", cost="30000", master_id=901)
+    _ad_cost(db, spend="10000")
+
+    y = str(_yesterday())
+    out = sales_summary(days=1, db=db)                  # 어제~어제(단일일 구간)
+    assert out["period"]["from"] == out["period"]["to"] == y
+    assert out["ad_alloc"]["uncovered_dates"] == [y]     # 단일일 구간에서도 그 하루가 잡힌다

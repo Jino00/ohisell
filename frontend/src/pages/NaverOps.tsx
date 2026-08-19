@@ -122,6 +122,13 @@ export function AdAllocationNotice({ summary, adAlloc, recon }: {
               {adAlloc?.ledger_from && ` — 원장 보유 창은 ${adAlloc.ledger_from}~${adAlloc.ledger_to}입니다`}.
             </div>
           )}
+          {adAlloc && Number(adAlloc.no_sale_cost ?? 0) > 0 && (
+            <div className="mt-1 text-red-800">
+              ⚠️ 상품 <b>{adAlloc.no_sale_products}개</b>는 광고비 <b>{won(adAlloc.no_sale_cost)}</b>가
+              나갔는데 이 기간 <b>판매가 0건</b>입니다 — 매출이 없어 상품 행에 나타나지 않으므로
+              미배분에 들어가 있습니다(순수 손실).
+            </div>
+          )}
           {adAlloc && Number(adAlloc.ambiguous_cost) > 0 && (
             <div className="mt-1 text-amber-800">
               ⚠️ 소재 {adAlloc.ambiguous_ads}개가 두 상품에 매핑돼 있어 {won(adAlloc.ambiguous_cost)}는
@@ -147,9 +154,10 @@ export function AdAllocationNotice({ summary, adAlloc, recon }: {
  * ★이 행이 있어야 열 합계가 상단 카드와 일치한다 — 표가 스스로 검산된다.
  *   빼면 상품 이익률이 다시 «전부 반영된 순이익»으로 읽힌다(이 작업이 고치려던 바로 그 오독).
  * ★0원이어도 그린다 — «없다»와 «0»이 같아 보이면 안 된다. */
-export function UnallocatedRow({ unallocated, uncoveredDays = 0 }: {
+export function UnallocatedRow({ unallocated, uncoveredDays = 0, noSaleCount = 0 }: {
   unallocated?: NaverUnallocated;
   uncoveredDays?: number;
+  noSaleCount?: number;
 }) {
   if (!unallocated) return null;
   return (
@@ -159,6 +167,7 @@ export function UnallocatedRow({ unallocated, uncoveredDays = 0 }: {
         <div className="mt-0.5 text-[11px] text-amber-700">
           파워링크(소재=키워드)·디스플레이는 상품 축이 없어 붙일 수 없다
           {uncoveredDays > 0 && ` · 소재 원장 없는 날 ${uncoveredDays}일 포함`}
+          {noSaleCount > 0 && ` · 판매 0건 상품 ${noSaleCount}개의 광고비 포함`}
         </div>
       </td>
       <td className="px-3 py-2 text-right tabular-nums text-gray-400">—</td>
@@ -1285,7 +1294,11 @@ export default function NaverOps() {
               {/* ★미배분 한 행 — 쿠팡 패널 「판매유형 미배분」과 같은 모양.
                   이 행이 있어야 열 합계가 상단 카드와 정확히 일치한다(표가 스스로 검산된다).
                   없애면 상품 이익률이 다시 «전부 반영된 순이익»으로 읽힌다. */}
-              <UnallocatedRow unallocated={unalloc} uncoveredDays={uncovered.length} />
+              <UnallocatedRow
+                unallocated={unalloc}
+                uncoveredDays={uncovered.length}
+                noSaleCount={adAlloc?.no_sale_products ?? 0}
+              />
             </tbody>
           </table>
           <div className="text-xs text-gray-400 px-3 py-2 border-t border-gray-100">

@@ -2233,6 +2233,10 @@ export interface NaverAdAlloc {
   unmapped_cost: string;        // 소재는 돌았는데 상품 매핑이 없다
   ambiguous_cost: string;       // ad_id가 두 상품에 매핑 → 고르지 않는다
   ambiguous_ads: number;
+  // 광고는 나갔는데 이 기간 판매가 0건인 상품 — 미배분에 흡수되지만 덩어리로 숨기지 않는다.
+  //   (적대 리뷰 1R P1이 드러낸 모집단 차이. 순수한 손실이라 몇 개·얼마인지 말한다.)
+  no_sale_cost?: string;
+  no_sale_products?: number;
 }
 
 /** D-NAO-207 — 화면 안의 자기 검산. closes=false면 표가 카드와 갈렸다는 뜻이다. */

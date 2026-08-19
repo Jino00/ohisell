@@ -185,3 +185,28 @@ describe("페이지 배선", () => {
     expect(src).toMatch(/label="광고비"\s+sk="ad_spend"/);
   });
 });
+
+// ── 적대 리뷰 1R P1의 화면 몫 ────────────────────────────────────────
+describe("판매 0건인데 광고비가 나간 상품", () => {
+  it("배너가 «순수 손실»이라고 말한다 — 상품 행에 안 나타나므로 여기서만 보인다", () => {
+    render(
+      <AdAllocationNotice
+        summary={summary()}
+        adAlloc={{ ...AD_ALLOC, no_sale_cost: "30000.00", no_sale_products: 3 }}
+        recon={RECON}
+      />,
+    );
+    expect(screen.getByText(/판매가 0건/)).toBeTruthy();
+    expect(screen.getByText(/30,000원/)).toBeTruthy();
+  });
+
+  it("0건이면 경고를 띄우지 않는다 — 늘 켜진 경고는 안 읽힌다", () => {
+    render(<AdAllocationNotice summary={summary()} adAlloc={AD_ALLOC} recon={RECON} />);
+    expect(screen.queryByText(/판매가 0건/)).toBeNull();
+  });
+
+  it("미배분 행도 그 몫이 섞여 있음을 말한다", () => {
+    inTable(<UnallocatedRow unallocated={UNALLOC} uncoveredDays={0} noSaleCount={3} />);
+    expect(screen.getByText(/판매 0건 상품 3개의 광고비 포함/)).toBeTruthy();
+  });
+});

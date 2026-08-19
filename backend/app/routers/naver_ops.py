@@ -814,7 +814,19 @@ def sales_summary(
     # ★정의를 «요약 − 배분합»으로 둔 것이 핵심이다 — 사유를 열거해 빼는 방식이면 새 사유가
     #   하나 생길 때마다 조용히 새고, 그 누수는 화면 어디에도 안 보인다. 잔차로 정의하면
     #   무엇이 생기든 반드시 이 행에 나타난다(fail-safe).
-    allocated_ad   = sum(ad_map.values(), _Z)
+    # ★★배분 «합»은 **상품 행이 실제로 소비한 것만** 센다 (적대 리뷰 1R P1).
+    #   `ad_map`은 광고 원장(소재→상품) 기준이고 `prod_acc`는 이 기간 **주문** 기준이라
+    #   모집단이 다르다. 광고는 돌았는데 그 기간 판매가 0건인 상품이 흔한데(`NaverAdgroupProduct`
+    #   docstring: "역대 관측의 누적이다 … 삭제하지 않는다"), 두 곳에서 다른 모집단을 쓰면
+    #   그 상품의 광고비가 **상품 행에도 미배분에도 안 잡혀** 조용히 증발한다.
+    #   재현(리뷰어): 주문 0건 상품에 광고비 30,000원 → residual −30,000 · closes=False ·
+    #   그런데 `ad_allocated`는 전액 배분된 것처럼 80,000원을 보고했다.
+    #   ⇒ 잔차 정의가 fail-safe이려면 «분자»가 화면에 실제로 실린 것이어야 한다.
+    allocated_ad   = sum((v for k, v in ad_map.items() if k in prod_acc), _Z)
+    # 광고는 나갔는데 이 기간 판매가 0인 상품 — 미배분에 흡수되지만 **덩어리로 숨기지 않는다**.
+    #   순수한 손실이고 이 패널의 목적(총이익)에 직접 걸리는 정보다.
+    no_sale_ad     = sum(ad_map.values(), _Z) - allocated_ad
+    no_sale_count  = sum(1 for k in ad_map if k not in prod_acc)
     unalloc_ad     = total_ad_spend - allocated_ad
     unalloc_logi_v = logi_left + claim_cost          # VAT 포함
     unalloc_profit = (
@@ -836,7 +848,14 @@ def sales_summary(
             "profit":        str(unalloc_profit.quantize(_Q2)),
         },
         # 광고비 배분 진단 — 배너가 이걸 읽어 «왜 못 붙였나»를 말한다.
-        "ad_alloc":       ad_diag,
+        "ad_alloc":       {
+            **ad_diag,
+            # ★`product_ad_spend`가 낸 `allocated`는 원장 기준이라 화면에 실린 것과 다르다.
+            #   화면과 같은 축으로 덮어쓴다 — 두 숫자가 갈리면 그게 위 P1의 재발 신호다.
+            "allocated":         str(allocated_ad.quantize(_Q2)),
+            "no_sale_cost":      str(no_sale_ad.quantize(_Q2)),
+            "no_sale_products":  no_sale_count,
+        },
         # 화면 안의 자기 검산: Σ(상품) + 미상제외분 + 미배분 = 요약. 1원 넘게 벌어지면 결함이다.
         "reconciliation": {
             "sum_product_profit":      str(sum_product_profit.quantize(_Q2)),
