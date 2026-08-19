@@ -166,12 +166,13 @@ describe("미배분 행 (표 맨 아래)", () => {
 //   «백엔드는 세는데 화면이 안 읽음»의 컴포넌트판([[same-defect-three-times-fix-the-shape]]).
 //   페이지 전체 렌더는 fetch 수십 개를 물고 와야 해서, 배선 사실 자체를 소스로 고정한다.
 //   리팩터로 이름이 바뀌면 여기서 빨간불이 난다 — 그건 오탐이 아니라 «배선을 다시 확인하라»다.
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 describe("페이지 배선", () => {
-  // jsdom 환경에선 import.meta.url이 file: 스킴이 아니다 — vitest의 cwd(=frontend/) 기준으로 읽는다.
-  const src = readFileSync(resolve(process.cwd(), "src/pages/NaverOps.tsx"), "utf-8");
+  // ★소스를 vite의 `?raw`로 읽는다. `node:fs`를 쓰면 vitest는 통과하지만 `npm run build`의
+  //   `tsc -b`가 @types/node 부재로 깨진다(빌드 tsconfig는 `types: ["vite/client"]`만 싣는다).
+  //   ⚠️ 그리고 `tsc --noEmit -p tsconfig.json`으로는 그걸 못 잡는다 — 그 파일은 `files: []`인
+  //   **솔루션 파일**이라 아무것도 검사하지 않고 exit 0을 낸다. 검증은 `tsc -b`(=npm run build)로.
+  const mods = import.meta.glob("./NaverOps.tsx", { query: "?raw", import: "default", eager: true });
+  const src = mods["./NaverOps.tsx"] as string;
 
   it("M11 — 배너를 실제로 렌더한다", () => {
     expect(src).toMatch(/<AdAllocationNotice[\s>]/);
