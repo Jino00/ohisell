@@ -116,6 +116,13 @@ def test_parser_404_is_status_not_exception(monkeypatch):
     assert got["media"] is None and got["black_media"] == [] and got["target_types"] == []
 
 
+def test_parser_dedupes_black_media(monkeypatch):
+    """파서 층에서 중복을 없앤다 — 적재 층(`_sync_black_rows`)도 set()으로 한 번 더 막지만,
+    ★한 층만 남기면 다른 호출부가 생겼을 때 UNIQUE 위반이 돌아온다(이중 방어를 고정한다)."""
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594, 612594, 118495]), _pcm()])})
+    assert fetcher.get_adgroup_targets("grp-1")["black_media"] == [118495, 612594]
+
+
 def test_parser_handles_null_black_media(monkeypatch):
     """응답이 실제로 null을 주는 자리가 있다(white.media 관측) — None을 []로 다룬다."""
     m = _media([])
@@ -193,8 +200,11 @@ def test_failed_probe_does_not_delete_existing_black_rows(db, monkeypatch):
     assert db.query(NaverAdgroupMediaBlack).count() == 2      # ★그대로
     cur = db.execute(select(NaverAdgroupTargetCurrent)).scalar_one()
     assert cur.probe_status == 500
-    # 설정 필드는 「모름」으로 비운다 — 0이나 []로 채우면 fail-open이 된다
-    assert cur.black_media_json is None and cur.pc is None
+    # ★초판은 여기서 설정 필드를 None으로 «비웠고», 이 단언이 그 결함을 정답으로 박고 있었다
+    #   (적대 리뷰 P1-1). 조회 실패는 «설정이 없어졌다»가 아니라 «지금 못 본다»다 —
+    #   마지막 관측값을 그대로 두는 것이 블랙 표의 fail-closed와 같은 규율이다.
+    assert json.loads(cur.black_media_json) == [118495, 612594]
+    assert cur.black_media_count == 2 and cur.pc is True
 
 
 def test_change_log_only_on_change(db, monkeypatch):
@@ -260,3 +270,154 @@ def test_one_group_failure_does_not_stop_the_sweep(db, monkeypatch):
     stats = adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
     assert stats["swept"] == 2 and stats["failed"] == 1 and stats["ok"] == 1
     assert db.query(NaverAdgroupMediaBlack).count() == 1
+
+
+# ─────────── 적대 리뷰(2026-08-19) P1·변이 생존분을 막는 테스트 ───────────
+
+def test_failed_probe_logs_only_probe_status_not_a_false_disappearance(db, monkeypatch):
+    """P1-1 회귀 봉쇄: 500 한 번에 「블랙이 사라졌다」가 원장에 새겨지면 안 된다.
+
+    초판 재현값: 500 직후 9행(사라짐) + 복구 후 9행(되돌아옴) = 18행. 실제 블랙은 불변."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on")])
+    ok = {"grp-1": _Resp(200, [_media([612594, 118495]), _pcm()])}
+    _patch_get(monkeypatch, ok)
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+
+    _patch_get(monkeypatch, {"grp-1": _Resp(500, None, "boom")})
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    fields = [r.field for r in db.execute(select(NaverAdgroupTargetChange)).scalars()]
+    assert fields == ["probe_status"], f"실패 시 남아야 할 변경은 probe_status뿐인데: {fields}"
+
+    _patch_get(monkeypatch, ok)                       # 복구
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    fields = [r.field for r in db.execute(select(NaverAdgroupTargetChange)).scalars()]
+    assert fields == ["probe_status", "probe_status"]  # 실패↔복구 두 줄. 그게 전부다.
+
+
+def test_first_seen_at_survives_resweep(db, monkeypatch):
+    """P1-2 회귀 봉쇄: 안 바뀐 블랙 행의 «최초 관측»이 매 스윕마다 오늘로 밀리면,
+    「이 매체가 언제부터 블랙인가」의 답이 항상 오늘이 된다."""
+    import datetime as _dt
+    _seed_entities(db, [("grp-1", "cmp-1", "on")])
+    resp = {"grp-1": _Resp(200, [_media([612594]), _pcm()])}
+
+    t0 = _dt.datetime(2026, 8, 19, 9, 35)
+    monkeypatch.setattr(adgroup_target_ingest, "kst_now", lambda: t0)
+    _patch_get(monkeypatch, resp)
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+
+    t1 = _dt.datetime(2026, 9, 30, 9, 35)
+    monkeypatch.setattr(adgroup_target_ingest, "kst_now", lambda: t1)
+    _patch_get(monkeypatch, resp)
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+
+    row = db.execute(select(NaverAdgroupMediaBlack)).scalar_one()
+    assert row.first_seen_at == t0, "최초 관측이 밀렸다"
+    assert row.observed_at == t1, "마지막 관측이 안 갱신됐다(stale 판정이 여기 걸린다)"
+    # ★현재상태 표도 같이 본다(변이 N3): 블랙 행만 단언하면 current.observed_at이
+    #   영원히 최초 적재일에 멈춰도 아무도 모른다 — 그러면 「이 관측이 얼마나 묵었나」를
+    #   물을 수 없고, 조회 실패가 며칠째인지도 안 보인다.
+    cur = db.execute(select(NaverAdgroupTargetCurrent)).scalar_one()
+    assert cur.first_seen_at == t0 and cur.observed_at == t1
+    assert db.query(NaverAdgroupTargetChange).count() == 0
+
+
+def test_db_error_on_one_group_does_not_kill_the_sweep(db, monkeypatch):
+    """P1-3 회귀 봉쇄: DB 오류가 루프 밖으로 나가면 뒤 그룹이 전멸하고
+    요약 로그조차 안 나와 «몇 건에서 멈췄나»를 알 수 없다."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on"), ("grp-2", "cmp-1", "on")])
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594]), _pcm()]),
+                             "grp-2": _Resp(200, [_media([335738]), _pcm()])})
+
+    real_commit, calls = db.commit, {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database or disk is full")
+        return real_commit()
+
+    monkeypatch.setattr(db, "commit", flaky_commit)
+    stats = adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    assert stats["swept"] == 2 and stats["failed"] == 1 and stats["ok"] == 2
+    monkeypatch.undo()
+    assert [r.adgroup_id for r in db.execute(select(NaverAdgroupMediaBlack)).scalars()] == ["grp-2"]
+
+
+def test_duplicate_media_codes_do_not_break_the_sweep(db, monkeypatch):
+    """P1-3 재현 B: 응답이 같은 코드를 두 번 주면 UNIQUE 위반으로 스윕이 죽었다.
+    (응답이 실제로 중복을 주는지는 [미확인] — 확인 안 된 가정 위에 스윕을 올려 두지 않는다.)"""
+    _seed_entities(db, [("grp-1", "cmp-1", "on"), ("grp-2", "cmp-1", "on")])
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594, 612594]), _pcm()]),
+                             "grp-2": _Resp(200, [_media([335738]), _pcm()])})
+    stats = adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    assert stats["failed"] == 0
+    assert sorted(r.media_code for r in db.execute(select(NaverAdgroupMediaBlack)).scalars()) \
+        == ["335738", "612594"]
+
+
+def test_sweep_scope_is_adgroups_only(db, monkeypatch):
+    """변이 N1 봉쇄 — 이 필터가 콜 예산의 전부다.
+    naver_entity엔 keyword 약 91,172행·campaign 46행이 같이 산다(prod 실측):
+    entity_type 필터가 빠지면 승인 1,013콜이 92,235콜(90배)이 된다."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on")])
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", parent_id="grp-1",
+                       name="키워드", status="on"))
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp-1", parent_id="",
+                       name="캠페인", status="on"))
+    db.commit()
+    assert [g for g, _ in adgroup_target_ingest.list_sweep_adgroups(db)] == ["grp-1"]
+
+
+def test_target_ids_come_from_their_own_target_types(db, monkeypatch):
+    """변이 N2 봉쇄 — A5/A6의 출처가 뒤바뀌어도 아무 단언이 없었다."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on")])
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594]), _pcm()] + _noise())})
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    cur = db.execute(select(NaverAdgroupTargetCurrent)).scalar_one()
+    assert cur.media_target_id == "tgt-m" and cur.pcm_target_id == "tgt-p"
+
+
+def test_edit_tm_is_stored_on_both_tables(db, monkeypatch):
+    """변이 N4 봉쇄 — `editTm`은 「언제부터인가」를 물을 때 유일한 출처 표식이다
+    (★단 그룹 단위 최종 수정 시각이지 media 한 건의 등재 시각이 아니다)."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on")])
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594], edit_tm="2026-07-21T11:51:52.000Z"),
+                                                  _pcm()])})
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    cur = db.execute(select(NaverAdgroupTargetCurrent)).scalar_one()
+    blk = db.execute(select(NaverAdgroupMediaBlack)).scalar_one()
+    assert cur.media_edit_tm == "2026-07-21T11:51:52.000Z"
+    assert blk.source_edit_tm == "2026-07-21T11:51:52.000Z"
+    assert cur.media_reg_tm == "2024-08-12T04:54:18.000Z"
+
+
+def test_target_types_change_is_recorded(db, monkeypatch):
+    """변이 N5/P2-5 봉쇄 — 그룹이 targetTp를 얻거나 잃은 사실도 관측이다."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on")])
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594]), _pcm()] + _noise())})
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594]), _pcm()])})   # 두 종 사라짐
+    adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    row = db.execute(
+        select(NaverAdgroupTargetChange).where(NaverAdgroupTargetChange.field == "target_types_json")
+    ).scalar_one()
+    assert json.loads(row.new_value) == ["MEDIA_TARGET", "PC_MOBILE_TARGET"]
+
+
+def test_empty_sweep_scope_is_not_silent(db, monkeypatch, caplog):
+    """교훈 #123 — 0건과 「이상 없음」이 같아 보이면 안 된다."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        stats = adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0)
+    assert stats["swept"] == 0
+    assert any("스윕 대상 0건" in r.message for r in caplog.records)
+
+
+def test_deadline_aborts_and_says_so(db, monkeypatch):
+    """데드라인 초과는 조용한 중단이 아니라 기록된 중단이다(적대 리뷰 P2-2)."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on"), ("grp-2", "cmp-1", "on")])
+    _patch_get(monkeypatch, {"grp-1": _Resp(200, [_media([612594]), _pcm()]),
+                             "grp-2": _Resp(200, [_media([335738]), _pcm()])})
+    stats = adgroup_target_ingest.sync_adgroup_targets(db, sleep_s=0, deadline_s=-1)
+    assert stats["aborted"] is True and stats["swept"] == 0

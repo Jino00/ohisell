@@ -811,8 +811,12 @@ def get_adgroup_targets(adgroup_id: str) -> dict:
         "media": media,
         "pc_mobile": pcm,
         # ★None과 []를 같은 것으로 뭉갠다 — 응답이 실제로 `"media": null`을 준다(white 쪽 관측).
-        "black_media": sorted(black.get("media") or []),
-        "black_mediagroup": sorted(black.get("mediaGroup") or []),
+        # ★`set()`으로 중복을 없앤다(적대 리뷰 P1-3): 같은 코드가 두 번 오면 적재 측
+        #   UNIQUE(adgroup_id, media_code)가 터지고 **그 시점부터 스윕이 통째로 죽는다**.
+        #   응답이 실제로 중복을 주는지는 [미확인]이지만, 확인 안 된 가정 위에 스윕 전체를
+        #   올려 둘 이유가 없다 — 방어 비용이 set() 한 번이다.
+        "black_media": sorted(set(black.get("media") or [])),
+        "black_mediagroup": sorted(set(black.get("mediaGroup") or [])),
     }
 
 

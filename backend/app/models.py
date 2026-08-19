@@ -3339,8 +3339,11 @@ class NaverAdgroupMediaBlack(Base):
     affinity의 보호를 못 받는다. ⇒ 이 규율을 지키는 변이 테스트는 SQLite에서 **원리적으로
     못 만든다**(변이 M1이 살아남는 이유가 결함이 아니라 affinity다 — 그 사실을 여기 남긴다).
 
-    ★프로브가 200이 아닌 그룹은 이 표에 행이 없다 — 그건 「블랙이 0건」이 아니라 「모름」이다.
-    행 없음을 0으로 읽지 않으려면 `NaverAdgroupTargetCurrent.probe_status`를 같이 본다.
+    ★프로브가 200이 아닌 그룹의 행은 **지우지 않고 그대로 둔다**(fail-closed) — 조회 실패는
+    「블랙이 사라졌다」가 아니라 「지금 못 본다」다. 그래서 이 표의 행은 «마지막으로 성공한
+    관측»이고, 얼마나 묵었는지는 `observed_at`이 말한다. 한 번도 성공한 적 없는 그룹만
+    행이 없는데, 그건 「블랙 0건」이 아니라 「모름」이다 —
+    `NaverAdgroupTargetCurrent.probe_status`를 같이 봐야 갈린다.
     """
 
     __tablename__ = "naver_adgroup_media_black"
