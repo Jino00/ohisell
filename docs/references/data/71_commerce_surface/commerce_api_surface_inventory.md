@@ -13,7 +13,7 @@
 
 | 엔드포인트 | 주는 자료 | grain | 조회창 제약 | 소급 가능성 | 코드 호출 | 라벨 |
 |---|---|---|---|---|---|---|
-| GET .../product-orders/last-changed-statuses | 상태 변경된 productOrderId 피드 | **TS**(date-time, lastChangedFrom/To) | lastChangedTo 생략시 +24h 자동, limitCount 최대 300(초과 요청도 300 캡), moreFrom/moreSequence 커서 페이지네이션 | 임의 과거 lastChangedFrom 지정 가능(창 상한 문서 미기재) | ✅ `backend/app/clients/naver.py:222,644,765` (fetch_orders/fetch_pending_orders/fetch_claims) | [확인됨] |
+| GET .../product-orders/last-changed-statuses | 상태 변경된 productOrderId 피드 | **TS**(date-time, lastChangedFrom/To) | lastChangedTo 생략시 +24h 자동, limitCount 최대 300(초과 요청도 300 캡), moreFrom/moreSequence 커서 페이지네이션 | 임의 과거 lastChangedFrom 지정 가능(창 상한 문서 미기재) | ✅ `backend/app/clients/naver.py:307,750,880` (fetch_orders/fetch_pending_orders/fetch_claims) — **전부 `_sweep_last_changed`(naver.py:231) 경유** | [확인됨] ⚠️**2026-08-19 정정**: 이 행의 ✅는 「호출한다」이지 「커서를 처리한다」가 아니었다. 실제로 세 호출부 전부 `more`를 무시해 **2026-08-18에 23건(356,100원)이 유실**됐다(D-NAO-202). 이 표의 ✅를 「제약을 지킨다」로 읽으면 안 된다 — 그 오독이 결함을 63일 가렸다. |
 | POST .../product-orders/query | 주문·상품주문·클레임·배송 풀 상세(paymentDate 등) | **TS**(응답 order.paymentDate — 우리 코드가 실제로 파싱, naver.py:316) | productOrderIds 배열 기반(최대 다건, 상한 문서 미기재) | 식별자 알면 언제든 재조회 가능 | ✅ `naver.py:223,645,766` | [확인됨](필드 구조는 문서상 축약 "하위 구조 생략"이나 우리 코드가 order.paymentDate/po.remainProductAmount 등 실 파싱으로 존재 실증) |
 | GET .../product-orders (조건형, rangeType) | 현재상태 스냅샷, rangeType(주문일/결제일/발송일 등)+상태필터 | **TS**(from/to date-time) | to 생략시 +24h, pageSize 1~300, page≥1. 문서: "동기화 용도라면 last-changed-statuses가 더 안전" | 구조상 가능, 창 상한 미기재 | ❌ 미사용(grep 0건) | [확인됨] |
 | GET orders/{orderId}/product-order-ids | 주문 내 상품주문ID 목록 | 정적(식별자 나열) | - | - | ❌ 미사용 | [확인됨] |

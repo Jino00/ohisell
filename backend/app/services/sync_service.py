@@ -24,6 +24,7 @@ MAX_RAW_DATA_SIZE = 10_000  # 10KB
 
 # 죽은 'running' SyncLog 회수 임계. 정상 동기화는 수분 내 끝나므로 이보다 오래 'running'이면
 # 크래시/타임아웃/프로세스 강제종료로 except가 못 돌아 영구히 남은 stale 락으로 본다(task_f1f36f02).
+_DETAIL_CHUNK_PREFIX = "detail-chunk["   # naver.py가 생산하는 표식 — 이 문자열이 계약이다(3R 리뷰 P2)
 STALE_RUNNING_TIMEOUT = timedelta(minutes=30)
 
 
@@ -389,7 +390,39 @@ def sync_channel_orders(
         )
 
         db.commit()
+        # ★부분 스윕 표면화(D-NAO-202): 클라이언트가 「전건을 못 받았다」고 알리면 그 사실을
+        #   sync_log에 남긴다. 2026-08-18 네이버 사고의 본체는 절단 자체가 아니라 **절단인데
+        #   status='success'였다**는 것이다 — 20:45·21:45·22:45·23:45 네 회차 전부 success로
+        #   찍힌 채 그날 저녁 주문 23건이 사라졌고, 어디에도 신호가 없었다(교훈 #123: 「못 받았다」와
+        #   「없다」는 같은 숫자로 보인다). status는 success로 둔다 — 받은 행은 실제로 적재됐고,
+        #   error로 뒤집으면 stale 락 회수·헬스 판정 등 성공 경로를 타던 것들이 함께 흔들린다.
+        incomplete_days = list(getattr(client, "last_sweep_incomplete_days", []) or [])
         sync_log.status = "success"
+        if incomplete_days:
+            # ★좌표를 자르지 않는다(적대 리뷰 P2): [:10] 절삭은 30일 창 전일 미완주 시 뒤 20일을
+            #   통째로 지운다 — 건수만 남고 «어느 날»이 사라지면 재수집 대상을 못 고른다.
+            #   캡도 두지 않는다: `SyncLog.error_message`는 `Text`(models.py:364)라 길이 제한이
+            #   없다. 종전 초안의 500자는 **근거 없는 캡**이었고(2R 리뷰), 근거 없는 캡이 바로
+            #   이 수정이 없애려던 좌표 소실을 되살린다.
+            # ★두 종류를 섞어 세지 않는다(2R 리뷰): 날짜(YYYY-MM-DD)는 «그 날을 다시 스윕»하면
+            #   되지만 `detail-chunk[i:j]`는 배치 인덱스라 일자를 특정할 수 없어 그 창을 통째로
+            #   다시 돌려야 한다. 재수집 담당자가 오독하지 않도록 문면에서 갈라 놓는다.
+            _days = [d for d in incomplete_days if not d.startswith(_DETAIL_CHUNK_PREFIX)]
+            _chunks = [d for d in incomplete_days if d.startswith(_DETAIL_CHUNK_PREFIX)]
+            _parts = []
+            if _days:
+                _parts.append("변경상태 스윕 미완주 %d일: %s" % (len(_days), ",".join(_days)))
+            if _chunks:
+                _parts.append(
+                    "상세조회 실패 %d청크(배치 인덱스라 일자 특정 불가 — 이 창 전체를 재수집): %s"
+                    % (len(_chunks), ",".join(_chunks))
+                )
+            sync_log.error_message = "[부분수집] " + " / ".join(_parts)
+            errors.append(sync_log.error_message)
+            log.error(
+                "[sync] 채널 %s 부분수집 — %s. 이 구간 주문이 덜 들어왔다.",
+                channel.name, sync_log.error_message,
+            )
         sync_log.records_synced = new_count + updated_count
         sync_log.completed_at = kst_now()
         db.commit()
