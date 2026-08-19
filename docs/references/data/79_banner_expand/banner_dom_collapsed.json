@@ -1,0 +1,12 @@
+{
+ "state": "collapsed (기본)",
+ "captured_at_kst": "2026-08-19 16:29",
+ "header": "⚠️ 파이프라인 경고",
+ "toggle": "외 10건 ▾",
+ "ariaExpanded": "false",
+ "visibleLine": "RG 정산비용(오픽스)이 net_profit에서 누락 중",
+ "visibleLineTruncated": false,
+ "liCount": 0,
+ "titleAttr": "11줄",
+ "note": "★접힘 상태에서도 보이는 한 줄이 «잘리지 않는다»(truncated=false) — 종전에는 11건을 한 줄에 이어 붙여 truncate가 걸렸다. 이제 1건만 싣고 나머지는 토글 뒤에 둔다. 호버 title에는 여전히 11줄 전부."
+}

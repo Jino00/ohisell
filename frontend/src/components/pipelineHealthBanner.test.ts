@@ -506,3 +506,125 @@ describe("buildPipelineHealthBanner — partial_sync", () => {
     expect(buildPipelineHealthBanner(makeHealth({}))).toBeNull();
   });
 });
+
+// ── 우선순위 정렬 + items (D-NAO-205) ────────────────────────────────────────
+// ★존재 이유: 종전엔 한 줄 truncate라 경고가 많으면 뒤 항목이 화면에서 통째로 사라졌다.
+//   2026-08-19 실측 — 11건 중 매출에 닿는 「주문이 덜 수집됨」이 잘려 안 보였다.
+//   이제 접기/펼치기가 있지만 **접힌 상태에서 무엇이 보이느냐**는 이 순서가 정한다.
+describe("buildPipelineHealthBanner — 우선순위와 items", () => {
+  const partial = {
+    sync_log_id: 1, channel_id: 6, channel_name: "네이버 스마트스토어",
+    at: "2026-08-19T10:25:12+09:00", records_synced: 336,
+    detail: "[부분수집] 변경상태 스윕 미완주 1일: 2026-08-18",
+  };
+  const disk = {
+    path: "/", state: "low", used_percent: 95.5, warn_percent: 90,
+    free_bytes: 3_300_000_000, total_bytes: 73_000_000_000,
+    impact: "디스크 포화 시 전 수집 잡이 조용히 멈춘다",
+  };
+
+  it("items 배열을 돌려준다 (화면이 줄 단위로 그릴 수 있어야 한다)", () => {
+    const b = buildPipelineHealthBanner(makeHealth({ partial_sync: [partial], disk_low: [disk] }));
+    expect(Array.isArray(b!.items)).toBe(true);
+    expect(b!.items).toHaveLength(2);
+    // summary/detail은 items에서 파생된다 — 두 벌이 갈라지면 접힘/펼침이 다른 말을 한다.
+    expect(b!.summary).toBe(b!.items.join(" · "));
+    expect(b!.detail).toBe(b!.items.join("\n"));
+  });
+
+  it("★매출에 직접 닿는 신호가 앞에 온다 — 접히면 이게 유일하게 보이는 줄이다", () => {
+    // 발견 순서상 disk_low(5번)가 partial_sync(9번)보다 먼저 push된다. 정렬이 없으면 disk가 앞.
+    const b = buildPipelineHealthBanner(makeHealth({ partial_sync: [partial], disk_low: [disk] }));
+    expect(b!.items[0]).toContain("덜 수집됨");
+    expect(b!.items[1]).toContain("디스크");
+  });
+
+  it("같은 등급 안에서는 발견 순서를 지킨다 (안정 정렬)", () => {
+    const b = buildPipelineHealthBanner(
+      makeHealth({
+        disk_low: [disk],
+        failed: [{ job_name: "sync_x", state: "error" }],
+      }),
+    );
+    // 둘 다 등급 1 — 발견 순서(disk 5번 < 잡 10번)가 유지돼야 한다.
+    expect(b!.items[0]).toContain("디스크");
+    expect(b!.items[1]).toContain("잡 실패");
+  });
+
+  it("경고가 1건이면 items도 1건 — 화면이 토글을 안 띄우는 근거다", () => {
+    const b = buildPipelineHealthBanner(makeHealth({ partial_sync: [partial] }));
+    expect(b!.items).toHaveLength(1);
+  });
+});
+
+
+// ── ★등급은 push 지점에서 붙는다 — 산문 재파싱 금지 (적대 리뷰 P1, 2026-08-19) ──
+// 초판은 완성된 문자열을 정규식으로 되읽어 등급을 매겼다. WING1/WING2 쿠키만 문구가
+// `RG 정산 수집 중단(…) — 쿠키 재등록 필요`로 하드코딩돼 있어 `쿠키 만료` 토큰에 안 걸렸고,
+// **가장 중요한 쿠키 케이스 둘이 「잡 실패」보다 뒤로** 갔다. 문구는 사람이 읽으라고 바뀌는
+// 것이고 등급이 그걸 따라가면 안 된다 — 그래서 «분기별 등급»을 여기에 못 박는다.
+describe("buildPipelineHealthBanner — 등급 (분기별 고정)", () => {
+  const cookie = (account_key: string) =>
+    ({ account_key, state: "stale", age_days: 9 }) as never;
+  const job = "auto_sync_orders";
+
+  it.each([
+    ["COUPANG_WING1", "RG 정산 수집 중단(오픽스)"],
+    ["COUPANG_WING2", "RG 정산 수집 중단(오하이테크)"],
+  ])("★%s 쿠키 만료가 「잡 실패」보다 앞선다 (P1 재발 방지)", (key, expected) => {
+    const b = buildPipelineHealthBanner(
+      makeHealth({ cookies_stale: [cookie(key)], missing_jobs: [job] }),
+    );
+    expect(b!.items[0]).toContain(expected);
+    expect(b!.items[1]).toContain("잡 실패");
+  });
+
+  it("일반 쿠키 만료도 잡 실패보다 앞선다 (WING만 특별대우하지 않는다)", () => {
+    const b = buildPipelineHealthBanner(
+      makeHealth({ cookies_stale: [cookie("NAVER_X")], missing_jobs: [job] }),
+    );
+    expect(b!.items[0]).toContain("쿠키 만료");
+  });
+
+  it.each([
+    ["net_profit 누락형 data_stale", { data_stale: [{ source: "rg", state: "stale", impact: "RG 정산비용(오픽스)이 net_profit에서 누락 중" }] as never }],
+    ["원가 드리프트", { cost_drift: { drift_count: 177, by_buffer: { "0": 177 }, sample: [] } as never }],
+    ["보존식 불일치", { vendor_item_conservation: { mismatch: [{ sales_date: "2026-08-18", diff: -88800, summary_gmv: 1, option_gmv: 2 }] } as never }],
+    ["부분수집", { partial_sync: [{ sync_log_id: 1, channel_id: 6, channel_name: "네이버", at: "2026-08-19T10:00:00", records_synced: 1, detail: "[부분수집] x" }] as never }],
+  ])("%s 는 잡 실패보다 앞선다 (돈이 조용히 샌다)", (_label, extra) => {
+    const b = buildPipelineHealthBanner(makeHealth({ ...extra, missing_jobs: [job] }));
+    expect(b!.items[b!.items.length - 1]).toContain("잡 실패");
+  });
+
+  it("정체형 data_stale은 «멈춤»이라 돈 계열보다 뒤로 간다", () => {
+    const b = buildPipelineHealthBanner(
+      makeHealth({
+        data_stale: [
+          { source: "a", state: "stale", impact: "쿠팡 판매분석 요약축(오픽스) 정체 — 대조 상대가 낡았다" },
+          { source: "b", state: "stale", impact: "RG 정산비용(오픽스)이 net_profit에서 누락 중" },
+        ] as never,
+      }),
+    );
+    expect(b!.items[0]).toContain("net_profit");
+    expect(b!.items[1]).toContain("정체");
+  });
+
+  it("등급 2(분류 실패)로 떨어지는 분기가 없다 — 모든 push가 0 또는 1을 명시한다", () => {
+    // 모든 분기를 한 번에 켜고, 「잡 실패」(등급 1)보다 뒤에 오는 항목이 없는지 본다.
+    // 등급 2가 생기면 그 항목만 잡 실패 뒤로 밀려 여기서 걸린다.
+    const b = buildPipelineHealthBanner(
+      makeHealth({
+        scheduler_running: false,
+        cookies_stale: [cookie("COUPANG_WING1")],
+        data_stale: [{ source: "a", state: "stale", impact: "쿠팡 판매분석 요약축 정체 — 낡았다" }] as never,
+        disk_low: [{ path: "/", state: "low", used_percent: 95.5, warn_percent: 90, free_bytes: 1, total_bytes: 2, impact: "포화 시 멈춘다" }],
+        missing_jobs: [job],
+      }),
+    );
+    const lastRankOne = b!.items.filter((t) => /잡 실패|정체|디스크|스케줄러 정지/.test(t));
+    expect(lastRankOne.length).toBe(4);
+    // 등급 1 그룹이 연속으로 끝에 몰려 있어야 한다(그 뒤에 등급 2가 없다).
+    const firstRankOneIdx = b!.items.findIndex((t) => /잡 실패|정체|디스크|스케줄러 정지/.test(t));
+    expect(b!.items.slice(firstRankOneIdx).every((t) => /잡 실패|정체|디스크|스케줄러 정지/.test(t))).toBe(true);
+  });
+});
