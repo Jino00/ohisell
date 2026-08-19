@@ -256,6 +256,10 @@ class SyncStatusOut(BaseModel):
     last_sync: Optional[datetime] = None
     status: Optional[str] = None
     records_synced: int = 0
+    # ★`status='success'`인데 실제로는 덜 들어온 경우가 있다(부분수집, D-NAO-202). 그 사실은
+    #   `sync_log.error_message`에만 있었고 이 스키마가 안 실어서 **화면이 초록만 봤다**.
+    #   status와 함께 내보내야 «성공»의 진짜 의미가 화면에 닿는다.
+    error_message: Optional[str] = None
 
 
 # ── Ad Cost ──
@@ -506,4 +510,14 @@ class SchedulerHealthOut(BaseModel):
     #   그때는 서비스층 dict까지만 보는 배선 테스트 6건이 전부 살아 있었다). 짝이 되는 테스트는
     #   `test_ad_cost_divergence.py::test_health_route_actually_returns_ad_cost_divergence`.
     ad_cost_divergence: dict | None = None
+    # 부분수집 — 주문 수집이 status='success'로 끝났는데 실제로는 덜 들어온 상태(D-NAO-202/204).
+    # 이상 없으면 [], 조회 자체를 못 했으면 None.
+    # ★★위 네 필드와 **같은 이유로** 이 줄이 필수다 — 그리고 나는 이 주석 네 개를 다 읽고도
+    #   같은 실패를 했다(2026-08-19 적대 리뷰 P1): 서비스층은 판정을 냈는데 여기 선언이 없어
+    #   response_model이 HTTP 응답에서 `partial_sync`를 지웠고, 프론트는 `?? []`로 받아
+    #   조용해졌다. 부분수집이 유일한 이상이면 배너가 **통째로 숨는다** — 이 필드가 막으려던
+    #   사고(2026-08-18 주문 23건·356,100원이 success인 채 사라짐)를 한 층 아래에서 재현한 것이다.
+    #   짝이 되는 테스트는 `test_health_partial_sync.py::test_health_route_actually_returns_partial_sync`
+    #   (**TestClient로 실제 호출**한다 — 서비스층 dict만 보는 테스트로는 원리적으로 못 잡는다).
+    partial_sync: list[dict] | None = None
     as_of: str

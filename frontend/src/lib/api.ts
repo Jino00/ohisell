@@ -427,6 +427,8 @@ export interface SyncStatus {
   last_sync: string | null;
   status: string | null;
   records_synced: number;
+  // ★status='success'인데 덜 들어온 경우가 있다(부분수집, D-NAO-202). 초록만 보면 놓친다.
+  error_message?: string | null;
 }
 
 export interface ProfitSummary {
@@ -683,7 +685,21 @@ export interface SchedulerHealth {
   exclusion_survival?: SchedulerHealthExclusionSurvival | null;
   // 광고비 괴리(D-CPP-46) — 구백엔드 안전을 위해 optional · 대조 불가면 null.
   ad_cost_divergence?: SchedulerHealthAdCostDivergence | null;
+  // 부분수집(D-NAO-204) — 주문 수집이 status='success'로 끝났는데 실제로는 덜 들어온 상태.
+  // 구백엔드 안전을 위해 optional · 조회 불가면 null · 이상 없으면 [].
+  partial_sync?: SchedulerHealthPartialSync[] | null;
   as_of: string;
+}
+
+// 부분수집 1건 = sync_log 1행. `detail`은 백엔드 원문 그대로다 — 여기서 요약하면
+// «어느 날이 덜 들어왔나»가 사라지고, 그게 재수집 대상을 고르는 유일한 좌표다.
+export interface SchedulerHealthPartialSync {
+  sync_log_id: number;
+  channel_id: number;
+  channel_name: string;
+  at: string | null;
+  records_synced: number;
+  detail: string;
 }
 
 // 쿠팡이 정산에서 뗀 광고비 ↔ 우리가 손익에서 뺀 광고비(D-CPP-46).

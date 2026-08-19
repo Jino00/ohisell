@@ -226,6 +226,14 @@ def disk_target_path(database_url: str) -> str:
     return os.path.dirname(os.path.abspath(raw)) or "/"
 
 
+# 부분수집 감시 창(시간). 24h인 이유: 주문 동기화는 매시간 도는 레인이라 하루면 같은 구간을
+# 여러 번 재시도한 결과가 다 들어온다 — 그래도 남아 있으면 «일시 실패»가 아니라 «덜 들어온 채
+# 굳었다»는 뜻이다. 창 밖 이력은 sync_log에 그대로 있으므로 이 창은 «배너를 켜 두는 기간»일 뿐이다.
+PARTIAL_SYNC_WINDOW_HOURS = 24
+# 배너·응답에 실을 최대 행 수(폭주 방어). 넘치면 최신 것부터 자른다 — 건수 자체는 판정에 안 쓴다.
+PARTIAL_SYNC_MAX_ROWS = 50
+
+
 def build_health(
     watched_jobs: Sequence[str],
     states: Iterable[Any],
@@ -239,6 +247,7 @@ def build_health(
     vendor_item_conservation: dict | None = None,
     exclusion_survival: dict | None = None,
     ad_cost_divergence: dict | None = None,
+    partial_sync: list[dict] | None = None,
 ) -> dict:
     """워치독 판정 코어(순수: DB/스케줄러 미접촉 — 인자로 받은 스냅샷만 사용).
 
@@ -347,6 +356,13 @@ def build_health(
         "diverged", "pipe_stopped",
     )
 
+    # 부분수집 — 주문 수집이 «성공»으로 끝났는데 실제로는 덜 들어온 상태(D-NAO-202/204).
+    # ★다른 어떤 감시로도 안 잡힌다: 잡은 돌았고(stale 아님) 상태는 success(failed 아님)이며
+    #   데이터도 «어제 것»이 있으니(data_stale 아님) 나이로도 안 걸린다. 2026-08-18에 정확히
+    #   그 상태로 23건·356,100원이 사라졌고 sync_log 네 회차가 전부 success였다.
+    # ★이건 «없음»이 아니라 «못 받음»이다 — 둘을 같은 숫자로 보이게 두는 것이 교훈 #123이다.
+    partial_sync_rows = list(partial_sync or [])
+
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
         scheduler_running
@@ -367,6 +383,8 @@ def build_health(
         # ★광고비 괴리 — D-CPP-43으로 정산 ad_sales 차감을 뺀 뒤 **안전망이 없어진 자리**다.
         #   PA 수집이 멈추면 ad_spend가 조용히 0이 되고 순이익이 그만큼 과대계상된다.
         and not ad_divergence_bad
+        # ★부분수집 — 「성공인데 덜 들어옴」. 매출이 조용히 과소계상되는 유일한 신호다.
+        and not partial_sync_rows
     )
 
     return {
@@ -393,6 +411,9 @@ def build_health(
         # 광고비 괴리 대조(D-CPP-46). 대조 자체를 못 했으면 None(위 셋과 같은 이유).
         # ★정상(`ok`)일 때도 `ratio`를 싣는다 — 숫자가 없으면 임계에 다가가는 과정을 아무도 못 본다.
         "ad_cost_divergence": ad_cost_divergence,
+        # 부분수집 목록(D-NAO-204). 대조 자체를 못 했으면 None, 이상이 없으면 [] — 위 넷과 같은
+        # 이유로 «판정 안 함»과 «이상 없음»을 구분한다.
+        "partial_sync": partial_sync,
         "as_of": now.isoformat(),
     }
 
@@ -654,6 +675,51 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 광고비 괴리 대조 실패 — 이 감시만 생략(헬스 API는 유지)")
         ad_cost_divergence = None
 
+    # 부분수집 — 주문 수집이 status='success'로 끝났는데 실제로는 덜 들어온 상태(D-NAO-202).
+    # ★왜 sync_log를 직접 읽나: 이건 «잡이 실패했다»가 아니라 «잡은 성공했는데 결과가 부분»이라
+    #   SchedulerState(잡 단위)에는 흔적이 없다. 원장에 남는 유일한 자리가 error_message다.
+    # ★창을 두는 이유: 옛 부분수집이 영원히 배너를 켜 두면 배너가 배경음이 되고, 그러면 다음
+    #   진짜 사고가 묻힌다. 창 밖 이력은 sync_log에 그대로 남아 있으므로 잃는 것은 없다.
+    # ★try/except: 위 다섯과 같은 이유 — 이 조회가 실패해도 헬스 API 전체를 죽이지 않는다.
+    partial_sync: list[dict] | None = None
+    try:
+        from datetime import timedelta  # noqa: PLC0415
+
+        from app.models import Channel as _Ch  # noqa: PLC0415
+        from app.models import SyncLog as _SL  # noqa: PLC0415
+        # ★표식은 **생산자에서 import한다** — 여기에 리터럴을 다시 적으면 두 벌이 되어 갈라진다.
+        #   (LIKE 와일드카드 주의: 이 표식엔 `%`·`_`가 없어 이스케이프가 필요 없다. 표식을 바꿀
+        #    땐 이 전제도 같이 확인할 것 — 교훈 #291.)
+        from app.services.sync_service import PARTIAL_SYNC_MARKER  # noqa: PLC0415
+
+        since = now - timedelta(hours=PARTIAL_SYNC_WINDOW_HOURS)
+        rows = (
+            db.query(_SL, _Ch.name)
+            .join(_Ch, _Ch.id == _SL.channel_id)
+            .filter(
+                _SL.started_at >= since,
+                _SL.error_message.like(f"{PARTIAL_SYNC_MARKER}%"),
+            )
+            .order_by(_SL.started_at.desc())
+            .limit(PARTIAL_SYNC_MAX_ROWS)
+            .all()
+        )
+        partial_sync = [
+            {
+                "sync_log_id": r.id,
+                "channel_id": r.channel_id,
+                "channel_name": name,
+                "at": r.started_at.isoformat() if r.started_at else None,
+                "records_synced": r.records_synced,
+                # 원문 그대로 싣는다 — 여기서 요약하면 «어느 날이 덜 들어왔나»가 사라진다.
+                "detail": r.error_message or "",
+            }
+            for r, name in rows
+        ]
+    except Exception:
+        log.exception("[워치독] 부분수집 조회 실패 — 이 감시만 생략(헬스 API는 유지)")
+        partial_sync = None
+
     return build_health(
         WATCHDOG_JOBS, states, registered, running, now,
         cookies=cookies, data_snapshots=data_snapshots, disk_snapshots=disk_snapshots,
@@ -661,4 +727,5 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         vendor_item_conservation=vendor_item_conservation,
         exclusion_survival=exclusion_survival,
         ad_cost_divergence=ad_cost_divergence,
+        partial_sync=partial_sync,
     )

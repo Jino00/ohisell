@@ -24,6 +24,10 @@ MAX_RAW_DATA_SIZE = 10_000  # 10KB
 
 # 죽은 'running' SyncLog 회수 임계. 정상 동기화는 수분 내 끝나므로 이보다 오래 'running'이면
 # 크래시/타임아웃/프로세스 강제종료로 except가 못 돌아 영구히 남은 stale 락으로 본다(task_f1f36f02).
+# ★부분수집 표식 — `sync_log.error_message`의 접두사. **워치독(scheduler_health)이 이 문자열로
+#   행을 찾는다**. 두 파일에 걸친 계약이므로 여기 한 곳에만 정의하고 소비자가 import한다
+#   (D-NAO-202 3R 리뷰: 같은 모양의 접두사 계약이 양쪽에 리터럴로 있어 갈라질 수 있었다).
+PARTIAL_SYNC_MARKER = "[부분수집]"
 _DETAIL_CHUNK_PREFIX = "detail-chunk["   # naver.py가 생산하는 표식 — 이 문자열이 계약이다(3R 리뷰 P2)
 STALE_RUNNING_TIMEOUT = timedelta(minutes=30)
 
@@ -417,7 +421,7 @@ def sync_channel_orders(
                     "상세조회 실패 %d청크(배치 인덱스라 일자 특정 불가 — 이 창 전체를 재수집): %s"
                     % (len(_chunks), ",".join(_chunks))
                 )
-            sync_log.error_message = "[부분수집] " + " / ".join(_parts)
+            sync_log.error_message = PARTIAL_SYNC_MARKER + " " + " / ".join(_parts)
             errors.append(sync_log.error_message)
             log.error(
                 "[sync] 채널 %s 부분수집 — %s. 이 구간 주문이 덜 들어왔다.",

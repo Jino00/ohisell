@@ -10,6 +10,7 @@ import {
   type SyncResult,
   type SyncStatus,
 } from "../lib/api";
+import { partialSyncChannels } from "./partialSync";
 
 const STATUS_LABELS: Record<string, string> = {
   confirmed: "확인",
@@ -74,6 +75,8 @@ export default function Orders() {
     if (!s.last_sync) return true;
     return Date.now() - new Date(s.last_sync).getTime() > 86400000;
   });
+
+  const partials = partialSyncChannels(syncStatuses);
 
   const fetchOrders = useCallback(async () => {
     setLoading(true);
@@ -213,6 +216,10 @@ export default function Orders() {
               className={`px-4 py-2 rounded-lg text-sm mb-1 ${
                 r.status === "error" ? "bg-red-50 text-red-700" :
                 r.status === "skipped" ? "bg-yellow-50 text-yellow-700" :
+                // ★status='success'인데 errors가 있으면 초록이 아니다(부분수집, D-NAO-202).
+                //   종전엔 이 분기가 없어 «성공 N건 추가»만 찍혔고, 백엔드가 실어 보낸
+                //   「[부분수집]」이 화면에서 통째로 증발했다.
+                (r.errors?.length ?? 0) > 0 ? "bg-amber-50 text-amber-800" :
                 "bg-green-50 text-green-700"
               }`}
             >
@@ -220,9 +227,27 @@ export default function Orders() {
                 ? `${r.channel_name || "동기화"} 실패: ${r.errors.join(", ")}`
                 : r.status === "skipped"
                 ? `${r.channel_name}: ${r.errors.join(", ")}`
+                : (r.errors?.length ?? 0) > 0
+                ? `${r.channel_name}: ${r.new_orders}건 추가, ${r.updated_orders}건 갱신 — ${r.errors.join(", ")}`
                 : `${r.channel_name}: ${r.new_orders}건 추가, ${r.updated_orders}건 갱신`}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* 부분수집 경고 — «성공인데 덜 들어옴». stale(=안 돌았다)과 종류가 다르므로 따로 띄운다:
+          뭉치면 «늦었다»가 «덜 들어왔다»를 가린다. */}
+      {partials.length > 0 && (
+        <div className="mb-4 px-4 py-2 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-800">
+          <span className="font-medium">⚠️ 일부 주문이 덜 수집됐습니다</span> — 동기화는 «성공»으로
+          기록됐지만 그 구간 매출이 과소계상됩니다.
+          <ul className="mt-1 list-disc list-inside">
+            {partials.map((s) => (
+              <li key={s.channel_id}>
+                {s.channel_name}: {s.error_message}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
