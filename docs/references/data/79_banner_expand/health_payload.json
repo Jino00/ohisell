@@ -1,0 +1,166 @@
+{
+ "healthy": false,
+ "scheduler_running": true,
+ "missing_jobs": [],
+ "failed": [
+  {
+   "job_name": "sync_naver_case_settlement",
+   "state": "failed",
+   "age_sec": null,
+   "reason": "마지막 상태=error",
+   "error_summary": "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
+  }
+ ],
+ "stale": [],
+ "never_succeeded": [
+  {
+   "job_name": "sync_coupang_rg_orders",
+   "state": "never_succeeded",
+   "age_sec": null,
+   "reason": "성공 기록 없음(등록 32461s 전, 주기 7200s 초과)",
+   "error_summary": null
+  }
+ ],
+ "disabled": [],
+ "cookies_stale": [],
+ "data_stale": [
+  {
+   "name": "rg_settlement_account_rows",
+   "account_key": "COUPANG_WING1",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 14.0,
+   "impact": "RG 정산비용(오픽스)이 net_profit에서 누락 중",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  },
+  {
+   "name": "rg_settlement_account_rows",
+   "account_key": "COUPANG_WING2",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 14.0,
+   "impact": "RG 정산비용(오하이테크)이 net_profit에서 누락 중",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  },
+  {
+   "name": "wing_vendor_summary",
+   "account_key": "COUPANG_WING1",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 3.0,
+   "impact": "쿠팡 판매분석 요약축(오픽스) 정체 — RG 매출(계정의 98.9%) 대조 상대가 낡았다",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  },
+  {
+   "name": "wing_vendor_item_sales",
+   "account_key": "COUPANG_WING1",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 3.0,
+   "impact": "쿠팡 판매분석 옵션축(오픽스) 정체 — 옵션별 RG 매출이 낡은 값으로 구른다",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  },
+  {
+   "name": "wing_vendor_summary",
+   "account_key": "COUPANG_WING2",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 3.0,
+   "impact": "쿠팡 판매분석 요약축(오하이테크) 정체 — 3P 매출 대조 상대가 낡았다",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  },
+  {
+   "name": "wing_vendor_item_sales",
+   "account_key": "COUPANG_WING2",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 3.0,
+   "impact": "쿠팡 판매분석 옵션축(오하이테크) 정체 — 옵션별 3P 매출이 낡은 값으로 구른다",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  },
+  {
+   "name": "coupang_ad_cost_sales",
+   "account_key": "COUPANG_WING1",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 3.0,
+   "impact": "쿠팡 광고비(report/SALES) 정체 — net_profit 차감 축이 낡은 값으로 구른다",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  },
+  {
+   "name": "rocket_1p_settlement",
+   "account_key": "COUPANG_WING2",
+   "state": "no_data",
+   "age_days": null,
+   "max_age_days": 10.0,
+   "impact": "로켓1P 정산(세금계산서) 정체 — 1P 매출 정본이 낡았다",
+   "reason": "데이터 없음(한 번도 수집된 적 없음)"
+  }
+ ],
+ "disk_low": [
+  {
+   "path": "/tmp",
+   "state": "low",
+   "used_percent": 95.83934601216629,
+   "warn_percent": 85.0,
+   "free_bytes": 41384468480,
+   "total_bytes": 994662584320,
+   "impact": "디스크 포화 시 전 수집 잡이 조용히 멈춘다(2026-08-03 ENOSPC 사고)",
+   "reason": "디스크 사용률 95.8% (> 85%), 여유 38.5GB"
+  }
+ ],
+ "cost_drift": null,
+ "vendor_item_conservation": {
+  "window": {
+   "start": "2026-08-12",
+   "end": "2026-08-19"
+  },
+  "compared": 0,
+  "mismatch": [],
+  "summary_only": [],
+  "option_only": []
+ },
+ "exclusion_survival": {
+  "monitored": 0,
+  "alive": 0,
+  "unverifiable": 0,
+  "unverifiable_note": "쇼핑 광고그룹의 제외는 네이버 API가 돌려주지 않아 라이브 대조가 불가능하다(콘솔에서만 확인 가능). 효과 자체는 성적표가 검색어 비용으로 판정한다.",
+  "breached": [],
+  "breached_total": 0,
+  "never_checked": 0,
+  "never_checked_due": 0,
+  "last_checked_at": null,
+  "stale_hours": 30,
+  "stale": false,
+  "healthy": true,
+  "revert_howto": "네이버 검색광고 콘솔 > 해당 광고그룹 > 제외 키워드(쇼핑몰 상품형은 「제외 검색어」 탭)에서 삭제하면 즉시 복구된다(자동 개방은 이 스프린트 범위 밖 — 사람이 실행한다).",
+  "impact": "우리가 건 제외가 사라지면 그 검색어에 광고비가 다시 흐른다. 대행사가 우리 조치를 되돌린 사례가 2회 있었고 그중 1회는 로그에 흔적이 없었다.",
+  "as_of": "2026-08-19T16:28:36.397538"
+ },
+ "ad_cost_divergence": {
+  "window": {
+   "start": null,
+   "end": null
+  },
+  "pa_spend": 0,
+  "nonpa_spend": 0,
+  "deducted": 0,
+  "settled": 0,
+  "max_ratio": 1.1,
+  "account_key": "COUPANG_WING1",
+  "ratio": null,
+  "verdict": "insufficient_data",
+  "reason": "PA 수집 창 또는 정산 광고비가 없어 대조하지 못했습니다"
+ },
+ "partial_sync": [
+  {
+   "sync_log_id": 1,
+   "channel_id": 6,
+   "channel_name": "네이버 스마트스토어",
+   "at": "2026-08-19T15:26:55.797510",
+   "records_synced": 336,
+   "detail": "[부분수집] 변경상태 스윕 미완주 1일: 2026-08-18"
+  }
+ ],
+ "as_of": "2026-08-19T16:28:36.397538"
+}

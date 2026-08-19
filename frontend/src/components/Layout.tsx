@@ -3,6 +3,7 @@
 // 대시보드(전체)를 부모 메뉴로 두고, 채널별 운영(쿠팡·스마트스토어)을 접이식 자식으로 묶음.
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
+import { PipelineHealthBanner } from "./PipelineHealthBanner";
 import SchedulerStatus from "./SchedulerStatus";
 import {
   getAdCostCookieStatus,
@@ -24,13 +25,25 @@ import { runStreamsRefresh, describeOutcome, specsForKeys } from "../lib/streamR
 // 반환: summary=" · "로 이은 한 줄(배너 truncate용), detail=줄바꿈 목록(title 호버용).
 export function buildPipelineHealthBanner(
   health: SchedulerHealth,
-): { summary: string; detail: string } | null {
+): { summary: string; detail: string; items: string[] } | null {
   if (health.healthy) return null;
-  const parts: string[] = [];
+  // ★등급은 **push 지점에서 함께 붙인다** — 완성된 산문을 나중에 정규식으로 되읽지 않는다
+  //   (적대 리뷰 P1, 2026-08-19). 초판은 `rank(text)`로 문자열을 재파싱했는데, WING1/WING2
+  //   쿠키만 문구가 `RG 정산 수집 중단(…) — 쿠키 재등록 필요`로 하드코딩돼 있어 `쿠키 만료`
+  //   토큰에 안 걸렸고, **가장 중요한 쿠키 케이스 둘이 「잡 실패」보다 뒤로** 갔다. 같은 사건의
+  //   쌍둥이 신호(`RG 정산비용이 net_profit에서 누락 중`)는 등급 0인데 그 원인이자 유일한
+  //   처방이 맨 뒤에 숨는 꼴이었다. 문구는 사람이 읽으라고 바뀌는 것이고 등급은 그걸 따라가면
+  //   안 된다 — 새 경고를 추가하는 사람이 등급을 **안 정하면 컴파일이 안 되게** 둔다.
+  //   등급 0=돈이 조용히 샌다(화면이 비지 않아 티가 안 난다) · 1=수집/실행이 멈췄다(언젠간 티가
+  //   난다) · 2=그 밖. 같은 등급 안에서는 발견 순서를 지킨다(안정 정렬).
+  const parts: { r: 0 | 1 | 2; t: string }[] = [];
+  const push = (r: 0 | 1 | 2, t: string) => {
+    parts.push({ r, t });
+  };
 
   // 1) 스케줄러 자체 정지 — 최우선
   if (health.scheduler_running === false) {
-    parts.push("스케줄러 정지");
+    push(1, "스케줄러 정지");   // 멈춤 — 화면이 비어 티가 난다
   }
 
   // 2) 쿠키 만료 — COUPANG_ADS1은 광고비 배너 전담이므로 제외
@@ -45,13 +58,17 @@ export function buildPipelineHealthBanner(
     } else {
       label = `${c.account_key} 쿠키 만료`;
     }
-    parts.push(label + days);
+    // ★쿠키 만료는 돈이 새는 쪽이다: WING 쿠키가 죽으면 RG 정산 수집이 멈추고
+    //   그 결과가 `net_profit 누락`(등급 0)으로 나타난다. 원인과 결과를 같은 등급에 둔다.
+    push(0, label + days);
   }
 
   // 3) 데이터 나이 — 백엔드 impact 라벨 그대로 노출
   for (const d of health.data_stale ?? []) {
     const days = d.age_days != null ? ` (${Math.floor(d.age_days)}일째)` : "";
-    parts.push(`${d.impact}${days}`);
+    // 백엔드 `impact` 라벨을 그대로 쓴다. `net_profit에서 누락`류는 돈이 새는 것(0),
+    // `정체`류는 대조 상대가 낡는 것(1) — 백엔드 룰 8건 전수 대조로 확인(2026-08-19).
+    push(/net_profit|누락|합 불일치/.test(d.impact) ? 0 : 1, `${d.impact}${days}`);
   }
 
   // 4) 원가 정본 드리프트 — `product_master.cost_price`가 «원가표 정본 + 알려진 버퍼»
@@ -66,7 +83,7 @@ export function buildPipelineHealthBanner(
     const which = Object.entries(d.by_buffer)
       .map(([label, n]) => `${label} ${n}건`)
       .join(", ");
-    parts.push(
+    push(0,
       `원가가 정본과 다름 ${d.count}건${which ? ` (${which})` : ""}` +
         " — 옛 매핑 엑셀 업로드 의심",
     );
@@ -80,7 +97,7 @@ export function buildPipelineHealthBanner(
   //      막으려고 만든 «유일한 사전 신호»가 화면까지 이어지지 않은 채 있었다.
   //    ★백엔드가 준 impact 라벨을 그대로 쓴다(판정도 문구도 백엔드가 정본).
   for (const d of health.disk_low ?? []) {
-    parts.push(`디스크 여유 부족 ${d.used_percent.toFixed(1)}% — ${d.impact}`);
+    push(1, `디스크 여유 부족 ${d.used_percent.toFixed(1)}% — ${d.impact}`);
   }
 
   // 6) 판매분석 보존식 어긋남 — Σ옵션 GMV ≠ 요약축 GMV (D-CPP-36).
@@ -95,7 +112,7 @@ export function buildPipelineHealthBanner(
     const worst = mismatches.reduce((a, b) =>
       Math.abs(b.diff) > Math.abs(a.diff) ? b : a,
     );
-    parts.push(
+    push(0,
       `판매분석 옵션↔요약 합 불일치 ${mismatches.length}건` +
         ` (최대 ${worst.date} ${worst.registration_type} ${worst.diff.toLocaleString()}원)` +
         " — 옵션별 3P 손익을 신뢰할 수 없음",
@@ -124,14 +141,14 @@ export function buildPipelineHealthBanner(
       const head = allUnknown
         ? `우리가 건 검색어 제외 ${total}건을 확인하지 못함`
         : `우리가 건 검색어 제외 ${total}건이 라이브에서 어긋남`;
-      parts.push(head + (b?.search_term ? ` (예: "${b.search_term}" ${label})` : ""));
+      push(1, head + (b?.search_term ? ` (예: "${b.search_term}" ${label})` : ""));
     } else if ((es.never_checked_due ?? 0) > 0 && !es.last_checked_at) {
       // ★«아직 안 돌았다»와 «멈췄다»는 다르다 — 마지막 대조 자체가 없으면 멈춘 게 아니라
       //   시작을 안 한 것이다. 이 구분이 NULL을 남긴 이유다(교훈 #123의 형태).
-      parts.push(`제외 ${es.never_checked_due}건이 아직 한 번도 대조되지 않음`);
+      push(1, `제외 ${es.never_checked_due}건이 아직 한 번도 대조되지 않음`);
     } else if (es.stale) {
       const lastDate = es.last_checked_at ? es.last_checked_at.slice(0, 10) : "없음";
-      parts.push(`제외 생존 대조가 멈춤 (마지막 대조 ${lastDate})`);
+      push(1, `제외 생존 대조가 멈춤 (마지막 대조 ${lastDate})`);
     }
   }
 
@@ -148,14 +165,14 @@ export function buildPipelineHealthBanner(
       ? ` [${adiv.window.start}~${adiv.window.end ?? "?"}]`
       : "";
     if (adiv.verdict === "pipe_stopped") {
-      parts.push(
+      push(0,
         `광고비 수집이 비었는데 정산에서는 ${adiv.settled.toLocaleString()}원이 공제됨${win}` +
           " — 순이익이 그만큼 과대계상됨",
       );
     } else {
       // 배율과 «얼마나»를 같이 준다 — 배율만으론 규모를 모르고, 금액만으론 임계를 모른다.
       const gap = adiv.settled - adiv.deducted;
-      parts.push(
+      push(0,
         `광고비 괴리 ${adiv.ratio?.toFixed(3)}배 (정산 ${adiv.settled.toLocaleString()}원 vs` +
           ` 차감 ${adiv.deducted.toLocaleString()}원, 차 ${gap.toLocaleString()}원)${win}` +
           " — PA 수집 누락 의심",
@@ -184,7 +201,7 @@ export function buildPipelineHealthBanner(
     const names = Array.from(new Set(partials.map((p) => p.channel_name)));
     const who = names.length > 1 ? `${names.join("·")} 주문` : `${latest.channel_name} 주문`;
     const more = partials.length > 1 ? ` (${partials.length}건)` : "";
-    parts.push(
+    push(0,
       `${who}이 덜 수집됨${more}` +
         ` — 최근: ${latest.detail}` +
         " (성공으로 기록됐지만 매출이 과소계상된다)",
@@ -199,11 +216,21 @@ export function buildPipelineHealthBanner(
     ...(health.missing_jobs ?? []),
   ];
   for (const n of jobNames) {
-    parts.push(`잡 실패: ${n}`);
+    push(1, `잡 실패: ${n}`);
   }
 
   if (parts.length === 0) return null;
-  return { summary: parts.join(" · "), detail: parts.join("\n") };
+
+  // ★우선순위 정렬(D-NAO-205): 한 줄만 보이던 시절 «매출에 직접 닿는 신호»가 뒤로 밀려 화면 밖으로
+  //   사라졌다(2026-08-19 실측: 경고 11건일 때 부분수집 문구가 truncate 뒤). 접기/펼치기가 생겨
+  //   전건을 볼 수 있게 됐지만, **접힌 상태에서 무엇이 보이느냐**는 여전히 이 순서가 정한다.
+  //   등급은 위 `push(r, …)`에서 이미 붙어 왔다 — 여기서 문자열을 되읽지 않는다.
+  const items = parts
+    .map((p, i) => ({ ...p, i }))
+    .sort((a, b) => a.r - b.r || a.i - b.i)   // 안정 정렬: 같은 등급은 발견 순서
+    .map((p) => p.t);
+
+  return { summary: items.join(" · "), detail: items.join("\n"), items };
 }
 
 // 로켓배송(1P) 전용 화면 묶음 — 채널 아래 **한 겹 더** 접힌다 (2026-08-06, Jino).
@@ -571,25 +598,7 @@ export default function Layout() {
 
         {/* 파이프라인 헬스 전역 경고 — /api/scheduler/health의 healthy:false 표면화.
             광고비 배너(위)와 별개·동시 표시 가능. COUPANG_ADS1 쿠키는 위 배너 전담이라 제외됨. */}
-        {healthBanner && (
-          <div
-            className="flex items-center gap-3 bg-amber-600 text-white px-4 py-2 text-sm"
-            title={healthBanner.detail}
-          >
-            <span className="font-semibold shrink-0">⚠️ 파이프라인 경고</span>
-            <span className="text-amber-100 min-w-0 truncate">{healthBanner.summary}</span>
-            {/* ★이 자리는 '액션'이 아니라 '이동'이다 — 여기 모이는 문제(쿠키 재등록·잡 실패)는
-                버튼 한 번으로 해결되지 않고 각자 다른 처방이 필요하다. 그래서 갱신 버튼을 달지
-                않고 라벨을 이동으로 정직하게 적는다(2026-08-03: 구 라벨 '확인 →'이 눌리는
-                버튼처럼 보여 "눌러도 아무 일이 없다"는 오해를 만들었다). */}
-            <Link
-              to="/coupang-ops"
-              className="ml-auto shrink-0 bg-white text-amber-700 font-medium px-3 py-1 rounded hover:bg-amber-50"
-            >
-              쿠팡 운영 열기 →
-            </Link>
-          </div>
-        )}
+        {healthBanner && <PipelineHealthBanner items={healthBanner.items} />}
 
         {/* 쿠팡 수집 신선도 전역 배너 — 자동 트리거 제거(순수 on-demand) 후 '낡음/실패'를 표면화.
             빨강=48h↑ 낡음 or 갱신 실패(로그인 필요), 노랑=24~48h 낡음. 항목 클릭 → 종합조망에서 갱신. */}
