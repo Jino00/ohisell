@@ -2225,6 +2225,45 @@ export interface NaverSalesSummaryData {
   // 반품비 청구가 출고+회수비를 넘는 건이 있다(반품의 진짜 손실은 매출을 잃는 쪽이다).
   claim_count?: number;
   claim_income?: string; claim_cost?: string; claim_net?: string;
+  // D-NAO-207: 광고비 중 상품에 실제로 붙은 몫 / 못 붙인 몫. 합 = ad_spend.
+  ad_allocated?: string;
+  ad_unallocated?: string;
+}
+
+/** D-NAO-207 — 상품에 못 붙인 몫. 표 맨 아래 한 행으로 낸다.
+ *  ★정의가 «요약 − 배분합»(잔차)이라 새 누수 사유가 생겨도 반드시 여기 나타난다. */
+export interface NaverUnallocated {
+  ad_spend: string;      // 파워링크 + 디스플레이 + 원장 창 밖 + 오늘 프록시
+  logistics: string;     // 상품ID 없는 라인만 든 패키지 + 클레임 회수비
+  claim_income: string;
+  claim_fee: string;
+  profit: string;        // 대개 음수 — 비용만 있고 매출이 거의 없다
+}
+
+/** D-NAO-207 — 광고비 배분 진단. 배너가 이걸 읽어 «왜 못 붙였나»를 말한다. */
+export interface NaverAdAlloc {
+  ledger_from: string | null;   // 소재 원장(naver_ad_creative_daily) 보유 창
+  ledger_to: string | null;
+  uncovered_dates: string[];    // 조회 구간 중 원장이 없는 날 — 그 날은 배분이 원리적으로 0
+  shopping_cost: string;        // 소재 원장의 SHOPPING 비용 합
+  allocated: string;            // 그 중 상품에 붙은 몫
+  unmapped_cost: string;        // 소재는 돌았는데 상품 매핑이 없다
+  ambiguous_cost: string;       // ad_id가 두 상품에 매핑 → 고르지 않는다
+  ambiguous_ads: number;
+  // 광고는 나갔는데 이 기간 판매가 0건인 상품 — 미배분에 흡수되지만 덩어리로 숨기지 않는다.
+  //   (적대 리뷰 1R P1이 드러낸 모집단 차이. 순수한 손실이라 몇 개·얼마인지 말한다.)
+  no_sale_cost?: string;
+  no_sale_products?: number;
+}
+
+/** D-NAO-207 — 화면 안의 자기 검산. closes=false면 표가 카드와 갈렸다는 뜻이다. */
+export interface NaverReconciliation {
+  sum_product_profit: string;
+  unknown_cost_profit: string;   // 원가 미상이라 「—」로 비운 상품들의 몫
+  unallocated_profit: string;
+  summary_profit: string;
+  residual: string;
+  closes: boolean;
 }
 
 /** 오늘(days=0) 광고비의 출처. 다른 기간에선 null.
@@ -2255,12 +2294,22 @@ export interface NaverSalesSummary {
   ad_basis: AdBasis | null;
   summary: NaverSalesSummaryData;
   by_product: NaverSalesProductRow[];
+  unallocated?: NaverUnallocated;
+  ad_alloc?: NaverAdAlloc;
+  reconciliation?: NaverReconciliation;
 }
 
 export interface NaverSalesProductRow {
   product_name: string;
   platform_id: string;
   revenue: string; fee: string;
+  // D-NAO-207: 상품 행이 매출총이익 → **순이익**으로 바뀌었다. 광고비(SHOPPING 실측 귀속분)와
+  //   물류비(패키지 배분)가 붙고, 고객배송비가 매출에 들어간다. 총매출 축 = revenue_total.
+  delivery_revenue?: string;
+  revenue_total?: string;
+  logistics?: string;
+  ad_spend?: string;
+  ad_allocated?: boolean;   // false면 이 상품엔 붙은 광고비가 0(파워링크만 돌았거나 원장 밖)
   // ★원가를 모르면 원가·이익·이익률이 전부 null이다 — «모름»을 0원으로 계산하지 않는다.
   //   (종전엔 0원 원가로 접혀 이익률 94~96%가 나왔다. 셋 중 하나라도 숫자로 남기면 그 카드가
   //    나머지를 부정한다 — 훑는 눈에는 큰 숫자가 이긴다.)
