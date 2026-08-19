@@ -438,3 +438,71 @@ describe("광고비 괴리 (D-CPP-46)", () => {
     expect(buildPipelineHealthBanner(makeHealth({}))).toBeNull();
   });
 });
+
+// ── 부분수집 (D-NAO-204) ────────────────────────────────────────────────────
+// ★존재 이유: 2026-08-18에 주문 23건·상품매출 356,100원이 사라졌는데 그날 sync_log 네 회차가
+//   전부 `success`였다. 수집 자체는 D-NAO-202에서 고쳤지만 그 «부분수집» 표식이 로그와
+//   sync_log에만 있고 화면 어디에도 안 나왔다 — disk_low가 판정에만 있고 표시가 없어 배너가
+//   통째로 숨었던 것과 같은 실패(교훈 #223). 이 블록이 그 분기를 고정한다.
+describe("buildPipelineHealthBanner — partial_sync", () => {
+  const partial = (over: Partial<NonNullable<SchedulerHealth["partial_sync"]>[number]> = {}) => ({
+    sync_log_id: 4326,
+    channel_id: 6,
+    channel_name: "네이버 스마트스토어",
+    at: "2026-08-19T10:25:12+09:00",
+    records_synced: 336,
+    detail: "[부분수집] 변경상태 스윕 미완주 1일: 2026-08-18",
+    ...over,
+  });
+
+  it("부분수집이 있으면 배너에 뜬다 (백엔드만 세고 화면이 숨는 것을 막는다)", () => {
+    const banner = buildPipelineHealthBanner(makeHealth({ partial_sync: [partial()] }));
+    expect(banner).not.toBeNull();
+    expect(banner!.summary).toContain("네이버 스마트스토어");
+    expect(banner!.summary).toContain("덜 수집됨");
+    // 백엔드 원문(어느 날인지)이 살아 있어야 재수집 대상을 고를 수 있다.
+    expect(banner!.summary).toContain("2026-08-18");
+    // 「성공인데 덜 들어옴」이라는 것이 말로 드러나야 한다.
+    expect(banner!.summary).toContain("과소계상");
+  });
+
+  it("여러 채널이면 채널명을 잃지 않는다 (접어서 묻으면 어디를 볼지 모른다)", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        partial_sync: [
+          partial(),
+          partial({ sync_log_id: 4327, channel_id: 7, channel_name: "자사몰" }),
+        ],
+      }),
+    );
+    expect(banner!.summary).toContain("네이버 스마트스토어");
+    expect(banner!.summary).toContain("자사몰");
+    expect(banner!.summary).toContain("2건");
+  });
+
+  it("같은 채널이 여러 번이면 이름은 한 번만 쓴다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({ partial_sync: [partial(), partial({ sync_log_id: 4327 })] }),
+    );
+    expect(banner!.summary.match(/네이버 스마트스토어/g)).toHaveLength(1);
+  });
+
+  it("맨 앞은 «최신»이다 — 백엔드가 started_at 내림차순으로 준다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        partial_sync: [
+          partial({ detail: "[부분수집] 최신건" }),
+          partial({ sync_log_id: 4327, detail: "[부분수집] 오래된건" }),
+        ],
+      }),
+    );
+    expect(banner!.summary).toContain("최신건");
+    expect(banner!.summary).not.toContain("오래된건");
+  });
+
+  it("빈 배열·null·미지원 백엔드에서는 아무 말도 안 한다", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ partial_sync: [] }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({ partial_sync: null }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({}))).toBeNull();
+  });
+});
