@@ -466,7 +466,19 @@ export interface KpiData extends Record<string, unknown> {
   order_count: number;
   revenue_change_pct: number;
   profit_change_pct: number;
+  // ── D-22: 카드도 요약표와 같은 모집단을 말한다(같은 백엔드 경로에서 나온다) ──
+  net_scope?: NetScope;
+  net_floor_ad?: number;   // 손익을 못 잰 채 광고비만 반영된 금액
 }
+
+/**
+ * 이 행의 순이익이 **무엇을 담고 있는지** (D-22, 2026-08-19).
+ *  full    = 매출·원가·수수료·광고비까지 다 반영
+ *  ad_only = 손익을 못 재는 구간이라 확정 비용인 **광고비만** 반영된 하한
+ *  partial = 위 둘이 섞인 소계
+ * 이 값을 화면에서 안 읽으면, 하한을 완전한 손익으로 오독한다.
+ */
+export type NetScope = "full" | "ad_only" | "partial";
 
 // 회사 > leaf 계층 그룹 요약 (kind: total | company | leaf)
 export interface GroupedSummaryRow extends Record<string, unknown> {
@@ -477,9 +489,14 @@ export interface GroupedSummaryRow extends Record<string, unknown> {
   product_revenue?: number;
   shipping_revenue?: number;
   ad_spend: number;
-  net_profit: number | null;  // null = 위탁(로켓배송) leaf/회사
+  net_profit: number | null;  // null = 잴 것이 아무것도 없다(매출·광고비 둘 다 0)
   profit_rate: number | null;
   order_count: number;
+  // ── 순이익이 무엇을 담고 있나 (D-22) ──
+  net_scope?: NetScope;
+  net_floor_ad?: number;       // 그중 「광고비만 반영된 하한」으로 들어간 광고비
+  net_basis_revenue?: number;  // 이익률의 분모(= 손익을 실제로 잰 매출). 총매출과 다를 수 있다
+  unmapped_revenue?: number;   // 원가를 못 붙인 제품매출 — 이익률을 위로 부풀린다
   // ── 로켓배송 1P leaf에만 붙는다(다른 채널은 축이 하나뿐) ──
   revenue_basis?: string;   // "settlement"(계산서) | "sales"(판매분석)
   cost_coverage?: number;   // 0~1. 판매 축에서 원가가 붙은 매출의 비율

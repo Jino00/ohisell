@@ -34,6 +34,9 @@ from app.services.coupang.rocket_1p_channel_pnl import (
     rocket_1p_channel,
 )
 from app.services.profit_calculator import (
+    NET_SCOPE_AD_ONLY,
+    NET_SCOPE_FULL,
+    NET_SCOPE_PARTIAL,
     calculate_channel_daily_trend,
     calculate_channel_summary,
     calculate_daily_trend,
@@ -282,38 +285,42 @@ def dashboard_trend(
 def dashboard_kpi(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    rocket_basis: str = Query(
+        BASIS_SETTLEMENT,
+        description="로켓배송 1P 매출 축 — 요약표와 **같은 값**을 써야 카드와 표가 안 갈라진다.",
+    ),
     db: Session = Depends(get_db),
 ):
-    """핵심 KPI (매출, 순이익, 이익률, 전기 대비 변화율)"""
+    """핵심 KPI (매출, 순이익, 이익률, 전기 대비 변화율)
+
+    ★D-22(2026-08-19)부터 요약표와 **같은 경로**(`_channel_rows`)를 쓴다. 종전엔 카드만
+      `calculate_daily_trend`(=`orders` 축)를 돌아 로켓1P를 통째로 빼놨고, 그래서 표에
+      로켓 광고비를 반영하는 순간 카드와 표가 다른 순이익을 말하게 된다.
+      부수 효과 둘(의도한 것):
+        · 판매 축을 고르면 카드 총매출에도 로켓1P 매출이 들어온다(표와 일치).
+        · RG 수수료 차감이 표와 같은 규칙(채널 code 매칭분만)으로 통일된다 — 종전 카드는
+          매칭되는 채널이 없는 account_key까지 빼서 표보다 더 차감했다.
+    """
     df, dt = _default_dates(date_from, date_to, "daily")
+    basis = normalize_basis(rocket_basis)
+    _sync_orders_recent(db)
+    _sync_ad_costs_for_period(db, df, dt)
     ad_db = _resolve_ad_db()
 
     try:
-        current = calculate_daily_trend(db, ad_db, None, df, dt)
+        ch = rocket_1p_channel(db)
+        rocket_id = ch.id if ch else None
 
-        # 현재 기간 합산
-        rev = sum(Decimal(p["revenue"]) for p in current)
-        net = sum(Decimal(p["net_profit"]) for p in current)
-        orders = sum(p["order_count"] for p in current)
-
-        # RG 정산 수수료 차감 (B안: KPI 기간 합산)
-        rg_by_account = get_rg_total_by_account(db, df, dt)
-        net -= sum(rg_by_account.values(), Decimal("0"))
-
-        rate = (net / rev * 100) if rev > 0 else Decimal("0")
+        cur = _kpi_totals(db, _channel_rows(db, ad_db, df, dt, basis), rocket_id)
+        rev, net = cur["revenue"], cur["net_profit"]
+        rate = (net / cur["basis_revenue"] * 100) if cur["basis_revenue"] > 0 else Decimal("0")
 
         # 이전 기간 (동일 길이)
         period_days = (dt - df).days
         prev_to = df - timedelta(days=1)
         prev_from = prev_to - timedelta(days=period_days)
-        prev = calculate_daily_trend(db, ad_db, None, prev_from, prev_to)
-
-        prev_rev = sum(Decimal(p["revenue"]) for p in prev)
-        prev_net = sum(Decimal(p["net_profit"]) for p in prev)
-
-        # 이전 기간 RG 차감
-        rg_prev = get_rg_total_by_account(db, prev_from, prev_to)
-        prev_net -= sum(rg_prev.values(), Decimal("0"))
+        prv = _kpi_totals(db, _channel_rows(db, ad_db, prev_from, prev_to, basis), rocket_id)
+        prev_rev, prev_net = prv["revenue"], prv["net_profit"]
 
         rev_change = float((rev - prev_rev) / prev_rev * 100) if prev_rev > 0 else None
         profit_change = float((net - prev_net) / prev_net * 100) if prev_net > 0 else None
@@ -322,9 +329,11 @@ def dashboard_kpi(
             total_revenue=str(rev),
             net_profit=str(net),
             profit_rate=str(rate.quantize(Decimal("0.01"))),
-            order_count=orders,
+            order_count=cur["order_count"],
             revenue_change_pct=round(rev_change, 2) if rev_change is not None else None,
             profit_change_pct=round(profit_change, 2) if profit_change is not None else None,
+            net_scope=NET_SCOPE_PARTIAL if cur["floor_ad"] > 0 else NET_SCOPE_FULL,
+            net_floor_ad=str(cur["floor_ad"]),
         )
     finally:
         if ad_db is not None:
@@ -362,6 +371,55 @@ def _merge_rocket_1p_trend(db: Session, points: list[dict], df, dt, basis: str) 
     return out
 
 
+def _channel_rows(db: Session, ad_db, df, dt, basis: str) -> list[dict]:
+    """채널 단위 요약 행 1벌 — RG 정산 수수료 차감 + 로켓1P 병합까지 끝난 상태.
+
+    ★KPI 카드와 요약표가 **이 함수 하나만** 쓰게 한 이유(D-22, 2026-08-19): 종전엔 카드가
+      `calculate_daily_trend`(=`orders` 축)를 따로 돌아서 로켓1P를 통째로 못 태웠다. 표만
+      고치면 카드 569,635원 vs 표 -28,253원처럼 **한 화면 안에서 두 숫자가 갈라진다.**
+      경로가 둘이면 언젠가 반드시 갈라지므로, 갈라질 수 없게 경로를 하나로 만든다.
+    """
+    rows = calculate_channel_summary(db, ad_db, df, dt)
+
+    # RG 정산 수수료 차감 (B안: account_key=채널code로 매핑)
+    rg_by_account = get_rg_total_by_account(db, df, dt)
+    if rg_by_account:
+        ch_map = {ch.id: ch for ch in db.query(Channel).all()}
+        for row in rows:
+            ch = ch_map.get(row["channel_id"])
+            if ch and ch.code in rg_by_account and row["net_profit"] is not None:
+                row["net_profit"] = str(Decimal(row["net_profit"]) - rg_by_account[ch.code])
+
+    return _merge_rocket_1p_summary(db, rows, df, dt, basis)
+
+
+def _kpi_totals(db: Session, rows: list[dict], rocket_ch_id: int | None) -> dict:
+    """채널 행 → KPI 카드 숫자. `group_summary_by_company`의 「전체」 행과 **같은 규칙**이다.
+
+    ★order_count만 로켓1P를 뺀다: 1P의 그 칸은 주문 건수가 아니라 **판매수량**이라(주문 개념이
+      없는 매입 구조) 더하면 「주문 건수」 카드가 축에 따라 뜻이 바뀐다.
+    """
+    rev = net = basis_rev = floor_ad = Decimal("0")
+    orders = 0
+    for r in rows:
+        rev += Decimal(r["revenue"])
+        if r.get("net_profit") is not None:
+            net += Decimal(r["net_profit"])
+            nb = r.get("net_basis_revenue")
+            basis_rev += Decimal(r["revenue"]) if nb is None else Decimal(nb)
+        if r.get("net_scope") == NET_SCOPE_AD_ONLY:
+            floor_ad += Decimal(r.get("ad_spend") or "0")
+        if r["channel_id"] != rocket_ch_id:
+            orders += r["order_count"]
+    return {
+        "revenue": rev,
+        "net_profit": net,
+        "basis_revenue": basis_rev,
+        "floor_ad": floor_ad,
+        "order_count": orders,
+    }
+
+
 @router.get("/channel-breakdown", response_model=list[GroupedSummaryRow])
 def channel_breakdown(
     date_from: Optional[date] = Query(None),
@@ -380,18 +438,7 @@ def channel_breakdown(
     ad_db = _resolve_ad_db()
 
     try:
-        rows = calculate_channel_summary(db, ad_db, df, dt)
-
-        # RG 정산 수수료 차감 (B안: account_key=채널code로 매핑)
-        rg_by_account = get_rg_total_by_account(db, df, dt)
-        if rg_by_account:
-            ch_map = {ch.id: ch for ch in db.query(Channel).all()}
-            for row in rows:
-                ch = ch_map.get(row["channel_id"])
-                if ch and ch.code in rg_by_account and row["net_profit"] is not None:
-                    row["net_profit"] = str(Decimal(row["net_profit"]) - rg_by_account[ch.code])
-
-        rows = _merge_rocket_1p_summary(db, rows, df, dt, normalize_basis(rocket_basis))
+        rows = _channel_rows(db, ad_db, df, dt, normalize_basis(rocket_basis))
         return group_summary_by_company(rows, get_channel_company_map(db))
     finally:
         if ad_db is not None:

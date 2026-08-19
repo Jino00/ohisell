@@ -353,7 +353,7 @@ export default function Dashboard() {
       const params = `date_from=${dateFrom}&date_to=${dateTo}`;
       const rb = `rocket_basis=${rocketBasis}`;
       const [kpiData, trendData, channelData, channelTrendData, productData] = await Promise.all([
-        fetchApi<KpiData>(`/api/dashboard/kpi?${params}`),
+        fetchApi<KpiData>(`/api/dashboard/kpi?${params}&${rb}`),
         fetchApi<TrendItem[]>(`/api/dashboard/trend?period=${period}&${params}`),
         fetchApi<GroupedSummaryRow[]>(`/api/dashboard/channel-breakdown?${params}&${rb}`),
         fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}&${rb}`),
@@ -675,14 +675,23 @@ export default function Dashboard() {
             <div className={`text-xl font-bold ${kpi.net_profit >= 0 ? "text-green-600" : "text-red-600"}`}>
               {formatKRW(kpi.net_profit)}원
             </div>
-            <ChangeIndicator value={kpi.profit_change_pct} />
+            {kpi.net_scope === "partial" && (kpi.net_floor_ad ?? 0) > 0 ? (
+              <div
+                className="text-xs text-amber-600"
+                title="손익을 못 재는 채널(로켓배송 계산서 축)의 광고비만 비용으로 반영했다 — 이 값은 실제 손익의 하한이다"
+              >
+                ⚠️ 하한 — 미측정 광고비 {formatKRW(kpi.net_floor_ad ?? 0)}원 반영
+              </div>
+            ) : (
+              <ChangeIndicator value={kpi.profit_change_pct} />
+            )}
           </div>
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">이익률</div>
             <div className={`text-xl font-bold ${profitRateColor(kpi.profit_rate)}`}>
               {kpi.profit_rate.toFixed(1)}%
             </div>
-            <div className="text-xs text-gray-400">순이익 / 매출</div>
+            <div className="text-xs text-gray-400">순이익 / 손익을 잰 매출</div>
           </div>
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">주문 건수</div>
@@ -774,6 +783,11 @@ export default function Dashboard() {
                     : "px-4 py-3 text-sm text-gray-900";
                 const prodRev = Number(c.product_revenue ?? 0);
                 const shipRev = Number(c.shipping_revenue ?? 0);
+                // ★원가를 못 붙인 매출 비중(D-22) — 이익률을 **위로만** 흔들기 때문에
+                //   비율 옆에 붙여야 한다. 표 상단 배너는 전체 합계라 어느 행이 범인인지 못 말한다.
+                const unmapped = Number(c.unmapped_revenue ?? 0);
+                const unmappedPct = prodRev > 0 ? (unmapped / prodRev) * 100 : 0;
+                const floorAd = Number(c.net_floor_ad ?? 0);
                 return (
                   <tr key={`${c.kind}-${c.label}-${i}`} className={`border-t ${rowCls}`}>
                     <td className={nameCls}>
@@ -796,9 +810,32 @@ export default function Dashboard() {
                           {formatKRW(c.net_profit)}원
                         </span>
                       )}
+                      {c.net_scope === "ad_only" ? (
+                        <div
+                          className="text-xs text-amber-600"
+                          title="이 축에서는 매출·원가가 손익에 안 닿는다. 확정 비용인 광고비만 반영한 하한이다 — 실제 손익은 「판매(납품가)」 축으로 본다."
+                        >
+                          광고비만(하한)
+                        </div>
+                      ) : c.net_scope === "partial" && floorAd > 0 ? (
+                        <div
+                          className="text-xs text-amber-600"
+                          title={`이 소계에는 손익을 못 잰 채 광고비만 반영된 ${formatKRW(floorAd)}원이 섞여 있다 — 실제 손익의 하한이다`}
+                        >
+                          하한 포함 {formatKRW(floorAd)}원
+                        </div>
+                      ) : null}
                     </td>
                     <td className={`px-4 py-3 text-sm text-right ${c.profit_rate == null ? "text-gray-400" : profitRateColor(c.profit_rate)}`}>
                       {c.profit_rate == null ? "—" : `${c.profit_rate.toFixed(1)}%`}
+                      {unmappedPct > 0 && (
+                        <div
+                          className="text-xs text-amber-600"
+                          title={`제품매출 ${formatKRW(prodRev)}원 중 ${formatKRW(unmapped)}원이 원가 0으로 계산됐다 — 이 이익률은 실제보다 높다`}
+                        >
+                          ⚠️ 원가 미상 {unmappedPct.toFixed(1)}%
+                        </div>
+                      )}
                     </td>
                   </tr>
                 );

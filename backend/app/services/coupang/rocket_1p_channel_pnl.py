@@ -22,8 +22,12 @@
 #     05월 이전 0%). A축(계산서) 기간 대부분에 원가를 붙일 라인 자체가 없다.
 #   - 있는 구간조차 원가 매핑이 **이름 유사도 자동 확정**이라 30일 GMV의 31.7%가 다른 물건의
 #     원가를 쓰고 있다(ref 44 §4 — `OHI-TGLASS-IP17PRO` 하나에 12개 기종이 붙어 있었다).
-#   `_finalize`의 기존 계약(measurable_rev 0 → net "—")이 이 상태를 그대로 표현한다.
-#   원가 축이 정리되면 이 파일에 cost/net을 채우는 것으로 전환된다(호출부 변경 없음).
+#   ★2026-08-19 D-22 정정 — **"내지 않는다"가 아니라 "하한만 낸다"로 바뀌었다.** 원가를
+#   모른다는 이유로 net을 통째로 None으로 두었더니, 부모 소계가 이 채널의 **광고비만 흡수하고
+#   손익은 흡수하지 않아** 나간 돈이 화면에서 사라졌다(2026-08-18 하루 597,888원, Jino 발견).
+#   그래서 계산서 축은 `net = -광고비`(net_scope=ad_only)를 낸다 — 매출·원가는 여전히 손익에
+#   넣지 않으므로 이 값은 **손익의 하한**이고, 이익률 분모(`net_basis_revenue`)도 0이다.
+#   원가 축이 정리되면 cost/net을 채우고 scope를 full로 올린다(호출부 변경 없음).
 #
 # ★광고비는 넣는다. 실측이고(계정×일 `coupang_ad_report`, sell_type='Retail'), 진짜 나간 돈을
 #   순이익을 못 낸다는 이유로 화면에서 지우면 비용이 **없는 것처럼** 보인다.
@@ -39,7 +43,11 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from app.models import Channel, CoupangAdReport, CoupangRocketSettlement
-from app.services.profit_calculator import payable_vat
+from app.services.profit_calculator import (
+    NET_SCOPE_AD_ONLY,
+    NET_SCOPE_FULL,
+    payable_vat,
+)
 
 log = logging.getLogger(__name__)
 
@@ -638,11 +646,13 @@ def compute_rocket_1p_summary_row(
         return None
 
     basis = normalize_basis(basis)
+    unmapped = ZERO
     if basis == BASIS_SALES:
         w = _sell_through_window(db, date_from, date_to)
         revenue, ad_spend = w["revenue"], w["ad_spend"]
         cost, burden, net = w["cost"], w["promo_burden"], w["net_profit"]
         coverage, qty = w["coverage"], w["qty"]
+        unmapped = revenue - w["revenue_costed"]
     else:
         revenue = _settlement_sum(db, date_from, date_to)
         ad_spend = _ad_spend_sum(db, date_from, date_to)
@@ -652,8 +662,19 @@ def compute_rocket_1p_summary_row(
     if revenue == ZERO and ad_spend == ZERO:
         return None
 
+    # ★손익을 온전히 못 잰 구간이라도 **광고비는 확정 비용**이라 하한을 낸다(D-22).
+    #   net_basis_revenue = 이익률 분모로 쓸 매출. 하한일 땐 0이다 — 원가를 모르는 매출을
+    #   분모에 넣으면 「하한 손익 ÷ 원가 미상 매출」이라는 뜻 없는 비율이 나온다.
+    if net is not None:
+        scope, net_basis = NET_SCOPE_FULL, revenue
+    elif ad_spend > ZERO:
+        net, scope, net_basis = -ad_spend, NET_SCOPE_AD_ONLY, ZERO
+    else:
+        # 광고비도 0이면 하한이랄 것도 없다 — 아는 게 없으면 "—"가 정직하다.
+        scope, net_basis = None, ZERO
+
     rate = None
-    if net is not None and revenue > 0:
+    if scope == NET_SCOPE_FULL and revenue > 0:
         rate = str((net / revenue * Decimal("100")).quantize(Decimal("0.01")))
 
     return {
@@ -668,6 +689,9 @@ def compute_rocket_1p_summary_row(
         "ad_spend": str(ad_spend),
         "shipping": "0",
         "net_profit": None if net is None else str(net),
+        "net_scope": scope,
+        "net_basis_revenue": str(net_basis),
+        "unmapped_revenue": str(unmapped),
         "profit_rate": rate,
         "order_count": qty,   # 계산서 축엔 주문 개념이 없어 0, 판매 축은 판매수량
         # ── 화면이 축과 신뢰도를 말할 수 있게 하는 부가 정보(다른 채널 행엔 없다) ──
