@@ -28,6 +28,14 @@ log = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
 
+# ── 순이익이 무엇을 담고 있는지 행 스스로 말하게 하는 라벨 (D-22, 2026-08-19) ──
+# 손익을 못 재는 채널(로켓1P 계산서 축)도 **광고비는 확정 비용**이라 `-광고비` 하한을 낸다.
+# 종전엔 그런 행의 net을 통째로 None으로 두었는데, 부모 소계는 그 자식의 광고비만 흡수하고
+# 손익은 안 흡수해서 나간 돈이 화면에서 사라졌다.
+NET_SCOPE_FULL = "full"        # 매출·원가·수수료·광고비까지 다 반영
+NET_SCOPE_AD_ONLY = "ad_only"  # 광고비만 반영된 하한(원가·매출이 손익에 안 닿는 구간)
+NET_SCOPE_PARTIAL = "partial"  # 위 둘이 섞인 소계
+
 # Meta 광고비 키워드 (캠페인명 매칭용)
 _META_KEYWORDS = [
     "지문방지필름", "골프필름", "버디필름", "강화유리", "셀카봉", "문캅스", "일미리케이스",
@@ -1222,7 +1230,10 @@ def calculate_channel_summary(
             "commission": "0",
             "ad_spend": str(ch_ad_spend),
             "shipping": "0",
-            "net_profit": None,  # 순이익 계산 불가 (매출-only)
+            # ★순이익 계산 불가(매출-only)지만 **광고비는 나갔다** — `net_contribution`이
+            #   집계 시 `-광고비` 하한을 만든다(D-22). 여기서 None을 유지하는 이유는
+            #   "원가·수수료를 모른다"가 이 행의 진실이기 때문이고, 하한 판정은 한 곳에만 둔다.
+            "net_profit": None,
             "profit_rate": None,
             "order_count": 0,
         })
@@ -1594,18 +1605,58 @@ def _agg_block() -> dict:
         "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
         "ad_spend": ZERO, "order_count": 0,
         "net_profit": ZERO, "measurable_rev": ZERO,
+        # 원가를 못 붙인 제품매출 — 이익률을 위로 부풀리므로 행마다 자백한다(D-22).
+        "unmapped_revenue": ZERO,
+        # 손익이 「광고비만 반영된 하한」으로 들어온 자식의 광고비 합(D-22).
+        "net_floor_ad": ZERO,
     }
 
 
-def _add_net(block: dict, net: str | None, revenue: Decimal) -> None:
-    """집계 net은 '측정가능分 합' (기존 대시보드 의미론).
-    위탁(로켓배송 등 net None) 자식은 net/측정매출에 미반영 — 매출/광고비는
-    호출부에서 별도 누적됨. 측정가능 자식이 하나도 없을 때만 net/rate "—".
+def net_contribution(row: dict, revenue: Decimal) -> tuple[Decimal | None, Decimal, Decimal]:
+    """이 채널 행이 부모 손익에 얹는 것 → (순이익, 이익률 분모, 하한으로 들어간 광고비).
+
+    ★`net_profit`이 None이어도 **광고비가 나갔으면 `-광고비` 하한을 만든다.**
+      이 판정을 producer(각 채널 엔진)가 아니라 **집계층 한 곳**에 두는 이유:
+      손익을 못 내는 행을 만드는 곳은 앞으로도 늘어나는데(로켓1P 계산서 축,
+      `calculate_channel_summary`의 수동매출-only 채널, 다음에 붙을 채널…),
+      각자 하한을 기억하게 하면 **한 곳만 빠져도 그 채널의 광고비가 조용히 샌다.**
+      실제로 그렇게 샜다 — 2026-08-18 하루 597,888원(D-22 적대 리뷰 1R P1-1).
+      여기서 막으면 「net=None인데 ad_spend가 있는 행」이라는 모양 자체가 불가능해진다.
+
+    ★광고비도 0이면 (None, 0, 0) — 아는 게 없으면 "—"가 정직하다.
     """
+    net = row.get("net_profit")
+    ad = Decimal(row.get("ad_spend") or "0")
+    if net is None:
+        return (None, ZERO, ZERO) if ad <= ZERO else (-ad, ZERO, ad)
+    basis = row.get("net_basis_revenue")
+    return (
+        Decimal(net),
+        revenue if basis is None else Decimal(basis),
+        ad if row.get("net_scope") == NET_SCOPE_AD_ONLY else ZERO,
+    )
+
+
+def _add_net(block: dict, row: dict, revenue: Decimal) -> None:
+    """집계 net은 '측정가능分 합' (기존 대시보드 의미론).
+
+    ★2026-08-19 D-22 — **손익 분모를 행이 직접 정할 수 있게 했다.** 종전엔 net이 있으면
+      그 행의 매출 전액을 이익률 분모(`measurable_rev`)에 넣었는데, 로켓1P 계산서 축은
+      **매출은 계산서대로 있지만 그 매출의 원가를 모른다.** 그 매출을 분모에 넣으면
+      「광고비만 반영된 하한 손익 ÷ 원가를 모르는 매출」이라는 뜻 없는 비율이 나온다.
+      그래서 행이 `net_basis_revenue`를 주면 그 값을, 안 주면 종전대로 매출 전액을 쓴다.
+
+    ★같은 개정에서 **net이 None인 자식은 이제 원칙적으로 없다** — 손익을 못 재는 채널도
+      광고비만큼은 확정 비용이라 `-광고비` 하한을 낸다(rocket_1p_channel_pnl 참조).
+      그 전엔 광고비가 부모 `ad_spend`에는 더해지는데 부모 `net_profit`에서는 한 번도
+      안 빠져서, 2026-08-18 하루에만 597,888원이 손익에서 증발했다(Jino 발견).
+    """
+    net, basis_rev, floor_ad = net_contribution(row, revenue)
     if net is None:
         return
-    block["net_profit"] += Decimal(net)
-    block["measurable_rev"] += revenue
+    block["net_profit"] += net
+    block["measurable_rev"] += basis_rev
+    block["net_floor_ad"] += floor_ad
 
 
 # 로켓1P leaf에만 있는 부가 필드(축·원가 커버리지·분담금). 회사/전체로는 **올리지 않는다** —
@@ -1614,12 +1665,26 @@ _LEAF_PASSTHROUGH = ("revenue_basis", "cost_coverage", "promo_burden")
 
 
 def _finalize(kind: str, company: str | None, label: str, b: dict) -> dict:
+    """집계 블록 → 화면 행.
+
+    ★net_scope(D-22) — 이 행의 순이익이 무엇을 담고 있는지 **행 스스로 말한다**:
+      full     = 매출·원가·수수료·광고비까지 다 반영된 손익
+      ad_only  = 손익을 못 재는 구간이라 **확정 비용인 광고비만** 반영된 하한
+      partial  = 위 둘이 섞임(회사·전체 소계) — `net_floor_ad`가 그 하한 몫
+      비율(`profit_rate`)의 분모는 **손익을 잰 매출**이지 표의 총매출이 아니다.
+    """
+    floor_ad = b.get("net_floor_ad", ZERO)
     if b["measurable_rev"] > 0:
         net = b["net_profit"]
         rate = (net / b["measurable_rev"] * 100).quantize(Decimal("0.01"))
         net_s, rate_s = str(net), str(rate)
+        scope = NET_SCOPE_PARTIAL if floor_ad > 0 else NET_SCOPE_FULL
+    elif floor_ad > 0:
+        # 손익을 잰 매출이 0인데 광고비는 나갔다 — 하한만 낸다(비율은 분모가 없어 "—").
+        net_s, rate_s = str(b["net_profit"]), None
+        scope = NET_SCOPE_AD_ONLY
     else:
-        net_s, rate_s = None, None  # 측정가능 매출 0 (예: 순수 로켓배송 leaf)
+        net_s, rate_s, scope = None, None, None  # 잴 것이 아무것도 없다
     return {
         "kind": kind,
         "company": company,
@@ -1631,6 +1696,10 @@ def _finalize(kind: str, company: str | None, label: str, b: dict) -> dict:
         "net_profit": net_s,
         "profit_rate": rate_s,
         "order_count": b["order_count"],
+        "unmapped_revenue": str(b.get("unmapped_revenue", ZERO)),
+        "net_scope": scope,
+        "net_floor_ad": str(floor_ad),
+        "net_basis_revenue": str(b["measurable_rev"]),
         **{k: b[k] for k in _LEAF_PASSTHROUGH if b.get(k) is not None},
     }
 
@@ -1661,13 +1730,15 @@ def group_summary_by_company(
         for k in _LEAF_PASSTHROUGH:      # leaf 블록에만 실어 보낸다(회사/전체 제외)
             if r.get(k) is not None:
                 lb[k] = r[k]
+        unmapped = Decimal(r.get("unmapped_revenue") or "0")
         for blk in (lb, cb, total):
             blk["revenue"] += rev
             blk["product_revenue"] += prod_rev
             blk["shipping_revenue"] += ship_rev
             blk["ad_spend"] += Decimal(r["ad_spend"])
             blk["order_count"] += r["order_count"]
-            _add_net(blk, r.get("net_profit"), rev)
+            blk["unmapped_revenue"] += unmapped
+            _add_net(blk, r, rev)
 
     out: list[dict] = [_finalize("total", None, "전체", total)]
     # 회사 매출 desc, 회사 내 leaf 매출 desc

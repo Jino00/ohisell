@@ -21,14 +21,17 @@ export function RocketBasisToggle({
   const leaf = rows.find((r) => r.revenue_basis);
   const coverage = typeof leaf?.cost_coverage === "number" ? leaf.cost_coverage : null;
   const burdenUnknown = leaf ? leaf.promo_burden === null : false;
+  // 손익을 못 잰 채 광고비만 반영된 금액(D-22). 전체 행이 그 합을 들고 있다.
+  const total = rows.find((r) => r.kind === "total");
+  const floorAd = Number(total?.net_floor_ad ?? 0);   // 호출부의 사전 파싱에 기대지 않는다
 
   return (
     <div className="flex items-center gap-2">
       <span className="text-xs text-gray-500">로켓배송 매출 축</span>
       <div className="flex bg-gray-100 rounded-lg p-0.5">
         {([
-          ["settlement", "계산서", "세금계산서 지급액 — 회계·세무 정본"],
-          ["sales", "판매", "판매분석 판매량 × 납품단가 — 일일 이익 판단용"],
+          ["settlement", "계산서", "세금계산서 지급액 — 회계·세무 정본. 계산서 발행일에 매출이 몰려 뜬다(주 3~4장)"],
+          ["sales", "판매(납품가)", "판매분석 판매량 × 납품단가 — 우리 손익. 날짜별 실제 판매 흐름"],
         ] as [RocketBasis, string, string][]).map(([k, label, title]) => (
           <button
             key={k}
@@ -57,6 +60,17 @@ export function RocketBasisToggle({
         >
           원가 커버리지 {(coverage * 100).toFixed(1)}%
           {coverage < 0.95 && " · 순이익 미산정"}
+        </span>
+      )}
+      {floorAd > 0 && (
+        <span
+          className="text-xs px-2 py-1 rounded bg-amber-50 text-amber-700"
+          title={
+            "이 축에서는 로켓배송의 매출·원가가 손익에 안 닿는다. 확정 비용인 광고비만 반영했으므로 " +
+            "이 화면의 순이익은 실제 손익의 **하한**이다. 날짜별 실제 손익은 「판매(납품가)」 축으로 본다."
+          }
+        >
+          손익 미측정 광고비 {Math.round(floorAd).toLocaleString("ko-KR")}원 반영(하한)
         </span>
       )}
       {value === "sales" && burdenUnknown && (

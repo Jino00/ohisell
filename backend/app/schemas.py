@@ -314,6 +314,10 @@ class DashboardKPI(BaseModel):
     order_count: int
     revenue_change_pct: Optional[float] = None
     profit_change_pct: Optional[float] = None
+    # ── D-22: 카드와 요약표가 **같은 모집단**을 말하게 하는 필드 ──
+    # 종전엔 카드가 로켓1P를 통째로 안 태워서, 표를 고치면 카드와 값이 갈라졌다.
+    net_scope: Optional[str] = None   # full | partial (하한이 섞였나)
+    net_floor_ad: str = "0"           # 손익을 못 잰 채 광고비만 반영된 금액
 
 
 class GroupedSummaryRow(BaseModel):
@@ -324,9 +328,16 @@ class GroupedSummaryRow(BaseModel):
     product_revenue: str = "0"
     shipping_revenue: str = "0"
     ad_spend: str
-    net_profit: Optional[str]  # 위탁(로켓배송) leaf/회사는 None
+    net_profit: Optional[str]  # 잴 것이 아무것도 없을 때만 None
     profit_rate: Optional[str]
     order_count: int
+    # ── 순이익이 무엇을 담고 있는지 (D-22, 2026-08-19) ──
+    # ★이 세 필드를 여기서 빼면 화면의 경고가 통째로 사라진다(교훈 #321: response_model이
+    #   서비스층에서 만든 키를 HTTP 경계에서 지운 사고). 필드를 지우기 전에 프론트를 볼 것.
+    net_scope: Optional[str] = None        # full | ad_only | partial
+    net_floor_ad: str = "0"                # 그중 「광고비만 반영된 하한」으로 들어간 광고비
+    net_basis_revenue: str = "0"           # 이익률의 분모(= 손익을 실제로 잰 매출)
+    unmapped_revenue: str = "0"            # 원가를 못 붙인 제품매출 — 이익률을 위로 부풀린다
     # ── 로켓배송 1P leaf에만 붙는다(다른 채널은 축이 하나뿐이라 None) ──
     revenue_basis: Optional[str] = None   # settlement(계산서) | sales(판매분석)
     cost_coverage: Optional[str] = None   # 0~1. 판매 축에서 원가가 붙은 매출의 비율

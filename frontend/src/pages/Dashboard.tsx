@@ -26,6 +26,7 @@ import {
   type ProductRanking,
   type RocketBasis,
 } from "../lib/api";
+import { netScopeNote, unmappedNote } from "../lib/netScope";
 import { RocketBasisToggle } from "../components/RocketBasisToggle";
 import {
   ALL_REFRESH_SPECS,
@@ -353,7 +354,7 @@ export default function Dashboard() {
       const params = `date_from=${dateFrom}&date_to=${dateTo}`;
       const rb = `rocket_basis=${rocketBasis}`;
       const [kpiData, trendData, channelData, channelTrendData, productData] = await Promise.all([
-        fetchApi<KpiData>(`/api/dashboard/kpi?${params}`),
+        fetchApi<KpiData>(`/api/dashboard/kpi?${params}&${rb}`),
         fetchApi<TrendItem[]>(`/api/dashboard/trend?period=${period}&${params}`),
         fetchApi<GroupedSummaryRow[]>(`/api/dashboard/channel-breakdown?${params}&${rb}`),
         fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}&${rb}`),
@@ -675,14 +676,23 @@ export default function Dashboard() {
             <div className={`text-xl font-bold ${kpi.net_profit >= 0 ? "text-green-600" : "text-red-600"}`}>
               {formatKRW(kpi.net_profit)}원
             </div>
-            <ChangeIndicator value={kpi.profit_change_pct} />
+            {kpi.net_scope === "partial" && (kpi.net_floor_ad ?? 0) > 0 ? (
+              <div
+                className="text-xs text-amber-600"
+                title="손익을 못 재는 채널(로켓배송 계산서 축)의 광고비만 비용으로 반영했다 — 이 값은 실제 손익의 하한이다"
+              >
+                ⚠️ 하한 — 미측정 광고비 {formatKRW(kpi.net_floor_ad ?? 0)}원 반영
+              </div>
+            ) : (
+              <ChangeIndicator value={kpi.profit_change_pct} />
+            )}
           </div>
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">이익률</div>
             <div className={`text-xl font-bold ${profitRateColor(kpi.profit_rate)}`}>
               {kpi.profit_rate.toFixed(1)}%
             </div>
-            <div className="text-xs text-gray-400">순이익 / 매출</div>
+            <div className="text-xs text-gray-400">순이익 / 손익을 잰 매출</div>
           </div>
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">주문 건수</div>
@@ -774,6 +784,9 @@ export default function Dashboard() {
                     : "px-4 py-3 text-sm text-gray-900";
                 const prodRev = Number(c.product_revenue ?? 0);
                 const shipRev = Number(c.shipping_revenue ?? 0);
+                // 판정은 `lib/netScope`에 있다 — 순수 함수라 테스트가 붙는다(적대 리뷰 1R P2).
+                const scopeNote = netScopeNote(c);
+                const costNote = unmappedNote(c);
                 return (
                   <tr key={`${c.kind}-${c.label}-${i}`} className={`border-t ${rowCls}`}>
                     <td className={nameCls}>
@@ -796,9 +809,19 @@ export default function Dashboard() {
                           {formatKRW(c.net_profit)}원
                         </span>
                       )}
+                      {scopeNote && (
+                        <div className="text-xs text-amber-600" title={scopeNote.title}>
+                          {scopeNote.text}
+                        </div>
+                      )}
                     </td>
                     <td className={`px-4 py-3 text-sm text-right ${c.profit_rate == null ? "text-gray-400" : profitRateColor(c.profit_rate)}`}>
                       {c.profit_rate == null ? "—" : `${c.profit_rate.toFixed(1)}%`}
+                      {costNote && (
+                        <div className="text-xs text-amber-600" title={costNote.title}>
+                          {costNote.text}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 );
