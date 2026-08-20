@@ -1,5 +1,25 @@
 # Track: PAO (파오) — 네이버 SA 광고 최적화 엔진
 
+<!-- TRACK-CONTRACT v1 -->
+목표: "무조건 이익스팟 순위에 있어서 매출 증가가 없는것보다 Roas는 떨어지지만 매출이 늘어서 총 이익이 늘어나는 경우, 구간도 분명히 있거든. 우리의 최종목표는 이거야. 이게 우리가 만든 MOP프로그램의 최종 목적이고 목표야." (Jino 2026-07-19 원문 — D-NAO-59. 궁극 목표의 구조판 = 「PAO 북극성」 D-NAO-208, docs/references/82_pao_north_star_20260819.md)
+안함: 쿠팡 로켓1P 손익 정합·대시보드 순이익 배선 → 소관: docs/tracks/active/track_coupang-rocket-1p.md
+안함: 쿠팡 광고 변경 이력·오하이테크 광고 → 소관: docs/tracks/active/track_coupang-ad-change-log.md · docs/tracks/active/track_coupang-ohitech-ad.md
+안함: 상품↔채널 매핑·원가 연결 → 소관: docs/tracks/active/track_product-connection-map.md
+안함: 매출 원장 정합(Wing) → 소관: docs/tracks/active/track_revenue-wing-truth.md
+안함: 층1 잔여 91 endpoint 개봉(N1~N8·C2/C3 등)·「모든 데이터 완료」 선언 → 소관: 없음(신규 계약 필요)
+안함: 예산 변경 개방 → 소관: 없음(스프린트 X부터 불변의 스코프 밖)
+합격:
+- [x] M0 — 효율 검정 완주: A/B 카운트가 움직이거나 「효율도 못 가른다」가 명시 판정으로 남는다 (증거: ref 81 §3·§4 · ref 80 §2 A+B 4→5 · 재분할 재검정 ref 83 4시드 · 커밋 00dac6c5)
+- [ ] M1 — L0 마감: D-NAO-197 ④C10 ⑤커머스 75건 → 진도 5/5 + 층2 처분표 갱신 + 「완료 ≠ 모든 데이터」 병기
+- [ ] M2 — L2 배선(ref 65 S1+S2): 풀링·n-gram·bidWeight 판독·판정면 라벨·하한 게이트·GAVE 성적표 축 (계약 1장 + Jino 승인 선행)
+- [ ] M3 — L4 부품: 지혜 성적표 + 확정 지식 주입 배선 (승격 지혜 ≥1건에 성적 행 + 항등식 일치)
+- [ ] M4 — L3 재개: 소유권 분리 확정 → 카나리 optimizer='ours' 1주 연속 무위반 관측 (Jino 결정 2건 선행)
+- [ ] M5 — 3속도 학습 루프 상시화: 「지혜→총이익 기여」 양수 ≥1건 + 발견 주체가 시스템으로 첫 이동
+- [ ] M6 — S4 정교 수학(LP 쌍대·분포예측+정수계획·한계ROI 균등화): ref 65 S4 진입 조건 4개 전부 충족
+상태: 활성
+확인: 2026-08-21 00:4x KST [3535fdfa] — 헤더 신설(합격 M0~M6은 북극성 ref 82 §6 표에서 옮겼다 — 발명 아님). C10 적재 구현·커밋 f671921f, 배포 전
+<!-- /TRACK-CONTRACT -->
+
 > **PAO = Profit Ad Optimizer** (D-NAO-162, 2026-08-09 Jino 확정). 광고 최적화 엔진이고, 남들과 다른 건
 > «무엇을 향해» 최적화하느냐다 — ROAS가 아니라 **총이익**. 옛 문서의 「우리판 MOP」 = PAO를 가리킨다.
 > MOP(네이버 `mop.co.kr`)는 앞으로도 **벤치마크 대상**을 뜻한다. 결정 대장 접두사는 `D-NAO` 유지.
