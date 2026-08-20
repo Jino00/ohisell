@@ -38,6 +38,9 @@ from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
 
+# 채널 api_config_key — 이 저장소의 다른 호출부와 같은 값(naver_ops.py:44 · scheduler_service.py:1769).
+NAVER_CONFIG_KEY = "NAVER"
+
 PAGE_SIZE = 200          # 문서 권고(100~200 시작) · 카탈로그 ~1,213 원상품 → 7페이지
 MAX_PAGES = 60           # 폭주 방지 상한(예상 7페이지의 8배). 닿으면 미완주로 표면화한다.
 SLEEP_S = 0.15
@@ -146,7 +149,21 @@ def sync_product_meta(
       않는다. 다만 이미 upsert된 행은 남긴다(관측된 값은 참이다).
     """
     now = kst_now()
-    api = client or NaverClient(get_naver_config())
+    if client is None:
+        # ★`get_naver_config`는 채널의 api_config_key를 **인자로 받는다**(config.py:41).
+        #   초판은 무인자로 불러 라이브 첫 트리거에서 TypeError로 죽었다 — 테스트·적대 리뷰가
+        #   둘 다 가짜 클라이언트를 주입해서 **원리적으로 못 잡는 자리**였다(격리 성공은
+        #   충분조건이 아니다). 값은 이 저장소의 다른 호출부와 같은 "NAVER"
+        #   (`naver_ops.py:44 _NAVER_CONFIG_KEY` · `scheduler_service.py:1769`).
+        cfg = get_naver_config(NAVER_CONFIG_KEY)
+        if cfg is None:
+            # 「설정이 없다」와 「호출했는데 0건」을 섞지 않는다 — 전자는 완주 실패다.
+            raise RuntimeError(
+                f"네이버 커머스 설정 없음({NAVER_CONFIG_KEY}_CLIENT_ID/SECRET 미설정) — 폴링 불가"
+            )
+        api = NaverClient(cfg)
+    else:
+        api = client
     stats: dict = {
         "pages": 0, "total_pages": None, "origins": 0, "total_elements": None,
         "channel_rows": 0, "new": 0, "changed": 0, "unchanged": 0, "change_rows": 0,

@@ -292,3 +292,27 @@ def test_duplicate_in_one_run_creates_no_change_row(db):
     assert st["dup_in_run"] == 1
     assert st["changed"] == 0
     assert db.execute(select(func.count()).select_from(NaverProductMetaChange)).scalar() == 0
+
+
+def test_default_client_path_uses_real_config_signature(monkeypatch, db):
+    """★라이브 첫 트리거에서 죽은 자리 — 가짜 클라이언트 주입이 **원리적으로 못 잡던** 경로.
+
+    `client=None`(= 크론·수동 트리거의 실제 경로)일 때 `get_naver_config`를 **인자와 함께**
+    부르는지 본다. 무인자로 부르면 TypeError가 나서 이 테스트가 죽는다.
+    격리(주입) 성공은 필요조건이지 충분조건이 아니다 — 그 격차가 이 테스트다.
+    """
+    seen: list = []
+    real_get = ingest.get_naver_config
+
+    def spy(key):                     # 시그니처를 그대로 흉내낸다(무인자 호출이면 TypeError)
+        seen.append(key)
+        return real_get(key)
+
+    monkeypatch.setattr(ingest, "get_naver_config", spy)
+    monkeypatch.delenv("NAVER_CLIENT_ID", raising=False)
+    monkeypatch.delenv("NAVER_CLIENT_SECRET", raising=False)
+
+    with pytest.raises(RuntimeError) as e:
+        ingest.sync_product_meta(db)          # client 주입 없음 = 라이브 경로
+    assert "설정 없음" in str(e.value)         # 「0건」이 아니라 「완주 실패」로 갈린다
+    assert seen == [ingest.NAVER_CONFIG_KEY]  # 인자와 함께 정확히 1회
