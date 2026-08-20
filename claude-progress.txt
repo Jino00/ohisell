@@ -2732,3 +2732,42 @@
   · ★북극성 대비 위치(자·층 병기): L0 진도 4/5·층1 광고 19/110·커머스 25/116 /
     L1 적재 완료도 19/36(53%)·**연관 확인도 5/36(14%)** / L2 1/13·230/854(08-17) /
     L3 0/7 / L4 사슬 5/5·승격 1건. **마일스톤 1.5/7**(M0 완주·M1 절반).
+
+[2026-08-20 08:55~09:1x] 04 자동운영 감사 D+21 (스케줄 태스크 — 감사 전용, prod 쓰기 0건)
+  · 서버 레인 정상: run_naver_auto_operator_daily 08:50:06 ok · hourly 08:20:00 ok ·
+    generate_naver_proposals 08:00:18 ok · sync_naver_entity 07:38:04 ok ·
+    scheduler_state 54행 중 non-ok 0건(NULL 1행 = sync_naver_criterion, 한 번도 안 돎).
+  · 집행 0건: auto_op/auto_op_hr 승인분은 전 기간 137건이 전부이고 마지막이
+    2026-07-30 10:20(update_bid). 오늘분 0건 = 21일째 소프트웨어 정지 유지
+    (7개 캠페인 전부 optimizer=none·auto_operate=0).
+  · 04 라이브 재조회: 캠페인 PAUSED·CAMPAIGN_PAUSED·userLock=true·budget 50,000.
+    ★그룹까지 내려가 확인 — 11개 중 ELIGIBLE&unlocked **0개**(10개 CAMPAIGN_PAUSED,
+    1개 「01. 아이폰16e」는 GROUP_PAUSED+userLock=true). 소진 20일 연속 0원(07-31~08-19),
+    마지막 비영일 07-30 2,682원.
+  · 03 라이브: ELIGIBLE·userLock=false·budget 200,000 · 그룹 24개 전부 ELIGIBLE&unlocked.
+    17E 카나리(grp-…65140028) PAUSED·bidAmt 1,400 — 리드아웃 불가(분자 0).
+  · 보류 분포: 오늘 생성 제안 98건(trigger_pacing 71 expired·search_term_promote 20 pending·
+    anomaly 6 pending·account_brief 1 expired) 전부 approval_source 공란 = auto_op 계열 0건,
+    rejected 0건. 태스크 문언의 '[auto_op 보류' 리터럴은 여전히 코드·DB 어디에도 없다(3일째).
+  · 외부 조작 탐지: 오늘 6건(external_bid_change 5 + external_status_change 1, 07:37:47,
+    전부 cmp-a001-01-…10206612 갤럭시 파워링크). 03·04 대상 0건 — 탐지기가 오늘 실제로
+    잡았으므로 0건은 진짜 0이다(교훈 #123). ★어제 항목 「c03 external_bid_change 전 기간 0」
+    재확인 = 유효: 03·04의 external_* 전 기간 15건은 **전부 status 계열**이고 bid 계열은 0이다.
+  · A/B(03 vs 04) DEAD 21일차: pre 창(07-05~11) 대비 최근 7정착일(08-13~19) —
+    03 cost 223,419(lift 1.000)·clk 106(0.946)·CPC 2,107.73(1.057) / 04 전 지표 0.
+    DiD cost −1.000·clk −0.946은 성능차가 아니라 «우리 팔이 없다»의 재진술. 인과 해석 금지.
+    03 sentinel ROAS 프록시(08-12~18, D-8~D-2) 4.307(938,310/217,837).
+    03 avg_rank 7일 6.55→6.31(08-19분은 sweep이 09:2x에 채워 감사 시각엔 아직 없음 — lag).
+  · 중단 조건 4종 전부 미발동: 소진 3배(해당없음) · ROAS 붕괴(판정불능, 분모 0) ·
+    외부/수동 변경(0건) · 레인 연속 error(0건). 킬스위치 대리 실행 불필요.
+    계정 총소진 08-19 510,200원 vs 직전 7일 평균 663,039원(−23.0%) — ★단 08-19는 D-1이고
+    naver_ad_daily는 3일 창 delete+insert라 정산 중일 수 있다. 감소 사실로 인용 금지.
+  · ★부수 발견(신규 1건): naver_keyword_hourly에서 17E 그룹 행은 **entity_id에만 실리고
+    adgroup_id 컬럼은 비어 있다**. adgroup_id로 조회하면 「행 0」이 나와 「데이터 없음」으로
+    오독된다 — 오늘 실제로 한 번 오독했다가 entity_id 재조회(417행, 마지막 07-30)로 교정했다.
+    보존 창은 07-11~08-18 39일이므로 07-30 행이 사라진 것이 아니었다.
+  · ★루틴 전제 무효 9회 연속(08-10부터): 이 태스크가 검증하려는 대상(04 자동 집행)이
+    존재하지 않는다. 태스크 정의 갱신 또는 종료는 Jino 판단.
+  · 이 세션 쓰기: prod 0건(sqlite3 -readonly) · 네이버 API GET 5회만 · repo는 이 로그와
+    ab_03_vs_04_daily.jsonl 2개 파일뿐. push는 보류 — 로컬 미푸시 2커밋(d33ee185·98893a7a)이
+    어제 D-NAO-208/209 세션 몫이라 같이 올라간다. 그 세션/Jino 판단으로 남긴다.
