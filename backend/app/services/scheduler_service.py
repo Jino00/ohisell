@@ -1142,6 +1142,66 @@ def sync_naver_adgroup_targets_job():
         db.close()
 
 
+def sync_naver_product_meta_job():
+    """네이버 커머스 상품 메타 전건 폴링 — C10 적재 (09:55 KST, D-NAO-212 · 북극성 M1 ④).
+
+    `POST /v1/products/search`를 **필터 없이** 전건 순회해 채널상품 현재 단면을 upsert하고
+    변경분만 원장에 append한다. 상품 도메인 **쓰기 endpoint 21종은 건드리지 않는다**(실판매 카탈로그).
+
+    ★왜 지금 여는가: 상품 도메인 전체에 변경-피드가 없어(75건 전건 개봉 실측 2026-08-19)
+    **소급이 원리적으로 불가능**하다 — 폴링 개통일이 곧 관측 창의 시작일이고, 하루 미룰 때마다
+    창이 하루 짧아진다.
+
+    ★09:55인 이유(전례가 만든 검사를 그대로 밟았다 — 교훈 #326: 크론 슬롯은 배포 «전»에만
+    무료로 고칠 수 있다): 분 55를 쓰는 잡은 `run_naver_probe_settlement`(08:55) 하나뿐이고
+    9시대엔 없다. 매시 발화 잡(:05 `snapshot_naver_ad_hourly` · :07 `trigger_watch` ·
+    :45 `sync_naver_orders_hourly` · */30 `cafe24_token_refresh`)도 :55에 안 닿는다.
+    직전 09:50 `sync_naver_keyword_baseline`은 prod 실측 09:51:21 완료(≈1.3분)라 여유 4분.
+    이 폴링 자체는 7페이지(~1,213 원상품)라 1분 안에 끝난다.
+
+    ★_CATCHUP_ORDER 제외 — 관측 전용이고 매일 전량을 다시 읽어 현재 단면을 통째로 갱신하므로
+    하루 유실이 «현재»에 구멍을 남기지 않는다. (다만 그날 일어났다가 되돌아간 변경은 변경
+    원장에서 영구히 안 보인다 — 소급 불가 자료의 대가다. 타겟팅 스윕과 같은 성질.)
+
+    ★**fail-open이 아니다 — 예외를 삼키지 않는다**(적대 리뷰 1R P1-1). 초판은 이 파일의 다른
+    관측 잡들을 따라 `except: log.exception` 으로 덮었는데, 그러면 잡이 예외 없이 `None`을
+    돌려주고 `_apply_job_event`가 `last_status='ok'`를 쓴다 — 수집기가 애써 만든 «미완주» 판정이
+    **어떤 지속 표면에도 못 닿고** 로그 한 줄에서 끝난다. 그건 계약 §2-3·§4-3이 금지한 바로
+    그것(「부분 적재를 success로 기록」)이고, 8/18 절단 사고(교훈 #319 — 그날 sync_log는 전부
+    `success`였다)와 D-NAO-204(교훈 #321 — 판정을 만들었는데 HTTP 경계를 못 넘었다)의 **세 번째
+    재현**이다. fail-open의 명분(«catch-up 하류 비블록»)도 이 잡엔 성립하지 않는다 —
+    `_CATCHUP_ORDER` **밖**이라 막을 하류가 애초에 없다. 파는 것은 실패 신호 전부인데 사는 것이 0이다.
+    ⇒ 이 파일의 원 관례를 따른다: *"잡 자체의 raise는 유지한다 — 정상 크론에서는 실패가
+    last_status로 드러나야 한다 … 성공으로 위장 금지"*(scheduler_service.py `_CATCHUP_NON_BLOCKING` 주석).
+
+    ★**결과 dict를 반환한다** — 수동 트리거 라우터가 반환 dict를 응답에 싣는다(`routers/scheduler.py`:
+    *"고정 문구만 돌려주면 누른 사람은 가드가 걸렸는지 알 수 없고, 그건 가드가 없는 것과 화면상 같다"*).
+    계약 §5 ⓑ의 라이브 증거가 그 응답에서 바로 나온다."""
+    db = _get_own_db_session()
+    try:
+        from app.services import naver_product_meta_ingest
+
+        result = naver_product_meta_ingest.sync_product_meta(db)
+        line = ("[스케줄러] 상품 메타 폴링: pages=%s/%s origins=%s/%s channel_rows=%s "
+                "new=%s changed=%s unchanged=%s dup_in_run=%s complete=%s")
+        args = (result["pages"], result["total_pages"], result["origins"],
+                result["total_elements"], result["channel_rows"], result["new"],
+                result["changed"], result["unchanged"], result["dup_in_run"],
+                result["complete"])
+        if not result["complete"]:
+            log.error(line + " reason=%s", *args, result["incomplete_reason"])
+            # ★여기서 던져야 `last_status='error'`가 남는다. 삼키면 미완주가 «성공»으로 굳는다.
+            raise RuntimeError(
+                f"상품 메타 폴링 미완주: {result['incomplete_reason']} "
+                f"(pages={result['pages']}/{result['total_pages']} "
+                f"origins={result['origins']}/{result['total_elements']})"
+            )
+        log.info(line, *args)
+        return result
+    finally:
+        db.close()
+
+
 def verify_search_term_exclusions_job():
     """조치 생존 감시 — 우리가 건 검색어 제외가 라이브에 아직 걸려 있나 (08:25 KST, D-NAO-173 P1-①).
 
@@ -1892,6 +1952,13 @@ def _ensure_default_states(db):
         #   **정본이 prod DB로 넘어간다** — 교훈 #297(의도는 코드에, 동작은 DB에)의 세 번째
         #   사례가 되지 않으려면 지금 맞아야 한다.
         # ★_CATCHUP_ORDER 제외 — 3일 창이 하루 유실을 스스로 메운다(D-1이 내일의 D-2가 된다).
+        # D-NAO-212: C10 상품 메타 전건 폴링(커머스 POST /v1/products/search).
+        # ★분 슬롯 = **55**. 분 55를 쓰는 잡은 `run_naver_probe_settlement`(08:55)뿐이고 9시대엔
+        #   없다(전수 grep). 매시 발화 잡 :05·:07·:45·*/30 어느 것도 :55에 안 닿는다.
+        #   직전 09:50 keyword_baseline은 prod 실측 09:51:21 완료(≈1.3분) → 여유 4분.
+        # ★★한 번 seed되면 정본이 prod DB로 넘어간다(`_ensure_default_states`는 기존 행의
+        #   cron을 안 고친다) — 배포 «전»에만 무료로 고칠 수 있다(교훈 #326).
+        ("sync_naver_product_meta", "55 9 * * *"),
         ("sync_naver_criterion", "37 10 * * *"),
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
@@ -2274,6 +2341,7 @@ def job_func_for(job_name: str):
         # 구멍을 남기지 않고, 대조가 멈춘 사실은 요약의 stale이 배너로 띄운다.
         "sync_naver_adgroup_targets": sync_naver_adgroup_targets_job,
         "sync_naver_criterion": sync_naver_criterion_job,  # D-NAO-203 (10:37)
+        "sync_naver_product_meta": sync_naver_product_meta_job,  # D-NAO-212 (09:55)
         "verify_search_term_exclusions": verify_search_term_exclusions_job,
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,

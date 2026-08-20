@@ -723,6 +723,41 @@ class NaverClient(BaseChannelClient):
             ],
         }
 
+    def search_products_raw(
+        self,
+        *,
+        page: int = 1,
+        size: int = 200,
+        status_types: list[str] | None = None,
+        period_type: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> dict:
+        """상품 목록 조회 — **응답 원문 그대로** 반환 (C10 적재용, D-NAO-212).
+
+        `search_products`와 같은 endpoint를 부르되 **필드를 깎지 않는다.** 왜 따로 두는가:
+        기존 `search_products`는 `channelProducts` 하위 29종 중 **10종만** 매핑해 19종을 버리는데
+        (2026-08-21 실응답 실측), 적재 경로가 그 절삭을 그대로 물려받으면 **소급 불가 자료를
+        영구히 잃는다**(교훈 #315 — 내 절삭이 원격 전제를 깬 실사고). 온디맨드 라우터가 쓰는
+        기존 메서드의 동작은 **건드리지 않는다**(계약 §3 금지선: additive로만).
+
+        ★`period_type`/`from_date`/`to_date`는 **보조 검증용**이다. 공식 문서
+        (`post-v1-products-search.md`, 2026-08-20 직취)에 `PROD_REG_DAY`/`SALE_START_DAY`/
+        `SALE_END_DAY`/`PROD_MOD_DAY` + `yyyy-MM-dd` 일 단위가 실재하지만, `modifiedDate`가
+        어떤 변경에 전진하는지가 [미상]이라 **수집 본경로는 필터 없는 전건 순회**다(계약 §2-2 —
+        필터 의존은 정상 응답의 일부로 오는 조용한 유실을 낳는다, 교훈 #319의 부류).
+
+        반환: 응답 dict 원문(`{totalElements, totalPages, page, size, first, last, contents}`).
+        """
+        body: dict = {"page": page, "size": size}
+        if status_types:
+            body["productStatusTypes"] = status_types
+        if period_type and from_date and to_date:
+            body["periodType"] = period_type
+            body["fromDate"] = from_date
+            body["toDate"] = to_date
+        return self._request_post("/v1/products/search", body) or {}
+
     def fetch_seller_info(self) -> dict:
         """판매자 계정·채널 정보 조회 (N5). 트랙 N5.
 

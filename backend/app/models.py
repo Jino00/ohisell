@@ -3915,3 +3915,124 @@ class NaverKeywordVolumeDaily(Base):
         UniqueConstraint("measured_date", "keyword", name="uq_naver_keyword_volume_daily"),
         Index("ix_naver_keyword_volume_daily_kw", "keyword", "measured_date"),
     )
+
+
+# ──────────────────────────────────────────────
+# 네이버 커머스 상품 메타 (C10 — D-NAO-212 · 북극성 M1 ④)
+# ──────────────────────────────────────────────
+class NaverProductMetaCurrent(Base):
+    """네이버 커머스 상품(채널상품)의 **현재 단면** 1행 — `POST /v1/products/search` 적재.
+
+    grain: (channel_product_no). upsert — 이 표에 역사는 없다(역사는 `NaverProductMetaChange`).
+
+    ★**소급이 원리적으로 불가능하다.** 상품 도메인 64 endpoint 전체에 변경-피드·변경 타임스탬프가
+    없다(75건 전건 개봉 실측, 2026-08-19 — 층화 가용 0건). 즉 가격·재고·판매상태·카테고리의
+    «변경 이력»은 어디에도 저장돼 있지 않고 API가 과거를 주지 않는다. ⇒ **폴링 개통일 = 관측 창의
+    시작일**이다(검색량 기준선 D-NAO-186과 같은 성질). 이 표를 과거 성과에 붙일 땐 그 한계를 같이 적는다.
+
+    ★`channel_product_no`는 **문자열**이다 — 조인 상대편인 `NaverAdgroupProduct.mall_product_id`와
+    `NaverProductBep.channel_product_id`가 둘 다 `String(50)`이기 때문이다. SQLite는 affinity가
+    덮어 주지만 이 저장소의 DB 이행 목표는 PostgreSQL이고 거기선 VARCHAR 컬럼에 int 바인딩이
+    에러다(같은 판단의 근거 전문은 `NaverAdgroupMediaBlack` docstring).
+    ⚠️단 `channelProductNo ≡ mall_product_id` **동일성 자체는 [미상]**이다 — 이 계약은 확정하지
+    않고 조인율 %만 실측한다(교집합은 인과가 아니다).
+
+    ★**필드 절삭 0** — 2026-08-21 00:0x 실응답 실측에서 `channelProducts[]` 하위 키가 **29종**으로
+    확인됐고(기존 클라이언트는 그중 10종만 매핑해 19종을 버리고 있었다) 전부 컬럼으로 받는다.
+    그래도 `raw_json`을 함께 보존한다 — 응답 스키마가 **항목마다 다르기 때문**이다(실측 8건 중
+    3건은 26키·5건은 29키. 리뷰 포인트류 3종이 있는 항목과 없는 항목이 섞인다). 키 부재와 null을
+    이 표는 구분하지 못하므로, 그 구분이 필요해지면 `raw_json`이 정본이다(교훈 #315 — 내 절삭이
+    원격 전제를 깬 실사고).
+
+    ★**누적판매·리뷰 «수»는 이 표면에 없다**(29키 전수 스캔, 2026-08-21). 계약 §0-4가 [약함]으로
+    달아 둔 기대(`accumulateSaleCount`·`reviewCount`·`averageReviewScore`)는 실측에서 **매치 0**이었다.
+    실린 `text_review_point`·`photo_video_review_point`·`regular_customer_point`는 리뷰 «수»가
+    아니라 **판매자가 설정한 적립 포인트 액수**(정책 설정값)다 — 시계열 신호로 읽으면 오독이다.
+    ⇒ 이 축이 주는 것은 「현재 단면」이고, 시계열은 폴링을 시작한 날부터만 쌓인다.
+
+    ★`reg_date`·`modified_date`는 **문자열 원문 그대로** 둔다 — 파싱하면 타임존 가정이 섞이는데
+    `modifiedDate`가 어떤 변경에 전진하는지 자체가 [미상]이라, 지금 단계에서 필요한 것은
+    «값이 바뀌었는가»(문자열 비교)이지 «언제인가»가 아니다.
+    """
+
+    __tablename__ = "naver_product_meta_current"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_product_no: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    origin_product_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    group_product_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+    display_status_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    channel_service_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+
+    sale_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    discounted_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mobile_discounted_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    stock_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    category_id: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    whole_category_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    whole_category_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    brand_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    manufacturer_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    delivery_fee: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    return_fee: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    exchange_fee: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    delivery_attribute_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+
+    # 리뷰 «수»가 아니라 적립 포인트 액수다(위 docstring) — 이름에 point를 남겨 오독을 막는다.
+    text_review_point: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    photo_video_review_point: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    regular_customer_point: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    manager_purchase_point: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    knowledge_shopping_registration: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    seller_tags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 원문 배열 JSON
+    image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # representativeImage.url
+
+    reg_date: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 원문 문자열(파싱 안 함)
+    modified_date: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 동상
+
+    raw_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 응답 원문(키 부재/null 구분의 정본)
+
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # ★`last_seen_at`이 정체한 상품 = 이번 응답에 없던 상품. 행을 지우지 않는다 —
+    #   `productStatusTypes` 무필터 호출의 포함 범위(DELETE 포함 여부)가 [미상]이라(계약 §8 ⑤),
+    #   「사라졌다」와 「이번엔 안 보였다」를 아직 못 가른다.
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    last_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("channel_product_no", name="uq_naver_product_meta_current"),
+    )
+
+
+class NaverProductMetaChange(Base):
+    """상품 메타의 **변경분만** append (C10 — D-NAO-212).
+
+    grain: (channel_product_no, observed_at). 변경이 있을 때만 행이 생긴다.
+
+    ★**`observed_at`은 «폴링 시각»이지 «변경 시각»이 아니다.** 폴링 grain이 일 1회라 실제 변경
+    시각은 ±1일 불확실하다. 이걸 숨기면 나중에 시간축 분석이 「가격 변경이 밴드 이동에
+    선행한다」류를 오독한다 — 컬럼 주석으로 남기는 이유다.
+
+    ★첫 회차는 전건 신규라 이 표가 **0행인 것이 정상**이다(신규 insert는 변경이 아니다).
+
+    ★왜 전건 일일 스냅샷이 아닌가: prod 디스크가 93%(여유 7.5G, 2026-08-21 00:00 실측)이고,
+    D-NAO-198이 같은 모양을 실측으로 기각했다(결합 전건 586MB 중 98.2%가 퇴화 행).
+    """
+
+    __tablename__ = "naver_product_meta_change"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_product_no: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)  # 폴링 시각(변경 시각 아님)
+    # {필드명: [old, new]} — 키 부재는 null로 접힌다(구분이 필요하면 current.raw_json이 정본)
+    changed_fields: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_naver_product_meta_change_cpn_at", "channel_product_no", "observed_at"),
+    )
