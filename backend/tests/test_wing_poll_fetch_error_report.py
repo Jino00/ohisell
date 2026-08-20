@@ -131,8 +131,12 @@ def _install_recorder(fetcher, monkeypatch):
     """모듈이 로드한 requests 객체의 post만 패치 — 함수레벨 패치 후엔 이 recorder만 남는다."""
     calls: list[dict] = []
 
-    def _post(url, params=None, headers=None, json=None, timeout=None):  # noqa: A002
-        calls.append({"url": url, "params": params, "headers": headers, "json": json})
+    # ★auth= 를 받는다(2026-08-20): 페처는 2026-08-13부터 prod Basic Auth를 붙여 보내는데
+    #   그 변경이 **repo에 없어서** 이 스텁이 실물 시그니처와 갈라져 있었다. 스텁이 좁으면
+    #   TypeError로 죽어 «호출 0건»이 되고, 테스트는 "보고가 안 갔다"고 오독한다.
+    def _post(url, params=None, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+        calls.append({"url": url, "params": params, "headers": headers,
+                      "json": json, "auth": auth})
         return _RespStub()
 
     monkeypatch.setattr(fetcher.requests, "post", _post)

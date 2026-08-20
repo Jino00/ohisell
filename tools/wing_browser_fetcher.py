@@ -1467,6 +1467,20 @@ def cmd_poll(cfg: dict) -> int:
     # 실패로 임대를 반납한 경우에 한해 쿨다운을 이 시각까지 면제한다(요청이 살아있는 동안만).
     rg_retry_at: float | None = None
     rg_retry_backoff = int(cfg.get("rg_retry_backoff_s", 30))
+    # ★사람이 누른 요청은 쿨다운을 면제한다 (2026-08-20, Jino 결정).
+    #   무엇이 잘못됐었나: 09:12~09:13에 RG 수집이 **성공**하자 `last_rg`가 찍혀 1시간 쿨다운이
+    #   걸렸고, 09:14 이후 「전체 갱신」을 몇 번을 눌러도 아래 `if`가 False라 **로그 한 줄 없이**
+    #   무시됐다(prod 실측: requested=true인데 claimed_at=null·attempt_count=0). UI는 215초 뒤
+    #   「Mac 응답 없음 — Mac이 켜져 있는지 확인하세요」로 오진한다 — Mac은 켜져 있었고 방금
+    #   성공까지 했다. 쿨다운의 목적은 «실패 재시도 폭주 방지»이지 «사람이 누른 것 막기»가 아니다.
+    #   판별자 = prod가 주는 `requested_at`. 내가 아직 집어보지 않은 요청이면 새로 눌린 것이다.
+    #   ★claim을 시도한 순간 «집어봤다»로 기록한다(성공 여부 무관) — 실패하면 그 뒤는 종전대로
+    #   `rg_retry_at` 백오프가 맡는다. 안 그러면 실패한 요청을 15초마다 무한 재claim한다.
+    rg_served_request_at: str | None = None
+    # 쿨다운에 막혀 건너뛴 사실도 남긴다 — 이 침묵이 오진의 원인이었다. 15초마다 찍으면
+    # 로그가 죽으므로 최대 5분에 한 줄로 조인다.
+    rg_skip_log_at: float | None = None
+    rg_skip_log_every = int(cfg.get("rg_skip_log_every_s", 300))
     # 중복 요청(dedup)에 막힌 회차용 긴 백오프 — 30초 뒤 재시도는 반드시 또 dup이 된다.
     rg_dup_backoff = int(cfg.get("rg_dup_backoff_s", 900))
     log.info("Wing 폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds. RG 버튼 전용·간격 %ds(창은 버튼 요청 시에만 뜸).",
@@ -1522,8 +1536,23 @@ def cmd_poll(cfg: dict) -> int:
         # ── RG 정산 다운로드: 버튼 요청만 소비(2026-07-27 — 새벽 일일예약 제거, 순수 버튼-only) ──
         try:
             rg_st = _prod_rg_refresh_status(cfg)
-            _rg_ready = (last_rg is None or time.monotonic() - last_rg >= rg_cooldown) or (
-                rg_retry_at is not None and time.monotonic() >= rg_retry_at)
+            _rg_requested_at = rg_st.get("requested_at")
+            # 내가 아직 집어보지 않은 요청 = 사람이 방금 누른 것 → 쿨다운 면제.
+            _rg_fresh = bool(_rg_requested_at) and _rg_requested_at != rg_served_request_at
+            _rg_ready = (
+                _rg_fresh
+                or last_rg is None
+                or time.monotonic() - last_rg >= rg_cooldown
+                or (rg_retry_at is not None and time.monotonic() >= rg_retry_at)
+            )
+            if bool(rg_st.get("requested")) and not _rg_ready:
+                # ★건너뛴 것을 말한다(조인 로그). 종전엔 여기가 통째로 침묵이라, 화면의
+                #   「Mac 응답 없음」이 사실은 「쿨다운 중」인 것을 아무도 알 수 없었다.
+                if rg_skip_log_at is None or time.monotonic() - rg_skip_log_at >= rg_skip_log_every:
+                    rg_skip_log_at = time.monotonic()
+                    _left = int(rg_cooldown - (time.monotonic() - last_rg)) if last_rg is not None else 0
+                    log.info("RG: 요청 있으나 재시도 백오프 대기 — 약 %d초 남음(이 요청은 이미 집어봤다)",
+                             max(0, _left))
             if bool(rg_st.get("requested")) and _rg_ready:
                 with _try_fetch_lock() as acquired:
                     if not acquired:
@@ -1533,6 +1562,10 @@ def cmd_poll(cfg: dict) -> int:
                         #   실패를 보고하면 임대만 반납돼 다음 폴에서 자동 재시도된다(최대 3회).
                         #   로그인 필요는 재시도 제외 — 창만 반복해서 뜨기 때문(PLAN §0).
                         _rg_claimed = _prod_rg_claim(cfg)
+                        # 성공 여부와 무관하게 «이 요청은 집어봤다» — 안 그러면 실패한 요청을
+                        # 15초마다 무한 재claim한다(면제는 «새 요청» 1회에만 준다).
+                        rg_served_request_at = _rg_requested_at
+                        rg_skip_log_at = None
                         if _rg_claimed.get("claimed", False):
                             rg_lease = _rg_claimed.get("lease")
                             last_rg = time.monotonic()
