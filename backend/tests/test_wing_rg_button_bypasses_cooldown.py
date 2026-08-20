@@ -17,8 +17,14 @@
 # 고정한다. 코드가 바뀌면 이 파일의 참조 문자열 검사가 먼저 깨진다.
 from __future__ import annotations
 
+import importlib.util
+import os
+import sys
+import types
 import re
 from pathlib import Path
+
+import pytest
 
 TOOLS = Path(__file__).resolve().parents[2] / "tools"
 SRC = (TOOLS / "wing_browser_fetcher.py").read_text(encoding="utf-8")
@@ -74,12 +80,19 @@ def test_source_still_has_this_shape():
     assert "rg_cooldown" in body and "rg_retry_at" in body, "폭주 방지 항이 사라졌다"
 
 
-def test_claim_attempt_marks_the_request_as_served():
-    """claim 시도 = 집어봤다. 성공 여부와 무관해야 무한 재claim이 안 난다."""
+def test_request_is_marked_served_before_the_claim_call():
+    """«집어봤다» 기록은 claim 호출 **앞**이어야 한다 (적대 리뷰 1R P1-1).
+
+    ★2026-08-20 초판은 이 순서가 **반대**였다: claim 뒤에 기록했더니 `_prod_rg_claim`이
+    `raise_for_status()`로 예외를 던질 때(prod 5xx) 그 줄을 건너뛰어 같은 요청을 15초마다
+    무한 재claim했다. 소스 위치 검사만으로는 부족해 아래 런타임 테스트가 짝으로 있다.
+    """
+    i_mark = SRC.index("rg_served_request_at = _rg_requested_at")
     i_claim = SRC.index("_rg_claimed = _prod_rg_claim(cfg)")
-    i_mark = SRC.index("rg_served_request_at = _rg_requested_at", i_claim)
-    i_if = SRC.index('if _rg_claimed.get("claimed", False):', i_claim)
-    assert i_claim < i_mark < i_if, "«집어봤다» 기록이 claim 성공 분기 안으로 들어가면 안 된다"
+    assert i_mark < i_claim, "«집어봤다» 기록이 claim 뒤로 갔다 — 예외 경로에서 유실된다"
+    i_lastrg = SRC.index("last_rg = time.monotonic()", i_mark)
+    assert i_lastrg < i_claim, (
+        "쿨다운 시작도 claim 앞이어야 한다 — `last_rg is None`이 남으면 _rg_ready의 다른 문이 열린다")
 
 
 def test_cooldown_skip_is_no_longer_silent():
@@ -131,3 +144,147 @@ def test_every_prod_call_carries_basic_auth():
     assert "def _basic_auth(cfg: dict)" in SRC
     # 설정에 키가 없으면 None — 인증을 켜기 전에도 이 코드가 배포될 수 있어야 한다(순서 보장).
     assert "return (u, p) if u and p else None" in SRC
+
+
+# ══════════════════════════════════════════════════════════════════
+# 런타임 테스트 — 위 소스 검사들의 **사각지대**를 닫는다 (적대 리뷰 1R P1-1)
+#
+# 리뷰어가 잡은 것: `rg_served_request_at` 기록이 `_prod_rg_claim()` **뒤**에 있으면,
+# 그 함수가 `raise_for_status()`로 예외를 던질 때(prod 5xx·네트워크 순단) 그 줄을 건너뛴다.
+# → `_rg_fresh`가 계속 True → **같은 요청을 15초마다 무한 재claim**(리뷰어 재현 20회전 20호출).
+# 소스 문자열 검사는 «위치»만 보므로 이 런타임 경로를 원리적으로 못 본다. 그래서 여기서 돈다.
+# ══════════════════════════════════════════════════════════════════
+
+
+class _StopPoll(Exception):
+    """폴 루프의 sleep에서 던져 1회전만 돌린다."""
+
+
+def _load_fetcher(home):
+    if "playwright.sync_api" in sys.modules:
+        pass
+    else:
+        pkg = types.ModuleType("playwright")
+        api = types.ModuleType("playwright.sync_api")
+        api.sync_playwright = lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("playwright stub"))
+        pkg.sync_api = api
+        sys.modules.setdefault("playwright", pkg)
+        sys.modules["playwright.sync_api"] = api
+    old = os.environ.get("HOME")
+    os.environ["HOME"] = str(home)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_tool_wing_rt", TOOLS / "wing_browser_fetcher.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        if old is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old
+
+
+@pytest.fixture()
+def fetcher(tmp_path_factory):
+    return _load_fetcher(tmp_path_factory.mktemp("home"))
+
+
+def _cfg(tmp_path):
+    st = tmp_path / "state.json"
+    st.write_text("{}", encoding="utf-8")
+    return {"account_key": "COUPANG_WING1", "prod_base_url": "http://prod.test",
+            "ingest_token": "tok", "state_file": str(st)}
+
+
+def test_claim_exception_does_not_cause_infinite_reclaim(fetcher, monkeypatch, tmp_path):
+    """★적대 리뷰 1R P1-1 — claim이 예외로 죽어도 같은 요청을 재claim하면 안 된다.
+
+    폴을 **여러 회전** 돌린다. 기록이 claim 뒤에 있으면 매 회전 claim이 호출된다.
+    """
+    calls = {"n": 0}
+    turns = {"n": 0}
+
+    def _boom_claim(_cfg):
+        calls["n"] += 1
+        raise fetcher.requests.RequestException("prod 5xx")
+
+    def _sleep(_s):
+        turns["n"] += 1
+        if turns["n"] >= 5:
+            raise _StopPoll()
+
+    monkeypatch.setattr(fetcher, "_prod_refresh_status", lambda _c: {"requested": False})
+    monkeypatch.setattr(fetcher, "_prod_rg_refresh_status",
+                        lambda _c: {"requested": True, "requested_at": "2026-08-20T10:08:37"})
+    monkeypatch.setattr(fetcher, "_prod_rg_claim", _boom_claim)
+    monkeypatch.setattr(fetcher.time, "sleep", _sleep)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(_cfg(tmp_path))
+
+    assert turns["n"] >= 5, "폴이 여러 회전 돌지 않았다 — 이 테스트가 무의미해졌다"
+    assert calls["n"] == 1, (
+        f"같은 요청을 {calls['n']}번 claim했다 — 예외 경로에서 «집어봤다»가 기록되지 않는다")
+
+
+def test_new_request_after_a_failed_claim_is_served_again(fetcher, monkeypatch, tmp_path):
+    """면제가 «죽은» 것은 아니어야 한다 — 사람이 **다시** 누르면(requested_at 변경) 또 집는다."""
+    seen = []
+    stamps = iter(["2026-08-20T10:08:37"] * 3 + ["2026-08-20T10:20:00"] * 3)
+    turns = {"n": 0}
+
+    def _claim(_cfg):
+        seen.append("claim")
+        raise fetcher.requests.RequestException("prod 5xx")
+
+    def _sleep(_s):
+        turns["n"] += 1
+        if turns["n"] >= 6:
+            raise _StopPoll()
+
+    monkeypatch.setattr(fetcher, "_prod_refresh_status", lambda _c: {"requested": False})
+    monkeypatch.setattr(fetcher, "_prod_rg_refresh_status",
+                        lambda _c: {"requested": True, "requested_at": next(stamps)})
+    monkeypatch.setattr(fetcher, "_prod_rg_claim", _claim)
+    monkeypatch.setattr(fetcher.time, "sleep", _sleep)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(_cfg(tmp_path))
+
+    assert len(seen) == 2, f"요청이 두 번 눌렸는데 claim 시도가 {len(seen)}회다(2회여야 한다)"
+
+
+def test_skip_log_reports_the_gate_that_is_actually_blocking(fetcher, monkeypatch, tmp_path, caplog):
+    """★적대 리뷰 1R P1-3 — 백오프 구간에서 «쿨다운 3599초»라고 말하면 안 된다."""
+    turns = {"n": 0}
+
+    def _sleep(_s):
+        turns["n"] += 1
+        if turns["n"] >= 3:
+            raise _StopPoll()
+
+    monkeypatch.setattr(fetcher, "_prod_refresh_status", lambda _c: {"requested": False})
+    monkeypatch.setattr(fetcher, "_prod_rg_refresh_status",
+                        lambda _c: {"requested": True, "requested_at": "2026-08-20T10:08:37"})
+    monkeypatch.setattr(fetcher, "_prod_rg_claim",
+                        lambda _c: (_ for _ in ()).throw(
+                            fetcher.requests.RequestException("prod 5xx")))
+    monkeypatch.setattr(fetcher.time, "sleep", _sleep)
+
+    with caplog.at_level("INFO"):
+        with pytest.raises(_StopPoll):
+            fetcher.cmd_poll(_cfg(tmp_path))
+
+    skips = [r.getMessage() for r in caplog.records if "요청 있으나" in r.getMessage()]
+    assert skips, "건너뛴 사실이 로그에 안 남았다"
+    assert any("재시도 백오프" in m for m in skips), f"막고 있는 문을 잘못 말한다: {skips}"
+    assert not any("3599" in m or "359" in m.split("약 ")[-1][:4] for m in skips), (
+        f"백오프 구간인데 쿨다운(1시간) 기준으로 남은 시간을 냈다: {skips}")
+
+
+def test_skip_log_is_throttled_not_every_poll(fetcher):
+    """스팸 방지가 실제 값으로 살아 있어야 한다(변이 5 생존분 봉쇄)."""
+    assert 'rg_skip_log_every = int(cfg.get("rg_skip_log_every_s", 300))' in SRC
+    assert "time.monotonic() - rg_skip_log_at >= rg_skip_log_every" in SRC

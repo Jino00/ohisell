@@ -1550,9 +1550,17 @@ def cmd_poll(cfg: dict) -> int:
                 #   「Mac 응답 없음」이 사실은 「쿨다운 중」인 것을 아무도 알 수 없었다.
                 if rg_skip_log_at is None or time.monotonic() - rg_skip_log_at >= rg_skip_log_every:
                     rg_skip_log_at = time.monotonic()
-                    _left = int(rg_cooldown - (time.monotonic() - last_rg)) if last_rg is not None else 0
-                    log.info("RG: 요청 있으나 재시도 백오프 대기 — 약 %d초 남음(이 요청은 이미 집어봤다)",
-                             max(0, _left))
+                    # ★어느 문이 막고 있는지로 남은 시간을 낸다(적대 리뷰 1R P1-3):
+                    #   백오프 구간인데 쿨다운(3600초)으로 계산하면 "약 3599초 남음"이라 쓰고
+                    #   실제로는 30초 뒤 재시도된다 — 틀린 ETA는 침묵보다 나은 실패가 아니다.
+                    if rg_retry_at is not None:
+                        _gate, _left = "재시도 백오프", int(rg_retry_at - time.monotonic())
+                    elif last_rg is not None:
+                        _gate, _left = "쿨다운", int(rg_cooldown - (time.monotonic() - last_rg))
+                    else:
+                        _gate, _left = "알 수 없음", 0
+                    log.info("RG: 요청 있으나 %s 대기 — 약 %d초 남음(이 요청은 이미 집어봤다)",
+                             _gate, max(0, _left))
             if bool(rg_st.get("requested")) and _rg_ready:
                 with _try_fetch_lock() as acquired:
                     if not acquired:
@@ -1561,14 +1569,27 @@ def cmd_poll(cfg: dict) -> int:
                         # claim = 원자적 임대(요청 플래그는 보존, 2026-07-27 lease 계약).
                         #   실패를 보고하면 임대만 반납돼 다음 폴에서 자동 재시도된다(최대 3회).
                         #   로그인 필요는 재시도 제외 — 창만 반복해서 뜨기 때문(PLAN §0).
-                        _rg_claimed = _prod_rg_claim(cfg)
-                        # 성공 여부와 무관하게 «이 요청은 집어봤다» — 안 그러면 실패한 요청을
-                        # 15초마다 무한 재claim한다(면제는 «새 요청» 1회에만 준다).
+                        # ★기록이 claim **앞**에 있어야 한다(적대 리뷰 1R P1-1): `_prod_rg_claim`은
+                        #   `raise_for_status()`를 쓰므로 prod 5xx·네트워크 순단이면 예외가 나고,
+                        #   뒤에 두면 이 줄을 건너뛰어 `_rg_fresh`가 계속 True로 남는다 →
+                        #   **같은 요청을 15초마다 무한 재claim**(리뷰어 재현: 20회전 20호출).
+                        #   구코드엔 없던 구멍이다 — 종전엔 쿨다운이 그 폭주를 막고 있었다.
                         rg_served_request_at = _rg_requested_at
                         rg_skip_log_at = None
+                        # ★쿨다운도 «시도한 순간»부터 센다. 종전엔 claim 성공 시에만 `last_rg`를
+                        #   찍었는데, 그러면 claim이 실패한 동안 `last_rg is None`이 남아
+                        #   `_rg_ready`의 **다른 문**이 계속 열려 있다 — 면제를 소진해도
+                        #   15초마다 재claim이 이어진다(런타임 테스트가 5회전 5호출로 잡았다).
+                        last_rg = time.monotonic()
+                        try:
+                            _rg_claimed = _prod_rg_claim(cfg)
+                        except requests.RequestException:
+                            # 일시 장애로 못 집었다 → 1시간이 아니라 짧은 백오프 뒤 다시 시도한다.
+                            # (면제는 이미 소진됐으므로 이 경로가 없으면 다음 기회가 1시간 뒤다.)
+                            rg_retry_at = time.monotonic() + rg_retry_backoff
+                            raise
                         if _rg_claimed.get("claimed", False):
                             rg_lease = _rg_claimed.get("lease")
-                            last_rg = time.monotonic()
                             rg_retry_at = None   # 이번 시도가 시작됨 — 면제 소진
                             log.info("RG 정산 다운로드 트리거(버튼)")
                             if not Path(state).is_file():
@@ -1597,6 +1618,10 @@ def cmd_poll(cfg: dict) -> int:
                                     # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
                                     # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
                                     _prod_notify_rg_complete(cfg, lease=rg_lease)
+                        else:
+                            # 못 집었다(남이 임대 보유·이미 처리됨). 시도 시점부터 쿨다운이
+                            # 켜졌으므로 여기서 짧은 백오프를 안 걸면 다음 기회가 1시간 뒤다.
+                            rg_retry_at = time.monotonic() + rg_retry_backoff
         except requests.RequestException as e:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다

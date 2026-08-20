@@ -314,7 +314,9 @@ def test_push_goes_to_the_option_axis_endpoint_not_the_summary_one(wing, monkeyp
         status_code = 200
         text = '{"ingested": 1}'
 
-    def fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002
+    # auth= 를 받는다 — 페처는 prod Basic Auth를 실어 보낸다(2026-08-13). 좁은 스텁은
+    # TypeError로 죽어 «호출 0건»이 되고 테스트가 «push가 안 갔다»로 오독한다.
+    def fake_post(url, json=None, headers=None, timeout=None, auth=None):  # noqa: A002
         seen["url"] = url
         seen["json"] = json
         seen["headers"] = headers
