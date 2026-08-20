@@ -6,7 +6,7 @@
 - 로컬 경로: `/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling` (공유 main 폴더 — **작업은 워크트리에서**)
 - 이번 작업 워크트리: `~/.claude-worktrees/Ohiselling/rocket-ad-in-net` (브랜치 `claude/rocket-1p-ad-in-net`)
 - 실행: 백엔드 `backend/` FastAPI · 프론트 `cd frontend && npm run dev`
-- 검증 명령: 백엔드 `cd backend && python3 -m pytest tests -q` · 프론트 **`npm run build`**(★`tsc --noEmit -p tsconfig.json`은 이 repo에서 0개 파일을 검사한다 — 교훈 #326) · `npm test`
+- 검증 명령: 백엔드 `cd backend && python3 -m pytest tests -q` · 프론트 **`npm run build`**(★`tsc --noEmit -p tsconfig.json`은 이 repo에서 0개 파일을 검사한다 — 교훈 #333, 최초 #326에서 재부여) · `npm test`
 - URL: prod `https://sellc.ohitech.co.kr` (Basic Auth 자격증명 `~/.ohisell_prod_auth`)
 - prod DB: `ssh sellc.ohitech.co.kr` → `/home/ubuntu/ohisell/backend/ohisell.db` (★인라인 heredoc은 따옴표가 벗겨진다 — `ssh host 'bash -s' < 파일`)
 - 배포: **반드시** `scripts/safe_deploy.sh` (이번엔 마이그레이션 없어 `--migrate` 불필요)
@@ -24,7 +24,7 @@
 - ✅ 적대 리뷰 1R FAIL(P1 2) → 처분 → 2R **PASS**(P1 0). 변이 누적 14종, 생존 0.
 - ✅ 배포 — 백엔드 무중단(다운타임 0초) `64b0d705`, 프론트 `844e0314`(백업 `dist_backup_20260820_0708`).
 - ✅ **PR #313** 생성 (OPEN·미병합).
-- ✅ 문서 — 트랙 D-22 · `docs/TRACKS.md` · `claude-progress.txt` · 교훈 **#328·#329·#330** · `failures.jsonl` 1줄.
+- ✅ 문서 — 트랙 D-22 · `docs/TRACKS.md` · `claude-progress.txt` · 교훈 **#335·#336·#337**(최초 #328~#330 → 병합 시 재부여, 병행 세션이 같은 번호를 다른 내용으로 main에 먼저 등재) · `failures.jsonl` 1줄.
 
 ## 2-1. 완료 QA
 - **작업 목적(정본 원문, 앵커 `목표:`)**: 대시보드에서 「광고비는 합계에 올라가는데 순이익에서는 안 빠지는」 구조를 없앤다 — 두 매출 축(계산서/판매=납품가) 어느 쪽을 골라도 광고비가 순이익에 반영되고 카드·표·행이 서로 검산된다
