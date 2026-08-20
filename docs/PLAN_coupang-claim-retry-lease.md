@@ -60,3 +60,83 @@
 
 - prod 배포는 safe_deploy.sh만. 페처(tools/)는 Mac 로컬 실행 — 코드 변경 후 `launchctl kickstart -k` 필요(stale 구코드 사고 이력), 단 이 스프린트에서는 재시작 금지(병합 후).
 - SQLite server_default now()=UTC 함정 — 시각 비교는 kst_now() 일관 사용(기존 코드 관례 따름).
+
+---
+
+## 6. 후속 — 쿨다운이 버튼을 삼키던 구멍 (2026-08-20, Jino 발견)
+
+> §0의 *"버튼 1회의 의도는 재시도 3회까지 포함한다"*는 **claim 이후**만 보장했다.
+> claim **이전**에 쿨다운이 버튼을 통째로 삼키는 경로가 남아 있었다.
+
+### 무엇이 있었나
+
+Jino 원문(09:43): *"오늘 오전에 몇번 시도했는데, 오픽스와 오하이테크가 응닶없음으로 계속 나오네"*
+
+라이브 실측 — RG 수집은 **성공하고 있었다**:
+
+```
+09:12:51 WING2 RG 다운로드 완료 (prod upserted 497)
+09:13:27 WING1 RG 다운로드 완료 (prod upserted 157)
+09:14:37 「전체 갱신」 → prod requested=true
+그 뒤   claimed_at=null · attempt_count=0 · 로그 한 줄 없음
+09:18   UI 「⚠️ 응답 없음 — Mac이 켜져 있는지 확인하세요」
+```
+
+`wing_browser_fetcher.py` 폴 루프의 RG 레인:
+
+```python
+_rg_ready = (last_rg is None or now - last_rg >= rg_cooldown) or (...)
+if bool(rg_st.get("requested")) and _rg_ready:
+    ...        # ← else 가 없다
+```
+
+`rg_min_interval_s`는 설정에 없어 기본 **3600초**다. 09:13에 성공하면 10:13까지
+버튼이 **로그도 없이** 무시된다. 「Mac 응답 없음」은 오진이다 — Mac은 켜져 있었고
+1분 전에 성공까지 했다.
+
+### Jino 결정 (선택지 4개 중)
+
+**「버튼 요청은 쿨다운 면제」.** 쿨다운의 목적은 «실패 재시도 폭주 방지»이지
+«사람이 누른 것 막기»가 아니다.
+
+### 무엇을 했나
+
+- 판별자 = prod `refresh-status`의 **`requested_at`**. 내가 마지막으로 집어본 값과
+  다르면 «사람이 새로 누른 것» → 쿨다운 면제.
+- 면제는 **새 요청 1회**에만. `rg_served_request_at` 기록과 `last_rg`(쿨다운 시작)를
+  **둘 다 claim 호출 «앞»**에 둔다.
+  - 기록만 앞으로 옮기면 부족하다 — `_prod_rg_claim`은 `raise_for_status()`를 쓰므로
+    prod 5xx에 예외가 나고, 그때 `last_rg`가 None으로 남으면 `_rg_ready`의 **다른 항**
+    (`last_rg is None`)이 무조건 True라 여전히 15초마다 무한 재claim한다.
+    (적대 리뷰 1R P1-1 → 런타임 테스트가 5회전 5호출로 재확인)
+- 예외 경로·`claimed=False` 경로엔 짧은 백오프(`rg_retry_at`)를 걸어 **1시간 정지**가
+  생기지 않게 한다.
+- 쿨다운에 막혀 건너뛰면 **로그를 남긴다**(최대 5분에 한 줄). 이 침묵이 오진의 원인이었다.
+  남은 시간은 «실제로 막고 있는 문»(백오프/쿨다운) 기준으로 낸다 — 백오프 30초인데
+  「약 3599초」라고 쓰면 틀린 ETA가 침묵을 대체할 뿐이다(1R P1-3).
+
+### 라이브 증거
+
+```
+10:28:16 RG 다운로드 완료 (쿨다운 시작)
+10:28:38 재요청
+10:28:46 RG 정산 다운로드 트리거(버튼)      ← 두 계정 모두
+10:28:55 / 10:29:02 완주 → requested=False
+prod: requested_at=10:28:38 claimed_at=10:28:46.94 attempts=1 in_flight=True
+```
+
+### 부수 — repo가 실물보다 낡아 있었다
+
+2026-08-13 prod Basic Auth 작업이 **Mac 가동본에만** 반영되고 `tools/`에는 안 들어와
+있었다. repo를 실물에 맞추자 wing 페처 테스트 **22건이 TypeError로 깨졌다**(스텁이
+`auth=`를 못 받는 좁은 시그니처) — 즉 그 기능은 repo의 어떤 테스트도 검증한 적이 없다.
+스텁을 실물에 맞추고, **「prod로 나가는 호출은 예외 없이 `auth`를 싣는다」**를 개수가
+아니라 불변식으로 고정했다.
+
+### 남은 것
+
+- `refresh-status`가 `status: green · stale: false`인데 `last_success_at`은
+  2026-08-15(122시간 전)이다. 설계상 `refresh-complete`는 이 시계를 안 건드리고
+  (*"받은 게 없으면 데이터는 그대로다"*), 오늘 받은 건 `PRODUCT_SIZE_COMPARISON`이라
+  정산 시계가 안 움직인다. 데이터는 결손 0으로 정상이나 **「초록인데 5일 묵음」**은
+  이 repo가 반복해 당한 형태다 — 별건.

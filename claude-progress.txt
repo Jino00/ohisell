@@ -39,6 +39,56 @@
   · QA가 확인 못한 것 4건 그대로 기록(#3·#13 독립 재현 미실시 등).
   · 코드·마이그레이션·배포·prod 쓰기 0건. 커밋 25bc064f·82941e2e·de3f790c·00dac6c5·191add42·
     846dac8a·13fd1064. 인계 .claude/memory/HANDOFF_holdout-reseed+c10-approved_20260820.md
+[2026-08-20 11:0x] RG 수집 버튼이 1시간 쿨다운에 조용히 삼켜지던 것 수리 (PR #314)
+  · 발단: Jino 09:43 "이것부터 해결해야 진행이 될 거 같아. 오늘 오전에 몇번 시도했는데,
+    오픽스와 오하이테크가 응닶없음으로 계속 나오네" — 대시보드 「전체 갱신 결과」에 오픽스·
+    오하이테크만 ⚠️「응답 없음 — Mac이 켜져 있는지 확인하세요」. 소속: 트랙 아님(완료된
+    「Wing 세션 자동화」 후속). 정본 문서 = docs/PLAN_coupang-claim-retry-lease.md §6.
+  · 진단(실측): Mac은 켜져 있었고 수집도 성공하고 있었다 — 09:12:51 WING2 · 09:13:27
+    WING1이 RG 다운로드를 완주(prod upserted 497/157). 그 성공이 last_rg를 찍어
+    rg_cooldown(config 미설정 → 기본 3600초)이 걸렸고, 09:14:37 이후 버튼 요청은 폴 루프가
+    `if requested and _rg_ready:`에 else가 없어 로그 한 줄 없이 건너뛰었다(prod 실측
+    requested=true·claimed_at=null·attempt_count=0). UI는 215초 뒤 「Mac 응답 없음」으로
+    오진 — 화면의 ⚠️ 두 줄은 판매분석이 아니라 RG 정산 수집(rg_wing1/rg_wing2)이다.
+  · Jino 결정(선택지 4개 중): 「버튼 요청은 쿨다운 면제」 — 쿨다운의 목적은 «실패 재시도
+    폭주 방지»이지 «사람이 누른 것 막기»가 아니다.
+  · 한 것 5가지: ①판별자=prod refresh-status의 requested_at, 마지막으로 집어본 값과 다르면
+    «사람이 새로 누른 것»→면제 ②면제는 새 요청 1회에만, rg_served_request_at 기록과
+    last_rg(쿨다운 시작)를 둘 다 claim 호출 앞에 둔다 ③예외 경로·claimed=False 경로에
+    짧은 백오프(rg_retry_at, 기본 30초)로 1시간 정지 방지 ④건너뛰면 로그(최대 5분 1줄),
+    남은 시간은 실제로 막는 문(백오프/쿨다운) 기준 ⑤repo↔Mac 가동본 동기화 —
+    2026-08-13 prod Basic Auth 작업이 Mac에만 반영돼 있었다(_basic_auth 헬퍼 + 호출 11곳).
+  · 적대 리뷰 1R FAIL(P1 3건) → 2R PASS. P1-1: `_prod_rg_claim`이 raise_for_status()를
+    써서 prod 5xx에 예외가 나면 「집어봤다」 기록이 그 뒤라도 last_rg가 None이면
+    _rg_ready의 다른 항(last_rg is None)이 무조건 True라 여전히 무한 재claim — 리뷰어
+    지적보다 한 겹 더 깊었다. 새 런타임 테스트(5회전 5호출)가 소스 문자열 검사로는
+    원리적으로 못 보는 이 결함을 잡았다. P1-2: `test_wing_vi_detail.py:317` fake_post가
+    auth=를 못 받아 origin/main 통과 테스트가 깨짐 → 좁은 스텁 전수 재조사. P1-3: 스킵
+    로그 ETA가 항상 쿨다운(3600초) 기준이라 30초 백오프 구간에서도 「약 3599초」로 오기.
+    2R P2: 변이 ⑤(claimed=False 백오프 제거) 생존 → 커밋 35169639로 회귀 테스트 추가
+    (가짜 monotonic 시계로 600초 시뮬레이션). 누적 변이 9종 생존 0.
+  · 라이브 증거(수정본 10:27 배포·재기동 후): 10:28:16 완주(쿨다운 시작) → 10:28:38
+    재요청 → 10:28:46 트리거(두 계정) → 10:28:55/10:29:02 완주 → requested=False. prod
+    claimed_at=10:28:46.94 attempts=1 in_flight=True.
+  · 테스트: 신규 14건(런타임 4 포함). 전체 스위트 5,861 passed / 2 failed — 그 2건
+    (test_health_partial_sync::test_health_route_actually_returns_partial_sync,
+    test_vendor_item_axis::test_health_route_actually_returns_conservation)은
+    origin/main(cf170d56)에서도 동일 실패하는 기존 부채(리뷰어 독립 실행과 숫자 일치).
+  · 커밋 5건: 07030022(동기화)→034fc0a4(면제)→2da88b03(1R 반영)→44d5778a(문서 §6)→
+    35169639(2R P2 테스트). PR #314 OPEN·미병합.
+  · 배포: Mac 로컬 파일 교체 + launchctl kickstart 2회(10:07 초판, 10:27 리뷰 반영본=
+    현재 가동). 백업 ~/.ohisell/tools/wing_browser_fetcher.py.bak-20260820. prod 백엔드는
+    무변경(Mac 페처 단독 수정).
+  · 완료 QA(별도 Sonnet 기, 읽기 전용) 판정 원문: "종합 판정: 부분달성 — 합격기준 ①②④
+    달성·「안 함」 위반 0건 / ③(재시도 폭주 방지)은 코드·테스트 증거로만 뒷받침되고
+    합격기준이 명시한 「라이브」 실사례에는 닿지 못해 판정불능으로 남긴다. 적대 리뷰 2R
+    미완도 별도로 남아 있다." (※QA 시점엔 2R가 미완이었고, 그 뒤 2R는 PASS로 끝났다.)
+  · 이월: refresh-status가 status: green·stale: false인데 last_success_at은 2026-08-15
+    (120시간+) — 설계상 refresh-complete는 이 시계를 안 건드리고(오늘 받은 건
+    PRODUCT_SIZE_COMPARISON이라 정산 시계가 안 움직임), 데이터는 결손 0으로 정상이나
+    「초록인데 묵음」은 이 repo가 반복해 당한 형태(별건) · 합격기준 설계 교훈: ③은
+    「라이브」로 못 잰다(폭주를 라이브로 유도하려면 prod를 일부러 망가뜨려야 한다) ·
+    리뷰어에게 전용 워크트리를 줘야 한다.
 
 [2026-08-20 07:0x] D-22 광고비가 순이익에 닿는다 — 로켓1P 계산서 축의 광고비 누출 수리·배포(PR #313)
   · 발단: Jino가 대시보드 스크린샷과 함께 "여기에 숫자들이 잘 안맞는거 같은데, 숫자를 좀

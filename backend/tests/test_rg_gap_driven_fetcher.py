@@ -174,7 +174,7 @@ def _cfg() -> dict:
 def test_gap_query_sends_account_days_and_report_types(wing, monkeypatch):
     seen: dict = {}
 
-    def _get(url, params=None, headers=None, timeout=None):
+    def _get(url, params=None, headers=None, timeout=None, auth=None):
         seen.update({"url": url, "params": params, "headers": headers})
         return _Resp(payload={"gaps": [], "covered_fee_types": ["delivery"]})
 
@@ -507,7 +507,7 @@ def test_gap_query_days_are_clamped_to_endpoint_limit(wing, monkeypatch):
     """days>400이면 422 → 조용한 폴백. 백필하려다 자가치유가 꺼지는 역설(리뷰 [P2-4])."""
     seen: dict = {}
 
-    def _get(_url, params=None, headers=None, timeout=None):
+    def _get(_url, params=None, headers=None, timeout=None, auth=None):
         seen.update(params)
         return _Resp(200, {"covered_fee_types": ["warehousing"], "gaps": []})
 

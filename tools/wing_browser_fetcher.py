@@ -368,6 +368,7 @@ def _push_vendor_item_sales(cfg: dict, rows: list[dict], last_refresh: str | Non
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-item-sales/ingest",
             json={"account_key": cfg["account_key"], "rows": payload},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,  # 요약축(20s)보다 길게 — 행 수가 수백~수천이다
         )
     except requests.RequestException as e:
@@ -930,6 +931,7 @@ def _push(cfg: dict, summ: dict) -> int:
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/ingest",
             json={"account_key": cfg["account_key"], "days": days},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=20,
         )
     except requests.RequestException as e:
@@ -1250,6 +1252,17 @@ _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 
 _MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
 
 
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(인증 켜기 전까지 기존 동작 유지).
+
+    ★설정에 키가 없으면 None을 돌려준다. 그래야 이 커밋을 먼저 배포해 두고
+      나중에 nginx를 켜는 «순서»가 성립한다(둘을 동시에 바꾸면 되돌릴 곳이 두 곳이 된다).
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
+
+
 # ★버튼 큐는 계정 차원(2026-07-27, WING2 인스턴스 편입): account_key를 안 보내면 백엔드가
 #   WING1 큐로 해석한다 → WING2 인스턴스가 오픽스(WING1) 버튼 요청을 claim해 가져가는 도난이
 #   난다(claim=원자적, 먼저 집는 쪽이 이김). 아래 4개 호출 모두 자기 계정을 명시한다.
@@ -1257,6 +1270,7 @@ def _prod_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-status",
         params={"account_key": cfg["account_key"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1268,6 +1282,7 @@ def _prod_claim(cfg: dict) -> dict:
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-claim",
         params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1278,6 +1293,7 @@ def _prod_rg_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-status",
         params={"account_key": cfg["account_key"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1289,6 +1305,7 @@ def _prod_rg_claim(cfg: dict) -> dict:
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-claim",
         params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1312,6 +1329,7 @@ def _prod_notify_rg_complete(cfg: dict, lease: str | None = None) -> None:
                 params={"account_key": cfg["account_key"]},   # ★계정 명시 — 아래 R3 주석 참조
                 json=body,
                 headers={"X-Ingest-Token": cfg["ingest_token"]},
+                auth=_basic_auth(cfg),
                 timeout=10,
             )
             if r.status_code == 200:
@@ -1351,6 +1369,7 @@ def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = No
             params={"account_key": cfg["account_key"]},
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=10,
         )
         # ★비200을 침묵시키지 않는다(codex 1R[P2], 2026-08-03): 이 POST가 실패의 **유일한**
@@ -1448,6 +1467,20 @@ def cmd_poll(cfg: dict) -> int:
     # 실패로 임대를 반납한 경우에 한해 쿨다운을 이 시각까지 면제한다(요청이 살아있는 동안만).
     rg_retry_at: float | None = None
     rg_retry_backoff = int(cfg.get("rg_retry_backoff_s", 30))
+    # ★사람이 누른 요청은 쿨다운을 면제한다 (2026-08-20, Jino 결정).
+    #   무엇이 잘못됐었나: 09:12~09:13에 RG 수집이 **성공**하자 `last_rg`가 찍혀 1시간 쿨다운이
+    #   걸렸고, 09:14 이후 「전체 갱신」을 몇 번을 눌러도 아래 `if`가 False라 **로그 한 줄 없이**
+    #   무시됐다(prod 실측: requested=true인데 claimed_at=null·attempt_count=0). UI는 215초 뒤
+    #   「Mac 응답 없음 — Mac이 켜져 있는지 확인하세요」로 오진한다 — Mac은 켜져 있었고 방금
+    #   성공까지 했다. 쿨다운의 목적은 «실패 재시도 폭주 방지»이지 «사람이 누른 것 막기»가 아니다.
+    #   판별자 = prod가 주는 `requested_at`. 내가 아직 집어보지 않은 요청이면 새로 눌린 것이다.
+    #   ★claim을 시도한 순간 «집어봤다»로 기록한다(성공 여부 무관) — 실패하면 그 뒤는 종전대로
+    #   `rg_retry_at` 백오프가 맡는다. 안 그러면 실패한 요청을 15초마다 무한 재claim한다.
+    rg_served_request_at: str | None = None
+    # 쿨다운에 막혀 건너뛴 사실도 남긴다 — 이 침묵이 오진의 원인이었다. 15초마다 찍으면
+    # 로그가 죽으므로 최대 5분에 한 줄로 조인다.
+    rg_skip_log_at: float | None = None
+    rg_skip_log_every = int(cfg.get("rg_skip_log_every_s", 300))
     # 중복 요청(dedup)에 막힌 회차용 긴 백오프 — 30초 뒤 재시도는 반드시 또 dup이 된다.
     rg_dup_backoff = int(cfg.get("rg_dup_backoff_s", 900))
     log.info("Wing 폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds. RG 버튼 전용·간격 %ds(창은 버튼 요청 시에만 뜸).",
@@ -1503,8 +1536,31 @@ def cmd_poll(cfg: dict) -> int:
         # ── RG 정산 다운로드: 버튼 요청만 소비(2026-07-27 — 새벽 일일예약 제거, 순수 버튼-only) ──
         try:
             rg_st = _prod_rg_refresh_status(cfg)
-            _rg_ready = (last_rg is None or time.monotonic() - last_rg >= rg_cooldown) or (
-                rg_retry_at is not None and time.monotonic() >= rg_retry_at)
+            _rg_requested_at = rg_st.get("requested_at")
+            # 내가 아직 집어보지 않은 요청 = 사람이 방금 누른 것 → 쿨다운 면제.
+            _rg_fresh = bool(_rg_requested_at) and _rg_requested_at != rg_served_request_at
+            _rg_ready = (
+                _rg_fresh
+                or last_rg is None
+                or time.monotonic() - last_rg >= rg_cooldown
+                or (rg_retry_at is not None and time.monotonic() >= rg_retry_at)
+            )
+            if bool(rg_st.get("requested")) and not _rg_ready:
+                # ★건너뛴 것을 말한다(조인 로그). 종전엔 여기가 통째로 침묵이라, 화면의
+                #   「Mac 응답 없음」이 사실은 「쿨다운 중」인 것을 아무도 알 수 없었다.
+                if rg_skip_log_at is None or time.monotonic() - rg_skip_log_at >= rg_skip_log_every:
+                    rg_skip_log_at = time.monotonic()
+                    # ★어느 문이 막고 있는지로 남은 시간을 낸다(적대 리뷰 1R P1-3):
+                    #   백오프 구간인데 쿨다운(3600초)으로 계산하면 "약 3599초 남음"이라 쓰고
+                    #   실제로는 30초 뒤 재시도된다 — 틀린 ETA는 침묵보다 나은 실패가 아니다.
+                    if rg_retry_at is not None:
+                        _gate, _left = "재시도 백오프", int(rg_retry_at - time.monotonic())
+                    elif last_rg is not None:
+                        _gate, _left = "쿨다운", int(rg_cooldown - (time.monotonic() - last_rg))
+                    else:
+                        _gate, _left = "알 수 없음", 0
+                    log.info("RG: 요청 있으나 %s 대기 — 약 %d초 남음(이 요청은 이미 집어봤다)",
+                             _gate, max(0, _left))
             if bool(rg_st.get("requested")) and _rg_ready:
                 with _try_fetch_lock() as acquired:
                     if not acquired:
@@ -1513,10 +1569,27 @@ def cmd_poll(cfg: dict) -> int:
                         # claim = 원자적 임대(요청 플래그는 보존, 2026-07-27 lease 계약).
                         #   실패를 보고하면 임대만 반납돼 다음 폴에서 자동 재시도된다(최대 3회).
                         #   로그인 필요는 재시도 제외 — 창만 반복해서 뜨기 때문(PLAN §0).
-                        _rg_claimed = _prod_rg_claim(cfg)
+                        # ★기록이 claim **앞**에 있어야 한다(적대 리뷰 1R P1-1): `_prod_rg_claim`은
+                        #   `raise_for_status()`를 쓰므로 prod 5xx·네트워크 순단이면 예외가 나고,
+                        #   뒤에 두면 이 줄을 건너뛰어 `_rg_fresh`가 계속 True로 남는다 →
+                        #   **같은 요청을 15초마다 무한 재claim**(리뷰어 재현: 20회전 20호출).
+                        #   구코드엔 없던 구멍이다 — 종전엔 쿨다운이 그 폭주를 막고 있었다.
+                        rg_served_request_at = _rg_requested_at
+                        rg_skip_log_at = None
+                        # ★쿨다운도 «시도한 순간»부터 센다. 종전엔 claim 성공 시에만 `last_rg`를
+                        #   찍었는데, 그러면 claim이 실패한 동안 `last_rg is None`이 남아
+                        #   `_rg_ready`의 **다른 문**이 계속 열려 있다 — 면제를 소진해도
+                        #   15초마다 재claim이 이어진다(런타임 테스트가 5회전 5호출로 잡았다).
+                        last_rg = time.monotonic()
+                        try:
+                            _rg_claimed = _prod_rg_claim(cfg)
+                        except requests.RequestException:
+                            # 일시 장애로 못 집었다 → 1시간이 아니라 짧은 백오프 뒤 다시 시도한다.
+                            # (면제는 이미 소진됐으므로 이 경로가 없으면 다음 기회가 1시간 뒤다.)
+                            rg_retry_at = time.monotonic() + rg_retry_backoff
+                            raise
                         if _rg_claimed.get("claimed", False):
                             rg_lease = _rg_claimed.get("lease")
-                            last_rg = time.monotonic()
                             rg_retry_at = None   # 이번 시도가 시작됨 — 면제 소진
                             log.info("RG 정산 다운로드 트리거(버튼)")
                             if not Path(state).is_file():
@@ -1545,6 +1618,10 @@ def cmd_poll(cfg: dict) -> int:
                                     # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
                                     # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
                                     _prod_notify_rg_complete(cfg, lease=rg_lease)
+                        else:
+                            # 못 집었다(남이 임대 보유·이미 처리됨). 시도 시점부터 쿨다운이
+                            # 켜졌으므로 여기서 짧은 백오프를 안 걸면 다음 기회가 1시간 뒤다.
+                            rg_retry_at = time.monotonic() + rg_retry_backoff
         except requests.RequestException as e:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
@@ -1707,6 +1784,7 @@ def _rg_push_status(cfg: dict, raw: dict) -> int:
             params={"account_key": cfg["account_key"]},
             json=raw,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
@@ -1821,6 +1899,7 @@ def _prod_rg_layer2_gaps(cfg: dict, report_types: list[str], days: int) -> dict 
             params={"account_key": cfg["account_key"], "days": days,
                     "report_types": list(report_types)},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=20,
         )
     except Exception as e:  # noqa: BLE001 — 조회 실패는 수집을 죽이지 않는다
@@ -2001,6 +2080,7 @@ def _rg_push_xlsx(cfg: dict, url: str, report_type: str, group_key: str) -> int:
             params=params,
             files={"file": (filename, content, _XLSX_MIME)},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
