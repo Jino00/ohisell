@@ -368,6 +368,7 @@ def _push_vendor_item_sales(cfg: dict, rows: list[dict], last_refresh: str | Non
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-item-sales/ingest",
             json={"account_key": cfg["account_key"], "rows": payload},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,  # 요약축(20s)보다 길게 — 행 수가 수백~수천이다
         )
     except requests.RequestException as e:
@@ -930,6 +931,7 @@ def _push(cfg: dict, summ: dict) -> int:
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/ingest",
             json={"account_key": cfg["account_key"], "days": days},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=20,
         )
     except requests.RequestException as e:
@@ -1250,6 +1252,17 @@ _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 
 _MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
 
 
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(인증 켜기 전까지 기존 동작 유지).
+
+    ★설정에 키가 없으면 None을 돌려준다. 그래야 이 커밋을 먼저 배포해 두고
+      나중에 nginx를 켜는 «순서»가 성립한다(둘을 동시에 바꾸면 되돌릴 곳이 두 곳이 된다).
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
+
+
 # ★버튼 큐는 계정 차원(2026-07-27, WING2 인스턴스 편입): account_key를 안 보내면 백엔드가
 #   WING1 큐로 해석한다 → WING2 인스턴스가 오픽스(WING1) 버튼 요청을 claim해 가져가는 도난이
 #   난다(claim=원자적, 먼저 집는 쪽이 이김). 아래 4개 호출 모두 자기 계정을 명시한다.
@@ -1257,6 +1270,7 @@ def _prod_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-status",
         params={"account_key": cfg["account_key"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1268,6 +1282,7 @@ def _prod_claim(cfg: dict) -> dict:
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-claim",
         params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1278,6 +1293,7 @@ def _prod_rg_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-status",
         params={"account_key": cfg["account_key"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1289,6 +1305,7 @@ def _prod_rg_claim(cfg: dict) -> dict:
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-claim",
         params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -1312,6 +1329,7 @@ def _prod_notify_rg_complete(cfg: dict, lease: str | None = None) -> None:
                 params={"account_key": cfg["account_key"]},   # ★계정 명시 — 아래 R3 주석 참조
                 json=body,
                 headers={"X-Ingest-Token": cfg["ingest_token"]},
+                auth=_basic_auth(cfg),
                 timeout=10,
             )
             if r.status_code == 200:
@@ -1351,6 +1369,7 @@ def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = No
             params={"account_key": cfg["account_key"]},
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=10,
         )
         # ★비200을 침묵시키지 않는다(codex 1R[P2], 2026-08-03): 이 POST가 실패의 **유일한**
@@ -1707,6 +1726,7 @@ def _rg_push_status(cfg: dict, raw: dict) -> int:
             params={"account_key": cfg["account_key"]},
             json=raw,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
@@ -1821,6 +1841,7 @@ def _prod_rg_layer2_gaps(cfg: dict, report_types: list[str], days: int) -> dict 
             params={"account_key": cfg["account_key"], "days": days,
                     "report_types": list(report_types)},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=20,
         )
     except Exception as e:  # noqa: BLE001 — 조회 실패는 수집을 죽이지 않는다
@@ -2001,6 +2022,7 @@ def _rg_push_xlsx(cfg: dict, url: str, report_type: str, group_key: str) -> int:
             params=params,
             files={"file": (filename, content, _XLSX_MIME)},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
