@@ -70,7 +70,11 @@ def upgrade() -> None:
         sa.Column("modified_date", sa.String(length=40), nullable=True),
         # ★응답 스키마가 항목마다 다르다(실측 8건 중 26키 3 · 29키 5) — 키 부재/null 구분의 정본.
         sa.Column("raw_json", sa.Text(), nullable=True),
-        sa.Column("first_seen_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=True),
+        # ★모델은 `Mapped[datetime]`(nullable=False)이다 — 초판은 여기만 True라 스키마가 갈렸다
+        #   (적대 리뷰 1R P2-7). ⚠️server_default는 SQLite에서 **UTC**인데 수집기가 넣는 값은
+        #   KST다. 수집기가 항상 명시적으로 채우므로 이 기본값은 발화하지 않지만, 발화하면
+        #   한 컬럼에 두 시간대가 섞인다(`scheduler_state`가 그렇게 됐다 — D-NAO-210 [미상] 해소).
+        sa.Column("first_seen_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
         sa.Column("last_seen_at", sa.DateTime(), nullable=True),
         sa.Column("last_changed_at", sa.DateTime(), nullable=True),
         sa.PrimaryKeyConstraint("id"),

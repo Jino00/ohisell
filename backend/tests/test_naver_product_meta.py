@@ -192,3 +192,103 @@ def test_missing_product_row_is_not_deleted(db):
             db.execute(select(NaverProductMetaCurrent)).scalars().all()}
     assert set(rows) == {"12345678901", "222"}          # 지우지 않았다
     assert rows["12345678901"].last_seen_at == before     # 정체했다
+
+
+# ─────────────────────────────────────────────────────────────
+# 적대 리뷰 1R 반영 — 살아남은 변이를 죽이는 테스트
+#   P1-1(M13): 미완주 판정이 **지속 표면**에 닿는가(로그 한 줄에서 끝나지 않는가)
+#   P2-2(M11·M12): 잡 «배선»(콜백 매핑·크론 기본값)
+#   P2-6(M3·M9·M17): 페이지 완주 검사 · 길이 클립 · last_seen_at 전진
+#   P2-5: 회차 내 중복이 변경 원장에 유령 행을 만들지 않는가
+# ─────────────────────────────────────────────────────────────
+
+
+def test_job_raises_when_incomplete_so_last_status_records_error(monkeypatch, db):
+    """★P1-1 — 미완주는 «성공으로 위장»되면 안 된다.
+
+    잡이 조용히 None을 돌려주면 `_apply_job_event`가 last_status='ok'를 쓰고 수동 트리거는
+    「작업 실행 완료」를 돌려준다 — 수집기의 판정이 어디에도 안 남는다(교훈 #319·#321).
+    """
+    from app.services import naver_product_meta_ingest as ing
+    from app.services import scheduler_service as sched
+
+    monkeypatch.setattr(sched, "_get_own_db_session", lambda: db)
+    monkeypatch.setattr(ing, "sync_product_meta", lambda _db, **kw: {
+        "pages": 1, "total_pages": 3, "origins": 5, "total_elements": 99, "channel_rows": 5,
+        "new": 5, "changed": 0, "unchanged": 0, "change_rows": 0, "dup_in_run": 0,
+        "complete": False, "incomplete_reason": "페이지 미완주 1/3", "errors": [], "as_of": "",
+    })
+    with pytest.raises(RuntimeError) as e:
+        sched.sync_naver_product_meta_job()
+    assert "미완주" in str(e.value) and "1/3" in str(e.value)
+
+
+def test_job_returns_result_dict_when_complete(monkeypatch, db):
+    """★P1-1 — 완주 회차는 결과 dict를 «반환»해야 한다(수동 트리거 응답에 실려 ⓑ 증거가 된다)."""
+    from app.services import naver_product_meta_ingest as ing
+    from app.services import scheduler_service as sched
+
+    payload = {"pages": 7, "total_pages": 7, "origins": 1213, "total_elements": 1213,
+               "channel_rows": 1213, "new": 1213, "changed": 0, "unchanged": 0,
+               "change_rows": 0, "dup_in_run": 0, "complete": True,
+               "incomplete_reason": None, "errors": [], "as_of": ""}
+    monkeypatch.setattr(sched, "_get_own_db_session", lambda: db)
+    monkeypatch.setattr(ing, "sync_product_meta", lambda _db, **kw: payload)
+    assert sched.sync_naver_product_meta_job() == payload
+
+
+def test_job_is_wired_to_scheduler_and_cron_slot():
+    """★P2-2 — 매핑이 빠지면 수동 트리거 400 + toggle이 재시작 없이 못 살린다(쿠팡 13일 정지의 뿌리)."""
+    from app.services import scheduler_service as sched
+
+    assert sched.job_func_for("sync_naver_product_meta") is sched.sync_naver_product_meta_job
+    defaults = dict(sched._DEFAULT_JOBS) if hasattr(sched, "_DEFAULT_JOBS") else None
+    if defaults is None:                      # 이름이 다르면 소스에서 직접 확인한다
+        import inspect
+        src = inspect.getsource(sched)
+        assert '("sync_naver_product_meta", "55 9 * * *")' in src
+    else:
+        assert defaults["sync_naver_product_meta"] == "55 9 * * *"
+
+
+def test_incomplete_when_last_flag_lies_about_completion(db):
+    """★P2-6(M3) — `last=True`가 거짓이어도 페이지 등식이 잡는다(응답을 곧이곧대로 믿지 않는다)."""
+    lying = _page([_origin([CP_29])], total_elements=1, total_pages=3, page=1, last=True)
+    st = ingest.sync_product_meta(db, client=FakeClient([lying]))
+    assert st["complete"] is False
+    assert "페이지 미완주 1/3" in st["incomplete_reason"]
+
+
+def test_last_seen_at_advances_for_products_still_present(db):
+    """★P2-6(M17) — 「사라진 상품」 관측의 유일한 기제다. 정체만 검사하고 전진을 안 보면 반쪽이다."""
+    ingest.sync_product_meta(db, client=FakeClient(
+        [_page([_origin([CP_29])], total_elements=1, total_pages=1)]))
+    first = db.execute(select(NaverProductMetaCurrent)).scalar_one().last_seen_at
+    import time as _t
+    _t.sleep(0.01)
+    ingest.sync_product_meta(db, client=FakeClient(
+        [_page([_origin([CP_29])], total_elements=1, total_pages=1)]))
+    again = db.execute(select(NaverProductMetaCurrent)).scalar_one().last_seen_at
+    assert again > first
+
+
+def test_overlong_string_is_clipped_but_raw_keeps_it(db):
+    """★P2-6(M9) — SQLite는 안 자르지만 PostgreSQL에선 초과가 에러다. 원문은 raw_json이 지킨다."""
+    long_cat = "가" * 400
+    st = ingest.sync_product_meta(db, client=FakeClient(
+        [_page([_origin([dict(CP_29, wholeCategoryName=long_cat)])],
+               total_elements=1, total_pages=1)]))
+    assert st["complete"] is True
+    row = db.execute(select(NaverProductMetaCurrent)).scalar_one()
+    assert len(row.whole_category_name) == 300
+    assert json.loads(row.raw_json)["wholeCategoryName"] == long_cat   # 원문은 안 잘렸다
+
+
+def test_duplicate_in_one_run_creates_no_change_row(db):
+    """★P2-5 — 회차 내 중복은 «변경»이 아니다. 변경 원장은 소급 복구가 안 된다."""
+    dup = _page([_origin([CP_29]), _origin([dict(CP_29, stockQuantity=1)], origin_no=111)],
+                total_elements=2, total_pages=1)
+    st = ingest.sync_product_meta(db, client=FakeClient([dup]))
+    assert st["dup_in_run"] == 1
+    assert st["changed"] == 0
+    assert db.execute(select(func.count()).select_from(NaverProductMetaChange)).scalar() == 0

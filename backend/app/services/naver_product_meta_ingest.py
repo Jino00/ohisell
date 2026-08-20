@@ -140,7 +140,7 @@ def sync_product_meta(
     """전건 폴링 1회.
 
     반환: {pages, total_pages, origins, total_elements, channel_rows, new, changed,
-           unchanged, change_rows, complete, incomplete_reason, errors, as_of}
+           unchanged, change_rows, dup_in_run, complete, incomplete_reason, errors, as_of}
 
     ★`complete`가 False면 그 회차는 **실패로 읽어야 한다** — 부분 적재를 성공으로 기록하지
       않는다. 다만 이미 upsert된 행은 남긴다(관측된 값은 참이다).
@@ -150,6 +150,7 @@ def sync_product_meta(
     stats: dict = {
         "pages": 0, "total_pages": None, "origins": 0, "total_elements": None,
         "channel_rows": 0, "new": 0, "changed": 0, "unchanged": 0, "change_rows": 0,
+        "dup_in_run": 0,
         "complete": False, "incomplete_reason": None, "errors": [],
         "as_of": now.isoformat(),
     }
@@ -160,6 +161,9 @@ def sync_product_meta(
         r.channel_product_no: r
         for r in db.execute(select(NaverProductMetaCurrent)).scalars().all()
     }
+    # ★같은 회차에 같은 키가 두 번 오면 «변경»이 아니다(적대 리뷰 1R P2-5). 그대로 두면
+    #   응답 안의 중복이 변경 원장에 유령 행을 만드는데, 이 원장은 소급 복구가 안 된다.
+    seen_this_run: set[str] = set()
 
     page = 1
     while page <= max_pages:
@@ -186,6 +190,11 @@ def sync_product_meta(
                     continue
                 cpn = str(cpn)
                 stats["channel_rows"] += 1
+                if cpn in seen_this_run:
+                    # 회차 내 중복 — 첫 관측을 정본으로 두고 diff·append를 하지 않는다.
+                    stats["dup_in_run"] += 1
+                    continue
+                seen_this_run.add(cpn)
                 values = _values_from_cp(cp)
                 row = existing.get(cpn)
                 if row is None:
