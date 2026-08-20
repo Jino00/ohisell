@@ -288,3 +288,43 @@ def test_skip_log_is_throttled_not_every_poll(fetcher):
     """스팸 방지가 실제 값으로 살아 있어야 한다(변이 5 생존분 봉쇄)."""
     assert 'rg_skip_log_every = int(cfg.get("rg_skip_log_every_s", 300))' in SRC
     assert "time.monotonic() - rg_skip_log_at >= rg_skip_log_every" in SRC
+
+
+def test_claimed_false_repeats_do_not_stall_for_an_hour(fetcher, monkeypatch, tmp_path):
+    """★적대 리뷰 2R 변이 ⑤ — `claimed=False`가 반복될 때 백오프가 걸려야 한다.
+
+    실전 시나리오: 이전 프로세스가 run 도중 죽고 launchd가 재기동하면, 새 프로세스는
+    **죽은 자기 자신의 임대**(TTL 20분)를 만나 `claimed=False`를 받는다. 이때 백오프가
+    없으면 쿨다운이 시도 시점부터 켜져 있으므로 다음 기회가 **1시간 뒤**가 된다 —
+    이 작업이 없애려던 「버튼이 조용히 삼켜지는」 상태로 되돌아간다.
+    (리뷰어 재현: else 분기를 지우면 600초 동안 claim 1회. 있으면 30초 간격.)
+
+    코드는 옳았지만 이 경로를 검증하는 테스트가 없어 변이가 살아남았다.
+    """
+    calls = {"n": 0}
+    turns = {"n": 0}
+    clock = {"t": 0.0}
+
+    def _claim(_cfg):
+        calls["n"] += 1
+        return {"claimed": False}
+
+    def _sleep(_s):
+        turns["n"] += 1
+        clock["t"] += 15.0          # 폴 간격
+        if turns["n"] >= 40:        # 600초 시뮬레이션
+            raise _StopPoll()
+
+    monkeypatch.setattr(fetcher.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(fetcher, "_prod_refresh_status", lambda _c: {"requested": False})
+    monkeypatch.setattr(fetcher, "_prod_rg_refresh_status",
+                        lambda _c: {"requested": True, "requested_at": "2026-08-20T10:28:38"})
+    monkeypatch.setattr(fetcher, "_prod_rg_claim", _claim)
+    monkeypatch.setattr(fetcher.time, "sleep", _sleep)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(_cfg(tmp_path))
+
+    # 600초 / 30초 백오프 ≈ 20회. 1회면 1시간 정지(백오프 없음), 40회면 매 폴 폭주.
+    assert 5 <= calls["n"] <= 25, (
+        f"600초 동안 claim {calls['n']}회 — 1회면 1시간 정지, 40회면 폭주다")
