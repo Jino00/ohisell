@@ -499,12 +499,18 @@ def _term(db, *, term, source, adgroup_id, clk=20, cost=6000, ad_date=date(2026,
     db.commit()
 
 
-def test_lane_shopping_candidates_never_create_proposals(db):
-    # 쇼핑 후보만 있어도(파워링크 0건) 제안·자동 발사 0건 — briefing diary만 산출(SS3-B, §실측-0).
+def test_lane_shopping_candidates_out_of_scope_create_no_proposals_but_brief(db):
+    """★M2-c(D-NAO-191·219) 이후: 쇼핑도 pending 제안을 만들 수 있게 됐다(§실측-0 전제 폐기,
+    test_naver_searchterm_semantic.py::test_lane_creates_pending_shopping_and_semantic_proposals_
+    when_in_scope 참조) — 단 이 테스트처럼 auto_operate 스코프 밖(settings 미등록=대행사 취급)
+    이면 파워링크와 동일하게 제안 자체를 만들지 않는다(잠김 3=optimizer 가드). briefing diary는
+    스코프 무관하게 그대로 산출된다(제거되지 않음)."""
     _map_product(db, "grp-shop", "PS")
     _term(db, term="쇼핑손실", source="shopping", adgroup_id="grp-shop")
     res = lane.run_search_term_ss_lane(db, now=_NOW)
     assert res["shopping_candidates"] == 1
+    assert res["shopping_proposals_created"] == 0
+    assert res["shopping_out_of_scope"] == 1
     assert res["proposals_created"] == 0
     assert res["powerlink_fired"] == 0
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).count() == 0
