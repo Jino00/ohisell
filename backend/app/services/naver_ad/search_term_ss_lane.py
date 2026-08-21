@@ -720,16 +720,21 @@ def run_search_term_ss_lane(
     생성(영구 Confirm·실행 손 없음). 실쓰기는 파워링크 자동 발사분뿐 — 쇼핑·승격은 전부 Confirm
     전용(자동 발사 없음, 잠김 2·3 유지).
 
-    ★쇼핑 pending 제안의 두 트랙(M2-c ⓔ): ①개별 grain(judge_search_terms의 shopping 후보) —
-    실제 관측된 검색어라 target_type='search_term', 콘솔 Confirm 시 harness가 라이브
-    adgroupType으로 WEB_SITE/SHOPPING 경로를 스스로 골라 실쓰기한다(D-NAO-181 ③, 이미 실증된
-    경로). ②의미 단위(judge_search_terms의 semantic_units.units/pairs, M2-c ⓒ) — 사전
-    최장일치로 조립된 합성 구라 target_type을 다르게 두어(SEARCH_TERM_EXCLUDE_SEMANTIC_
-    TARGET_TYPE) 콘솔 Confirm으로도 **실행되지 않게**(harness 구조 가드가 정보성으로 표시) 막는다
-    — 등록 표현이 아직 미검증이기 때문. 둘 다 auto_operate=1(ours) 캠페인 그룹만 대상으로
-    한다(잠김 3=optimizer 가드 — 파워링크와 동일하게 대행사 그룹엔 우리 제안을 아예 만들지
-    않는다, §0 3 대행사 무실쓰기). 잔여(사전 밖 조각)는 제안화하지 않는다 — 사전 보강·무관 유입
-    발견용 관측 신호이지 확정된 등록 후보가 아니다(NGRAM_GRAIN_MEASUREMENT_20260818.md §4-4).
+    ★쇼핑 pending 제안의 두 트랙(M2-c ⓔ, 스코프 규칙이 다르다 — 라이브 실측 수정 2026-08-21):
+    ①개별 grain(judge_search_terms의 shopping 후보) — 실제 관측된 검색어라
+    target_type='search_term', 콘솔 Confirm 시 harness가 라이브 adgroupType으로 WEB_SITE/
+    SHOPPING 경로를 스스로 골라 실쓰기한다(D-NAO-181 ③, 이미 실증된 경로). **auto_operate=1
+    (ours) 캠페인 그룹만 대상**(잠김 3=optimizer 가드 — 파워링크와 동일하게 대행사 그룹엔 우리
+    제안을 아예 만들지 않는다, §0 3 대행사 무실쓰기).
+    ②의미 단위(judge_search_terms의 semantic_units.units/pairs, M2-c ⓒ) — 사전 최장일치로
+    조립된 합성 구라 target_type을 다르게 두어(SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE) 콘솔
+    Confirm으로도 **실행되지 않게**(harness 구조 가드가 정보성으로 표시) 막는다 — 등록 표현이
+    아직 미검증이기 때문. **auto_operate 스코프는 걸지 않는다**(sentinel·빈 adgroup 위생만) —
+    PAO가 D-NAO-132로 전면 정지돼 auto_operate=1이 라이브에 0건이라, 여기서 걸면 의미 단위
+    제안이 영원히 0건이 된다. 계약(docs/PLAN_naver-m2-l2-wiring.md §4-4)이 요구하는 "잠김 3이
+    실행 경로에서 막는 라이브 증거"는 harness 구조 가드가 이미 담당하므로 여기서 중복 적용하지
+    않는다. 두 트랙 다 잔여(사전 밖 조각)는 제안화하지 않는다 — 사전 보강·무관 유입 발견용 관측
+    신호이지 확정된 등록 후보가 아니다(NGRAM_GRAIN_MEASUREMENT_20260818.md §4-4).
 
     ★bm_prior(BM P4, D-NAO-78 교차·optional): 대행사 등록 키워드 텍스트 셋(bench_kind=
     'keyword_verified'). 승격 후보 중 이 셋에 든 검색어는 (a) 상한 슬롯을 먼저 채우도록 정렬
@@ -743,7 +748,7 @@ def run_search_term_ss_lane(
            "shopping_over_cap","shopping_out_of_scope",
            "semantic_candidates","semantic_vocab_size","semantic_proposals_created",
            "semantic_deduped","semantic_skipped_too_long","semantic_over_cap",
-           "semantic_out_of_scope",
+           "semantic_invalid_adgroup",
            "promote_proposals_created","promote_deduped","promote_skipped_too_long",
            "promote_over_cap","promote_bm_crossed"}."""
     now = now or kst_now()
@@ -807,11 +812,25 @@ def run_search_term_ss_lane(
     db.commit()
 
     # ══════════════════════════════════════════════════════════════════
-    # M2-c ⓔ(D-NAO-191·219) — 쇼핑 제외 pending 제안: 개별 grain + 의미 단위(단일·쌍). 파워링크
-    # 위 auto_map(§0 3 대행사 무실쓰기, 잠김 3=optimizer 가드)을 그대로 재사용 — 대행사(비-ours)
-    # 캠페인 그룹엔 우리 제안 자체를 만들지 않는다(콘솔 Confirm이 킬스위치를 안 타므로, 여기서
-    # 안 막으면 대행사 그룹도 사람이 실수로 승인할 수 있다). approval_source는 절대 설정하지
-    # 않는다(잠김 2=ss_exclude 자동 승인원 미배선 유지).
+    # M2-c ⓔ(D-NAO-191·219, 라이브 실측 수정 2026-08-21) — 쇼핑 제외 pending 제안: 개별 grain +
+    # 의미 단위(단일·쌍). 두 트랙의 스코프 규칙이 **다르다** — 실행 가능성이 다르기 때문이다.
+    #
+    #   개별 grain(target_type='search_term', 콘솔 Confirm 시 실제 실쓰기 가능) — auto_map(§0 3
+    #   대행사 무실쓰기, 잠김 3=optimizer 가드)을 그대로 적용한다. 콘솔 Confirm이 킬스위치를 안
+    #   타므로, 여기서 안 막으면 대행사 그룹도 사람이 실수로 승인할 수 있다(_in_scope).
+    #
+    #   의미 단위(target_type=SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE) — auto_operate 스코프를
+    #   걸지 않는다(_has_valid_adgroup, sentinel/빈 adgroup 위생만 본다). 이유(라이브 실측
+    #   2026-08-21 발견): PAO는 D-NAO-132로 2026-07-30부터 전면 정지돼 `naver_campaign_settings`
+    #   전체 9행이 auto_operate=0이다 — 여기서 auto_operate를 걸면 의미 단위 제안이 **영원히
+    #   0건**이 된다. 계약(docs/PLAN_naver-m2-l2-wiring.md §4-4)은 "판정층까지만 만들고 실행은
+    #   기존 잠김에 맡긴다 — 잠김 3(optimizer, naver_execution_harness.py OptimizerGuardError)이
+    #   **실행 경로에서** 살아 막는 모습 자체가 합격기준 ⑤의 라이브 증거"라고 정한다. 의미 단위는
+    #   harness 구조 가드(target_type 불일치)가 콘솔 Confirm으로도 실행을 이미 영구 차단하므로
+    #   (test_semantic_proposal_not_executable_via_console), 여기서 auto_operate까지 걸면 잠김
+    #   3을 «실행»이 아니라 «후보 생성» 단계로 옮기는 것이 되어 계약이 정한 증거 발생 지점을
+    #   지운다(그리고 산출까지 0으로 죽인다). approval_source는 두 트랙 모두 절대 설정하지
+    #   않는다(잠김 2=ss_exclude 자동 승인원 미배선 유지, 트랙 무관).
     # ══════════════════════════════════════════════════════════════════
     auto_map = {
         cid: bool(auto)
@@ -821,10 +840,19 @@ def run_search_term_ss_lane(
     }
 
     def _in_scope(cand: dict) -> bool:
+        """개별 grain 전용 — auto_operate(잠김 3) 스코프. 실행 가능한 target_type='search_term'
+        제안이라 대행사 그룹엔 제안 자체를 안 만든다(§0 3, 변경 없음)."""
         adg = cand.get("adgroup_id") or ""
         if not adg or adg == BACKFILL_SENTINEL_ADGROUP:
             return False
         return auto_map.get(cand["campaign_id"], False)
+
+    def _has_valid_adgroup(cand: dict) -> bool:
+        """의미 단위 전용 — 데이터 위생만(sentinel·빈 adgroup). auto_operate는 안 본다(위 주석 —
+        harness 구조 가드가 이미 실행을 영구 차단하므로 여기서 거는 건 잠김 3의 중복이자 계약이
+        정한 «실행 경로 증거» 자리를 상류로 옮기는 것)."""
+        adg = cand.get("adgroup_id") or ""
+        return bool(adg) and adg != BACKFILL_SENTINEL_ADGROUP
 
     shopping_created = 0
     shopping_deduped = 0
@@ -857,10 +885,10 @@ def run_search_term_ss_lane(
     semantic_deduped = 0
     semantic_skipped_too_long = 0
     semantic_over_cap = 0
-    semantic_out_of_scope = 0
+    semantic_invalid_adgroup = 0
     for cand in semantic_candidates:
-        if not _in_scope(cand):
-            semantic_out_of_scope += 1
+        if not _has_valid_adgroup(cand):  # sentinel·빈 adgroup 위생만(auto_operate 스코프 없음)
+            semantic_invalid_adgroup += 1
             continue
         if len(cand["phrase"]) > _TARGET_ID_MAXLEN:
             semantic_skipped_too_long += 1
@@ -997,13 +1025,15 @@ def run_search_term_ss_lane(
         "shopping_out_of_scope": shopping_out_of_scope,  # 잠김 3(optimizer 가드) — 대행사 그룹 skip
 
         # M2-c ⓔ: 의미 단위(단일·쌍) 제외 pending 제안(잔여는 제안화하지 않음, 관측 신호로만 산출)
+        # ★auto_operate 스코프 없음(라이브 실측 수정 2026-08-21) — harness 구조 가드가 실행을
+        # 이미 영구 차단하므로 여기선 데이터 위생(sentinel·빈 adgroup)만 본다.
         "semantic_candidates": len(semantic_candidates),
         "semantic_vocab_size": semantic.get("vocab_size", 0),
         "semantic_proposals_created": semantic_created,
         "semantic_deduped": semantic_deduped,
         "semantic_skipped_too_long": semantic_skipped_too_long,
         "semantic_over_cap": semantic_over_cap,
-        "semantic_out_of_scope": semantic_out_of_scope,
+        "semantic_invalid_adgroup": semantic_invalid_adgroup,  # sentinel·빈 adgroup skip(스코프 아님)
 
         "promote_proposals_created": promote_created,
         "promote_deduped": promote_deduped,
