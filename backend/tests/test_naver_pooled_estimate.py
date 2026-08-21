@@ -390,14 +390,20 @@ def test_campaign_layer_is_not_skipped_in_the_stored_prior(db):
         db, wt - timedelta(days=writer.WINDOW_DAYS - 1), wt)
     row = db.query(NaverPooledEstimateDaily).filter_by(scope_key="nkw-hi").one()
 
-    # 저장된 prior는 «3단을 다 거친» 그룹 레벨 값이어야 한다.
-    _, priors = hierarchical_pooling.pool_all_with_priors(
-        {"imp": 1_000, "clk": 100, "conv_cnt": 5, "conv_amt": 250_000},
-        agg["group"]["grp-hi"], agg["campaign"]["cmp-hi"], agg["account"],
-    )
+    # ★기대값을 **독립적으로** 손계산한다 — `pool_all_with_priors`를 다시 부르면 자기참조가 되어
+    #   체인이 틀려도 양쪽이 똑같이 틀려 항상 통과한다(적대 리뷰 2R가 지적한 그대로다:
+    #   이 테스트의 초판이 정확히 그랬고, campaign 단을 빼는 변이를 통과시켰다).
+    #   여기서 쓰는 `shrink`는 «공식» 원자이지 «체인»이 아니다 — 체인이 이 테스트의 표적이다.
+    grp, camp, acct = agg["group"]["grp-hi"], agg["campaign"]["cmp-hi"], agg["account"]
+    acct_raw = Decimal(acct["clk"]) / Decimal(acct["imp"])
+    campaign_pooled = hierarchical_pooling.shrink(
+        n=camp["imp"], raw=Decimal(camp["clk"]) / Decimal(camp["imp"]), prior=acct_raw)
+    expected_prior = hierarchical_pooling.shrink(
+        n=grp["imp"], raw=Decimal(grp["clk"]) / Decimal(grp["imp"]), prior=campaign_pooled)
+
     # prior_ctr 컬럼은 Numeric(12,6) — 저장이 6자리로 반올림한다. 완전일치가 아니라 그 격자에
     # 맞춘 일치를 본다(격자를 넘는 차이는 «다른 계산»이라는 뜻이고, 그게 이 테스트의 표적이다).
-    assert Decimal(row.prior_ctr) == priors["ctr"].quantize(Decimal("0.000001"))
+    assert Decimal(row.prior_ctr) == expected_prior.quantize(Decimal("0.000001"))
 
     # 그리고 그 값은 «계정 raw»와 확실히 달라야 한다 — 같다면 캠페인 단이 무의미해진 것이다.
     acct = agg["account"]
