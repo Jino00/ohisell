@@ -61,24 +61,6 @@ def _keyword_rows(db: Session, date_from: date, date_to: date) -> list[tuple]:
     ).all()
 
 
-def _group_prior(group_agg: dict, campaign_agg: dict, account_agg: dict) -> dict[str, Decimal]:
-    """이 키워드가 물려받는 prior = «그룹 레벨 pooled 값».
-
-    pool_metric 내부의 3단(account raw → campaign pooled → group pooled) 중 마지막 단과 같은
-    값이어야 한다 — 그래야 저장된 prior로 `(n·raw+K·prior)/(n+K)`를 수기 계산했을 때
-    pooled_* 와 일치한다(계약 §4 S1-② 합격기준). 키워드 grain 자체를 뺀 나머지를 그대로 다시
-    계산하는 방식이라 pool_metric의 정의가 바뀌면 여기도 같이 깨진다 — 테스트가 그 일치를 잡는다.
-    """
-    out: dict[str, Decimal] = {}
-    for metric in hierarchical_pooling.METRICS:
-        num_key, den_key = hierarchical_pooling.METRICS[metric]
-        acct_den = account_agg.get(den_key, 0)
-        acct_raw = _raw(account_agg.get(num_key, 0), acct_den)
-        campaign_pooled = hierarchical_pooling._level_metric(campaign_agg, metric, prior=acct_raw)
-        out[metric] = hierarchical_pooling._level_metric(group_agg, metric, prior=campaign_pooled)
-    return out
-
-
 def write_pooled_estimates(db: Session, *, as_of: date | None = None) -> dict:
     """키워드 grain 전수 계층 풀링 산출 → naver_pooled_estimate_daily upsert.
 
@@ -131,8 +113,12 @@ def write_pooled_estimates(db: Session, *, as_of: date | None = None) -> dict:
             campaign_agg = agg["campaign"].get(campaign_id, _empty())
             account_agg = agg["account"]
 
-            pooled = hierarchical_pooling.pool_all(keyword_row, group_agg, campaign_agg, account_agg)
-            prior = _group_prior(group_agg, campaign_agg, account_agg)
+            # ★한 번의 호출로 산출과 prior를 **같은 계산에서** 받는다(적대 리뷰 1R P2 채택).
+            # 이전 판은 prior를 이 파일에서 재계산했는데, 그러면 pool_metric의 정의가 바뀌는 날
+            # 저장된 prior만 옛 정의로 남아 수기 검산이 «맞다»면서 실제와 다른 값을 가리킨다.
+            pooled, prior = hierarchical_pooling.pool_all_with_priors(
+                keyword_row, group_agg, campaign_agg, account_agg,
+            )
 
             values = dict(
                 campaign_id=campaign_id or "",

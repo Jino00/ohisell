@@ -77,10 +77,17 @@ def upgrade() -> None:
         conn.execute(
             sa.text(
                 "INSERT INTO naver_campaign_settings (campaign_id, optimizer, auto_operate, memo) "
-                "SELECT :cid, 'none', 0, :memo "
+                "SELECT :cid, 'none', :auto_operate, :memo "
                 "WHERE NOT EXISTS (SELECT 1 FROM naver_campaign_settings WHERE campaign_id = :cid)"
             ),
-            {"cid": campaign_id, "memo": "BRAND_SEARCH 등록 (ref 65 S1-ⓓ · D-NAO-214 M2-a)"},
+            # ★`0`이 아니라 **바인딩된 파이썬 bool**이다(적대 리뷰 1R P1). auto_operate는 Boolean
+            # 컬럼이라 PostgreSQL은 정수 리터럴을 거부한다("열은 boolean인데 표현식은 integer") —
+            # 그리고 PG에선 마이그레이션이 트랜잭션으로 감싸이므로 이 INSERT 하나가 실패하면
+            # 같은 파일의 create_table까지 통째로 롤백돼 **테이블 신설 자체가 무산**된다.
+            # SQLite는 타입을 강제하지 않아 로컬·CI에서 전혀 안 보이고 PG 컷오버에서 처음 터진다.
+            # 저장소 관례도 이미 bool이다(n4o5p6q7r8s9 마이그의 `sa.false()`) — 이 파일만의 이탈이었다.
+            {"cid": campaign_id, "auto_operate": False,
+             "memo": "BRAND_SEARCH 등록 (ref 65 S1-ⓓ · D-NAO-214 M2-a)"},
         )
 
 
@@ -91,9 +98,10 @@ def downgrade() -> None:
         conn.execute(
             sa.text(
                 "DELETE FROM naver_campaign_settings "
-                "WHERE campaign_id = :cid AND optimizer = 'none' AND auto_operate = 0"
+                "WHERE campaign_id = :cid AND optimizer = 'none' AND auto_operate = :auto_operate"
             ),
-            {"cid": campaign_id},
+            # upgrade와 같은 이유로 정수 리터럴 금지 — PG에선 `boolean = integer` 연산자가 없다.
+            {"cid": campaign_id, "auto_operate": False},
         )
     op.drop_index(op.f("ix_naver_pooled_estimate_daily_scope_key"), table_name="naver_pooled_estimate_daily")
     op.drop_index(op.f("ix_naver_pooled_estimate_daily_target_date"), table_name="naver_pooled_estimate_daily")

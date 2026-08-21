@@ -36,13 +36,20 @@ def _level_metric(agg: dict, metric: str, prior: Decimal) -> Decimal:
     return shrink(n=den, raw=raw, prior=prior)
 
 
-def pool_metric(
+def _pool_with_prior(
     keyword_row: dict,
     group_agg: dict,
     campaign_agg: dict,
     account_agg: dict,
     metric: str,
-) -> Decimal:
+) -> tuple[Decimal, Decimal]:
+    """(키워드 수축값, 그 값이 물려받은 prior=그룹 레벨 수축값).
+
+    수축 체인의 **유일한 구현**이다 — pool_metric·pool_all·pool_all_with_priors가 전부 이걸 부른다.
+    prior를 밖에서 다시 계산하지 않고 여기서 함께 내보내는 이유: 산출을 기록하는 쪽이 체인을
+    재구현하면, 이 함수의 정의가 바뀌는 날 **저장된 prior만 조용히 옛 정의로 남는다**. 그러면
+    `(n·raw+K·prior)/(n+K)` 수기 검산이 «맞다»고 나오면서 실제 값과 다른, 최악의 조합이 된다.
+    """
     if metric not in METRICS:
         raise ValueError(f"unknown metric '{metric}', expected one of {list(METRICS)}")
 
@@ -57,7 +64,36 @@ def pool_metric(
     group_pooled = _level_metric(group_agg, metric, prior=campaign_pooled)
     keyword_pooled = _level_metric(keyword_row, metric, prior=group_pooled)
 
-    return keyword_pooled.quantize(_Q4)
+    return keyword_pooled.quantize(_Q4), group_pooled
+
+
+def pool_metric(
+    keyword_row: dict,
+    group_agg: dict,
+    campaign_agg: dict,
+    account_agg: dict,
+    metric: str,
+) -> Decimal:
+    return _pool_with_prior(keyword_row, group_agg, campaign_agg, account_agg, metric)[0]
+
+
+def pool_all_with_priors(
+    keyword_row: dict,
+    group_agg: dict,
+    campaign_agg: dict,
+    account_agg: dict,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """pool_all 산출 + 각 지표가 물려받은 prior. 산출을 «검산 가능하게» 기록하려는 쪽이 쓴다.
+
+    ★prior는 quantize 하지 않는다(전 정밀도) — 검산 공식의 입력이지 표시값이 아니다.
+    """
+    pooled: dict[str, Decimal] = {}
+    priors: dict[str, Decimal] = {}
+    for metric in METRICS:
+        pooled[metric], priors[metric] = _pool_with_prior(
+            keyword_row, group_agg, campaign_agg, account_agg, metric,
+        )
+    return pooled, priors
 
 
 def pool_all(
@@ -66,7 +102,4 @@ def pool_all(
     campaign_agg: dict,
     account_agg: dict,
 ) -> dict[str, Decimal]:
-    return {
-        metric: pool_metric(keyword_row, group_agg, campaign_agg, account_agg, metric)
-        for metric in METRICS
-    }
+    return pool_all_with_priors(keyword_row, group_agg, campaign_agg, account_agg)[0]

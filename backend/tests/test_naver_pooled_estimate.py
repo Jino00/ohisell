@@ -246,7 +246,9 @@ def test_failure_is_surfaced_as_incomplete_not_silent_success(db, monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("계산 폭발")
 
-    monkeypatch.setattr(hierarchical_pooling, "pool_all", boom)
+    # ★리팩터(1R P2 채택) 후 writer가 부르는 것은 pool_all_with_priors다 — 옛 이름을 패치하면
+    # 아무것도 가로채지 못한 채 «성공»으로 통과한다(테스트가 조용히 무력해지는 전형).
+    monkeypatch.setattr(hierarchical_pooling, "pool_all_with_priors", boom)
     result = writer.write_pooled_estimates(db, as_of=as_of)
     assert result["complete"] is False
     assert "계산 폭발" in result["incomplete_reason"]
@@ -335,3 +337,178 @@ def test_quantization_width_is_pinned_so_precision_loss_stays_visible():
     tiny = {"imp": 1_000_000, "clk": 10, "conv_cnt": 0, "conv_amt": 0}
     out = hierarchical_pooling.pool_all(tiny, tiny, tiny, tiny)
     assert out["ctr"] == Decimal("0.0000")  # 실제 CTR 1e-5가 0으로 뭉친다 — 알고 쓰는 한계다
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R에서 **살아남은 변이 3종**을 죽이는 테스트.
+# 살아남은 변이는 그 자체가 발견이다 — 「통과하는데 아무것도 안 지키는」 자리를 가리킨다.
+# 세 경우 다 구현은 옳았고(리뷰어가 직접 재현해 확인), 없던 것은 «그걸 지키는 테스트»였다.
+# ═════════════════════════════════════════════════════════════════════════
+
+def test_impressions_without_clicks_are_kept_not_skipped(db):
+    """변이 `and`→`or` 사살. imp>0·clk=0은 실무에서 흔하다(노출됐는데 안 눌린 키워드).
+
+    그 상태야말로 CTR 신호의 핵심 표본이다 — `or`로 바뀌면 조용히 통째로 버려지는데,
+    산출 행이 줄어드는 것 말고는 아무 증상이 없어 눈으로는 절대 안 보인다.
+    """
+    as_of = date(2026, 8, 20)
+    wt = _yesterday_window(as_of)
+    db.add_all([
+        _row(wt, kw="nkw-seen-not-clicked", imp=5000, clk=0),   # 노출만
+        _row(wt, kw="nkw-clicked-no-imp", imp=0, clk=3, cnt=0, amt=0),  # 원장 이상치지만 신호는 있다
+        _row(wt, kw="nkw-dead", imp=0, clk=0),                  # 진짜 무신호
+    ])
+    db.commit()
+    result = writer.write_pooled_estimates(db, as_of=as_of)
+
+    keys = {r.scope_key for r in db.query(NaverPooledEstimateDaily).all()}
+    assert keys == {"nkw-seen-not-clicked", "nkw-clicked-no-imp"}
+    assert result["skipped_no_signal"] == 1
+    row = db.query(NaverPooledEstimateDaily).filter_by(scope_key="nkw-seen-not-clicked").one()
+    assert row.n_imp == 5000 and row.n_clk == 0
+    assert Decimal(row.raw_ctr) == Decimal("0")  # 관측 CTR은 0이 맞다(분모 있음, 분자 0)
+
+
+def test_campaign_layer_is_not_skipped_in_the_stored_prior(db):
+    """변이 「campaign 단 건너뛰기」 사살 — **캠페인 2개 이상 + 캠페인별 CTR이 다른** 픽스처가 필요하다.
+
+    기존 픽스처는 캠페인이 1개뿐이라 campaign_agg == account_agg가 되어 campaign_pooled와
+    acct_raw가 수학적으로 같아진다 — 3단 중 한 단을 통째로 빼도 값이 안 변한다. 우연히
+    통과하던 자리다. 여기서는 두 캠페인의 CTR을 크게 벌려 그 우연을 깨뜨린다.
+    """
+    as_of = date(2026, 8, 20)
+    wt = _yesterday_window(as_of)
+    # cmp-hi: CTR 10% (imp 1,000 / clk 100) · cmp-lo: CTR 0.1% (imp 100,000 / clk 100)
+    db.add_all([
+        _row(wt, kw="nkw-hi", camp="cmp-hi", grp="grp-hi", imp=1_000, clk=100, cnt=5, amt=250_000),
+        _row(wt, kw="nkw-lo", camp="cmp-lo", grp="grp-lo", imp=100_000, clk=100, cnt=1, amt=10_000),
+    ])
+    db.commit()
+    writer.write_pooled_estimates(db, as_of=as_of)
+
+    agg = proposal_pipeline._precompute_aggregates(
+        db, wt - timedelta(days=writer.WINDOW_DAYS - 1), wt)
+    row = db.query(NaverPooledEstimateDaily).filter_by(scope_key="nkw-hi").one()
+
+    # 저장된 prior는 «3단을 다 거친» 그룹 레벨 값이어야 한다.
+    _, priors = hierarchical_pooling.pool_all_with_priors(
+        {"imp": 1_000, "clk": 100, "conv_cnt": 5, "conv_amt": 250_000},
+        agg["group"]["grp-hi"], agg["campaign"]["cmp-hi"], agg["account"],
+    )
+    # prior_ctr 컬럼은 Numeric(12,6) — 저장이 6자리로 반올림한다. 완전일치가 아니라 그 격자에
+    # 맞춘 일치를 본다(격자를 넘는 차이는 «다른 계산»이라는 뜻이고, 그게 이 테스트의 표적이다).
+    assert Decimal(row.prior_ctr) == priors["ctr"].quantize(Decimal("0.000001"))
+
+    # 그리고 그 값은 «계정 raw»와 확실히 달라야 한다 — 같다면 캠페인 단이 무의미해진 것이다.
+    acct = agg["account"]
+    acct_raw_ctr = Decimal(acct["clk"]) / Decimal(acct["imp"])
+    assert Decimal(row.prior_ctr) != acct_raw_ctr
+    # 고CTR 캠페인 소속이므로 계정 평균보다 위로 당겨져 있어야 한다(방향까지 고정).
+    assert Decimal(row.prior_ctr) > acct_raw_ctr
+
+
+def test_partial_writes_are_rolled_back_when_a_later_keyword_explodes(db):
+    """변이 「rollback 제거」 사살 — 예외가 **이미 add한 뒤에** 나야 롤백 유무가 드러난다.
+
+    기존 테스트는 첫 키워드 처리 «전»에 터뜨려서 add된 것이 하나도 없었고, 그래서 롤백을
+    지워도 통과했다. 부분 적재가 남으면 그날 행이 «일부만 있는 채» 완주처럼 보인다.
+    """
+    as_of = date(2026, 8, 20)
+    wt = _yesterday_window(as_of)
+    db.add_all([
+        _row(wt, kw="nkw-1", imp=100, clk=10, cnt=1, amt=10_000),
+        _row(wt, kw="nkw-2", imp=200, clk=20, cnt=2, amt=20_000),
+        _row(wt, kw="nkw-3", imp=300, clk=30, cnt=3, amt=30_000),
+    ])
+    db.commit()
+
+    real = hierarchical_pooling.pool_all_with_priors
+    calls = {"n": 0}
+
+    def explode_on_third(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise RuntimeError("세 번째에서 폭발")
+        return real(*a, **kw)
+
+    import app.services.naver_ad.pooled_estimate_writer as w
+    w.hierarchical_pooling.pool_all_with_priors = explode_on_third
+    try:
+        result = w.write_pooled_estimates(db, as_of=as_of)
+    finally:
+        w.hierarchical_pooling.pool_all_with_priors = real
+
+    assert result["complete"] is False
+    assert calls["n"] >= 3  # 앞의 두 건은 실제로 add됐다 — 롤백이 없으면 세션에 남는다
+
+    # ★`count(*)`만으로는 롤백을 못 잰다 — 픽스처가 prod와 같은 autoflush=False라 pending add가
+    #   flush되지 않아, 롤백을 지워도 쿼리는 0을 본다(변이 재주입으로 실측: M2 생존).
+    #   그래서 **세션의 pending 집합**을 직접 본다. 이게 「롤백했다」의 진짜 내용이다.
+    assert len(db.new) == 0, "롤백 후에도 미flush add가 세션에 남아 있다"
+    # 그리고 뒤이어 누가 commit 해도 부분 적재가 새어 나가면 안 된다(호출측이 세션을 공유하는 경우).
+    db.commit()
+    assert db.query(func.count(NaverPooledEstimateDaily.id)).scalar() == 0
+
+
+def test_migration_uses_boolean_not_integer_for_auto_operate():
+    """적대 리뷰 1R P1 재발 방지 — PostgreSQL에서 `boolean = integer`는 연산자가 없다.
+
+    SQLite는 타입을 강제하지 않아 **런타임 테스트로는 원리적으로 못 잡는다**(로컬·CI 전부 초록).
+    그래서 소스 자체를 검사한다. 이 검사가 보는 것은 「정수 리터럴이 auto_operate에 안 닿는가」다.
+    """
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[1] / "alembic" / "versions" / \
+        "m2a1pool2eb3_add_pooled_estimate.py"
+    text = src.read_text(encoding="utf-8")
+    # ★**개수를 센다.** 「존재하는가」만 보면 두 자리 중 한 자리만 망가뜨렸을 때 나머지가 검사를
+    #   통과시킨다(변이 재주입으로 실측: M4 생존). 발견 0건과 실행 안 됨이 같은 숫자로 보이는
+    #   것과 같은 함정이다(교훈 #123). auto_operate가 걸리는 자리는 upgrade INSERT·downgrade
+    #   DELETE **정확히 둘**이고, 둘 다 파이썬 bool이어야 한다.
+    assert text.count('"auto_operate": False') == 2, "bool 바인딩이 두 자리 모두에 있어야 한다"
+    assert "auto_operate = 0" not in text
+    assert "auto_operate\": 0" not in text
+    assert "'none', 0," not in text
+
+
+def test_stored_prior_keeps_full_precision_not_the_display_grid(db):
+    """변이 「prior도 _Q4로 quantize」 사살.
+
+    prior는 **검산 공식의 입력**이지 표시값이 아니다. 4자리로 뭉개면 저장된 (n,raw,prior,K)로
+    계산한 값이 실제 pooled와 미세하게 어긋나고, 허용오차가 그걸 덮어 «검산 통과»라고 말한다 —
+    합격기준이 거짓말을 하는 정확한 경로다. 그래서 prior가 4자리 격자 «밖»의 정보를 갖는
+    사례를 하나 고정한다.
+    """
+    as_of = date(2026, 8, 20)
+    wt = _yesterday_window(as_of)
+    db.add_all([
+        _row(wt, kw="nkw-hi", camp="cmp-hi", grp="grp-hi", imp=1_000, clk=100, cnt=5, amt=250_000),
+        _row(wt, kw="nkw-lo", camp="cmp-lo", grp="grp-lo", imp=100_000, clk=100, cnt=1, amt=10_000),
+    ])
+    db.commit()
+    writer.write_pooled_estimates(db, as_of=as_of)
+
+    row = db.query(NaverPooledEstimateDaily).filter_by(scope_key="nkw-hi").one()
+    prior = Decimal(row.prior_ctr)
+    assert prior != prior.quantize(Decimal("0.0001")), (
+        f"prior_ctr={prior} 가 4자리 격자에 뭉쳐 있다 — 검산 입력이 표시값으로 대체됐다"
+    )
+
+
+def test_window_length_is_pinned_to_thirty_days(db):
+    """창 길이는 계약 §3 금지선이다(「분석 창 길이 변경 금지」) — 아무도 안 지키면 조용히 바뀐다.
+
+    창은 산출값의 의미를 정한다. 30일이 31일이 되면 모든 추정치가 달라지는데 화면상 증상은 없다.
+    """
+    as_of = date(2026, 8, 20)
+    wt = _yesterday_window(as_of)
+    db.add(_row(wt, kw="nkw-1", imp=100, clk=10, cnt=1, amt=10_000))
+    db.commit()
+    result = writer.write_pooled_estimates(db, as_of=as_of)
+
+    assert writer.WINDOW_DAYS == 30
+    w_from = date.fromisoformat(result["window_from"])
+    w_to = date.fromisoformat(result["window_to"])
+    assert (w_to - w_from).days == 29, "포함 창 30일 = 끝-시작 29일(off-by-one 고정)"
+    assert w_to == as_of - timedelta(days=1)
+    row = db.query(NaverPooledEstimateDaily).one()
+    assert row.window_from == w_from and row.window_to == w_to  # 행에도 같은 창이 박힌다
