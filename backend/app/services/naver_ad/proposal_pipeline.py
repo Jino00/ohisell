@@ -82,10 +82,15 @@ def _freshness_gate(db: Session, as_of: date) -> dict:
 def _precompute_aggregates(
     db: Session, date_from: date, date_to: date, *, campaign_type: str | None = None,
 ) -> dict:
-    """그룹(adgroup)/캠페인/계정 레벨 clk·conv_amt 합계를 회당 1회 집계(N+1 방지).
+    """그룹(adgroup)/캠페인/계정 레벨 imp·clk·conv_cnt·conv_amt 합계를 회당 1회 집계(N+1 방지).
 
-    bid_simulator.pooled_rpc가 소비하는 상위 aggregate. 반환:
-    {"group": {adgroup_id: {"clk","conv_amt"}}, "campaign": {campaign_id: {...}}, "account": {...}}.
+    bid_simulator.pooled_rpc(현 hierarchical_pooling)가 소비하는 상위 aggregate. 반환:
+    {"group": {adgroup_id: {"imp","clk","conv_cnt","conv_amt"}}, "campaign": {...}, "account": {...}}.
+
+    ★imp·conv_cnt는 M2-a(D-NAO-214)에서 **추가**됐다 — `hierarchical_pooling.pool_all`의 CTR 분모가
+    imp, CVR 분자가 conv_cnt이기 때문이다. 이게 없으면 pool_all이 예외 없이 **ctr·cvr을 0으로**
+    돌려준다(분모 부재 → raw=0 ∧ n=0 → 결과 0). 조용한 0은 「신호 없음」과 구분되지 않으므로
+    분모를 먼저 채웠다. 기존 소비자는 clk·conv_amt만 읽으므로 **회귀 없음**(순증 키).
 
     campaign_type: None이면(compute_bid_sims 기존 동작) 전 캠페인유형을 계정 prior에 섞는다
     (예외 보드 후보는 항상 자기 자신의 실측 cost>0 행이라 계정 수준 수축은 미세조정일 뿐).
@@ -98,6 +103,9 @@ def _precompute_aggregates(
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.imp), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_cnt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_cnt), 0),
     ).filter(
         NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
         NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
@@ -106,20 +114,26 @@ def _precompute_aggregates(
         q = q.filter(NaverAdDaily.campaign_type == campaign_type)
     rows = q.group_by(NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id).all()
 
+    def _empty() -> dict:
+        return {"imp": 0, "clk": 0, "conv_cnt": 0, "conv_amt": 0}
+
     group_agg: dict[str, dict] = {}
     campaign_agg: dict[str, dict] = {}
-    account_agg = {"clk": 0, "conv_amt": 0}
-    for campaign_id, adgroup_id, clk, direct, indirect in rows:
+    account_agg = _empty()
+    for campaign_id, adgroup_id, clk, direct, indirect, imp, cnt_d, cnt_i in rows:
         clk = int(clk)
+        imp = int(imp)
+        conv_cnt = int(cnt_d) + int(cnt_i)
         conv_amt = int(direct) + int(indirect)
-        g = group_agg.setdefault(adgroup_id, {"clk": 0, "conv_amt": 0})
-        g["clk"] += clk
-        g["conv_amt"] += conv_amt
-        c = campaign_agg.setdefault(campaign_id, {"clk": 0, "conv_amt": 0})
-        c["clk"] += clk
-        c["conv_amt"] += conv_amt
-        account_agg["clk"] += clk
-        account_agg["conv_amt"] += conv_amt
+        for bucket in (
+            group_agg.setdefault(adgroup_id, _empty()),
+            campaign_agg.setdefault(campaign_id, _empty()),
+            account_agg,
+        ):
+            bucket["imp"] += imp
+            bucket["clk"] += clk
+            bucket["conv_cnt"] += conv_cnt
+            bucket["conv_amt"] += conv_amt
     return {"group": group_agg, "campaign": campaign_agg, "account": account_agg}
 
 

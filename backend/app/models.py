@@ -3629,6 +3629,65 @@ class NaverForecastDaily(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverPooledEstimateDaily(Base):
+    """[9] 계층 EB 풀링 산출 — CTR/CVR/RPC 축소추정치 (D-NAO-214 M2-a · ref 65 S1-ⓑ).
+
+    `hierarchical_pooling.pool_all`이 매일 크론 1회전에서 산출한 값을 남긴다. 기존
+    `naver_forecast_daily`를 **확장하지 않고 신설**했다 — 계약 §8-Q3의 기본값은 「확장 우선」이었으나
+    착수 실측(2026-08-21)이 실격 사유를 냈다: `forecast_scorer.backfill`(forecast_scorer.py:55-57)은
+    `target_date`가 맞고 `actual_clk IS NULL`인 행을 **grain을 가리지 않고 전부** 집어 백필한다.
+    풀링 추정치를 그 테이블에 얹으면 스코어러가 그것을 예측으로 오인해 `pred_clk=0` 대비 MAPE를
+    계산하고, 그 값이 `NaverForecastModel.recent_mape` → `gate_status` 강등으로 굴러간다 —
+    **예측이 아니었던 행 때문에 진짜 예측 모델이 강등**된다. 계약 §2-2가 「신설보다 확장을 먼저
+    실측한다」고 못박은 이유가 이것이다(취향이 아니라 실격).
+
+    ★**이 테이블은 판정을 하지 않는다 — 추정치를 남길 뿐이다.** 소비는 M2-d(성적표 축) 이후이고,
+    이 슬라이스에서 자동 쓰기 경로에 연결되지 않는다(계약 §3 「신규 자동 쓰기 0건」).
+
+    ★**수기 검산이 가능하도록 원료를 함께 남긴다**(계약 §4 S1-② 합격기준: *"표본 키워드 1개에서
+    «raw vs shrunk» 값이 공식 `(n·raw+K·prior)/(n+K)`과 수기 일치"*). 그래서 결과값만이 아니라
+    분모 n(지표마다 다르다 — CTR은 imp, CVR·RPC는 clk)·raw·prior·K를 전부 컬럼으로 둔다.
+    이 넷이 없으면 합격기준이 원리적으로 관측 불가가 된다.
+
+    grain/scope_key 관례는 `naver_forecast_daily`와 같다(account/campaign/adgroup/keyword).
+    conv_amt는 D-NAO-21 보정계수 **미적용** 원값(직접+간접) — `pooled_rpc`의 기존 관례와 같다.
+    """
+
+    __tablename__ = "naver_pooled_estimate_daily"
+    __table_args__ = (
+        UniqueConstraint("target_date", "grain", "scope_key", name="uq_naver_pooled_estimate_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    grain: Mapped[str] = mapped_column(String(16), nullable=False)  # keyword/adgroup
+    scope_key: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    # 집계 창 — 어떤 창의 실적으로 수축했는지가 값의 의미를 정한다(창 없는 숫자는 해석 불가).
+    window_from: Mapped[datetime] = mapped_column(Date, nullable=False)
+    window_to: Mapped[datetime] = mapped_column(Date, nullable=False)
+    # 분모·분자 원값(수기 검산용) — conv_cnt/conv_amt는 직접+간접 합산.
+    n_imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_conv_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_conv_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 수축 전 관측값(분모 0이면 0 — 가중치도 0이라 결과에 영향 없음)
+    raw_ctr: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    raw_cvr: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    raw_rpc: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    # 이 행이 물려받은 상위 prior(= 그룹 레벨 pooled 값) — 검산 공식의 prior 항
+    prior_ctr: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    prior_cvr: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    prior_rpc: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    # pool_all 산출(수축 후)
+    pooled_ctr: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    pooled_cvr: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    pooled_rpc: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False, default=0)
+    shrink_k: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False, default=10)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ══════════════════════════════════════════════════════════════════
 # 예측·전문가 스프린트 E1a — expert_desk 조언자 모드 (D-NAO-30/31/32,
 # docs/PLAN_naver-ad-forecast-expert.md §8)
