@@ -9,9 +9,26 @@
 #   (ad vs group 축)만 가린다 — **기기(PC/모바일) 축**은 원래 이 모듈의 소관이 아니었다. 그런데
 #   두 값(group_bid·ad_bid_amt) 모두 네이버 콘솔의 "명목" 입찰가이고, 실제로 과금되는 CPC는
 #   여기에 기기별 입찰가중치(pcNetworkBidWeight/mobileNetworkBidWeight, 10~500·기본 100)가
-#   곱해진 값이다. 즉 이 모듈이 지금까지 "effective_bid"라 불러온 값은 (ad-vs-group 축에서는
-#   맞지만) 기기 축에서는 여전히 명목이었다 — ref 65가 지목한 "명목 입찰을 실효 입찰의 대리로
-#   쓰는 전진 판단" 그 자체다. 아래 device_weight_multiplier가 그 축을 마저 닫는다.
+#   곱해진 값이다.
+#
+#   ★적대 리뷰 1R P1(재현됨) — **`effective_bid` 필드는 손대지 않는다.** 초판은 이 필드
+#   자체를 기기가중치 적용값으로 재정의했는데, `account_diagnosis.py`(at_floor·
+#   stop_loss_amount·lever_broken)와 `proposal_writer.py`(shopping_lever_resume_candidates·
+#   `_ad_bid_proposal(current_ad_bid=...)`)가 이미 이 필드를 **네이버가 bidAmt 리터럴에 거는
+#   70원 하한**과 직접 비교한다 — 70원은 명목 필드의 플랫폼 제약이지 가중치 곱한 값의
+#   제약이 아니다. `effective_bid`는 여전히 ad-vs-group 축만 반영한 **명목**값이고,
+#   기기가중치 적용값은 `adgroup_effective_bids`가 내는 **새 키**
+#   `effective_bid_device_weighted`로만 노출한다(§ 아래 함수 참조) — 기존 소비처의 계약을
+#   깨지 않는다. 이 슬라이스(M2-b2)의 실제 소비 배선은 이 필드가 아니라
+#   `nominal_ceiling_for_device`(auto_operator의 rank_servo 경제성상한 경로)다.
+#
+#   ★P2-2(적대 리뷰 채택) — device_weight_multiplier가 PC/모바일 중 **큰 쪽**을 택하는 것은
+#   근사다. 정확히 하려면 기기별로 **분해된 지출**(PC 클릭·비용 vs 모바일 클릭·비용)을 알아야
+#   비용가중 평균 배율을 낼 수 있는데, **그 원장이 지금 없다**(2026-08-21 prod 실측:
+#   `naver_ad_daily`엔 기기 축 컬럼 자체가 없고, `naver_search_term_dim_daily.dim_type`은
+#   h(시간대)/m(매체)/r(지역) 세 값뿐 — PC/모바일 분해는 어느 표에도 없다). 선행 조건은
+#   `/stats` 기기 breakdown 수집(미착수, 이 슬라이스 범위 밖) — 다음 세션이 "왜 max인가"를
+#   다시 조사하지 않도록 여기 남긴다.
 from __future__ import annotations
 
 import logging
@@ -222,18 +239,25 @@ def adgroup_effective_bids(db: Session, group_bids: dict[str, int]) -> dict[str,
         for adgroup_id, group_bid in group_bids.items()
     }
 
-    # ── D-NAO-218(M2-b2) — 기기 축 적용 ──────────────────────────────────────
-    # 위 _derive는 ad-vs-group 축(어느 레버가 실효인가)만 가린다. source·max_ad_id·
-    # has_ad_data는 그 축의 판정이라 **명목 기준 그대로 둔다**(레버 라우팅은 기기와 무관).
-    # 기기 축은 여기서 마지막에 곱해 최종 effective_bid를 낸다 — 원래 값은
-    # effective_bid_nominal로 보존(하위 소비처가 배선 전 값과 대조할 수 있게, 이 계약 합격②).
+    # ── D-NAO-218(M2-b2) — 기기 축 부기(附記), 「effective_bid」의 기존 의미는 안 건드린다 ──
+    # ★적대 리뷰 1R P1(재현 확인): 최초 구현은 이 자리에서 `effective_bid` 값 자체를 기기
+    #   가중치 적용값으로 **재정의**했는데, `account_diagnosis.py`(at_floor·stop_loss_amount·
+    #   lever_broken)와 `proposal_writer.py`(shopping_lever_resume_candidates의 bid_down_first/
+    #   resume 분기, `_ad_bid_proposal(current_ad_bid=...)`)가 이미 이 필드를 **네이버 bidAmt
+    #   리터럴 70원 하한**과 직접 비교하고 있었다 — 70원은 플랫폼이 "명목 bidAmt"에 거는
+    #   제약이지 가중치 곱한 값에 거는 제약이 아니다. 필드 의미를 조용히 바꾸면 두 소비처가
+    #   깨진다(재현: 명목 140원·가중치 50% → 재정의판 70원=at_floor True, 원래 140원=False).
+    #   → **effective_bid는 옛 의미(명목, _derive 그대로) 그대로 둔다.** 기기가중치 적용값은
+    #   아래 새 키(`effective_bid_device_weighted`)로만 낸다 — 이 계약(M2-b2)의 실제 소비
+    #   배선은 `auto_operator.nominal_ceiling_for_device`(경제성상한 쪽)이지 이 필드가 아니다.
     weights = adgroup_device_weights(db, group_bids.keys())
     for adgroup_id, out in derived.items():
         w = weights.get(adgroup_id, {"pc": None, "mobile": None})
-        nominal = out["effective_bid"]
+        nominal = out["effective_bid"]  # ★그대로 — account_diagnosis·proposal_writer가 읽는 계약
         mult = device_weight_multiplier(w["pc"], w["mobile"])
-        out["effective_bid_nominal"] = nominal
-        out["effective_bid"] = int((Decimal(nominal) * mult).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        out["effective_bid_device_weighted"] = int(
+            (Decimal(nominal) * mult).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
         out["device_pc_weight"] = w["pc"]
         out["device_mobile_weight"] = w["mobile"]
         if w["pc"] is None and w["mobile"] is None:
@@ -241,8 +265,8 @@ def adgroup_effective_bids(db: Session, group_bids: dict[str, int]) -> dict[str,
             log.info("effective_bid: adgroup=%s 기기가중치 미관측(NULL) — 100 취급", adgroup_id)
         else:
             log.debug(
-                "effective_bid: adgroup=%s 기기가중치 pc=%s mobile=%s 배율=%s 명목=%s→실효=%s",
-                adgroup_id, w["pc"], w["mobile"], mult, nominal, out["effective_bid"],
+                "effective_bid: adgroup=%s 기기가중치 pc=%s mobile=%s 배율=%s 명목=%s→기기가중=%s",
+                adgroup_id, w["pc"], w["mobile"], mult, nominal, out["effective_bid_device_weighted"],
             )
     return derived
 

@@ -98,10 +98,14 @@ def test_stop_loss_non_canary_lever_broken_pauses():
 # (2) item 2/5 — shopping_lever_resume_candidates: 바닥 재개 분기(GATE P2-1)
 #     + flip-flop 쿨다운(GATE P2-3①)
 # ══════════════════════════════════════════════════════════════════
-def _off_shop_group(db, adgroup_id, *, bid_amt=50, campaign_id=CAMP, status="off"):
+def _off_shop_group(db, adgroup_id, *, bid_amt=50, campaign_id=CAMP, status="off",
+                     pc_bid_weight=None, mobile_bid_weight=None):
+    # ★D-NAO-218(M2-b2) 픽스처 확장 — pc/mobile_bid_weight를 실을 수 있는 모양으로(적대 리뷰
+    # 1R P1 지적: 기존 모양은 가중치를 아예 못 만들어 회귀를 원리적으로 못 잡았다).
     db.add(NaverEntity(entity_type="adgroup", entity_id=adgroup_id, parent_id=campaign_id,
                        campaign_id=campaign_id, campaign_type="SHOPPING", name=adgroup_id,
-                       status=status, bid_amt=bid_amt))
+                       status=status, bid_amt=bid_amt,
+                       pc_bid_weight=pc_bid_weight, mobile_bid_weight=mobile_bid_weight))
 
 
 def _mat(db, adgroup_id, mall_product_id, *, ad_id, ad_bid_amt, use_group=False,
@@ -159,6 +163,21 @@ def test_lever_resume_classifies_resume_at_floor(db):
     assert len(out) == 1
     assert out[0]["action"] == "resume"
     assert out[0]["effective_bid"] == 70
+
+
+def test_lever_resume_classifies_above_floor_using_nominal_not_device_weighted(db):
+    """★P1 회귀 잠금(적대 리뷰 1R FAIL 재현분, D-NAO-218) — 소재 실효입찰(명목 140원)에
+    기기가중치 50/50이 걸려 있어도 분기는 **명목** 기준(action='bid_down_first')이어야 한다.
+    재정의판(초판 결함)이면 기기가중 적용값(70원=바닥)을 써서 'resume'으로 잘못 분류돼
+    재개 준비(하향) 단계를 건너뛰고 800원급 소재가 그대로 재개될 수 있었다."""
+    _off_shop_group(db, "grp-mo", pc_bid_weight=50, mobile_bid_weight=50)
+    _mat(db, "grp-mo", "cp-1", ad_id="nad-1", ad_bid_amt=140)
+    _lock_log(db, "grp-mo", locked=True)
+    db.commit()
+    out = diag.shopping_lever_resume_candidates(db, date_to=TODAY)
+    assert len(out) == 1
+    assert out[0]["action"] == "bid_down_first"  # ★140원(명목)은 바닥이 아니다
+    assert out[0]["effective_bid"] == 140
 
 
 def test_lever_resume_no_product_bep_still_classified(db):

@@ -93,35 +93,59 @@ def test_adgroup_device_weights_missing_row_absent_not_faked(db):
     assert "grp-unknown" not in out
 
 
+def test_adgroup_device_weights_ignores_non_adgroup_entity_type(db):
+    """★P2-1(적대 리뷰 채택, 변이5 생존 대응): entity_type='adgroup' 필터가 살아 있어야 한다.
+    같은 entity_id를 가진 campaign/keyword 행에 가중치가 실려 있어도(정상 데이터에선 안
+    생기지만) adgroup 행이 아니면 섞이지 않는다."""
+    db.add(NaverEntity(
+        entity_type="campaign", entity_id="dup-id", parent_id="", campaign_id="dup-id",
+        campaign_type="SHOPPING", name="캠페인", status="on",
+        pc_bid_weight=70, mobile_bid_weight=70,
+    ))
+    db.add(NaverEntity(
+        entity_type="keyword", entity_id="dup-id", parent_id="grp-x", campaign_id="cmp-1",
+        campaign_type="WEB_SITE", name="키워드", status="on",
+        pc_bid_weight=80, mobile_bid_weight=80,
+    ))
+    db.commit()
+    out = effective_bid.adgroup_device_weights(db, ["dup-id"])
+    assert "dup-id" not in out  # adgroup 행이 없으므로 campaign/keyword 값이 새어들면 안 된다
+
+
 # ── adgroup_effective_bids 통합: 배선 전(명목) vs 배선 후(실효) 산출 차이 ──
 
-def test_adgroup_effective_bids_applies_device_weight_to_group_fallback(db):
-    """★핵심 증거(합격②): 그룹입찰 폴백 경로(소재 데이터 없음)에서 기기가중치 70% →
-    effective_bid가 명목 1000원의 700원으로 달라진다. effective_bid_nominal에 배선 전
-    값(1000)이 그대로 보존된다(대조용)."""
-    _seed_weight(db, "grp-1", 70, 70)
-    out = effective_bid.adgroup_effective_bids(db, {"grp-1": 1000})
-    assert out["grp-1"]["effective_bid_nominal"] == 1000  # 배선 전
-    assert out["grp-1"]["effective_bid"] == 700            # 배선 후(실효)
-    assert out["grp-1"]["device_pc_weight"] == 70
-    assert out["grp-1"]["device_mobile_weight"] == 70
+def test_adgroup_effective_bids_leaves_effective_bid_nominal_p1_regression(db):
+    """★P1 회귀 잠금(적대 리뷰 1R FAIL 재현분) — `effective_bid`는 여전히 **명목**(ad-vs-group
+    파생 그대로)이어야 한다. account_diagnosis.at_floor·stop_loss_amount·lever_broken과
+    proposal_writer의 70원 하한 분기가 이 필드를 네이버 bidAmt 리터럴과 직접 비교하므로,
+    기기가중치를 이 필드에 곱하면(초판의 결함) 명목 140원짜리가 70원으로 보여 at_floor가
+    거짓으로 True가 된다. 기기가중치 적용값은 별도 키(effective_bid_device_weighted)에만
+    있어야 한다."""
+    _seed_weight(db, "grp-1", 50, 50)
+    out = effective_bid.adgroup_effective_bids(db, {"grp-1": 140})
+    assert out["grp-1"]["effective_bid"] == 140          # ★명목 그대로 — 재정의 금지
+    assert out["grp-1"]["effective_bid_device_weighted"] == 70  # 기기가중 적용값은 새 키에만
+    assert out["grp-1"]["device_pc_weight"] == 50
+    assert out["grp-1"]["device_mobile_weight"] == 50
 
 
-def test_adgroup_effective_bids_null_weight_leaves_value_unchanged(db):
-    """②미관측(NULL) 그룹은 100 취급 — effective_bid가 배선 전과 동일(회귀 0 보장 축)."""
+def test_adgroup_effective_bids_null_weight_device_weighted_equals_nominal(db):
+    """②미관측(NULL) 그룹은 100 취급 — effective_bid_device_weighted가 명목과 동일(회귀 0 축)."""
     out = effective_bid.adgroup_effective_bids(db, {"grp-no-entity": 500})
-    assert out["grp-no-entity"]["effective_bid_nominal"] == 500
     assert out["grp-no-entity"]["effective_bid"] == 500
+    assert out["grp-no-entity"]["effective_bid_device_weighted"] == 500
     assert out["grp-no-entity"]["device_pc_weight"] is None
     assert out["grp-no-entity"]["device_mobile_weight"] is None
 
 
-def test_adgroup_effective_bids_above_100_weight_increases_effective_bid(db):
-    """★스펙 ④: 100 초과 가중치는 실효 입찰을 명목보다 **높인다**(과대평가 방향만이 아니다 —
-    ref 65 "명목>실효" 단정을 이 슬라이스에서 재확인·수정)."""
+def test_adgroup_effective_bids_above_100_weight_increases_device_weighted_only(db):
+    """★스펙 ④: 100 초과 가중치는 effective_bid_device_weighted를 명목보다 **높인다**(과대평가
+    방향만이 아니다 — ref 65 "명목>실효" 단정을 이 슬라이스에서 재확인·수정). effective_bid
+    (명목)은 여전히 불변."""
     _seed_weight(db, "grp-up", 130, 100)
     out = effective_bid.adgroup_effective_bids(db, {"grp-up": 1000})
-    assert out["grp-up"]["effective_bid"] == 1300
+    assert out["grp-up"]["effective_bid"] == 1000
+    assert out["grp-up"]["effective_bid_device_weighted"] == 1300
 
 
 # ── nominal_ceiling_for_device (rank_servo:49 소비처 전용 변환) ──

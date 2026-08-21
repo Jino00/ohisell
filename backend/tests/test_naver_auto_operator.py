@@ -2874,6 +2874,33 @@ def test_hourly_lane_servo_ceiling_device_weighted_does_not_over_clamp(db):
     assert saved.target_bid == 1150  # raw_target(콜드 1000×1.15) — 명목환산상한 2200이 안 잘림
 
 
+def test_hourly_lane_servo_logs_partial_device_weight_via_or_not_and(db, caplog):
+    """★P2-3(적대 리뷰 채택, 변이8 생존 대응) — 기기가중치 로그 분기는 **OR**다(둘 중 하나만
+    100이 아니어도 찍힌다). pc=100·mobile=70은 배율=max(100,70)/100=1이라 target_bid로는
+    두 그룹(로그 분기 AND vs OR)을 못 가른다 — 로그 자체를 캡처해서 가른다. AND로 바뀌면
+    이 케이스(pc=100 ∧ mobile≠100)에서 조용히 안 찍힌다."""
+    import logging as _logging
+    caplog.set_level(_logging.DEBUG, logger="app.services.naver_ad.auto_operator")
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db, adgroup_id="grp-shop-mixed")
+    db.query(NaverEntity).filter(NaverEntity.entity_id == "grp-shop-mixed").update(
+        {"pc_bid_weight": 100, "mobile_bid_weight": 70}
+    )
+    db.commit()
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator, "_servo_economic_ceiling", return_value=1100), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_called_once()
+    assert any("기기가중치 pc=100 mobile=70" in r.message for r in caplog.records), (
+        "OR 분기가 AND로 바뀌면(pc=100이라 앞항 False) 이 로그가 조용히 사라진다"
+    )
+
+
 def test_hourly_lane_brand_search_adgroup_up_uses_clamp_not_servo(db):
     """UP∧BRAND_SEARCH adgroup → 기존 _clamp_step ±15%(codex P1-3, 서보 미적용·UP 회귀 아님).
     proposal_type=bid_up(서보 아님)·target_bid=1150(±15%)."""

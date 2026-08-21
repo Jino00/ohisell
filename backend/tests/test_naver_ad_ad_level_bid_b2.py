@@ -61,10 +61,14 @@ def _daily(db, ad_date, adgroup_id, *, clk, cost, direct=0, campaign_id="cmp-sho
     ))
 
 
-def _shopping_entity(db, adgroup_id, *, status="on", bid_amt, campaign_id="cmp-shop"):
+def _shopping_entity(db, adgroup_id, *, status="on", bid_amt, campaign_id="cmp-shop",
+                      pc_bid_weight=None, mobile_bid_weight=None):
+    # ★D-NAO-218(M2-b2) 픽스처 확장 — pc/mobile_bid_weight를 실을 수 있는 모양으로(적대 리뷰
+    # 1R P1 지적: 기존 모양은 가중치를 아예 못 만들어 회귀를 원리적으로 못 잡았다).
     db.add(NaverEntity(entity_type="adgroup", entity_id=adgroup_id, parent_id=campaign_id,
                        campaign_id=campaign_id, campaign_type="SHOPPING", name=adgroup_id,
-                       status=status, bid_amt=bid_amt))
+                       status=status, bid_amt=bid_amt,
+                       pc_bid_weight=pc_bid_weight, mobile_bid_weight=mobile_bid_weight))
 
 
 def _active_campaign(db, campaign_id="cmp-shop"):
@@ -241,6 +245,24 @@ def test_shopping_pause_genuine_lever_broken_retained_when_ad_bid_low(db):
     assert out[0]["reason"] == "lever_broken"
     assert out[0]["lever_broken"] is True
     assert out[0]["effective_bid"] == 70
+
+
+def test_shopping_pause_at_floor_uses_nominal_not_device_weighted_p1_lock(db):
+    """★P1 회귀 잠금(적대 리뷰 1R FAIL 재현분, D-NAO-218) — at_floor 판정은 **명목** eff_bid
+    기준이어야 한다. 그룹입찰(명목) 140원·기기가중치 50/50 → 기기가중 적용값은 바닥(70원)과
+    같다. 이 값을 at_floor에 잘못 쓰면(초판 결함이 재현된 값) 정상 구간(140원, 안 바닥)인데도
+    at_floor=True로 오판돼 lever_broken과 겹쳐 터미널 pause 후보로 잘못 올라간다
+    (`_stop_loss_proposal`이 `_terminal_pause`로 떨어뜨려 실제 광고그룹 정지까지 이어지는
+    경로). cost·CPC는 어느 쪽 eff_bid를 써도 lever_broken=True가 되게 짜서 **at_floor 하나만**
+    가른다 — 재정의판은 out에 1건(lever_broken), 명목판은 0건이어야 한다."""
+    _active_campaign(db)
+    _shopping_entity(db, "grp-dw", bid_amt=140, pc_bid_weight=50, mobile_bid_weight=50)
+    # NaverAdgroupProduct 미시드 → 그룹입찰(명목 140원) 폴백 = eff_bid.
+    _daily(db, D0, "grp-dw", clk=5, cost=4000, direct=500)  # CPC 800 — 5×70=350·5×140=700 둘 다 초과
+    db.commit()
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                         correction_factor=Decimal("1.0"))
+    assert out == []  # ★명목 140원은 at_floor가 아니다 — 잘못 배선되면 여기서 1건(lever_broken) 진입
 
 
 # ══════════════════════════════════════════════════════════════════
