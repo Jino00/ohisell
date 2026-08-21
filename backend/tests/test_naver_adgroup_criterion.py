@@ -274,6 +274,67 @@ def test_probe_distinguishes_zero_settings_from_failure(db, monkeypatch):
     assert db.query(NaverAdgroupCriterionCurrent).count() == 0
 
 
+def test_db_exception_triggers_rollback_and_next_group_still_processes(db, monkeypatch):
+    """★적대 리뷰 P2 채택분(변이 5) — `db.rollback()`을 지워도 기존 18건이 전부 통과했다.
+    실제 DB 예외(SQLite UNIQUE 제약 위반, 가짜 예외 아님)를 진짜로 일으켜서 ⓐ db_failed가
+    오르고 ⓑ rollback 뒤 **다음 그룹**이 정상 처리되는 것까지 확인한다.
+
+    grp-bad는 같은 (criterion_type, dictionary_code) 키를 가진 행 2개를 준다 — `_apply_rows`는
+    `existing`을 루프 시작 전 한 번만 스냅샷하므로 둘 다 「신규」로 보고 `db.add()`를 두 번
+    한다. commit 시 `uq_naver_adgroup_criterion_current`가 IntegrityError를 던진다.
+
+    rollback이 없으면 세션이 실패 상태로 남아 grp-good 차례의 `db.execute(select(...))`가
+    (SQLAlchemy 레벨의) PendingRollbackError로 죽는다 — 그래서 이 테스트는 rollback을
+    지우면 반드시 죽는다(직접 변이로 재확인, 아래 리포트 참조)."""
+    _seed_entities(db, [("grp-bad", "cmp-1", "on"), ("grp-good", "cmp-1", "on")])
+    dup_rows = [_real_row(code="AG0013"), _real_row(code="AG0013")]
+    _patch_get(monkeypatch, {
+        "grp-bad": _Resp(200, dup_rows),
+        "grp-good": _Resp(200, [_real_row(code="AG0013")]),
+    })
+
+    stats = ing.sweep_adgroup_criterion(db, sleep_s=0)
+
+    assert stats["swept"] == 2
+    assert stats["failed"] == 1
+    assert stats["db_failed"] == 1  # ⓐ 실제 DB 예외가 db_failed를 올렸다
+    # ★stats["ok"]는 status==200 응답을 받은 시점(_apply_rows 호출 전)에 이미 올라간다 —
+    #   grp-bad도 여기 한 번 잡히고, 뒤이은 commit 실패로 failed·db_failed가 "동시에" 오른다.
+    #   즉 ok=2(grp-bad 응답성공 카운트 + grp-good) · failed=1(grp-bad의 commit 실패)다.
+    assert stats["ok"] == 2
+
+    # ⓑ rollback 이후에도 다음 그룹(grp-good)은 정상 진행됐다 — 세션이 오염되지 않았다.
+    cur = db.execute(
+        select(NaverAdgroupCriterionCurrent)
+        .where(NaverAdgroupCriterionCurrent.adgroup_id == "grp-good")
+    ).scalars().all()
+    assert len(cur) == 1
+    assert cur[0].dictionary_code == "AG0013"
+
+    # grp-bad 쪽은 rollback으로 통째로 안 남아야 한다(부분 반영 없음).
+    bad_cur = db.execute(
+        select(NaverAdgroupCriterionCurrent)
+        .where(NaverAdgroupCriterionCurrent.adgroup_id == "grp-bad")
+    ).scalars().all()
+    assert bad_cur == []
+
+
+def test_fail_ratio_exactly_at_threshold_is_not_incomplete(db, monkeypatch):
+    """★적대 리뷰 P2 채택분(변이 9) — 비교 연산자를 `>`에서 `>=`로 바꿔도 기존 18건이
+    전부 통과했다. fail_ratio가 max_fail_ratio와 **정확히 같은** 경계값을 고정한다 —
+    문턱은 초과(>)해야 «시스템 이상」으로 본다(§ `_MAX_FAIL_RATIO` 판정 기준: 넘었다면
+    그건 그룹들의 문제가 아니다 — «같다»는 아직 그 판정을 내릴 근거가 아니다)."""
+    _seed_entities(db, [("grp-1", "cmp-1", "on"), ("grp-2", "cmp-1", "on")])
+    _patch_get(monkeypatch, {
+        "grp-1": _Resp(200, [_real_row()]),
+        "grp-2": _Resp(500, None, "boom"),
+    })
+    stats = ing.sweep_adgroup_criterion(db, sleep_s=0, max_fail_ratio=0.5)
+    assert stats["swept"] == 2 and stats["failed"] == 1  # fail_ratio == 0.5 == max_fail_ratio
+    assert stats["complete"] is True
+    assert stats["incomplete_reason"] is None
+
+
 def test_stale_removal_does_not_touch_failed_group(db, monkeypatch):
     """실패한 그룹의 기존 설정 행은 지우지 않는다(fail-closed) — 성공한 그룹만 stale 처분."""
     _seed_entities(db, [("grp-1", "cmp-1", "on")])
