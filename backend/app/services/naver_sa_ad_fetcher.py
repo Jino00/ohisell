@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from urllib.parse import urlparse, parse_qs
@@ -818,6 +818,110 @@ def get_adgroup_targets(adgroup_id: str) -> dict:
         "black_media": sorted(set(black.get("media") or [])),
         "black_mediagroup": sorted(set(black.get("mediaGroup") or [])),
     }
+
+
+# ── /ncc/criterion — 연령·성별·요일시간 타겟팅 설정 + bidWeight (D-NAO-216, ref 65 S1-ⓐ) ──
+#
+# ★ref 58 §2 C-0(★필수) — 이 endpoint는 **설정이 없는 축을 조회할 때마다 기본값 3행을
+#   새로 합성**해 돌려준다(GNM/GNF/GNU, bidWeight=100·negative=false, regTm=«방금 조회한
+#   시각»). 1분 간격 재조회로 반증됨 — 두 번째 응답의 regTm이 다시 «지금»으로 찍혔다.
+#   이 함정을 안 걸러내고 그대로 적재하면 **매 스윕이 「방금 누가 바꿨다」로 변경 원장을
+#   오염시킨다** — 진짜 설정(과거로 고정된 regTm)과 합성 기본값(regTm≈호출 시각)을
+#   가르는 판별자가 반드시 있어야 한다(그 근거가 곧 아래 임계값이다).
+#
+# 임계값 근거: 2026-08-17 라이브 재현에서 합성 regTm은 호출 시각과 **밀리초 단위**로
+# 일치했고(요청 00:33:33.091Z → 응답 regTm 00:33:33.227Z), 실측된 **진짜 설정은 전부
+# 날짜 단위로 오래됐다**(가장 최근도 2026-07-31, 관측일 기준 17일 전 — 대부분은
+# 2024~2025년). 600초(10분)면 네트워크 지연·시계 오차를 다 흡수하고도 안전 마진이 크다.
+_SYNTHETIC_REGTM_THRESHOLD_S = 600
+
+
+def _parse_iso_utc(raw: object) -> datetime | None:
+    """UTC ISO8601('...Z') 문자열 → timezone-aware datetime. 해석 불가면 None(추정 금지).
+
+    `ad_external_change.parse_edit_tm`과 같은 변환 규칙(Z→+00:00)이지만 반환이 UTC
+    그대로다 — 여기서는 KST 표시가 아니라 «호출 시각과의 근접도 계산」이 목적이라
+    타임존 변환을 한 번 덜 한다."""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def get_adgroup_criterion(adgroup_id: str) -> dict:
+    """GET /ncc/criterion/{ownerId} — 그 광고그룹의 **연령·성별·요일시간 타겟팅 실설정**과
+    각 항목의 `bidWeight`를 파싱해 돌려준다 (D-NAO-216, ref 65 S1-ⓐ 경로 정정).
+
+    ★**다른 두 표면과 혼동 금지**:
+      · `/ncc/criterion-dictionary/{type}`(`NaverCriterionDict`, D-NAO-203) — 코드→한글명
+        **사전**. 이쪽은 그룹별 **실설정**.
+      · `NaverCriterionDaily`(D-NAO-203, StatReport `CRITERION` **벌크 성과 리포트**) —
+        「어느 세그먼트에서 비용·클릭이 났나」(성과 분해). 이쪽은 「어느 세그먼트가
+        타겟팅돼 있고 입찰 가중치가 몇인가」(**설정**) — 스케줄러 job도 이름을 반드시
+        가른다(`sync_naver_criterion`=벌크 성과, `sweep_naver_adgroup_criterion`=이 함수).
+
+    응답은 **평면 dict의 배열**이다(2026-08-17 캡처 실측, 키 11종·결측 0):
+      `ownerId` · `type`(AG/GN/SD) · `dictionaryCode` · `codeName` · `bidWeight` ·
+      `negative` · `enable` · `delFlag` · `regTm` · `editTm` · `customerId`.
+
+    ★**삭제된 광고그룹은 404 `{"code":1018,...}`**를 준다(`/ncc/targets`와 같은 처분,
+    D-NAO-201 전례) — 예외로 올리지 않고 `status`에 실어 돌려준다. 「모름」과 「설정
+    0건」을 가르는 것은 부르는 쪽(probe 표)의 몫이다(교훈 #318 — 한쪽만 fail-closed면
+    나머지가 거짓을 영구 기록한다).
+
+    ⚠️`negative=true` 행의 `bidWeight`는 **제외 대상**에 붙은 값이라 실효 입찰 배율로
+    읽으면 안 된다(2026-08-21 실측 각주, D-NAO-216) — 소비 측이 반드시 `negative`를
+    함께 본다.
+
+    Returns:
+      {"status": int,
+       "rows": [{"criterion_type","dictionary_code","code_name","bid_weight","negative",
+                 "enable","del_flag","reg_tm","edit_tm","is_synthetic"}, ...]}
+      status != 200이면 rows는 [] — 「설정 0건」이 아니라 **「모름」**이다.
+      `is_synthetic=True`인 행은 위 C-0 함정에 해당하는 **합성 기본값**이다 — 적재 측이
+      반드시 걸러야 한다(이 함수는 판별만 하고 걸러내지 않는다 — 필터링은 ingest 층의
+      결정이지 fetcher가 조용히 버릴 일이 아니다, 「모름을 값으로 센다」류 실수 예방).
+    """
+    call_time = datetime.now(timezone.utc)
+    resp = _get(f"/ncc/criterion/{adgroup_id}")
+    if resp.status_code != 200:
+        log.info("[criterion] adgroup=%s HTTP %s body=%s", adgroup_id, resp.status_code, resp.text[:200])
+        return {"status": resp.status_code, "rows": []}
+
+    items = resp.json() or []
+    rows: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        reg_tm = it.get("regTm")
+        parsed_reg = _parse_iso_utc(reg_tm)
+        # ★파싱 실패(None)는 판별 불가라 «합성 아님»으로 보수적으로 둔다 — 모름을 합성으로
+        #   세면 진짜 설정을 조용히 버리게 된다(교훈 #123과 같은 방향의 실수, 반대 부호).
+        is_synthetic = (
+            parsed_reg is not None
+            and abs((parsed_reg - call_time).total_seconds()) < _SYNTHETIC_REGTM_THRESHOLD_S
+        )
+        rows.append({
+            "criterion_type": it.get("type") or "",
+            "dictionary_code": it.get("dictionaryCode") or "",
+            "code_name": it.get("codeName") or "",
+            "bid_weight": it.get("bidWeight"),
+            "negative": bool(it.get("negative", False)),
+            "enable": bool(it.get("enable", False)),
+            "del_flag": bool(it.get("delFlag", False)),
+            "reg_tm": reg_tm,
+            "edit_tm": it.get("editTm"),
+            "is_synthetic": is_synthetic,
+        })
+    return {"status": 200, "rows": rows}
 
 
 def get_keywords(adgroup_id: str) -> list[dict]:

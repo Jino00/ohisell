@@ -147,6 +147,29 @@ def _classify(row: NaverSearchTermExclusion, live: list[dict]) -> tuple[str, str
     return STATE_MISSING, "라이브 제외키워드 목록에 없다 — 우리 조치가 사라졌다", None
 
 
+def _match_type_for(row: NaverSearchTermExclusion, live: list[dict]) -> object | None:
+    """제외 1행이 실제로 매칭된 라이브 항목의 원본 `type` 값 (D-NAO-216 Q2-b).
+
+    `_classify`와 **같은 우선순위**로 항목을 찾는다(id 우선 → 본문 정확 일치 단독)지만
+    상태 판정에는 관여하지 않는다 — SHOPPING `RESTRICT_KEYWORD_TARGET.target[].type`
+    (1=exact 추정·2=phrase 추정, [미상])을 읽어 오는 것이 전부다.
+
+    ★`_classify`에 이 값을 얹어 4-튜플로 만들지 않은 이유: 그 반환을 3개로 unpack하는
+      기존 테스트가 10건 있고(`test_exclusion_survival.py`), 튜플을 늘리면 그 전부가
+      깨진다 — 「기존 테스트 회귀 0」 규율(계약 §4)이 이 별도 함수를 선택하게 했다.
+    """
+    if row.restrict_kwd_id:
+        for e in live:
+            if e.get("nccAdgroupRestrictKwdId") == row.restrict_kwd_id and not e.get("delFlag"):
+                return e.get("type")
+    exact_alive = [
+        e for e in live if not e.get("delFlag") and e.get("keyword") == row.search_term
+    ]
+    if len(exact_alive) == 1:
+        return exact_alive[0].get("type")
+    return None
+
+
 def check_survival(db: Session, *, now: datetime | None = None) -> dict:
     """status='excluded' 전 행을 라이브 재조회로 대조하고 결과를 DB에 적는다(잡 진입점).
 
@@ -247,6 +270,23 @@ def check_survival(db: Session, *, now: datetime | None = None) -> dict:
                 # 대조로 알아낸 id를 회수한다 — 이게 있어야 나중에 «개방(delete)»이 가능하다.
                 r.restrict_kwd_id = found_id
             counts[state] += 1
+
+            # ── 매칭 타입 보존 (D-NAO-216 Q2-b) ──
+            # ★SHOPPING에서만 채운다. WEB_SITE(`get_restricted_keywords`)의 `type`은 조회
+            #   카테고리(KEYWORD_PLUS_RESTRICT/EXP_SEARCH)라 **다른 어휘**이고, 그걸 이 칸에
+            #   같이 넣으면 나중에 「phrase 통합 후보를 이 칸으로 고른다」(M2-c)가 오작동한다
+            #   (models.py `NaverSearchTermExclusion.match_type` docstring 참조).
+            if adgroup_type == naver_sa_writer.SHOPPING_ADGROUP_TYPE:
+                raw_type = _match_type_for(r, live)
+                if raw_type is not None:
+                    mt = str(raw_type)
+                    if mt not in ("1", "2"):
+                        # ★버리지 않는다(계약 스펙) — [미상] 값도 그대로 저장하고 표면화만 한다.
+                        log.warning(
+                            "[제외생존] 예상 밖 match_type=%r adgroup=%s term=%r — 그대로 저장",
+                            raw_type, r.adgroup_id, r.search_term,
+                        )
+                    r.match_type = mt
 
     db.commit()
     return {

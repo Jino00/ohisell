@@ -3381,6 +3381,128 @@ class NaverAdgroupTargetChange(Base):
     new_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class NaverAdgroupCriterionCurrent(Base):
+    """`/ncc/criterion/{ownerId}` 실설정 **현재 상태** (D-NAO-216, ref 65 S1-ⓐ 경로 정정).
+
+    grain: (adgroup_id, criterion_type, dictionary_code). upsert — 역사는
+    `NaverAdgroupCriterionChange`가 따로 쌓는다(같은 관례를 `NaverAdgroupTargetCurrent`
+    /`NaverAdgroupTargetChange`에서 승계).
+
+    ★**`NaverCriterionDaily`(D-NAO-203)와 다른 표다** — 그건 StatReport `CRITERION`
+    **벌크 성과 리포트**(비용·클릭이 어느 세그먼트에서 났나)이고, 이 표는 **엔티티별 GET
+    스윕**(`/ncc/criterion/{ownerId}`, 그룹마다 1콜)으로 얻는 **설정**(어느 세그먼트가
+    타겟팅돼 있고 `bidWeight`가 몇인가)이다. 두 경로는 서로를 대체하지 않는다 — 성과 표는
+    「무엇이 얼마나 팔렸나」를, 이 표는 「그 판매가 어떤 필터 아래서 났나」를 준다.
+
+    ★**`naver_adgroup_target_current`(D-NAO-201)와도 다른 endpoint에서 왔다**:
+    `/ncc/targets`는 매체·기기·제외키워드(MEDIA_TARGET·PC_MOBILE_TARGET·
+    RESTRICT_KEYWORD_TARGET)를 주고, `bidWeight`는 그 응답에 **0건**이다(2026-08-21
+    실측, `data/77_targets_surface/*.jsonl`). 연령·성별·요일시간 + `bidWeight`는
+    `/ncc/criterion`에서만 온다 — ref 65가 08-17엔 이걸 한 경로로 잘못 적었던 것을
+    D-NAO-216이 정정했다.
+
+    ★★**C-0 함정(ref 58 §2) — 이 표에 들어오는 행은 전부 「진짜 설정」이어야 한다.**
+    `/ncc/criterion` GET은 설정 안 된 축을 조회할 때마다 **기본값을 새로 합성**해
+    돌려준다(예: 성별 미설정 그룹 → GNM/GNF/GNU 3행, `bidWeight=100`·`negative=false`,
+    `regTm`=«방금 조회한 시각» — 1분 뒤 재조회하면 `regTm`이 다시 «지금»으로 찍힌다).
+    ingest 층(`adgroup_criterion_ingest._apply_rows`)이 `is_synthetic=True`인 행을
+    걸러내고 **진짜 설정만** 이 표에 쓴다 — 안 걸러내면 매 스윕이 「방금 누가 바꿨다」를
+    변경 원장에 새기고, 이 표는 «타겟팅 설정»이 아니라 «오늘 우연히 합성된 기본값
+    3~4천 행»으로 채워진다.
+
+    criterion_type — 'AG'=연령 · 'GN'=성별 · 'SD'=요일·시간(2026-08-17 캡처 실측 3종).
+    'AD'(관심사)는 이 GET 표면에서 **아직 관측되지 않았다** — StatReport 축엔 있지만
+    (`NaverCriterionDaily` docstring) 그룹별 설정 GET에서 나온다는 보장은 없다. 실제로
+    나오면 이 컬럼은 그대로 받는다(코드에서 화이트리스트로 막지 않는다).
+
+    ⚠️`negative=true` 행의 `bid_weight`는 **제외 대상**에 붙은 값이라 실효 입찰 배율로
+    읽으면 안 된다(2026-08-21 실측 각주 — fetcher docstring과 동일 경고).
+
+    ★`campaign_id`는 스윕 대상 열거(`naver_entity`)에서 얻은 부가 정보이지 API 원값이
+    아니다 — `/ncc/criterion` 응답엔 캠페인 식별자가 없다.
+    """
+
+    __tablename__ = "naver_adgroup_criterion_current"
+    __table_args__ = (
+        UniqueConstraint(
+            "adgroup_id", "criterion_type", "dictionary_code",
+            name="uq_naver_adgroup_criterion_current",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    criterion_type: Mapped[str] = mapped_column(String(4), nullable=False)
+    dictionary_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    code_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    bid_weight: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    negative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    enable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    del_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reg_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class NaverAdgroupCriterionChange(Base):
+    """criterion 설정이 **바뀐 순간만** 남기는 이벤트 원장 (D-NAO-216).
+
+    grain: (adgroup_id, changed_at, criterion_type, dictionary_code, field). 값이 바뀐
+    순간만 쌓는다 — 이 스윕의 존재 이유가 **대행사가 가중치를 건드린 것을 잡는 것**이라
+    (계약 배경 문단) 「무엇이 언제 몇에서 몇으로 바뀌었나」가 이 표의 전부다.
+
+    field는 최소 `bid_weight`·`negative`·`enable`(값 변화)과 `__row__`(신규 등장/삭제,
+    old/new에 `null`/요약 문자열)를 쓴다 — `NaverAdgroupTargetChange`와 같은 관례
+    (관측 메타뿐 아니라 등장·소멸 자체도 «변경»으로 남긴다).
+
+    ⚠️이 원장의 시작은 **최초 적재일**이다. 그 전의 변경은 «없었다»가 아니라 «관측되지
+    않았다» — API가 현재만 주므로 소급이 원리적으로 불가능하다(D-NAO-201과 동일 한계).
+    """
+
+    __tablename__ = "naver_adgroup_criterion_change"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    criterion_type: Mapped[str] = mapped_column(String(4), nullable=False)
+    dictionary_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    field: Mapped[str] = mapped_column(String(40), nullable=False)
+    old_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    new_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class NaverAdgroupCriterionProbe(Base):
+    """그룹별 criterion 스윕 **결과 자체**의 기록 (D-NAO-216).
+
+    grain: (adgroup_id) — unique, 그룹당 최신 1행(upsert, 역사 없음).
+
+    ★★**이 표가 있는 이유**: `naver_adgroup_criterion_current`만 보면 「설정이 0건인
+    그룹」과 「이번 스윕에서 조회 자체가 실패한 그룹」이 **똑같이 행 0개**로 보인다.
+    그 둘을 가르지 못하면 실패를 「설정 없음」으로 **영구 기록**하게 된다(교훈 #318 —
+    한 사실을 여러 표에 쓰면서 한쪽만 fail-closed면 나머지가 거짓을 영구 기록한다.
+    `naver_adgroup_media_black`이 500 한 번에 「블랙이 사라졌다」를 9행 새겼던 그 사고와
+    같은 모양). `probe_status`가 200이고 `row_count`가 0이면 **확인된 「설정 없음」**,
+    `probe_status`가 200이 아니면 `row_count`는 신뢰하지 말고 **「모름」**으로 읽는다
+    (실패 시 이전 값을 유지 — 덮어쓰지 않는다, ingest 층 참조).
+
+    `row_count`는 **필터링 후**(C-0 합성 기본값 제거 후) 실제로 `naver_adgroup_criterion_current`
+    에 반영된 행 수다 — 원응답의 raw 행 수가 아니다.
+    """
+
+    __tablename__ = "naver_adgroup_criterion_probe"
+    __table_args__ = (
+        UniqueConstraint("adgroup_id", name="uq_naver_adgroup_criterion_probe"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    probe_status: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
 class NaverCriterionDaily(Base):
     """연령·성별·관심사·요일시간(CRITERION) 성과 분해 — StatReport 벌크 경로 (D-NAO-203).
 
@@ -3530,6 +3652,17 @@ class NaverSearchTermExclusion(Base):
     adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     search_term: Mapped[str] = mapped_column(String(300), nullable=False, default="")
     restrict_kwd_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 개방(delete)에 필수, WriteResult에서 회수
+    # ★매칭 타입 원값 보존 (D-NAO-216 Q2-b, 계약 §8-Q2-b). SHOPPING의
+    #   `RESTRICT_KEYWORD_TARGET.target[].type`(1/2)을 그대로 저장한다 — 1=exact(추정)·
+    #   2=phrase(추정)이지만 Swagger에 의미 설명이 없어 **[미상]**이다(ref 77 §6). 그래서
+    #   코드가 해석하지 않고 응답 원값을 문자열로만 보존한다(1/2 외 값이 와도 버리지 않고
+    #   그대로 저장 — 로그는 채우는 쪽에서 남긴다).
+    #   ★WEB_SITE 경로(`get_restricted_keywords`)의 `type`은 **다른 어휘**다
+    #   (KEYWORD_PLUS_RESTRICT/EXP_SEARCH — 조회 카테고리 파라미터지 항목별 매칭 타입이
+    #   아니다) — 그래서 이 칸은 SHOPPING 대조 경로(`exclusion_survival.check_survival`)
+    #   에서만 채워진다. 두 어휘를 한 칸에 섞으면 나중에 「phrase 통합 후보를 이 칸으로
+    #   고른다」(M2-c ⓒ, 70/70 도달 그룹의 무손실 배출구)가 오작동한다.
+    match_type: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     status: Mapped[str] = mapped_column(String(12), nullable=False, default="excluded", index=True)  # excluded/probation/restored
     cycle: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     excluded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now 주입(server_default 아님)
