@@ -222,6 +222,8 @@ def collect_entities(
                 "bid_amt": ag.get("bid_amt"),
                 "edit_tm": ag.get("edit_tm"),  # D-NAO-146
                 "reg_tm": ag.get("reg_tm"),    # D-NAO-148
+                "pc_bid_weight": ag.get("pc_bid_weight"),        # D-NAO-218(M2-b2)
+                "mobile_bid_weight": ag.get("mobile_bid_weight"),
             })
 
             if ctype != "WEB_SITE":
@@ -698,6 +700,9 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                 status=r["status"], status_reason=r.get("status_reason"),
                 bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"),
                 edit_tm=r.get("edit_tm"), reg_tm=r.get("reg_tm"), synced_at=now,
+                # D-NAO-218(M2-b2): campaign/keyword 행엔 키 자체가 없다 → get()이 None
+                # → "미상(NULL)"으로 정직하게 저장(가짜 100을 지어내지 않는다).
+                pc_bid_weight=r.get("pc_bid_weight"), mobile_bid_weight=r.get("mobile_bid_weight"),
             ))
         else:
             if r["entity_type"] == "keyword":
@@ -736,6 +741,10 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                 # 키가 없는 레거시 주입 rows는 마지막 관측 사유를 지우지 않는다(qi와 같은 규약).
                 e.status_reason = r["status_reason"]
             e.bid_amt = r.get("bid_amt")
+            # D-NAO-218(M2-b2): bid_amt와 같은 규약(항상 최신 관측으로 덮어쓴다·last-known
+            # 보존 안 함) — campaign/keyword 행은 r에 키가 없어 매번 None(=해당없음)으로 유지.
+            e.pc_bid_weight = r.get("pc_bid_weight")
+            e.mobile_bid_weight = r.get("mobile_bid_weight")
             if r.get("reg_tm") is not None:
                 # D-NAO-148: regTm은 불변이므로 last-known을 None으로 지우지 않는다(qi와 같은
                 # 규약). 레거시 주입 rows·API 누락에 기존 생성 시각을 잃지 않기 위함.

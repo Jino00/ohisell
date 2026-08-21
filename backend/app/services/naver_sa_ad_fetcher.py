@@ -736,8 +736,13 @@ def get_adgroups(campaign_id: str) -> list[dict]:
     §3.2, useExpSearch=true·expSearchBudgetRatio=100 관측 확인)으로 확정 — 추정 아님. 기존
     호출부(entity_sync)는 두 신규 키를 안 써도 무해(dict 추가 키, 기존 키 제거 없음).
 
+    ★D-NAO-218(M2-b2): pc_bid_weight/mobile_bid_weight(pcNetworkBidWeight/
+    mobileNetworkBidWeight) 추가 — 공식 Swagger 확정 range 10~500·기본 100(100 초과값도
+    유효, 이상치 아님). **추가 API 콜 0** — 이 endpoint는 entity sync가 이미 매일 부른다.
+    이번은 이 2필드만 뽑는다(39키 중 나머지 26키는 이월 — 앵커 「안 함」).
+
     Returns: [{"adgroup_id","campaign_id","name","status","status_reason","user_lock","bid_amt",
-               "daily_budget","extended_search"}, ...]
+               "daily_budget","extended_search","pc_bid_weight","mobile_bid_weight"}, ...]
     status_reason(statusReason)는 D-NAO-97 추가 — "왜 꺼져 있나"(사람 OFF vs 예산소진 vs 검수)를
     구분하는 유일한 필드. 그룹 status는 이미 userLock 기준이라 오탐은 없었지만, 사유를 저장하지
     않으면 PAUSED의 원인을 사후에 알 방법이 없다(라이브 실측 2026-07-28: 그룹 PAUSED 548건 중
@@ -757,6 +762,8 @@ def get_adgroups(campaign_id: str) -> list[dict]:
         "extended_search": a.get("useExpSearch"),
         "edit_tm": a.get("editTm"),  # D-NAO-146 발생 시각 앵커(원문 그대로, 라이브 실측 1,010/1,010건)
         "reg_tm": a.get("regTm"),    # D-NAO-148 생성 시각(불변) — 라이브 실측 96/96 = 100%
+        "pc_bid_weight": a.get("pcNetworkBidWeight"),        # D-NAO-218: 100 초과도 유효(잘라내지 않는다)
+        "mobile_bid_weight": a.get("mobileNetworkBidWeight"),
     } for a in resp.json()]
 
 

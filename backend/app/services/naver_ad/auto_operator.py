@@ -3348,6 +3348,27 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         servo_agg=servo_agg, correction_factor=servo_correction_factor,
                         window_from=window_from, window_to=window_to,
                     )
+                    # D-NAO-218(M2-b2, ref 65 정정 #2 — rank_servo:49 소비처): 위 economic_ceiling은
+                    # 실효(원가) 스케일인데 rank_servo는 이걸 current_bid·target_bid(둘 다 네이버
+                    # bidAmt에 그대로 쓰는 **명목**)와 같은 스케일로 비교한다. 기기가중치≠100이면
+                    # 어긋난다(>100 실재: AG5054=130 — 명목 그대로 비교하면 상한을 조용히 넘길 수
+                    # 있다). rank_servo.py는 손대지 않는다 — 진입 직전 상한만 명목 스케일로 환산
+                    # (서보 신설이 아니라 "이미 있는 값을 옳게 읽는" 정정, 앵커 「순위서보 구현 안
+                    # 함」 경계 준수). current_bid(step_base)는 그대로 명목 — target_bid도 명목
+                    # 그대로 나와야 write 필드와 스케일이 맞는다(둘 다 안 건드리는 쪽이 안전하다).
+                    economic_ceiling, _device_w = effective_bid.nominal_ceiling_for_device(
+                        db, exec_target_id, economic_ceiling,
+                    )
+                    if _device_w["pc"] is None and _device_w["mobile"] is None:
+                        log.info(
+                            "[순위서보] adgroup=%s 기기가중치 미관측(NULL) — 100 취급(상한 환산 없음)",
+                            exec_target_id,
+                        )
+                    elif _device_w["pc"] != 100 or _device_w["mobile"] != 100:
+                        log.debug(
+                            "[순위서보] adgroup=%s 기기가중치 pc=%s mobile=%s — 경제성상한 명목환산 %s원",
+                            exec_target_id, _device_w["pc"], _device_w["mobile"], economic_ceiling,
+                        )
                     # IU-R R3: 반응곡선 기울기를 response_prior로 주입(harness read, 원칙18-6).
                     # 유닛별 "adgroup:<id>" 곡선이 있으면 그 기울기로 "한 단 위 필요 증분" 근접,
                     # 없으면 None → rank_servo 콜드스타트 보수 기본 스텝 폴백.
