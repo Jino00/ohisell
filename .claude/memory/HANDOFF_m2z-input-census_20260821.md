@@ -69,7 +69,13 @@
 7. ★**S2③ 함정 예고** — `gave_score_d3/d7`은 `models.py`에 있고 내부 계산에 쓰이는데 `routers/*.py`·`schemas.py`엔 **0건**이다. M2-d가 「API 노출」을 만들 때 교훈 #321(`response_model`이 키를 지운다)의 **네 번째 재발** 자리.
 8. ★**S1①의 콘솔 캡처는 Jino 개입이 필요한 유일한 항목**(계약 §8-Q5 미결). 대조 좌표는 확정돼 있다 — 캠페인「아이폰 17프로 필름」/그룹「아이폰필름」(`grp-a001-02-000000063093697`) 연령 탭, `AG5054=130`.
 9. **CI 빨강은 결제 정지**(`steps=0`·2~4초)지 코드 신호가 아니다. ⚠️확인 없이 `--force` 습관이 붙으면 진짜 빨간불도 같은 손짓으로 지나간다.
-10. **다음 구조 감사 트리거 = 08-25 이후**(마지막 §4 감사 = `docs/references/69_audit_pao_drift_20260818.md`, 08-18).
+10. ★★**내 것이 아닌 미커밋 변경 1건**(세션 중 나타남, 19:4x 발견) — `tools/rocket_supplier_fetcher.py`(+7/−1):
+    `_SALES_PERMITTED_LEVELS`에 **`DISCOVERY`** 추가. 근거 주석은 라이브 실측(무료체험 `freeTrialEnd=2026.08.20`
+    종료 → 08-21 `BASIC→FREE` 강등 → 유료 재개 후 `permittedLevel=DISCOVERY subscribed=DISCOVERY`).
+    **→ 소관: `docs/tracks/active/track_coupang-rocket-1p.md`**(PAO 트랙 「안 함」). 이 세션은 **손대지 않았고**
+    커밋 4건에도 안 섞였다(경로 명시 `git add`). ⚠️**미커밋인 채 남아 있다** — 병행 세션이 있었을 수 있다.
+    다음 세션은 커밋 전 `git status`를 반드시 확인하고, 이 파일을 **자기 커밋에 담지 말 것**(issue #247).
+11. **다음 구조 감사 트리거 = 08-25 이후**(마지막 §4 감사 = `docs/references/69_audit_pao_drift_20260818.md`, 08-18).
 
 ## 6. 다음에 할 작업 (미완료)
 - **이어지는 작업의 목적(원문)** — 트랙 계약 헤더 `목표:` 줄 그대로:
