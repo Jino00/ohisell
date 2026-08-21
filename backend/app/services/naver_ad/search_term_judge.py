@@ -24,7 +24,7 @@ from app.models import (
     NaverProductBep,
     NaverSearchTermDaily,
 )
-from app.services.naver_ad import campaign_target_resolver, intraday_roas
+from app.services.naver_ad import campaign_target_resolver, intraday_roas, semantic_units
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now
 
@@ -44,6 +44,17 @@ APPROVAL_SOURCE_SS_EXCLUDE = "ss_exclude"
 # 미구현이 안전장치 그 자체 — SS3처럼 별도 SHOPPING 명시 거부 코드가 필요 없음).
 # String(24) 적합(20자).
 SEARCH_TERM_PROMOTE_TYPE = "search_term_promote"
+
+# M2-c ⓒ/ⓔ(D-NAO-191·219) — 의미 단위(사전 최장일치로 조립된 합성 구) 제외 후보의 target_type.
+# 실제 관측된 검색어(target_type="search_term")와 다른 값을 쓰는 이유: harness의 구조 가드
+# (_execute_search_term_exclude·_execution_blocker 둘 다 "target_type != 'search_term'"이면
+# fail-closed 거부/정보성 표시)가 이 값을 만나면 **콘솔 Confirm으로도 실행되지 않는다.** 의미
+# 단위는 사전 최장일치로 조립된 합성 구라 실제 검색어 텍스트가 아니고, SHOPPING API가 그걸 어떤
+# type(exact=1 추정/phrase=2 추정, naver_sa_writer._SHOPPING_RESTRICT_TYPE 참조)으로 받아야
+# 의도대로 동작하는지 아직 실증되지 않았다(NGRAM_GRAIN_MEASUREMENT_20260818.md §6). 그래서 이
+# target_type은 "쓸 수 있게 태어난 제안"이 아니라 "사람이 검토 후 콘솔 밖에서 수동 등록하는
+# 배출구"로 의도적으로 비실행 상태에 둔다 — 등록 표현이 검증되면 그때 별도 슬라이스가 연다.
+SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE = "search_term_semantic"
 
 # ── 안전 봉투 §1 상수(PLAN §1) — 초기값은 가설, SS1 실분포로 캘리브레이션(§실측 2) ──
 _SS_WINDOW_DAYS = 14   # rolling 창(§난제 2 — 저볼륨 롱테일 표본 누적, 보존 16일 내)
@@ -240,11 +251,187 @@ def judge_search_terms(
 
     powerlink = _judge_powerlink(db, now=now, as_of=as_of)
 
+    # M2-c ⓒ-3: 의미 단위 판정은 **병렬 산출**이다 — 위 개별 grain 판정을 대체하지 않는다(기존
+    # 4개 키는 이 줄 이전 로직과 byte-동일 유지). 같은 now·window_days로 같은 rolling 창을 재사용.
+    semantic = judge_semantic_units(db, now=now, window_days=window_days)
+
     return {
         "window": {"from": window_from.isoformat(), "to": as_of.isoformat(), "days": window_days},
         "exclude_candidates": {"shopping": _sort(shopping), "powerlink": powerlink["powerlink"]},
         "agency_powerlink": powerlink["agency_powerlink"],
         "promote_candidates": _sort(promote),
+        "semantic_units": semantic,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# M2-c ⓒ-2 — 의미 단위(사전 최장일치) 풀링 판정. 개별 grain(GROUP BY search_term)의 클릭 희소성을
+# 우회한다(D-NAO-191 실측: 검색어의 97.4%가 토큰 1개 → 단어 n-gram은 산출 0). 순수·read-only.
+# ══════════════════════════════════════════════════════════════════
+def _semantic_reason(
+    kind: str, key: str, clk: int, cost: int, min_cost: Decimal,
+    member_terms: int, members_passing: int, window_from: date, window_to: date,
+) -> str:
+    unlocked = members_passing == 0
+    unlocked_txt = (
+        "개별 grain에선 표본 게이트를 통과하는 멤버가 0건 — 풀링으로 신규 확보(unlocked_by_pooling)"
+        if unlocked else
+        f"개별 grain에서 이미 게이트를 통과한 멤버 {members_passing}건 포함"
+    )
+    return (
+        f"[검색어제외 의미단위·{kind}] 「{key}」 — rolling {window_from}~{window_to}: "
+        f"clk={clk}(≥{_SS_MIN_CLICK}), cost={cost}원(≥공헌이익 {int(min_cost)}원), "
+        f"묶인 검색어={member_terms}건. {unlocked_txt}. target ROAS 미달·매출 미증 = 클릭당 확정 "
+        "손해(PLAN §1 2, 의미단위 풀링 적용 — D-NAO-191·219)."
+    )
+
+
+def judge_semantic_units(
+    db: Session, *, now: datetime | None = None, window_days: int = _SS_WINDOW_DAYS,
+) -> dict:
+    """쇼핑 검색어를 의미 단위(사전 최장일치, semantic_units.py)로 풀링해 개별 grain 클릭
+    희소성을 우회한다(M2-c ⓒ, D-NAO-191 실측 이식 — NGRAM_GRAIN_MEASUREMENT_20260818.md). 개별
+    grain 판정(위 judge_search_terms)의 **병렬 산출**이지 대체가 아니다. 순수·read-only.
+
+    원료: judge_search_terms와 같은 rolling 창(window_days)·같은 테이블(NaverSearchTermDaily).
+    대상: source='shopping' 且 conv_purchase_cnt(창 합산)==0 — §1-1 전환 보호를 그대로 상속한다
+    (전환이 붙은 검색어는 집계 대상에도 들어가지 않는다 — 살아있는 증거는 애초에 후보가 아니다).
+
+    검색어 정규화: casefold() 후 공백 제거(프로토타입과 동일 — 붙여 쓴 한국어 검색어 전제).
+
+    집계 3종(각 (adgroup_id, 키) grain, 같은 검색어 안 같은 단위 중복 등장은 1회만 센다):
+      ① 의미단위 단일 ② 의미단위 쌍(인접 zip, key="a+b") ③ 잔여(사전 밖, len>=2).
+
+    게이트(기존 상수·기존 화이트리스트만 재사용, fail-closed — 신규 문턱·신규 정책 없음):
+    ① 화이트리스트(§1 3, 적대 리뷰 1R P1-1 반영 2026-08-21) — unit/pair 후보는 phrase(단일은
+    키 자체, 쌍은 공백 조인)를 judge_search_terms와 **같은** `_build_whitelist(db)`/
+    `_is_whitelisted(...)`로 보호한다. 개별 grain에선 「아이폰」류 상품 핵심어가 보호돼 후보에도
+    못 들어가는데, 풀링이 그 보호를 우회해 「아이폰」 하나로 묶어 오컷 후보를 만들어내는 사고가
+    실제로 재현됐다(리뷰어 재현: 개별 11건 보호 vs 의미단위 「아이폰」 1건 생존) — 그래서 여기서
+    막는다. ★잔여(residual)에는 적용하지 않는다 — 화이트리스트 토큰(하드코딩 6개 + 상품명 토큰)
+    은 전부 build_vocab()의 사전 원소이기도 하므로, 최장일치 스캔의 정의상 잔여 구간은 그 시작
+    위치에 어떤 사전 단어도 매치될 수 없는 구간이다(매치 가능했다면 거기서 잔여 스캔이 멈추고
+    그 단어가 별도 unit으로 잡혔을 것). 즉 잔여 텍스트는 **구조적으로** 화이트리스트 토큰을
+    부분문자열로도 포함할 수 없다 — 적용해도 항상 no-op이라 적용하지 않는다(이 불변식은 vocab이
+    화이트리스트를 진부분집합으로 포함하는 한 성립 — semantic_units.build_vocab이 그 조건을
+    깨면 재검토 필요).
+    ② clk≥_SS_MIN_CLICK 且 cost≥_min_cost_for_adgroup(그룹 공헌이익). min_cost가 None/<=0이면
+    제외(원가 미확인 그룹은 자르지 않는다).
+
+    각 생존 항목: adgroup_id·campaign_id·kind(unit/pair/residual)·key(내부 집계 키)·phrase(등록
+    표현용 텍스트 — 쌍은 공백 조인)·clk·cost·min_cost·window_from/to·member_terms(묶인 검색어
+    수)·members_passing_individual_gate(그중 개별 grain에서 clk≥_SS_MIN_CLICK을 통과하는 멤버
+    수)·unlocked_by_pooling(members_passing_individual_gate==0 — 개별 grain에선 판정 불가였는데
+    풀링으로 새로 확보된 후보라는 뜻)·member_sample(예시 검색어 최대 8개, 정렬)·reason."""
+    now = now or kst_now()
+    as_of = now.date()
+    window_from = as_of - timedelta(days=window_days - 1)
+
+    rows = (
+        db.query(
+            NaverSearchTermDaily.campaign_id,
+            NaverSearchTermDaily.adgroup_id,
+            NaverSearchTermDaily.search_term,
+            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.clk), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_cnt), 0),
+        )
+        .filter(
+            NaverSearchTermDaily.source == _SHOPPING_SOURCE,
+            NaverSearchTermDaily.ad_date >= window_from,
+            NaverSearchTermDaily.ad_date <= as_of,
+        )
+        .group_by(
+            NaverSearchTermDaily.campaign_id,
+            NaverSearchTermDaily.adgroup_id,
+            NaverSearchTermDaily.search_term,
+        )
+        .all()
+    )
+
+    vocab = semantic_units.build_vocab(db)
+    index = semantic_units.build_index(vocab)
+
+    # agg[kind][(adgroup_id, key)] = {"campaign_id","clk","cost","member_terms":set,"members_passing"}
+    agg: dict[str, dict[tuple[str, str], dict]] = {"unit": {}, "pair": {}, "residual": {}}
+
+    def _bump(kind: str, adgroup_id: str, campaign_id: str, key: str, term: str,
+              clk: int, cost: int, individual_pass: bool) -> None:
+        bucket = agg[kind].setdefault(
+            (adgroup_id, key),
+            {"campaign_id": campaign_id, "clk": 0, "cost": 0, "member_terms": set(), "members_passing": 0},
+        )
+        # ★같은 검색어가 같은 키에 여러 번 기여해도(예: 인접 쌍이 한 검색어 안에서 반복) 1회만
+        # 센다 — "묶인 검색어 수"가 실제 검색어 종류 수를 뜻해야 하기 때문(프로토타입은 unit·
+        # residual만 set()을 쓰고 pair는 안 썼으나, 이 규칙을 3종에 균일 적용한다 — 판단 근거는
+        # 구현 보고에 명시).
+        if term in bucket["member_terms"]:
+            return
+        bucket["member_terms"].add(term)
+        bucket["clk"] += clk
+        bucket["cost"] += cost
+        if individual_pass:
+            bucket["members_passing"] += 1
+
+    for campaign_id, adgroup_id, term, clk, cost, pconv in rows:
+        clk, cost, pconv = int(clk), int(cost), int(pconv)
+        if pconv >= 1:
+            continue  # §1-1 전환 보호 상속 — 살아있는 증거는 집계 대상도 아니다
+        norm = (term or "").casefold().replace(" ", "")
+        if not norm:
+            continue
+        units, resid = semantic_units.segment_indexed(norm, index)
+        individual_pass = clk >= _SS_MIN_CLICK  # 이 행 자체가 개별 grain 값(같은 창·같은 표)
+
+        for u in set(units):
+            _bump("unit", adgroup_id, campaign_id, u, term, clk, cost, individual_pass)
+        for a, b in zip(units, units[1:]):
+            _bump("pair", adgroup_id, campaign_id, f"{a}+{b}", term, clk, cost, individual_pass)
+        for r in set(resid):
+            if len(r) >= 2:
+                _bump("residual", adgroup_id, campaign_id, r, term, clk, cost, individual_pass)
+
+    min_cost_cache: dict[str, Decimal | None] = {}
+    whitelist = _build_whitelist(db)  # 개별 grain과 동일 소스(§1 3, 적대 리뷰 1R P1-1)
+
+    def _finalize(kind: str) -> list[dict]:
+        out: list[dict] = []
+        for (adgroup_id, key), v in agg[kind].items():
+            clk, cost = v["clk"], v["cost"]
+            phrase = key.replace("+", " ") if kind == "pair" else key
+            # ① 화이트리스트(§1 3) — unit/pair만. 잔여는 구조적으로 걸릴 수 없다(위 docstring 참조).
+            if kind in ("unit", "pair") and _is_whitelisted(phrase, whitelist):
+                continue
+            if clk < _SS_MIN_CLICK:
+                continue
+            min_cost = _min_cost_for_adgroup(db, adgroup_id, min_cost_cache)
+            if min_cost is None or min_cost <= 0:
+                continue  # fail-closed — 원가 미확인 그룹은 자르지 않는다
+            if cost < min_cost:
+                continue
+            member_terms = len(v["member_terms"])
+            members_passing = v["members_passing"]
+            out.append({
+                "adgroup_id": adgroup_id, "campaign_id": v["campaign_id"],
+                "kind": kind, "key": key, "phrase": phrase,
+                "clk": clk, "cost": cost, "min_cost": int(min_cost),
+                "window_from": window_from.isoformat(), "window_to": as_of.isoformat(),
+                "member_terms": member_terms,
+                "members_passing_individual_gate": members_passing,
+                "unlocked_by_pooling": members_passing == 0,
+                "member_sample": sorted(v["member_terms"])[:8],
+                "reason": _semantic_reason(
+                    kind, key, clk, cost, min_cost, member_terms, members_passing, window_from, as_of,
+                ),
+            })
+        return sorted(out, key=lambda c: (-c["cost"], c["key"]))
+
+    return {
+        "window": {"from": window_from.isoformat(), "to": as_of.isoformat(), "days": window_days},
+        "vocab_size": len(vocab),
+        "units": _finalize("unit"),
+        "pairs": _finalize("pair"),
+        "residual": _finalize("residual"),
     }
 
 

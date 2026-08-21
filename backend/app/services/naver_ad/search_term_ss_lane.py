@@ -23,8 +23,15 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import NaverChangeLog, NaverEntity, NaverProposal, NaverSearchTermExclusion
+from app.models import (
+    NaverCampaignSettings,
+    NaverChangeLog,
+    NaverEntity,
+    NaverProposal,
+    NaverSearchTermExclusion,
+)
 from app.services.naver_ad import diary, naver_sa_writer, search_term_judge
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -48,6 +55,13 @@ _RETURN_MARKER = "[검색어제외 복귀]"
 # probation 관찰창(§2) — 개방 후 재노출 관찰 기간(일).
 _PROBATION_DAYS = 14
 
+# M2-c ⓔ(D-NAO-191·219) — 쇼핑 제외 pending 제안 1회 생성 상한. 아래 SS4 승격 상한이 실제로
+# 콘솔을 범람시킨 사고(2026-07-22, 354건 한꺼번에)를 겪은 뒤 만들어진 것과 같은 이유로, 처음
+# 여는 경로부터 상한을 둔다(사고를 재현한 뒤에 배우지 않는다). 개별 grain·의미 단위는 신뢰도가
+# 다른 후보군이라(개별=실제 관측 검색어, 의미단위=사전 조립 합성 구) 상한도 분리한다.
+_SS_SHOPPING_EXCLUDE_CAP = 20
+_SS_SEMANTIC_EXCLUDE_CAP = 20
+
 # SS4 승격 제안 1회 생성 상한(라이브 첫 실행 실측: 2026-07-22 08:50 크론에서 354건 pending이
 # 한꺼번에 쏟아져 Jino 콘솔이 범람 — 운영 결함). conv_direct_cnt 내림차순(→ conv_purchase_amt
 # 내림차순 tie-break)으로 정렬해 근거가 가장 강한 후보부터 상위 20건만 신규 생성한다. dedup으로
@@ -68,18 +82,28 @@ _TARGET_ID_MAXLEN = NaverProposal.target_id.property.columns[0].type.length
 
 
 def _has_open_or_executed(
-    db: Session, adgroup_id: str, search_term: str, *, proposal_type: str,
+    db: Session, adgroup_id: str, search_term: str, *, proposal_type: str, target_type: str,
 ) -> bool:
-    """같은 (adgroup, search_term, proposal_type)의 제안이 이미 살아있거나 실행됐는지.
+    """같은 (adgroup, search_term, proposal_type, target_type)의 제안이 이미 살아있거나 실행됐는지.
 
     재생성 금지 대상(PLAN §3 "이미 pending/실행된 동일 (adgroup, search_term) 제안 존재 시
     재생성 금지"): status가 pending/approved/executing(승인 대기·집행 중)이거나 executed_
     change_log_id가 채워진(실집행 완료) 제안. rejected/expired/failed는 재생성 허용(익일 갱신
     데이터로 다시 제안될 수 있음 — in-out 롤링 큐레이션, §0 2). proposal_type을 명시 인자로
     받아 SS3(제외)·SS4(승격)이 서로의 dedup을 오염시키지 않는다(같은 검색어가 동시에 제외
-    후보이면서 승격 후보일 순 없지만 — 표본 게이트가 상호배타적 — 방어적으로 분리)."""
+    후보이면서 승격 후보일 순 없지만 — 표본 게이트가 상호배타적 — 방어적으로 분리).
+
+    ★target_type도 필터에 넣는다(M2-c 적대 리뷰 1R P1-2, 2026-08-21): 개별 grain 제외
+    (target_type='search_term', 실행 가능)와 의미 단위 제외(target_type=SEARCH_TERM_EXCLUDE_
+    SEMANTIC_TARGET_TYPE, 콘솔에서도 비실행)는 텍스트가 같아도 **다른 신뢰도의 다른 후보**다.
+    target_type 없이 (adgroup, search_term)만 보면, 먼저 생성된 의미 단위 pending(영구 비실행)
+    이 나중에 등장하는 실행 가능한 개별 grain 제안을 영구히 가린다(재현: Day1 풀링으로 「블루투스」
+    semantic pending 생성 → Day2 실제 검색어 "블루투스"가 개별 grain 게이트를 통과해도
+    shopping_deduped로 빠져 search_term 제안이 끝내 안 만들어짐). target_type을 필터에 넣으면
+    두 트랙이 서로를 shadow하지 않는다 — 같은 트랙끼리의 진짜 중복만 dedup된다."""
     return db.query(NaverProposal.id).filter(
         NaverProposal.proposal_type == proposal_type,
+        NaverProposal.target_type == target_type,
         NaverProposal.adgroup_id == adgroup_id,
         NaverProposal.target_id == search_term,
         or_(
@@ -640,12 +664,72 @@ def _create_promote_proposal(db: Session, cand: dict, *, bm_verified: bool = Fal
     return obj
 
 
+def _create_shopping_exclude_proposal(db: Session, cand: dict) -> NaverProposal:
+    """쇼핑 개별 grain 제외 후보 1건 → pending 제안(M2-c ⓔ, D-NAO-191·219). 실제 관측된 검색어
+    텍스트이므로 target_type='search_term' — 콘솔 Confirm 시 harness._execute_search_term_exclude가
+    라이브 adgroupType으로 WEB_SITE/SHOPPING 경로를 스스로 고른다(D-NAO-181 ③, 이미 라이브
+    실증된 경로 — test_naver_searchterm_ss3.py::test_shopping_exclude_now_routes_to_the_shopping_
+    writer 참조). approval_source는 항상 None(자동 승인 없음 — ss_exclude 승인원은 여전히 미배선,
+    잠김 2 유지)."""
+    obj = NaverProposal(
+        proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+        target_type="search_term", target_id=cand["search_term"],
+        campaign_id=cand["campaign_id"], adgroup_id=cand["adgroup_id"],
+        rationale=cand["reason"],
+        expected_effect=(
+            f"쇼핑 손실 검색어 API 제외(cost={cand['cost']}원 낭비비용 회수) — SHOPPING은 "
+            "PUT /ncc/targets 경로로 쓸 수 있다(D-NAO-181). Jino 콘솔 Confirm 시 실쓰기, 자동 "
+            "발사 없음(잠김 2·3 유지)."
+        ),
+        status="pending",  # approval_source 미설정 = None(자동 승인 없음)
+    )
+    db.add(obj)
+    return obj
+
+
+def _create_semantic_exclude_proposal(db: Session, cand: dict) -> NaverProposal:
+    """의미 단위(단일/쌍) 제외 후보 1건 → pending 제안(M2-c ⓔ). target_type을 실제 검색어 후보
+    (`search_term`)와 다르게(`SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE`) 두어, harness의 구조
+    가드가 콘솔 Confirm으로도 **실행되지 않게**(정보성 표시) 막는다 — 합성 구의 등록 표현
+    (exact/phrase, SHOPPING type 값)이 아직 미검증이라는 것이 이유다(search_term_judge 모듈
+    상수 주석 참조). 사람이 콘솔에서 근거를 보고 필요하면 콘솔 밖에서 수동 등록하는 배출구다."""
+    sample = ", ".join(cand["member_sample"][:5])
+    obj = NaverProposal(
+        proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+        target_type=search_term_judge.SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE,
+        target_id=cand["phrase"],
+        campaign_id=cand["campaign_id"], adgroup_id=cand["adgroup_id"],
+        rationale=cand["reason"],
+        expected_effect=(
+            f"의미 단위 풀링 제외 후보(M2-c, 묶인 검색어 {cand['member_terms']}건 중 개별 grain "
+            f"판정 통과 {cand['members_passing_individual_gate']}건) — 등록 표현 미검증이라 실행 "
+            f"손 미구현, 콘솔 수동 검토·등록 대상(자동 발사 없음). 예시 검색어: {sample}"
+        ),
+        status="pending",
+    )
+    db.add(obj)
+    return obj
+
+
 def run_search_term_ss_lane(
     db: Session, *, now: datetime | None = None, bm_prior: set[str] | None = None,
 ) -> dict:
-    """SS2 판단 → (SS3) 파워링크 제외 후보만 pending 제안 생성 + 쇼핑은 브리핑 diary만(제안
-    생성 없음, PLAN §3 SS3-B) + (SS4) 승격 후보 전건 pending 제안 생성(영구 Confirm·실행 손
-    없음). 실쓰기 0(전부 Confirm 전용).
+    """SS2 판단 → (SS3) 파워링크 제외 후보 pending Confirm 없이 즉시 자동 발사 + (M2-c ⓔ, D-NAO-
+    191·219) 쇼핑 제외 후보(개별 grain + 의미 단위)를 pending 제안으로 생성(API 제외는 D-NAO-
+    180·181로 이미 실증됐다 — §실측-0 전제는 폐기됐다) + (SS4) 승격 후보 전건 pending 제안
+    생성(영구 Confirm·실행 손 없음). 실쓰기는 파워링크 자동 발사분뿐 — 쇼핑·승격은 전부 Confirm
+    전용(자동 발사 없음, 잠김 2·3 유지).
+
+    ★쇼핑 pending 제안의 두 트랙(M2-c ⓔ): ①개별 grain(judge_search_terms의 shopping 후보) —
+    실제 관측된 검색어라 target_type='search_term', 콘솔 Confirm 시 harness가 라이브
+    adgroupType으로 WEB_SITE/SHOPPING 경로를 스스로 골라 실쓰기한다(D-NAO-181 ③, 이미 실증된
+    경로). ②의미 단위(judge_search_terms의 semantic_units.units/pairs, M2-c ⓒ) — 사전
+    최장일치로 조립된 합성 구라 target_type을 다르게 두어(SEARCH_TERM_EXCLUDE_SEMANTIC_
+    TARGET_TYPE) 콘솔 Confirm으로도 **실행되지 않게**(harness 구조 가드가 정보성으로 표시) 막는다
+    — 등록 표현이 아직 미검증이기 때문. 둘 다 auto_operate=1(ours) 캠페인 그룹만 대상으로
+    한다(잠김 3=optimizer 가드 — 파워링크와 동일하게 대행사 그룹엔 우리 제안을 아예 만들지
+    않는다, §0 3 대행사 무실쓰기). 잔여(사전 밖 조각)는 제안화하지 않는다 — 사전 보강·무관 유입
+    발견용 관측 신호이지 확정된 등록 후보가 아니다(NGRAM_GRAIN_MEASUREMENT_20260818.md §4-4).
 
     ★bm_prior(BM P4, D-NAO-78 교차·optional): 대행사 등록 키워드 텍스트 셋(bench_kind=
     'keyword_verified'). 승격 후보 중 이 셋에 든 검색어는 (a) 상한 슬롯을 먼저 채우도록 정렬
@@ -655,6 +739,11 @@ def run_search_term_ss_lane(
 
     반환: {"shopping_candidates","powerlink_candidates","promote_candidates",
            "proposals_created","deduped","skipped_too_long",
+           "shopping_proposals_created","shopping_deduped","shopping_skipped_too_long",
+           "shopping_over_cap","shopping_out_of_scope",
+           "semantic_candidates","semantic_vocab_size","semantic_proposals_created",
+           "semantic_deduped","semantic_skipped_too_long","semantic_over_cap",
+           "semantic_out_of_scope",
            "promote_proposals_created","promote_deduped","promote_skipped_too_long",
            "promote_over_cap","promote_bm_crossed"}."""
     now = now or kst_now()
@@ -671,10 +760,13 @@ def run_search_term_ss_lane(
     # 재제외가 오늘 캡을 소비하면 아래 remaining_cap 계산에 반영돼 신규는 잔여만큼만 발사된다.
     reexam = _run_reexamination(db, powerlink, now)
 
-    # ★쇼핑(shopping)은 제안을 만들지 않는다 — API 제외 불가(§실측-0)라 브리핑 diary(아래)만
-    # 남긴다. ★파워링크(PX2): pending Confirm 경로 제거 — §1 통과 후보를 status='approved' +
+    # ★파워링크(PX2): pending Confirm 경로 제거 — §1 통과 후보를 status='approved' +
     # approval_source=ss_exclude 제안으로 자동 발사(exploration BX2 관례). 일일캡·킬스위치·
     # SHOPPING 거부·전환 재검증은 harness가 최종 강제(자동 경로도 동일 봉투).
+    # ★쇼핑(shopping)은 예전엔 "API 제외 불가"라 제안을 안 만들었다(§실측-0) — 그 전제는
+    # D-NAO-180·181로 폐기됐다(쇼핑도 PUT /ncc/targets로 쓸 수 있다). 아래(M2-c ⓔ)에서 쇼핑은
+    # pending 제안으로 생성하되, 파워링크처럼 **자동 발사는 하지 않는다**(status='pending'만,
+    # Confirm은 사람이 콘솔에서). 브리핑 diary는 그대로 유지한다(아래 diary 블록, 제거하지 않음).
     fired = 0
     deduped = 0
     skipped_too_long = 0
@@ -702,7 +794,7 @@ def run_search_term_ss_lane(
         # 중복 방지: 살아있는 제외 제안 or 활성 제외 상태 행(excluded/probation) 있으면 스킵.
         if _has_open_or_executed(
             db, adg, cand["search_term"],
-            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE, target_type="search_term",
         ) or _active_exclusion_exists(db, adg, cand["search_term"]):
             deduped += 1
             continue
@@ -712,6 +804,79 @@ def run_search_term_ss_lane(
         fired += 1
         remaining_cap -= 1
         slot_cache[adg] = slot_cache.get(adg, _excluded_slot_count(db, adg) - 1) + 1
+    db.commit()
+
+    # ══════════════════════════════════════════════════════════════════
+    # M2-c ⓔ(D-NAO-191·219) — 쇼핑 제외 pending 제안: 개별 grain + 의미 단위(단일·쌍). 파워링크
+    # 위 auto_map(§0 3 대행사 무실쓰기, 잠김 3=optimizer 가드)을 그대로 재사용 — 대행사(비-ours)
+    # 캠페인 그룹엔 우리 제안 자체를 만들지 않는다(콘솔 Confirm이 킬스위치를 안 타므로, 여기서
+    # 안 막으면 대행사 그룹도 사람이 실수로 승인할 수 있다). approval_source는 절대 설정하지
+    # 않는다(잠김 2=ss_exclude 자동 승인원 미배선 유지).
+    # ══════════════════════════════════════════════════════════════════
+    auto_map = {
+        cid: bool(auto)
+        for cid, auto in db.query(
+            NaverCampaignSettings.campaign_id, NaverCampaignSettings.auto_operate,
+        ).all()
+    }
+
+    def _in_scope(cand: dict) -> bool:
+        adg = cand.get("adgroup_id") or ""
+        if not adg or adg == BACKFILL_SENTINEL_ADGROUP:
+            return False
+        return auto_map.get(cand["campaign_id"], False)
+
+    shopping_created = 0
+    shopping_deduped = 0
+    shopping_skipped_too_long = 0
+    shopping_over_cap = 0
+    shopping_out_of_scope = 0
+    for cand in shopping:
+        if not _in_scope(cand):
+            shopping_out_of_scope += 1
+            continue
+        if len(cand["search_term"]) > _TARGET_ID_MAXLEN:
+            shopping_skipped_too_long += 1
+            continue
+        if _has_open_or_executed(
+            db, cand["adgroup_id"], cand["search_term"],
+            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE, target_type="search_term",
+        ):
+            shopping_deduped += 1
+            continue
+        if shopping_created >= _SS_SHOPPING_EXCLUDE_CAP:
+            shopping_over_cap += 1
+            continue
+        _create_shopping_exclude_proposal(db, cand)
+        shopping_created += 1
+    db.commit()
+
+    semantic = judged.get("semantic_units", {})
+    semantic_candidates = semantic.get("units", []) + semantic.get("pairs", [])
+    semantic_created = 0
+    semantic_deduped = 0
+    semantic_skipped_too_long = 0
+    semantic_over_cap = 0
+    semantic_out_of_scope = 0
+    for cand in semantic_candidates:
+        if not _in_scope(cand):
+            semantic_out_of_scope += 1
+            continue
+        if len(cand["phrase"]) > _TARGET_ID_MAXLEN:
+            semantic_skipped_too_long += 1
+            continue
+        if _has_open_or_executed(
+            db, cand["adgroup_id"], cand["phrase"],
+            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            target_type=search_term_judge.SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE,
+        ):
+            semantic_deduped += 1
+            continue
+        if semantic_created >= _SS_SEMANTIC_EXCLUDE_CAP:
+            semantic_over_cap += 1
+            continue
+        _create_semantic_exclude_proposal(db, cand)
+        semantic_created += 1
     db.commit()
 
     # SS4 승격 후보 — 제외(SS3)와 동일한 표현 가능성 방어(target_id 길이) + dedup 규약을 그대로
@@ -736,7 +901,7 @@ def run_search_term_ss_lane(
             continue
         if _has_open_or_executed(
             db, cand["adgroup_id"], cand["search_term"],
-            proposal_type=search_term_judge.SEARCH_TERM_PROMOTE_TYPE,
+            proposal_type=search_term_judge.SEARCH_TERM_PROMOTE_TYPE, target_type="search_term",
         ):
             # dedup은 상한을 소모하지 않는다 — 신규 생성 슬롯은 그대로 다음 후보로 넘어간다.
             promote_deduped += 1
@@ -779,8 +944,10 @@ def run_search_term_ss_lane(
             now=now,
         )
 
-    # 쇼핑 브리핑 diary(1건 요약, event_type='observe' 재사용 — 관측/브리핑 성격). API 제외 불가라
-    # Jino 콘솔 수동이 필요한 후보를 상위 N개 나열(전건은 제안 테이블에 노출). fail-open(diary.py 계약).
+    # 쇼핑 브리핑 diary(1건 요약, event_type='observe' 재사용 — 관측/브리핑 성격). ★M2-c ⓔ 이후에도
+    # 유지한다(제거하지 않음) — pending 제안(위)이 콘솔 목록에 뜨긴 하지만, diary는 브리핑 리듬
+    # (일 08:50)에 맞춘 요약 알림이라 별도 채널로서 값이 있다. 문구만 갱신(§실측-0 전제 폐기 —
+    # D-NAO-180·181로 API 제외가 가능해졌고, 이제 pending 제안도 함께 생성된다). fail-open(diary.py 계약).
     if shopping:
         top = shopping[:_BRIEF_TOP_N]
         listed = "; ".join(f"{c['search_term']}(cost={c['cost']}·clk={c['clk']})" for c in top)
@@ -790,8 +957,8 @@ def run_search_term_ss_lane(
             actor=diary.ACTOR_DAILY,
             action=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
             rationale=(
-                f"[검색어제외 브리핑] 쇼핑 손실 검색어 {len(shopping)}건 — API 자동 제외 불가"
-                f"(§실측-0), 콘솔 수동 제외 대상: {listed}{more}"
+                f"[검색어제외 브리핑] 쇼핑 손실 검색어 {len(shopping)}건 — {shopping_created}건 "
+                f"pending 제안 생성(콘솔 Confirm 대상, 자동 발사 없음), 상위 목록: {listed}{more}"
             ),
             now=now,
         )
@@ -821,6 +988,22 @@ def run_search_term_ss_lane(
         "reexam_restored": reexam["restored"],
         "reexam_healed": reexam["healed"],  # C5: 크래시 고아 상태 행 재생성 건수
         "reexam_probation_healed": reexam["probation_healed"],  # F2: probation 클레임 크래시 창 치유 건수
+
+        # M2-c ⓔ: 쇼핑 개별 grain 제외 pending 제안
+        "shopping_proposals_created": shopping_created,
+        "shopping_deduped": shopping_deduped,
+        "shopping_skipped_too_long": shopping_skipped_too_long,
+        "shopping_over_cap": shopping_over_cap,
+        "shopping_out_of_scope": shopping_out_of_scope,  # 잠김 3(optimizer 가드) — 대행사 그룹 skip
+
+        # M2-c ⓔ: 의미 단위(단일·쌍) 제외 pending 제안(잔여는 제안화하지 않음, 관측 신호로만 산출)
+        "semantic_candidates": len(semantic_candidates),
+        "semantic_vocab_size": semantic.get("vocab_size", 0),
+        "semantic_proposals_created": semantic_created,
+        "semantic_deduped": semantic_deduped,
+        "semantic_skipped_too_long": semantic_skipped_too_long,
+        "semantic_over_cap": semantic_over_cap,
+        "semantic_out_of_scope": semantic_out_of_scope,
 
         "promote_proposals_created": promote_created,
         "promote_deduped": promote_deduped,
