@@ -110,7 +110,7 @@ return "good" if good else "bad"
 
 | 좌표 | 함수 | 판정식 | 무엇을 좌우하나 |
 |---|---|---|---|
-| `retro_scorer.py:47` | `_judge` | down: `roas_c<bep_asof→correct` / up: `roas_c>=target_asof→correct` | 진단 제안 방향의 **사후 정확도 채점** → GAVE 롤업 학습치 |
+| `retro_scorer.py:58-60`(함수 `_judge` 정의는 `:47`) | `_judge` | `roas_c=(conv_post/cost_post)*cf_asof` → down: `roas_c<bep_asof→correct` / up: `roas_c>=target_asof→correct` | 진단 제안 방향의 **사후 정확도 채점** → GAVE 롤업 학습치 |
 | `auto_operator.py:406` | `_settlement_roas_status` | `roas_corrected < target_roas → below` | **bid_up 승인의 핵심 거부권** |
 | `auto_operator.py:1696` | `_judge_hourly` | CPC급등(배수) · loss leash(ROAS<BEP) · UP(ROAS≥target) 조합 | 시간당 입찰 상향/하향/보류 |
 | `auto_operator.py:1425` | `_intraday_loss_leash` | `est_roas < bep_roas` | 장중 순위 고삐(하향) 발동 |
@@ -143,10 +143,16 @@ return "good" if good else "bad"
 
 | 좌표 | 판정식 | 비고 |
 |---|---|---|
-| **`gave_score.py:21`** | **`score = min((ROAS/BEP)^γ, 1) × revenue`** | ★**올바른 모양이 이미 코드에 있다** — 비율 페널티 × **절대 매출**. 북극성 §5-⑤ 기준 **배선·정지중** |
+| **`gave_score.py:60-63`** | **`penalty = ratio ** gamma` → `penalty = min(penalty, _ONE)` → `score = (penalty * revenue)`** (`roas`는 `:40`) | ★**올바른 모양이 이미 코드에 있다** — 비율 페널티 × **절대 매출**. 북극성 §5-⑤ 기준 **배선·정지중** |
 | `account_diagnosis.py:711` | zero_conv=`cost>=eff_bid×10`(절대액) / lever_broken=`roas_c<bep & CPC>k×bid`(효율) | 쇼핑그룹 터미널 pause |
 | `probe_revert.py:307` | `hourly_rate>avg×3`(효율) & `전환==0`(절대액) | 실시간 프로브 되돌림 |
 | `growth_sweeper.py:78` | `ceiling=affordable_ceiling(rpc,target_roas)`(효율) → `gap=ceiling-bid`(절대액) | WEB_SITE 성장 후보 |
+
+> ★**좌표 표기 규약**(완료 QA 지적으로 2026-08-22 00:0x 정정): 이 표의 좌표는 **판정식이 실제로 있는 줄**이다.
+> 함수 진입점(`def` 줄)과 다르면 괄호로 병기했다. 초판은 `gave_score.py:21`·`retro_scorer.py:47`처럼
+> **`def` 줄을 판정식 좌표로 썼는데 그건 부정확한 인용**이다 — QA 원문: *"「그 줄에 그 판정식이 실제로
+> 있는가」라는 원 질문 기준으로는 정확한 인용이 아니다"*. 나머지 행도 같은 규약으로 읽어야 하며,
+> **이 표의 다른 행들은 그 관점에서 재검증되지 않았다**(§8-A [미상] 4번).
 
 ### 4-4. ★ 이 표에서 읽어야 할 것
 
@@ -223,6 +229,7 @@ Jino 질문에 숫자로 답하려면 «우리 운영 창»과 «대행사 운�
 1. `naver_change_log` id 221·222의 동일 값 — 다른 소재 2건인지 중복 기입인지 못 갈랐다(§2-2).
 2. `outcome='success'` 2행의 출처 — 쓰는 코드를 못 찾았고 `models.py:2567` 정의 집합에도 없다.
 3. `improved` 4건이 **모수게이트(clk≥10)를 통과한 표본**이라 전체 조치의 대표값인지 알 수 없다. 채점된 것은 150건(improved 4 / neutral 57 / declined 89)이고 나머지는 `outcome=NULL`(판정 보류)이다.
+4. **§4 표의 나머지 행이 「판정식이 있는 줄」 규약을 지키는지 재검증되지 않았다** — 완료 QA가 `gave_score`·`retro_scorer` 2건에서 `def` 줄 인용을 잡아 정정했으나(§4-3 위 규약 상자), 나머지 25행은 같은 관점으로 다시 보지 않았다. 이 표의 좌표를 인용할 땐 **그 줄을 직접 열어 확인할 것.**
 
 ### 8-B. 못 본 곳 (스윕이 열지 못한 파일 — 정직한 나열)
 - `auto_operator.py` 3,713줄 중 **약 900줄만** 확인. 미확인: `_hot_set_candidates`·`_probe_trigger`·`_learned_optimal_skip`·`_deep_expansion_ok`·`_run_exploration_for_campaign`·`_fire_vitality_revive`·`_bp_fire`·`run_daily_lane`·`run_hourly_lane` 등
@@ -258,5 +265,21 @@ ssh sellc.ohitech.co.kr "sqlite3 -readonly /home/ubuntu/ohisell/backend/ohisell.
 # ③ 판정식 좌표 (로컬)
 sed -n '55,105p' backend/app/services/naver_ad/proposal_scoreboard.py
 sed -n '70,90p'  backend/app/services/naver_ad/wisdom_candidates.py
-sed -n '15,30p'  backend/app/services/naver_ad/gave_score.py
+sed -n '38,64p'  backend/app/services/naver_ad/gave_score.py      # 수식은 :60-63 (roas는 :40)
+sed -n '47,62p'  backend/app/services/naver_ad/retro_scorer.py    # 판정식은 :58-60
+
+# ④ 대행사 외부변경의 축 — ★완료 QA가 재현에 실패했던 숫자다(엉뚱한 테이블을 봤다).
+#    정본 테이블은 naver_change_log이고 action LIKE 'external%'가 조건이다.
+#    기대: 총 4,937 = keyword 4,885 + adgroup 44 + campaign 8 / WEB_SITE 4,903 · SHOPPING 34
+ssh sellc.ohitech.co.kr "sqlite3 -readonly /home/ubuntu/ohisell/backend/ohisell.db \
+  \"SELECT entity_type, COUNT(*) FROM naver_change_log WHERE action LIKE 'external%' GROUP BY entity_type;\""
+ssh sellc.ohitech.co.kr "sqlite3 -readonly /home/ubuntu/ohisell/backend/ohisell.db \
+  \"SELECT e.campaign_type, COUNT(*) FROM naver_change_log l \
+     LEFT JOIN naver_entity e ON e.entity_type='campaign' AND e.entity_id=l.campaign_id \
+    WHERE l.action LIKE 'external%' GROUP BY e.campaign_type;\""
 ```
+
+> ★**왜 ④가 중요한가**: 쇼핑엔 등록 키워드가 없어(`naver_ad_daily.keyword_id`가 SHOPPING 전건 빈 문자열)
+> 외부변경 감지가 **원리적으로 키워드 축에 서 있다**. 그래서 「최근 30일 외부변경 0건인 쇼핑 캠페인 13개」는
+> **대행사가 안 만진다는 증거가 아니라 우리가 못 본다는 뜻일 수 있다** ⇒ 소유권 분리(북극성 §8-②)는
+> 데이터로 고를 수 없고 **합의로만 확정된다**. 이 결론은 §6(교락)과는 다른 층의 제약이다.
