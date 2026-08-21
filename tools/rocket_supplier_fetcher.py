@@ -1600,7 +1600,13 @@ def _sales_records(payload: dict, day: date) -> list[dict]:
 # 판매분석을 실제로 볼 수 있는 권한 등급(2026-07-28 실측: BASIC + 무료체험). 목록에 없는
 #   등급은 **모르는 등급 = 차단**으로 본다 — 새 등급이 생겨 오탐이 나면 그건 로그에 이름이
 #   찍히므로 한 줄로 고칠 수 있지만, 반대로 열어두면 만료를 조용히 통과시킨다(D-CPP-5).
-_SALES_PERMITTED_LEVELS = {"BASIC", "PREMIUM", "FULL", "PRO"}
+#   ★DISCOVERY 추가(2026-08-21 라이브 실측): 무료체험(freeTrialEnd=2026.08.20)이 끝나 08-21에
+#     permittedLevel이 BASIC→FREE로 강등됐고, 유료 구독 재개 후 게이트 로그가
+#     `permittedLevel=DISCOVERY subscribed=DISCOVERY freeTrialEnd=None`을 찍었다. 즉 위 주석이
+#     예고한 «새 등급이 생겨 로그에 이름이 찍히는» 바로 그 경우다. 넣어도 안전한 근거는
+#     _collect_sales_rows의 창 전체 판정이다 — DISCOVERY가 실제로는 데이터를 안 주면
+#     vendorItems 합계 0에서 _SalesAccessDenied가 다시 잡는다(이 둘은 짝으로만 성립).
+_SALES_PERMITTED_LEVELS = {"BASIC", "PREMIUM", "FULL", "PRO", "DISCOVERY"}
 
 
 def _parse_trial_end(v) -> date | None:
