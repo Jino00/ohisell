@@ -740,10 +740,13 @@ def test_precompute_aggregates_sums_by_level(db):
     db.commit()
 
     agg = proposal_pipeline._precompute_aggregates(db, D_FROM, AS_OF)
-    assert agg["group"]["grp1"] == {"clk": 30, "conv_amt": 1500}
-    assert agg["campaign"]["cmp1"] == {"clk": 30, "conv_amt": 1500}
-    assert agg["campaign"]["cmp2"] == {"clk": 5, "conv_amt": 250}
-    assert agg["account"] == {"clk": 35, "conv_amt": 1750}
+    # M2-a(D-NAO-214): imp·conv_cnt가 **순증**했다(hierarchical_pooling의 CTR 분모·CVR 분자).
+    # 완전일치를 느슨한 부분집합 검사로 바꾸지 않는다 — 네 키 전부를 명시해 그대로 못박는다.
+    # 옛 두 키의 값은 바뀌지 않았다는 것이 「회귀 0」(계약 §4 S1-⑥)의 내용이다.
+    assert agg["group"]["grp1"] == {"imp": 200, "clk": 30, "conv_cnt": 2, "conv_amt": 1500}
+    assert agg["campaign"]["cmp1"] == {"imp": 200, "clk": 30, "conv_cnt": 2, "conv_amt": 1500}
+    assert agg["campaign"]["cmp2"] == {"imp": 100, "clk": 5, "conv_cnt": 1, "conv_amt": 250}
+    assert agg["account"] == {"imp": 300, "clk": 35, "conv_cnt": 3, "conv_amt": 1750}
 
 
 # ── _collect_bid_sim_candidates (X1b-S S3, D-NAO-43 확장) ─────────────────

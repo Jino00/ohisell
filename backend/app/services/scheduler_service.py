@@ -1142,6 +1142,50 @@ def sync_naver_adgroup_targets_job():
         db.close()
 
 
+def write_naver_pooled_estimates_job():
+    """[9] 계층 EB 풀링 산출 기록 — 키워드 grain CTR/CVR/RPC (09:30 KST, D-NAO-214 · ref 65 S1-ⓑ).
+
+    `hierarchical_pooling.pool_all`을 창 30일 키워드 전수에 돌려 `naver_pooled_estimate_daily`에
+    남긴다. **판정하지 않고 추정치만 남긴다** — 자동 쓰기 경로에 연결되지 않는다(계약 §3
+    「신규 자동 쓰기 0건」). 소비는 M2-d(성적표 축)부터다.
+
+    ★09:30인 이유(prod 실측 2026-08-21로 골랐다 — 교훈 #326: 슬롯은 배포 «전»에만 무료):
+    분 30의 daily 잡은 05:30(3건)·08:30(retro)뿐이고 9시대엔 없다. 매시 잡 :05·:07·:20·:45·:57도
+    :30에 안 닿는다. 진짜 위험은 길이가 긴 이웃인데 — `sweep_naver_keyword_hourly`(09:10 발화)가
+    **11분**을 써 09:21:03에 끝난다. 09:30은 그로부터 9분 뒤다. 다음 잡 `sync_naver_adgroup_targets`
+    (09:35, 실측 3.4분)와는 5분 간격이지만 이 잡 자체가 초 단위라(창 30일 키워드 6,343개·45,616행,
+    2026-08-21 실측) 겹칠 여지가 없다.
+
+    ★원료는 `naver_ad_daily`이고 그 수집은 07:30(실측 14초)에 끝난다 — 창이 «어제까지»라
+    당일 수집 진행 여부와 무관하다.
+
+    ★_CATCHUP_ORDER 제외 — 매일 창 전체를 다시 계산해 그날 행을 통째로 upsert하므로 하루 유실이
+    «현재»에 구멍을 남기지 않는다. 다만 그날치 target_date 행은 영영 안 생긴다(추정치의 일별
+    스냅샷이 하루 빈다) — 소급 재계산은 원장이 남아 있어 언제든 가능하다.
+
+    ★**예외를 삼키지 않는다.** `complete=False`면 raise 해서 `last_status='error'`가 남게 한다 —
+    부분 산출을 success로 굳히는 것이 교훈 #319(8/18 절단: sync_log 전부 success)·#321(D-NAO-204:
+    판정이 HTTP 경계를 못 넘음)·D-NAO-212 1R P1의 **네 번째** 같은 모양이다. 결과 dict를 반환하는
+    이유도 같다 — 수동 트리거 라우터가 그 dict를 응답에 실어야 누른 사람이 완주 여부를 안다."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad import pooled_estimate_writer
+
+        result = pooled_estimate_writer.write_pooled_estimates(db)
+        line = ("[스케줄러] 계층 풀링 산출: window=%s~%s candidates=%s written=%s updated=%s "
+                "skipped_no_signal=%s complete=%s")
+        args = (result["window_from"], result["window_to"], result["candidates"],
+                result["written"], result["updated"], result["skipped_no_signal"],
+                result["complete"])
+        if not result["complete"]:
+            log.error(line + " reason=%s", *args, result["incomplete_reason"])
+            raise RuntimeError(f"계층 풀링 산출 미완주: {result['incomplete_reason']}")
+        log.info(line, *args)
+        return result
+    finally:
+        db.close()
+
+
 def sync_naver_product_meta_job():
     """네이버 커머스 상품 메타 전건 폴링 — C10 적재 (09:55 KST, D-NAO-212 · 북극성 M1 ④).
 
@@ -1959,6 +2003,8 @@ def _ensure_default_states(db):
         # ★★한 번 seed되면 정본이 prod DB로 넘어간다(`_ensure_default_states`는 기존 행의
         #   cron을 안 고친다) — 배포 «전»에만 무료로 고칠 수 있다(교훈 #326).
         ("sync_naver_product_meta", "55 9 * * *"),
+        # M2-a(D-NAO-214): [9] 계층 EB 풀링 산출 기록. 슬롯 근거는 잡 docstring 참조.
+        ("write_naver_pooled_estimates", "30 9 * * *"),
         ("sync_naver_criterion", "37 10 * * *"),
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
@@ -2342,6 +2388,7 @@ def job_func_for(job_name: str):
         "sync_naver_adgroup_targets": sync_naver_adgroup_targets_job,
         "sync_naver_criterion": sync_naver_criterion_job,  # D-NAO-203 (10:37)
         "sync_naver_product_meta": sync_naver_product_meta_job,  # D-NAO-212 (09:55)
+        "write_naver_pooled_estimates": write_naver_pooled_estimates_job,  # D-NAO-214 M2-a (09:30)
         "verify_search_term_exclusions": verify_search_term_exclusions_job,
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,

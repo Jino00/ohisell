@@ -15,7 +15,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverEntity
-from app.services.naver_ad import bid_simulator
+from app.services.naver_ad import bid_simulator, hierarchical_pooling
 from app.services.naver_ad.account_diagnosis import LOW_CLICK_THRESHOLD
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
@@ -111,7 +111,12 @@ def find_growth_candidates(
         group_agg = agg["group"].get(e.parent_id, {"clk": 0, "conv_amt": 0})
         target_roas = target_roas_for(e.campaign_id)
 
-        rpc_raw = bid_simulator.pooled_rpc(row, group_agg, campaign_agg, agg["account"])
+        rpc_raw = hierarchical_pooling.pool_metric(
+            row, group_agg, campaign_agg, agg["account"], "rpc",
+        )  # M2-a(D-NAO-214·ref 65 S1-ⓑ): bid_simulator.pooled_rpc → hierarchical_pooling.
+        # 값은 동일하다 — 양쪽 다 K=10(bid_simulator._SHRINK_K = LOW_CLICK_THRESHOLD = 10 =
+        # hierarchical_pooling.SHRINK_K)로 같은 공식 (n·raw+K·prior)/(n+K)를 쓴다. 중복 구현을
+        # 하나로 접는 것이지 계산을 바꾸는 게 아니다(회귀 0 — 테스트가 두 경로 동치를 잡는다).
         rpc_corrected = (rpc_raw * correction_factor).quantize(_Q4)
         ceiling = bid_simulator.affordable_ceiling(rpc_corrected, target_roas)
         if ceiling <= 0:

@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, hierarchical_pooling, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -1506,7 +1506,12 @@ def _servo_economic_ceiling(
     keyword_row = {"clk": settle["clk"], "conv_amt": settle["conv_amt"]}
     campaign_agg = servo_agg["campaign"].get(campaign_id, {"clk": 0, "conv_amt": 0})
     group_agg = campaign_agg  # SHOPPING: 그룹 하위 키워드 grain 부재 → group=campaign 근사
-    rpc_raw = bid_simulator.pooled_rpc(keyword_row, group_agg, campaign_agg, servo_agg["account"])
+    rpc_raw = hierarchical_pooling.pool_metric(
+        keyword_row, group_agg, campaign_agg, servo_agg["account"], "rpc",
+    )  # M2-a(D-NAO-214·ref 65 S1-ⓑ): bid_simulator.pooled_rpc → hierarchical_pooling.
+    # 값은 동일하다 — 양쪽 다 K=10(bid_simulator._SHRINK_K = LOW_CLICK_THRESHOLD = 10 =
+    # hierarchical_pooling.SHRINK_K)로 같은 공식 (n·raw+K·prior)/(n+K)를 쓴다. 중복 구현을
+    # 하나로 접는 것이지 계산을 바꾸는 게 아니다(회귀 0 — 테스트가 두 경로 동치를 잡는다).
     rpc_corrected = (rpc_raw * correction_factor).quantize(Decimal("0.0001"))
     return bid_simulator.affordable_ceiling(rpc_corrected, Decimal(str(target_roas)))
 
