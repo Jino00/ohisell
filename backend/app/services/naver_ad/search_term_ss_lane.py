@@ -82,18 +82,28 @@ _TARGET_ID_MAXLEN = NaverProposal.target_id.property.columns[0].type.length
 
 
 def _has_open_or_executed(
-    db: Session, adgroup_id: str, search_term: str, *, proposal_type: str,
+    db: Session, adgroup_id: str, search_term: str, *, proposal_type: str, target_type: str,
 ) -> bool:
-    """같은 (adgroup, search_term, proposal_type)의 제안이 이미 살아있거나 실행됐는지.
+    """같은 (adgroup, search_term, proposal_type, target_type)의 제안이 이미 살아있거나 실행됐는지.
 
     재생성 금지 대상(PLAN §3 "이미 pending/실행된 동일 (adgroup, search_term) 제안 존재 시
     재생성 금지"): status가 pending/approved/executing(승인 대기·집행 중)이거나 executed_
     change_log_id가 채워진(실집행 완료) 제안. rejected/expired/failed는 재생성 허용(익일 갱신
     데이터로 다시 제안될 수 있음 — in-out 롤링 큐레이션, §0 2). proposal_type을 명시 인자로
     받아 SS3(제외)·SS4(승격)이 서로의 dedup을 오염시키지 않는다(같은 검색어가 동시에 제외
-    후보이면서 승격 후보일 순 없지만 — 표본 게이트가 상호배타적 — 방어적으로 분리)."""
+    후보이면서 승격 후보일 순 없지만 — 표본 게이트가 상호배타적 — 방어적으로 분리).
+
+    ★target_type도 필터에 넣는다(M2-c 적대 리뷰 1R P1-2, 2026-08-21): 개별 grain 제외
+    (target_type='search_term', 실행 가능)와 의미 단위 제외(target_type=SEARCH_TERM_EXCLUDE_
+    SEMANTIC_TARGET_TYPE, 콘솔에서도 비실행)는 텍스트가 같아도 **다른 신뢰도의 다른 후보**다.
+    target_type 없이 (adgroup, search_term)만 보면, 먼저 생성된 의미 단위 pending(영구 비실행)
+    이 나중에 등장하는 실행 가능한 개별 grain 제안을 영구히 가린다(재현: Day1 풀링으로 「블루투스」
+    semantic pending 생성 → Day2 실제 검색어 "블루투스"가 개별 grain 게이트를 통과해도
+    shopping_deduped로 빠져 search_term 제안이 끝내 안 만들어짐). target_type을 필터에 넣으면
+    두 트랙이 서로를 shadow하지 않는다 — 같은 트랙끼리의 진짜 중복만 dedup된다."""
     return db.query(NaverProposal.id).filter(
         NaverProposal.proposal_type == proposal_type,
+        NaverProposal.target_type == target_type,
         NaverProposal.adgroup_id == adgroup_id,
         NaverProposal.target_id == search_term,
         or_(
@@ -784,7 +794,7 @@ def run_search_term_ss_lane(
         # 중복 방지: 살아있는 제외 제안 or 활성 제외 상태 행(excluded/probation) 있으면 스킵.
         if _has_open_or_executed(
             db, adg, cand["search_term"],
-            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE, target_type="search_term",
         ) or _active_exclusion_exists(db, adg, cand["search_term"]):
             deduped += 1
             continue
@@ -830,7 +840,7 @@ def run_search_term_ss_lane(
             continue
         if _has_open_or_executed(
             db, cand["adgroup_id"], cand["search_term"],
-            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE, target_type="search_term",
         ):
             shopping_deduped += 1
             continue
@@ -858,6 +868,7 @@ def run_search_term_ss_lane(
         if _has_open_or_executed(
             db, cand["adgroup_id"], cand["phrase"],
             proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            target_type=search_term_judge.SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE,
         ):
             semantic_deduped += 1
             continue
@@ -890,7 +901,7 @@ def run_search_term_ss_lane(
             continue
         if _has_open_or_executed(
             db, cand["adgroup_id"], cand["search_term"],
-            proposal_type=search_term_judge.SEARCH_TERM_PROMOTE_TYPE,
+            proposal_type=search_term_judge.SEARCH_TERM_PROMOTE_TYPE, target_type="search_term",
         ):
             # dedup은 상한을 소모하지 않는다 — 신규 생성 슬롯은 그대로 다음 후보로 넘어간다.
             promote_deduped += 1

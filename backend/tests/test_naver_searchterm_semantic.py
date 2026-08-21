@@ -162,8 +162,19 @@ def test_build_vocab_excludes_non_shopping_group_names(db):
 # ══════════════════════════════════════════════════════════════════
 # ④~⑦ judge_semantic_units
 # ══════════════════════════════════════════════════════════════════
+# ★P1-1 수정 후: 상품명에서 파생된 vocab 단어는 화이트리스트에도 그대로 들어간다(둘 다 같은
+# NaverProductBep(has_cost=True).product_name 소스라서 — 아래 test_whitelist_blocks_semantic_
+# unit_pooling_leak 참조). 그래서 「풀링으로 unlock되는데 화이트리스트엔 안 걸리는」 시나리오를
+# 만들려면 vocab 단어를 **상품명이 아니라 SHOPPING 그룹명으로만** 공급해야 한다(margin 산정용
+# 상품은 그와 무관한 중립 이름을 쓴다) — build_vocab은 그룹명도 사전에 태우지만 _build_whitelist는
+# 그룹명을 보지 않으므로, 그룹명 전용 단어는 vocab엔 있고 화이트리스트엔 없다(의도된 비대칭).
+def _neutral_margin_product(db, adgroup_id, cpid, margin="500"):
+    _map_product(db, adgroup_id, cpid, name="무관상품", margin=margin)
+
+
 def test_unlocked_by_pooling_true_when_no_individual_member_passes(db):
-    _map_product(db, "grp-1", "P1", name="갤럭시 폴드8")
+    _neutral_margin_product(db, "grp-1", "P1")
+    _shopping_group(db, "grp-vocab", "갤럭시 폴드8")  # vocab만 공급(화이트리스트엔 안 들어감)
     _daily(db, "grp-1", "갤럭시폴드8세트", clk=6, cost=3000)
     _daily(db, "grp-1", "폴드8갤럭시메이트", clk=6, cost=3000)
     out = judge.judge_semantic_units(db, now=_NOW)
@@ -178,7 +189,8 @@ def test_unlocked_by_pooling_true_when_no_individual_member_passes(db):
 
 
 def test_unlocked_by_pooling_false_when_a_member_already_passes_individually(db):
-    _map_product(db, "grp-1", "P1", name="갤럭시 폴드8")
+    _neutral_margin_product(db, "grp-1", "P1")
+    _shopping_group(db, "grp-vocab", "갤럭시 폴드8")
     _daily(db, "grp-1", "갤럭시폴드8세트", clk=20, cost=9000)  # 개별 grain 단독으로도 clk>=10
     _daily(db, "grp-1", "폴드8갤럭시메이트", clk=6, cost=3000)
     out = judge.judge_semantic_units(db, now=_NOW)
@@ -189,9 +201,10 @@ def test_unlocked_by_pooling_false_when_a_member_already_passes_individually(db)
 
 
 def test_semantic_fail_closed_when_margin_absent(db):
-    # 사전은 다른 그룹의 상품 매핑으로 채우되(전역 사전), 검색어가 속한 grp-nomap엔 상품 매핑이
-    # 없어 margin=None → 풀링 게이트를 충족해도 제외한다(자르지 않는다, fail-closed).
-    _map_product(db, "grp-vocab-only", "P1", name="갤럭시 폴드8")
+    # vocab만 다른 그룹명으로 전역 채우고(그룹명은 화이트리스트를 안 타므로 이 테스트가 순수하게
+    # margin 부재만 검증한다), 검색어가 속한 grp-nomap엔 상품 매핑이 없어 margin=None →
+    # 풀링 게이트를 충족해도 제외한다(자르지 않는다, fail-closed).
+    _shopping_group(db, "grp-vocab", "갤럭시 폴드8")
     _daily(db, "grp-nomap", "갤럭시폴드8세트", clk=6, cost=9000)
     _daily(db, "grp-nomap", "폴드8갤럭시메이트", clk=6, cost=9000)
     out = judge.judge_semantic_units(db, now=_NOW)
@@ -201,10 +214,44 @@ def test_semantic_fail_closed_when_margin_absent(db):
 
 
 def test_semantic_excludes_rows_with_live_conversion(db):
-    _map_product(db, "grp-1", "P1", name="갤럭시 폴드8")
+    _neutral_margin_product(db, "grp-1", "P1")
+    _shopping_group(db, "grp-vocab", "갤럭시 폴드8")
     _daily(db, "grp-1", "갤럭시폴드8세트", clk=20, cost=9000, pconv=1)  # 전환 있음 → 집계 제외
     out = judge.judge_semantic_units(db, now=_NOW)
     assert out["units"] == [] and out["pairs"] == [] and out["residual"] == []
+
+
+# ══════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R P1-1 — 화이트리스트가 의미 단위 경로에서 무력화되던 결함(수정 확인)
+# ══════════════════════════════════════════════════════════════════
+def test_whitelist_blocks_semantic_unit_pooling_leak(db):
+    """리뷰어 재현 그대로: 상품 핵심어(하드코딩 화이트리스트 토큰 "아이폰")를 포함한 검색어
+    11건이 개별 grain에선 전부 화이트리스트로 보호돼 후보가 0건인데, 그 11건을 의미 단위
+    "아이폰" 하나로 풀링하면 clk 합산이 게이트를 넘는다. 수정 전엔 이게 그대로 새서 "아이폰"을
+    제외하라는 제안이 나왔다(오컷 방지 정면 위반) — 수정 후엔 화이트리스트가 unit/pair에도
+    걸려 0건이어야 한다."""
+    _map_product(db, "grp-1", "P1", name="무관상품")  # margin만, "아이폰"과 무관한 이름
+    for i in range(11):
+        _daily(db, "grp-1", f"아이폰{i}케이스", clk=5, cost=1000)  # 개별로는 clk<10(보호 이전에도 게이트 미달)
+    out_individual = judge.judge_search_terms(db, now=_NOW)
+    assert out_individual["exclude_candidates"]["shopping"] == []  # 개별 grain: 화이트리스트+게이트 이중 보호
+
+    out = judge.judge_semantic_units(db, now=_NOW)
+    unit_keys = {u["key"] for u in out["units"]}
+    assert "아이폰" not in unit_keys  # ★수정 확인: 풀링으로도 "아이폰"이 새지 않는다
+    pair_keys = {p["key"] for p in out["pairs"]}
+    assert not any("아이폰" in k for k in pair_keys)
+
+
+def test_whitelist_blocks_semantic_pair_containing_whitelisted_unit(db):
+    # 쌍(phrase)도 구성 단위 중 하나가 화이트리스트 토큰이면 막힌다(phrase 문자열에 부분문자열로
+    # 포함되므로 _is_whitelisted가 그대로 잡는다).
+    _map_product(db, "grp-1", "P1", name="무관상품")
+    _shopping_group(db, "grp-vocab", "케이스")  # "케이스"는 화이트리스트가 아닌 순수 vocab 단어
+    for i in range(6):
+        _daily(db, "grp-1", "아이폰케이스", clk=6, cost=2000, ad_date=date(2026, 8, 10 + i))
+    out = judge.judge_semantic_units(db, now=_NOW)
+    assert out["pairs"] == []  # "아이폰+케이스" phrase="아이폰 케이스" → 화이트리스트에 걸림
 
 
 def test_semantic_residual_captures_off_dictionary_span(db):
@@ -245,7 +292,8 @@ def test_judge_search_terms_existing_keys_unchanged_and_semantic_key_added(db):
 # ══════════════════════════════════════════════════════════════════
 def test_lane_creates_pending_shopping_and_semantic_proposals_when_in_scope(db):
     _settings(db, auto_operate=True)
-    _map_product(db, "grp-1", "P1", name="갤럭시 폴드8")
+    _neutral_margin_product(db, "grp-1", "P1")
+    _shopping_group(db, "grp-vocab", "갤럭시 폴드8")  # vocab만(화이트리스트엔 안 들어감)
     _daily(db, "grp-1", "손실검색어", clk=20, cost=9000)  # 개별 grain 후보
     _daily(db, "grp-1", "갤럭시폴드8세트", clk=6, cost=6000)
     _daily(db, "grp-1", "폴드8갤럭시메이트", clk=6, cost=6000)  # 풀링으로 unlock되는 의미단위 후보
@@ -278,7 +326,8 @@ def test_lane_shopping_out_of_scope_agency_creates_no_proposal(db):
 
 def test_semantic_proposal_not_executable_via_console(db):
     _settings(db, auto_operate=True)
-    _map_product(db, "grp-1", "P1", name="갤럭시 폴드8")
+    _neutral_margin_product(db, "grp-1", "P1")
+    _shopping_group(db, "grp-vocab", "갤럭시 폴드8")
     _daily(db, "grp-1", "갤럭시폴드8세트", clk=6, cost=6000)
     _daily(db, "grp-1", "폴드8갤럭시메이트", clk=6, cost=6000)
     lane.run_search_term_ss_lane(db, now=_NOW)
@@ -288,6 +337,22 @@ def test_semantic_proposal_not_executable_via_console(db):
     assert p is not None
     from app.services.naver_ad import naver_execution_harness as harness
     assert harness.real_write_blocker(p) is not None  # 구조 가드가 콘솔에서도 비실행으로 막는다
+
+
+def test_lane_semantic_proposal_zero_when_only_whitelisted_unit_pools(db):
+    # ⓔ 경로 통합 확인: 화이트리스트 토큰만 pooling되는 상황에선 semantic 제안이 0건이어야 한다
+    # (judge_semantic_units 단위 테스트 test_whitelist_blocks_semantic_unit_pooling_leak의
+    # ss_lane 경유 재확인 — 제안 생성 직전까지 화이트리스트가 살아있는지 본다).
+    _settings(db, auto_operate=True)
+    _map_product(db, "grp-1", "P1", name="무관상품")
+    for i in range(11):
+        _daily(db, "grp-1", f"아이폰{i}케이스", clk=5, cost=1000)
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["semantic_candidates"] == 0
+    assert res["semantic_proposals_created"] == 0
+    assert db.query(NaverProposal).filter(
+        NaverProposal.target_type == judge.SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE,
+    ).count() == 0
 
 
 def test_lane_shopping_dedup_skips_existing_pending(db):
@@ -333,3 +398,82 @@ def test_lane_shopping_briefing_diary_still_written(db):
     lane.run_search_term_ss_lane(db, now=_NOW)
     briefs = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "observe").all()
     assert any("검색어제외 브리핑" in b.rationale for b in briefs)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R P1-2 — dedup 키가 target_type을 안 봐서 실행 가능한 제안이 영구히 막히던 결함
+# ══════════════════════════════════════════════════════════════════
+def test_lane_dedup_does_not_cross_target_types(db):
+    """의미 단위 pending(target_type=SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE, 영구 비실행)이
+    이미 있어도, 텍스트가 같은 개별 grain 후보(target_type='search_term', 실행 가능)는 별도로
+    생성돼야 한다 — 둘은 신뢰도가 다른 별개 트랙이다. 재현: Day1에 풀링으로 「블루투스」 semantic
+    pending 생성 → Day2에 실제 검색어 "블루투스"가 개별 grain 게이트를 통과 → 수정 전엔
+    target_id만 보고 dedup돼 shopping 제안이 끝내 생성되지 않았다."""
+    _settings(db, auto_operate=True)
+    _map_product(db, "grp-1", "P1", name="무관템")
+    db.add(NaverProposal(
+        proposal_type=judge.SEARCH_TERM_EXCLUDE_TYPE,
+        target_type=judge.SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE,
+        target_id="블루투스", campaign_id="cmp1", adgroup_id="grp-1", status="pending",
+    ))
+    db.commit()
+    _daily(db, "grp-1", "블루투스", clk=15, cost=9000)
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["shopping_proposals_created"] == 1  # ★수정 전엔 0(잘못된 교차 dedup)
+    assert res["shopping_deduped"] == 0
+    executable = db.query(NaverProposal).filter(
+        NaverProposal.target_type == "search_term", NaverProposal.target_id == "블루투스",
+    ).all()
+    assert len(executable) == 1
+    assert executable[0].status == "pending"
+
+
+def test_lane_dedup_still_blocks_true_duplicate_within_same_target_type(db):
+    # 반대 방향 회귀: target_type을 필터에 추가했다고 «같은 트랙 안»의 진짜 중복까지 새지 않는다.
+    _settings(db, auto_operate=True)
+    _map_product(db, "grp-1", "P1", name="무관템")
+    db.add(NaverProposal(
+        proposal_type=judge.SEARCH_TERM_EXCLUDE_TYPE, target_type="search_term",
+        target_id="블루투스", campaign_id="cmp1", adgroup_id="grp-1", status="pending",
+    ))
+    db.commit()
+    _daily(db, "grp-1", "블루투스", clk=15, cost=9000)
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["shopping_proposals_created"] == 0
+    assert res["shopping_deduped"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R P2 채택 — 생존 변이를 죽이는 테스트
+# ══════════════════════════════════════════════════════════════════
+def test_pair_repeated_within_single_term_counts_once_not_doubled(db):
+    """변이3: `_bump`의 per-term dedup 가드(`if term in bucket[...]: return`)를 무력화하면, 한
+    검색어 안에서 같은 인접쌍이 반복될 때(「필름필름필름」→ 인접쌍 "필름+필름"이 zip에서 2번
+    나온다) clk/cost가 그 검색어 분만큼 중복 가산된다 — unit/residual은 호출 전 set()으로 이미
+    걸러지므로 이 가드가 실제로 의미를 갖는 자리는 pair뿐이다."""
+    _map_product(db, "grp-1", "P1", name="무관상품")
+    _shopping_group(db, "grp-vocab", "필름")
+    _daily(db, "grp-1", "필름필름필름", clk=12, cost=6000)
+    out = judge.judge_semantic_units(db, now=_NOW)
+    pairs = {p["key"]: p for p in out["pairs"]}
+    assert "필름+필름" in pairs
+    p = pairs["필름+필름"]
+    assert p["clk"] == 12 and p["cost"] == 6000  # 가드 없으면 24/12,000으로 2배 가산됐을 것
+    assert p["member_terms"] == 1
+
+
+def test_lane_semantic_cap_boundary_exact(db):
+    """변이7: semantic 상한 비교(`semantic_created >= _SS_SEMANTIC_EXCLUDE_CAP`)가 `>`로
+    바뀌는 off-by-one을 잡는다. cap+1건의 서로 다른 의미 단위 후보를 주고 정확히 cap건만
+    생성되는지 확인한다(`_SS_SHOPPING_EXCLUDE_CAP`엔 대응 테스트가 이미 있다 —
+    test_lane_shopping_cap_limits_new_creation, 같은 모양)."""
+    _settings(db, auto_operate=True)
+    _map_product(db, "grp-1", "P1", name="무관상품")
+    n = lane._SS_SEMANTIC_EXCLUDE_CAP + 1
+    _shopping_group(db, "grp-vocab", " ".join(f"단어{i}" for i in range(n)))
+    for i in range(n):
+        _daily(db, "grp-1", f"단어{i}단독", clk=20, cost=9000)
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["semantic_candidates"] == n
+    assert res["semantic_proposals_created"] == lane._SS_SEMANTIC_EXCLUDE_CAP
+    assert res["semantic_over_cap"] == 1

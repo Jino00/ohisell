@@ -302,11 +302,21 @@ def judge_semantic_units(
     집계 3종(각 (adgroup_id, 키) grain, 같은 검색어 안 같은 단위 중복 등장은 1회만 센다):
       ① 의미단위 단일 ② 의미단위 쌍(인접 zip, key="a+b") ③ 잔여(사전 밖, len>=2).
 
-    게이트(기존 상수만 재사용, fail-closed — 신규 문턱 없음): 집계 clk≥_SS_MIN_CLICK 且 집계
-    cost≥_min_cost_for_adgroup(그룹 공헌이익). min_cost가 None/<=0이면 제외(원가 미확인 그룹은
-    자르지 않는다). ★화이트리스트는 이 grain에 아직 적용하지 않는다(NGRAM_GRAIN_MEASUREMENT
-    §6-1 [미상] — 적용 방식이 결정되지 않은 채로 남아 있고, 이 함수는 그 미결정을 판단으로
-    메우지 않는다. 완료 QA·다음 슬라이스가 볼 것).
+    게이트(기존 상수·기존 화이트리스트만 재사용, fail-closed — 신규 문턱·신규 정책 없음):
+    ① 화이트리스트(§1 3, 적대 리뷰 1R P1-1 반영 2026-08-21) — unit/pair 후보는 phrase(단일은
+    키 자체, 쌍은 공백 조인)를 judge_search_terms와 **같은** `_build_whitelist(db)`/
+    `_is_whitelisted(...)`로 보호한다. 개별 grain에선 「아이폰」류 상품 핵심어가 보호돼 후보에도
+    못 들어가는데, 풀링이 그 보호를 우회해 「아이폰」 하나로 묶어 오컷 후보를 만들어내는 사고가
+    실제로 재현됐다(리뷰어 재현: 개별 11건 보호 vs 의미단위 「아이폰」 1건 생존) — 그래서 여기서
+    막는다. ★잔여(residual)에는 적용하지 않는다 — 화이트리스트 토큰(하드코딩 6개 + 상품명 토큰)
+    은 전부 build_vocab()의 사전 원소이기도 하므로, 최장일치 스캔의 정의상 잔여 구간은 그 시작
+    위치에 어떤 사전 단어도 매치될 수 없는 구간이다(매치 가능했다면 거기서 잔여 스캔이 멈추고
+    그 단어가 별도 unit으로 잡혔을 것). 즉 잔여 텍스트는 **구조적으로** 화이트리스트 토큰을
+    부분문자열로도 포함할 수 없다 — 적용해도 항상 no-op이라 적용하지 않는다(이 불변식은 vocab이
+    화이트리스트를 진부분집합으로 포함하는 한 성립 — semantic_units.build_vocab이 그 조건을
+    깨면 재검토 필요).
+    ② clk≥_SS_MIN_CLICK 且 cost≥_min_cost_for_adgroup(그룹 공헌이익). min_cost가 None/<=0이면
+    제외(원가 미확인 그룹은 자르지 않는다).
 
     각 생존 항목: adgroup_id·campaign_id·kind(unit/pair/residual)·key(내부 집계 키)·phrase(등록
     표현용 텍스트 — 쌍은 공백 조인)·clk·cost·min_cost·window_from/to·member_terms(묶인 검색어
@@ -382,11 +392,16 @@ def judge_semantic_units(
                 _bump("residual", adgroup_id, campaign_id, r, term, clk, cost, individual_pass)
 
     min_cost_cache: dict[str, Decimal | None] = {}
+    whitelist = _build_whitelist(db)  # 개별 grain과 동일 소스(§1 3, 적대 리뷰 1R P1-1)
 
     def _finalize(kind: str) -> list[dict]:
         out: list[dict] = []
         for (adgroup_id, key), v in agg[kind].items():
             clk, cost = v["clk"], v["cost"]
+            phrase = key.replace("+", " ") if kind == "pair" else key
+            # ① 화이트리스트(§1 3) — unit/pair만. 잔여는 구조적으로 걸릴 수 없다(위 docstring 참조).
+            if kind in ("unit", "pair") and _is_whitelisted(phrase, whitelist):
+                continue
             if clk < _SS_MIN_CLICK:
                 continue
             min_cost = _min_cost_for_adgroup(db, adgroup_id, min_cost_cache)
@@ -396,7 +411,6 @@ def judge_semantic_units(
                 continue
             member_terms = len(v["member_terms"])
             members_passing = v["members_passing"]
-            phrase = key.replace("+", " ") if kind == "pair" else key
             out.append({
                 "adgroup_id": adgroup_id, "campaign_id": v["campaign_id"],
                 "kind": kind, "key": key, "phrase": phrase,
