@@ -2822,6 +2822,58 @@ def test_hourly_lane_shopping_adgroup_up_routes_to_servo(db):
     assert saved.rationale.startswith("[순위서보]")
 
 
+# ══════ D-NAO-218(M2-b2): rank_servo:49 소비처 — 경제성상한 명목 스케일 환산 ══════
+# ref 65 정정 #2: economic_ceiling(실효/원가 스케일)을 current_bid·target_bid(명목)와
+# 같은 스케일로 비교하면 기기가중치≠100일 때 어긋난다. 두 테스트가 같은 시나리오
+# (경제성상한 고정 1100원 — _servo_economic_ceiling을 직접 패치해 RPC 산정과 분리)를
+# 가중치 미설정/50%로 갈라 target_bid 차이를 고정한다(배선 전/후 산출 차이의 라이브 증거).
+
+
+def test_hourly_lane_servo_ceiling_unweighted_clamps_at_nominal_value(db):
+    """회귀 기준선: 기기가중치 미설정(NULL) → 100 취급 → 경제성상한 그대로(1100원)가
+    raw_target(1150)보다 작아 거기서 잘린다. target_bid=1100(현재 1000 초과·70원 이상 유효)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db, adgroup_id="grp-shop-nodw")
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator, "_servo_economic_ceiling", return_value=1100), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_called_once()
+    assert result["servo"] == 1
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.target_bid == 1100  # 경제성상한(1100)이 raw_target(1150)보다 작아 거기서 잘림
+
+
+def test_hourly_lane_servo_ceiling_device_weighted_does_not_over_clamp(db):
+    """★핵심 회귀(M2-b2 합격②): 같은 경제성상한 1100원인데 이 그룹의 기기가중치가 50/50이면
+    실제로는 명목 1원당 절반만 나간다 — 상한을 명목 스케일로 되돌리면 2200원이 되어
+    raw_target(1150)이 더 이상 안 잘린다. target_bid=1150(위 테스트의 1100과 달라야 한다 —
+    이게 배선 전/후 산출값 차이의 라이브 증거)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db, adgroup_id="grp-shop-dw")
+    # entity_sync가 매일 채우는 자리 — 여기선 소비 로직만 검증하므로 직접 시드한다.
+    db.query(NaverEntity).filter(NaverEntity.entity_id == "grp-shop-dw").update(
+        {"pc_bid_weight": 50, "mobile_bid_weight": 50}
+    )
+    db.commit()
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator, "_servo_economic_ceiling", return_value=1100), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_called_once()
+    assert result["servo"] == 1
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.target_bid == 1150  # raw_target(콜드 1000×1.15) — 명목환산상한 2200이 안 잘림
+
+
 def test_hourly_lane_brand_search_adgroup_up_uses_clamp_not_servo(db):
     """UP∧BRAND_SEARCH adgroup → 기존 _clamp_step ±15%(codex P1-3, 서보 미적용·UP 회귀 아님).
     proposal_type=bid_up(서보 아님)·target_bid=1150(±15%)."""

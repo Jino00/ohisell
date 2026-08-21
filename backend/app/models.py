@@ -2936,6 +2936,12 @@ class NaverEntity(Base):
     # (LESSONS #119는 "마지막 수정만 남는다"가 전제였고, 생성 시각엔 그 전제가 없다).
     # 소비처는 신설 op의 occurred_at 하나뿐이다(bm_diff._REG_OPS · entity_sync 키워드 등록).
     reg_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # D-NAO-218(M2-b2): 기기별 입찰가중치(`/ncc/adgroups` pcNetworkBidWeight·mobileNetworkBidWeight,
+    # 공식 Swagger 확정 range 10~500·기본 100 — adgroup 행에만 실린다, campaign/keyword는 항상 NULL).
+    # 실효 입찰가 = 명목 bid_amt × (이 값/100). NULL = "아직 안 채워짐"과 100(=진짜 가중치 없음)을
+    # 구분해야 하므로 기본값을 두지 않는다(소비처가 NULL/100을 각각 로깅 — ref 65 정정 #2·앵커 스펙).
+    pc_bid_weight: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mobile_bid_weight: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

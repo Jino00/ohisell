@@ -4,13 +4,97 @@
 #   제어는 B3 몫). useGroupBidAmt=false 소재는 소재 개별 bidAmt가 실효 입찰이고 그룹입찰을
 #   무시한다(공식 apidoc, D-NAO-65 B 선행 실측). 그룹 단일 실효값 = 소재 실효입찰들의 max
 #   (보수 — 임계=실효×10을 높여 과-pause 방지, 실측 CPC 상한과 정합).
+#
+# ★D-NAO-218(M2-b2, ref 65 정정 #2 소비처): 위 파생은 그룹입찰/소재입찰 **어느 쪽이 레버인가**
+#   (ad vs group 축)만 가린다 — **기기(PC/모바일) 축**은 원래 이 모듈의 소관이 아니었다. 그런데
+#   두 값(group_bid·ad_bid_amt) 모두 네이버 콘솔의 "명목" 입찰가이고, 실제로 과금되는 CPC는
+#   여기에 기기별 입찰가중치(pcNetworkBidWeight/mobileNetworkBidWeight, 10~500·기본 100)가
+#   곱해진 값이다. 즉 이 모듈이 지금까지 "effective_bid"라 불러온 값은 (ad-vs-group 축에서는
+#   맞지만) 기기 축에서는 여전히 명목이었다 — ref 65가 지목한 "명목 입찰을 실효 입찰의 대리로
+#   쓰는 전진 판단" 그 자체다. 아래 device_weight_multiplier가 그 축을 마저 닫는다.
 from __future__ import annotations
+
+import logging
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdgroupProduct
+from app.models import NaverAdgroupProduct, NaverEntity
+
+log = logging.getLogger(__name__)
 
 _ID_CHUNK = 400  # IN 절 분할(SQLite 바인딩 상한 방어 — bm_diff._ID_CHUNK 관례)
+
+_DEFAULT_DEVICE_WEIGHT = 100  # 네이버 기본값(공식 Swagger 확정) — NULL(미관측)의 취급값
+
+
+def device_weight_multiplier(pc_weight: int | None, mobile_weight: int | None) -> Decimal:
+    """기기별 입찰가중치 → 실효 배율(단일값). 실효 입찰가 = 명목 × 이 배율.
+
+    ★이 함수의 호출부(effective_bid·rank_servo 소비 경로)는 PC/모바일을 **구분하지 않는**
+    단일 숫자 하나로 그룹의 "실효 입찰"을 표현한다 — 그 설계 자체를 이번 슬라이스에서
+    새로 짜지 않는다(범위 밖: PC/모바일 이원화는 시장가·서보 판정 전체의 재설계). 구분하지
+    않는 자리에 기기별로 다른 두 값을 하나로 접어야 하므로, **둘 중 큰 쪽**(=더 높은 실효
+    입찰=더 보수적 비용 가정)을 택한다. 이유: 이 값이 흘러가는 곳(경제성 상한 비교·서보 스텝
+    캡)은 전부 "실제로 얼마가 나갈지"를 과소평가하면 과다입찰로 이어지는 자리다 — 모듈
+    헤더의 기존 관례("그룹 단일 실효값 = 소재 max, 보수")와 같은 방향의 선택이다.
+    ⚠️`bid_weight=130`처럼 100 초과 상향도 실재한다(D-NAO-216 §8-Q2 각주 라이브 실측) —
+    100을 상한으로 자르지 않는다.
+
+    NULL은 100(가중치 미설정)으로 취급한다 — **NULL과 100을 구분해 로깅하는 책임은
+    호출부**에 있다(이 함수는 순수 계산이라 로그를 남기지 않는다, bid_ceiling_calculator의
+    "순수 계산부는 SA간 직접 호출 금지·부수효과 0" 관례와 같은 결)."""
+    pc = pc_weight if pc_weight is not None else _DEFAULT_DEVICE_WEIGHT
+    mobile = mobile_weight if mobile_weight is not None else _DEFAULT_DEVICE_WEIGHT
+    return Decimal(max(pc, mobile)) / Decimal(_DEFAULT_DEVICE_WEIGHT)
+
+
+def apply_device_weight(nominal_bid: int, pc_weight: int | None, mobile_weight: int | None) -> int:
+    """명목 입찰 → 기기가중치 적용 실효 입찰(원 단위 반올림, 항상 int)."""
+    mult = device_weight_multiplier(pc_weight, mobile_weight)
+    return int((Decimal(nominal_bid) * mult).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def nominal_ceiling_for_device(db: Session, adgroup_id: str, effective_ceiling: int) -> tuple[int, dict]:
+    """실효(원가) 스케일 경제성 상한 → 이 그룹 기기가중치로 나눈 **명목** 스케일 상한.
+
+    ★rank_servo:49 소비처(ref 65 정정 #2)를 위한 전용 변환. rank_servo.decide_servo_step은
+    current_bid·target_bid·economic_ceiling을 **같은 스케일**로 비교하는데(순수 함수라
+    그 전제를 스스로 검증하지 않는다), 호출부(auto_operator)에서 current_bid·target_bid는
+    항상 **명목**(네이버 bidAmt 필드에 그대로 쓰는 값)이고 economic_ceiling은 RPC·BEP로 낸
+    **실효**(원가) 값이다. 가중치≠100이면 두 스케일이 어긋난다 — 특히 가중치>100(실재:
+    AG5054=130)이면 명목 그대로 비교했을 때 상한을 조용히 넘겨 과다입찰이 된다. 이 함수는
+    rank_servo.py를 손대지 않고 **진입 직전** 상한만 명목 스케일로 환산한다(서보 신설이
+    아니라 정정 — 앵커 「순위 서보 구현 안 함」 경계 준수).
+
+    반환: (명목 스케일 상한, {"pc":.., "mobile":..}) — 후자는 호출부가 NULL/100 구분
+    로깅에 재사용."""
+    w = adgroup_device_weights(db, [adgroup_id]).get(adgroup_id, {"pc": None, "mobile": None})
+    mult = device_weight_multiplier(w["pc"], w["mobile"])
+    if effective_ceiling <= 0 or mult == Decimal(1):
+        return effective_ceiling, w
+    nominal = int((Decimal(effective_ceiling) / mult).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return nominal, w
+
+
+def adgroup_device_weights(db: Session, adgroup_ids) -> dict[str, dict]:
+    """광고그룹별 기기 입찰가중치 배치 조회(N+1 방지, GATE P3-2와 같은 관례).
+
+    반환: {adgroup_id: {"pc": int|None, "mobile": int|None}} — 행이 없거나(entity sync
+    전) 값이 NULL이면 None(호출부가 NULL/100을 구분해 로깅할 수 있게 원값을 보존한다)."""
+    ids = [a for a in dict.fromkeys(adgroup_ids) if a]
+    if not ids:
+        return {}
+    out: dict[str, dict] = {}
+    for i in range(0, len(ids), _ID_CHUNK):
+        rows = (
+            db.query(NaverEntity.entity_id, NaverEntity.pc_bid_weight, NaverEntity.mobile_bid_weight)
+            .filter(NaverEntity.entity_type == "adgroup", NaverEntity.entity_id.in_(ids[i:i + _ID_CHUNK]))
+            .all()
+        )
+        for adgroup_id, pc, mobile in rows:
+            out[adgroup_id] = {"pc": pc, "mobile": mobile}
+    return out
 
 
 def _superseded_ad_ids(db: Session, ad_ids: list[str]) -> set[tuple[str, str]]:
@@ -133,10 +217,34 @@ def adgroup_effective_bids(db: Session, group_bids: dict[str, int]) -> dict[str,
         if ad_id and (ad_id, adgroup_id) in stale_ad_ids:
             continue  # 이 소재는 다른 그룹에서 더 최근에 관측됐다 — 옛 문맥 행은 버린다
         by_adgroup.setdefault(adgroup_id, []).append((ad_id, ad_bid_amt, use_group, user_lock))
-    return {
+    derived = {
         adgroup_id: _derive(by_adgroup.get(adgroup_id, []), group_bid)
         for adgroup_id, group_bid in group_bids.items()
     }
+
+    # ── D-NAO-218(M2-b2) — 기기 축 적용 ──────────────────────────────────────
+    # 위 _derive는 ad-vs-group 축(어느 레버가 실효인가)만 가린다. source·max_ad_id·
+    # has_ad_data는 그 축의 판정이라 **명목 기준 그대로 둔다**(레버 라우팅은 기기와 무관).
+    # 기기 축은 여기서 마지막에 곱해 최종 effective_bid를 낸다 — 원래 값은
+    # effective_bid_nominal로 보존(하위 소비처가 배선 전 값과 대조할 수 있게, 이 계약 합격②).
+    weights = adgroup_device_weights(db, group_bids.keys())
+    for adgroup_id, out in derived.items():
+        w = weights.get(adgroup_id, {"pc": None, "mobile": None})
+        nominal = out["effective_bid"]
+        mult = device_weight_multiplier(w["pc"], w["mobile"])
+        out["effective_bid_nominal"] = nominal
+        out["effective_bid"] = int((Decimal(nominal) * mult).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        out["device_pc_weight"] = w["pc"]
+        out["device_mobile_weight"] = w["mobile"]
+        if w["pc"] is None and w["mobile"] is None:
+            # ★스펙 요구: NULL(미관측)과 100(진짜 가중치 없음)을 구분해 로깅한다.
+            log.info("effective_bid: adgroup=%s 기기가중치 미관측(NULL) — 100 취급", adgroup_id)
+        else:
+            log.debug(
+                "effective_bid: adgroup=%s 기기가중치 pc=%s mobile=%s 배율=%s 명목=%s→실효=%s",
+                adgroup_id, w["pc"], w["mobile"], mult, nominal, out["effective_bid"],
+            )
+    return derived
 
 
 def adgroup_effective_bid(db: Session, adgroup_id: str, group_bid: int) -> dict:
