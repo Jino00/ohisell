@@ -156,6 +156,9 @@ return "good" if good else "bad"
 > ### ✅ 전수 재검증 완료 (2026-08-22 00:2x KST · 세션 `cd7d21df` · 체인 「PAO 논의 32」)
 > **표기**: `🔧` = 이번에 정정된 좌표 · `✅` = 초판 좌표가 처음부터 정확했음. **미검증 행 0.**
 >
+> ⚠️**정정 «전» 상태는 이 커밋으로 사라졌다 — 되짚을 좌표는 `git show 68992668:docs/references/90_scorer_objective_function_mismatch_20260821.md`**
+> (직전 커밋. 완료 QA가 *"정정 전 30좌표 중 25개가 def였다는 과정 주장은 검증 대상이 사라져 판정불능"*이라 지적한 자리 — 그래서 좌표를 박는다.)
+>
 > **결과 — 좌표 30개 중 25개(83.3%)가 `def` 줄이었다.** 행 단위로는 **27행 중 24행 정정**
 > (`✅` 3행 = `retro_scorer`·`diary_outcome`·`gave_score`. 앞의 둘 중 `retro_scorer`는 완료 QA가 이미 고친 것이고,
 > 초판이 «스스로» 판정식 줄을 맞힌 행은 **`diary_outcome.py:194`·`gave_score.py:60-63` 2행뿐**이다).
