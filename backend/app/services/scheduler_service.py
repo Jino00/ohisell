@@ -1186,6 +1186,61 @@ def write_naver_pooled_estimates_job():
         db.close()
 
 
+# 크론 슬롯 08:12 — **확정**(D-NAO-217, 2026-08-21 Jino 확인).
+#   하한 = 07:37(`sync_naver_entity`가 `naver_entity`를 채운 뒤라야 스윕 대상을 열거할 수 있다.
+#   `adgroup_target_ingest.list_sweep_adgroups`가 그 표를 읽는다 — 추가 API 콜 0의 근거이자
+#   이 잡의 유일한 선행 의존이다).
+#   prod 실측(2026-08-21) 인접 잡 발화 순서와 빈 창:
+#     sync_naver_entity 07:37:27 종료  ← 이보다 앞은 원리적으로 불가
+#     run_naver_learning_loops 08:10:01 종료 → [빈 창 13분] → verify_search_term_exclusions 08:25:28
+#     run_naver_vault_export 09:05:00 종료 → [빈 창 15분] → coupang_collection_watchdog 09:20:00
+#     sync_naver_adgroup_targets 09:38:21 종료(09:35 발화, 1,013콜 ≈3.4분) → [빈 창 13분] → 09:51:20
+#   ⇒ 08:12는 «가장 이른 안전한 자리»다(08:16경 종료 예상, 다음 잡까지 9분 여유).
+#   ★Jino 선호 원문: *"좀 더 전에 하면 안되?"* — 09:41(형제 잡 옆) 대신 이른 자리를 택한 이유다.
+#   ★★한 번 seed되면 정본이 prod DB로 넘어가 `_ensure_default_states`가 기존 행의 cron을
+#   안 고친다 — **배포 «전»에만 무료로 고칠 수 있다**(교훈 #326).
+_ADGROUP_CRITERION_CRON = "12 8 * * *"
+
+
+def sweep_naver_adgroup_criterion_job():
+    """광고그룹 criterion(연령·성별·요일시간) 타겟팅 설정 전수 스윕 — bidWeight 판독·적재
+    (D-NAO-216, ref 65 S1-ⓐ 경로 정정, 계약 M2-b).
+
+    `/ncc/criterion/{ownerId}`를 non-deleted 광고그룹(≈1,013개) 전건에 1회씩 GET한다.
+    네이버에 쓰지 않는다.
+
+    ★★**이름이 `sync_naver_criterion`(D-NAO-203, 10:37)과 다르다 — 의도적이다.** 그쪽은
+    StatReport `CRITERION` **벌크 성과 리포트**(하루 2건으로 계정 전체 성과를 받는다) 잡이고,
+    이 잡은 **엔티티별 GET 스윕**(설정 — bidWeight 포함)이다. `scheduler_state`에 두 잡이
+    **같은 job_name으로 seed되면 한쪽의 상태 행을 다른 쪽이 덮어써** 그 잡의 관측 이력이
+    사라진다 — 그래서 이 잡의 이름은 반드시 `sweep_naver_adgroup_criterion`이어야 한다
+    (2026-08-21 prod 실측: `sync_naver_criterion`이 이미 10:37:19 ok로 살아 있다).
+
+    크론 슬롯 = **08:12 확정**(D-NAO-217 — 계약 §7이 요구한 배포 전 Jino 확인 완료).
+    근거·대안은 위 `_ADGROUP_CRITERION_CRON` 주석 참조.
+
+    ★**예외를 삼키지 않는다.** `complete=False`면 raise해서 `last_status='error'`가 남게
+    한다 — 부분 스윕을 success로 굳히는 것이 이 저장소의 반복 결함(교훈 #319·#321,
+    D-NAO-212 1R P1, `write_naver_pooled_estimates_job`과 같은 관례)이다."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad import adgroup_criterion_ingest
+
+        result = adgroup_criterion_ingest.sweep_adgroup_criterion(db)
+        line = ("[스케줄러] criterion 설정 스윕: swept=%s ok=%s failed=%s(db=%s) new=%s "
+                "changed=%s rows_written=%s synthetic_skipped=%s aborted=%s complete=%s")
+        args = (result["swept"], result["ok"], result["failed"], result["db_failed"],
+                result["new"], result["changed"], result["rows_written"],
+                result["synthetic_skipped"], result["aborted"], result["complete"])
+        if not result["complete"]:
+            log.error(line + " reason=%s", *args, result["incomplete_reason"])
+            raise RuntimeError(f"criterion 설정 스윕 미완주: {result['incomplete_reason']}")
+        log.info(line, *args)
+        return result
+    finally:
+        db.close()
+
+
 def sync_naver_product_meta_job():
     """네이버 커머스 상품 메타 전건 폴링 — C10 적재 (09:55 KST, D-NAO-212 · 북극성 M1 ④).
 
@@ -2005,6 +2060,10 @@ def _ensure_default_states(db):
         ("sync_naver_product_meta", "55 9 * * *"),
         # M2-a(D-NAO-214): [9] 계층 EB 풀링 산출 기록. 슬롯 근거는 잡 docstring 참조.
         ("write_naver_pooled_estimates", "30 9 * * *"),
+        # M2-b(D-NAO-216): criterion 설정 GET 스윕(bidWeight 판독). 시각 08:12 확정
+        #   (D-NAO-217). 여기 값은 `_ADGROUP_CRITERION_CRON`을 그대로 쓴다 — seed 하나로
+        #   관리한다(값이 두 곳에 따로 있으면 한쪽만 고치는 실수가 난다).
+        ("sweep_naver_adgroup_criterion", _ADGROUP_CRITERION_CRON),
         ("sync_naver_criterion", "37 10 * * *"),
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
@@ -2389,6 +2448,8 @@ def job_func_for(job_name: str):
         "sync_naver_criterion": sync_naver_criterion_job,  # D-NAO-203 (10:37)
         "sync_naver_product_meta": sync_naver_product_meta_job,  # D-NAO-212 (09:55)
         "write_naver_pooled_estimates": write_naver_pooled_estimates_job,  # D-NAO-214 M2-a (09:30)
+        # D-NAO-216 M2-b. 크론 시각 08:12 확정(D-NAO-217) — `_ADGROUP_CRITERION_CRON` 참조.
+        "sweep_naver_adgroup_criterion": sweep_naver_adgroup_criterion_job,
         "verify_search_term_exclusions": verify_search_term_exclusions_job,
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,
