@@ -110,59 +110,78 @@ return "good" if good else "bad"
 
 | 좌표 | 함수 | 판정식 | 무엇을 좌우하나 |
 |---|---|---|---|
-| `retro_scorer.py:58-60`(함수 `_judge` 정의는 `:47`) | `_judge` | `roas_c=(conv_post/cost_post)*cf_asof` → down: `roas_c<bep_asof→correct` / up: `roas_c>=target_asof→correct` | 진단 제안 방향의 **사후 정확도 채점** → GAVE 롤업 학습치 |
-| `auto_operator.py:406` | `_settlement_roas_status` | `roas_corrected < target_roas → below` | **bid_up 승인의 핵심 거부권** |
-| `auto_operator.py:1696` | `_judge_hourly` | CPC급등(배수) · loss leash(ROAS<BEP) · UP(ROAS≥target) 조합 | 시간당 입찰 상향/하향/보류 |
-| `auto_operator.py:1425` | `_intraday_loss_leash` | `est_roas < bep_roas` | 장중 순위 고삐(하향) 발동 |
-| `auto_operator.py:1130` | `_check_spend_circuit_breaker` | `today_cost > prior_avg×3` | 시간당 레인 전체 hold |
-| `budget_pacing.py:390` | `evaluate` | `depletion_ratio>=trigger` → `proxy_roas<target_roas→거부` | **예산 증액 승인 여부** |
-| `expansion_pressure.py:112` | `judge_campaign_pressure` | `보정ROAS/BEP >= 1.25 → expansion_mode` | **캠페인 확장(볼륨 배분) 허용 여부** |
-| `account_diagnosis.py:110` | `bleeding_keywords` | `roas_c < bep_roas` | 출혈 키워드 목록(하향 대상) |
-| `account_diagnosis.py:128` | `starving_winners` | `roas_c>=target_roas & avg_daily_clk<1` | 굶는 승자 육성 후보 |
-| `account_diagnosis.py:185` | `shopping_group_bep` | `roas_c < bep_roas` | 쇼핑그룹 BEP 미달 목록 |
-| `account_diagnosis.py:290` | `vicious_cycle_flags` | `recent_roas<prior_roas×0.9 & clk↓ & roas<target` | 악순환 캠페인 플래그 |
-| `account_diagnosis.py:617` | `resume_candidates` | `roas_at_pause(보정) >= target_roas` | 정지 키워드 재개 후보 |
-| `account_diagnosis.py:1057` | `shopping_group_growth` | `roas_c >= target_roas` | 쇼핑그룹 성장 후보 |
-| `search_term_judge.py:452` | `_pl_group_net_loss` | `conv_amt/gcost < target_roas` | 파워링크 그룹 자동 제외 게이트④ |
-| `search_term_scorecard.py:107` | `_verdict` | `after_cost/before_cost <= 0.10 → stopped` | 제외 조치가 걸렸는지 판정 |
-| `group_state_badge.py:61` | `judge` | `roas<bep→hold` / `roas>=target→expanding` | 그룹 상태 배지(UI) |
-| `creative_scorecard.py:75·155` | `build` | `roas - bep_roas >= 0 → "above"` | 소재별 스코어카드 |
-| `anomaly_feed.py:105` | `spend_anomalies` | `cost_today/cost_prior >= SPIKE` | 소진 이상 탐지(브리핑) |
-| `vitality_signal.py:89·107` | `_signal_s1`·`_signal_s2` | 노출 누적하락률≥40% · 순위 악화+밴드 밖 | 스파이럴 경보·소생 대상 |
+| ✅ `retro_scorer.py:58-60` (def `:47`) | `_judge` | `roas_c=(conv_post/cost_post)*cf_asof` → down: `roas_c<bep_asof→correct` / up: `roas_c>=target_asof→correct` | 진단 제안 방향의 **사후 정확도 채점** → GAVE 롤업 학습치 |
+| 🔧 `auto_operator.py:438` (def `:406`) | `_settlement_roas_status` | `roas_corrected < target_roas → below` | **bid_up 승인의 핵심 거부권** |
+| 🔧 `auto_operator.py:1744·1762·1835-1836` (def `:1696`) | `_judge_hourly` | CPC급등(배수) · loss leash(ROAS<BEP) · UP(ROAS≥target) 조합 | 시간당 입찰 상향/하향/보류 |
+| 🔧 `auto_operator.py:1471` (def `:1425`) | `_intraday_loss_leash` | `est_roas < bep_roas` | 장중 순위 고삐(하향) 발동 |
+| 🔧 `auto_operator.py:1177` (def `:1130`) | `_check_spend_circuit_breaker` | `today_cost > prior_avg×3` | 시간당 레인 전체 hold |
+| 🔧 `budget_pacing.py:481·545` (def `:390`) | `evaluate` | `depletion_ratio>=trigger` → `proxy_roas<target_roas→거부` | **예산 증액 승인 여부** |
+| 🔧 `expansion_pressure.py:173` (def `:112` · 상수 `:51`) | `judge_campaign_pressure` | `보정ROAS/BEP >= 1.25 → expansion_mode` | **캠페인 확장(볼륨 배분) 허용 여부** |
+| 🔧 `account_diagnosis.py:122` (def `:110`) | `bleeding_keywords` | `roas_c < bep_roas` | 출혈 키워드 목록(하향 대상) |
+| 🔧 `account_diagnosis.py:143` (def `:128`) | `starving_winners` | `roas_c>=target_roas & avg_daily_clk<1` | 굶는 승자 육성 후보 |
+| 🔧 `account_diagnosis.py:212` (def `:185`) | `shopping_group_bep` | `roas_c < bep_roas` | 쇼핑그룹 BEP 미달 목록 |
+| 🔧 `account_diagnosis.py:355-358` (def `:290`) | `vicious_cycle_flags` | `recent_roas<prior_roas×0.9 & clk↓ & roas<target` | 악순환 캠페인 플래그 |
+| 🔧 `account_diagnosis.py:702` (def `:617`) | `resume_candidates` | `roas_at_pause(보정) >= target_roas` | 정지 키워드 재개 후보 |
+| 🔧 `account_diagnosis.py:1117` (def `:1057`) | `shopping_group_growth` | `roas_c >= target_roas` | 쇼핑그룹 성장 후보 |
+| 🔧 `search_term_judge.py:483` (def `:452`) | `_pl_group_net_loss` | `conv_amt/gcost < target_roas` | 파워링크 그룹 자동 제외 게이트④ |
+| 🔧 `search_term_scorecard.py:116` (def `:107` · 상수 `:44`) | `_verdict` | `after_cost/before_cost <= 0.10 → stopped` | 제외 조치가 걸렸는지 판정 |
+| 🔧 `group_state_badge.py:113·139` (def `:61`) | `judge` | `roas<bep→hold` / `roas>=target→expanding` | 그룹 상태 배지(UI) |
+| 🔧 `creative_scorecard.py:155` (def `:75`) | `build` | `roas - bep_roas >= 0 → "above"` | 소재별 스코어카드 |
+| 🔧 `anomaly_feed.py:130` (def `:105`) | `spend_anomalies` | `cost_today/cost_prior >= SPIKE` | 소진 이상 탐지(브리핑) |
+| 🔧 `vitality_signal.py:99·114` (def `:89`·`:107`) | `_signal_s1`·`_signal_s2` | 노출 누적하락률≥40% · 순위 악화+밴드 밖 | 스파이럴 경보·소생 대상 |
 
 ### 4-2. 절대액으로 가르는 지점 — 4 (★설계로 방어한 사례)
 
 | 좌표 | 판정식 | 비고 |
 |---|---|---|
-| `search_term_judge.py:148` | `pconv==0 & clk>=10 & cost>=min_cost(공헌이익)` | 코드가 **"ROAS 최대화 아님"** 을 명시 |
-| `account_diagnosis.py:549` | `conv_amt==0 & cost >= bid_amt×10` (스톱로스 절대액) | WEB_SITE 자동 정지 |
-| `diary_outcome.py:194` | `cost_total==0 → stopped, else leaking` | 주석: "성공 지표가 비용 정지" |
-| `probe_revert.py:174` | `ad_conv>0 or proxy_revenue>0 → positive` | 프로브 되돌림 근거 |
+| 🔧 `search_term_judge.py:220·226·231` (def `:148`) | `pconv==0 & clk>=10 & cost>=min_cost(공헌이익)` | 코드가 **"ROAS 최대화 아님"** 을 명시 |
+| 🔧 `account_diagnosis.py:599` (def `:549` · 상수 `:25`) | `conv_amt==0 & cost >= bid_amt×10` (스톱로스 절대액) | WEB_SITE 자동 정지 |
+| ✅ `diary_outcome.py:194` | `cost_total==0 → stopped, else leaking` | 주석: "성공 지표가 비용 정지" |
+| 🔧 `probe_revert.py:187·208-215` (def `:174`) | `ad_conv>0 → positive`(`:187`) / `proxy==0 → certain_zero`(`:212`) / **`proxy>0 → tentative_zero`**(`:214`) | 프로브 되돌림 근거. ★**초판 서술 정정** — 초판은 *"ad_conv>0 **or proxy_revenue>0** → positive"*라 적었으나 코드는 **4값**이고 `proxy_revenue>0`은 positive가 아니라 `tentative_zero`(*"상품은 팔렸는데 광고 전환 0 — 거짓 0 가능"*)다 |
 
 ### 4-3. 혼합 — 4
 
 | 좌표 | 판정식 | 비고 |
 |---|---|---|
-| **`gave_score.py:60-63`** | **`penalty = ratio ** gamma` → `penalty = min(penalty, _ONE)` → `score = (penalty * revenue)`** (`roas`는 `:40`) | ★**올바른 모양이 이미 코드에 있다** — 비율 페널티 × **절대 매출**. 북극성 §5-⑤ 기준 **배선·정지중** |
-| `account_diagnosis.py:711` | zero_conv=`cost>=eff_bid×10`(절대액) / lever_broken=`roas_c<bep & CPC>k×bid`(효율) | 쇼핑그룹 터미널 pause |
-| `probe_revert.py:307` | `hourly_rate>avg×3`(효율) & `전환==0`(절대액) | 실시간 프로브 되돌림 |
-| `growth_sweeper.py:78` | `ceiling=affordable_ceiling(rpc,target_roas)`(효율) → `gap=ceiling-bid`(절대액) | WEB_SITE 성장 후보 |
+| ✅ **`gave_score.py:60-63`** | **`penalty = ratio ** gamma` → `penalty = min(penalty, _ONE)` → `score = (penalty * revenue)`** (`roas`는 `:40`) | ★**올바른 모양이 이미 코드에 있다** — 비율 페널티 × **절대 매출**. 북극성 §5-⑤ 기준 **배선·정지중** |
+| 🔧 `account_diagnosis.py:819·840·864` (def `:711`) | zero_conv=`cost>=eff_bid×10`(절대액) / lever_broken=`roas_c<bep & CPC>k×bid`(효율) | 쇼핑그룹 터미널 pause |
+| 🔧 `probe_revert.py:356·367·382` (def `:307`) | `hourly_rate>avg×3`(효율) & `전환==0`(절대액) | 실시간 프로브 되돌림 |
+| 🔧 `growth_sweeper.py:121·125` (def `:78`) | `ceiling=affordable_ceiling(rpc,target_roas)`(효율) → `gap=ceiling-bid`(절대액) | WEB_SITE 성장 후보 |
 
 > ★**좌표 표기 규약**(완료 QA 지적으로 2026-08-22 00:0x 정정): 이 표의 좌표는 **판정식이 실제로 있는 줄**이다.
 > 함수 진입점(`def` 줄)과 다르면 괄호로 병기했다. 초판은 `gave_score.py:21`·`retro_scorer.py:47`처럼
 > **`def` 줄을 판정식 좌표로 썼는데 그건 부정확한 인용**이다 — QA 원문: *"「그 줄에 그 판정식이 실제로
-> 있는가」라는 원 질문 기준으로는 정확한 인용이 아니다"*. 나머지 행도 같은 규약으로 읽어야 하며,
-> **이 표의 다른 행들은 그 관점에서 재검증되지 않았다**(§8-A [미상] 4번).
+> 있는가」라는 원 질문 기준으로는 정확한 인용이 아니다"*.
+>
+> ### ✅ 전수 재검증 완료 (2026-08-22 00:2x KST · 세션 `cd7d21df` · 체인 「PAO 논의 32」)
+> **표기**: `🔧` = 이번에 정정된 좌표 · `✅` = 초판 좌표가 처음부터 정확했음. **미검증 행 0.**
+>
+> **결과 — 좌표 30개 중 25개(83.3%)가 `def` 줄이었다.** 행 단위로는 **27행 중 24행 정정**
+> (`✅` 3행 = `retro_scorer`·`diary_outcome`·`gave_score`. 앞의 둘 중 `retro_scorer`는 완료 QA가 이미 고친 것이고,
+> 초판이 «스스로» 판정식 줄을 맞힌 행은 **`diary_outcome.py:194`·`gave_score.py:60-63` 2행뿐**이다).
+> ⇒ 완료 QA가 2건에서 잡은 것은 예외가 아니라 **표 전체의 표기 습관**이었다.
+>
+> ★**좌표 밖 결함 1건**: `probe_revert` 행은 좌표뿐 아니라 **판정식 서술 자체가 코드와 달랐다**
+> (`proxy_revenue>0`을 positive라 적었으나 실제는 `tentative_zero`). 표의 해당 칸에 병기했다.
+>
+> ✅**숫자는 전건 일치**: 표가 인용한 상수값 8종을 정의 줄에서 대조 — `_STOPPED_RATIO=0.10`(`search_term_scorecard.py:44`) ·
+> `LOW_CLICK_THRESHOLD=10`(`account_diagnosis.py:25`) · `_CUM_DROP_THRESHOLD=0.40`(`vitality_signal.py:38`) ·
+> `_RANK_BAND_TOP=4.0`(`:39`) · `_HOURLY_SPEND_BREAKER_MULTIPLE=3`(`auto_operator.py:236`) ·
+> `_SS_MIN_CLICK=10`(`search_term_judge.py:61`) · `EX_PRESSURE_RATIO=1.25`(`expansion_pressure.py:51`) ·
+> `CPC_SPIKE_RATIO=2`(`trigger_watch.py:57`, §4-4 2번의 「×2」 주장 근거). **불일치 0건.**
+>
+> ⇒ **분류(효율 19 / 절대액 4 / 혼합 4)는 바뀌지 않았다.** 좌표가 틀렸어도 «무엇을 재는가»의 판정은 유지된다 —
+> 이번 검증은 인용 정밀도를 갚은 것이지 §0 결론을 흔든 것이 아니다.
 
 ### 4-4. ★ 이 표에서 읽어야 할 것
 
 1. **누락이 아니라 «편중»이다.** `search_term_scorecard.py`는 주석에서 *"우리가 만들지 않은 매출 증가분을 회수액에 넣지 않는다"* 며 **D-NAO-59를 직접 겨냥해** 설계돼 있다. 즉 이 저장소는 목적함수를 아는 자리와 모르는 자리가 섞여 있다. 일괄 과실로 서술하면 틀린다.
 2. **★올바른 목적함수가 이미 코드에 있다 — 그런데 그게 정지 중이다.** `gave_score.py`의 `min((ROAS/BEP)^γ,1)×revenue`가 정확히 「효율은 페널티로, 크기는 절대액으로」의 모양이다. 북극성이 이걸 **배선·정지중**으로 분류해 뒀고, 실제로 성패를 찍고 있는 19개는 그 옆에서 효율만 본다.
 3. **「절대액이 줄어도 통과」가 실증 가능한 지점 4곳**(스윕 판정):
-   - `retro_scorer.py:47` — 하향의 사후 채점이 `roas_c<bep_asof`뿐. **매출을 얼마나 깎았는지가 채점식에 없다.** D-NAO-85 같은 사건도 「correct」로 기록된다.
-   - `auto_operator.py:1696` CPC급등 DOWN 분기 — `today_cpc>baseline×2`만 보고 하향. 그 시간대 매출이 늘고 있어도 크기를 참조하지 않는다.
-   - `auto_operator.py:1425` — `est_roas<bep_roas`면 무조건 하향 대상. **매출 절대 규모가 발동 여부에 반영되지 않는다.**
-   - `account_diagnosis.py:110·185` — 배제 기준이 비율뿐이라 매출 규모가 큰 키워드·그룹도 동일하게 「출혈」로 오른다(정렬만 비용순).
+   - `retro_scorer.py:58-60` — 하향의 사후 채점이 `roas_c<bep_asof`뿐. **매출을 얼마나 깎았는지가 채점식에 없다.** D-NAO-85 같은 사건도 「correct」로 기록된다.
+   - `auto_operator.py:1744` CPC급등 DOWN 분기 — `today_cpc>baseline×2`만 보고 하향. 그 시간대 매출이 늘고 있어도 크기를 참조하지 않는다.
+   - `auto_operator.py:1471` — `est_roas<bep_roas`면 무조건 하향 대상. **매출 절대 규모가 발동 여부에 반영되지 않는다.**
+   - `account_diagnosis.py:122·212` — 배제 기준이 비율뿐이라 매출 규모가 큰 키워드·그룹도 동일하게 「출혈」로 오른다(정렬만 비용순).
 
 ---
 
@@ -225,11 +244,45 @@ Jino 질문에 숫자로 답하려면 «우리 운영 창»과 «대행사 운�
 
 ## §8. [미상] · 못 본 곳
 
-### 8-A. [미상] 3건
-1. `naver_change_log` id 221·222의 동일 값 — 다른 소재 2건인지 중복 기입인지 못 갈랐다(§2-2).
-2. `outcome='success'` 2행의 출처 — 쓰는 코드를 못 찾았고 `models.py:2567` 정의 집합에도 없다.
-3. `improved` 4건이 **모수게이트(clk≥10)를 통과한 표본**이라 전체 조치의 대표값인지 알 수 없다. 채점된 것은 150건(improved 4 / neutral 57 / declined 89)이고 나머지는 `outcome=NULL`(판정 보류)이다.
-4. **§4 표의 나머지 행이 「판정식이 있는 줄」 규약을 지키는지 재검증되지 않았다** — 완료 QA가 `gave_score`·`retro_scorer` 2건에서 `def` 줄 인용을 잡아 정정했으나(§4-3 위 규약 상자), 나머지 25행은 같은 관점으로 다시 보지 않았다. 이 표의 좌표를 인용할 땐 **그 줄을 직접 열어 확인할 것.**
+### 8-A. [미상] — 2026-08-22 재검증 후 (세션 `cd7d21df` · 체인 「PAO 논의 32」)
+
+> 초판은 「[미상] 3건」이라 적고 4개를 나열했다(제목과 항목 수 불일치도 이번에 정정). 재검증 결과 **2건 해소 · 1건 부분해소 · 1건 잔존**.
+
+1. ✅**해소 — `naver_change_log` id 221·222는 «다른 소재 2건»이다**(중복 기입 아님).
+   근거: `entity_id`가 다르고(`nad-…375630001` = 아이폰13 프로 필름 `710→780` / `nad-…375602323` = 아이폰16 플러스 필름 `1570→1720`),
+   `proposal_id`도 다르다(**1508 / 1509**). 같은 `changed_at`(2026-07-21 23:20:00.002629)은 **한 배치의 동시 기입**이다.
+   재현: §9-⑤.
+2. 🟡**부분해소 — `outcome='success'` 2행은 «채점기 산물이 아니고», 그 값이 그 행을 «채점에서 영구 제외»한다.**
+   다만 **누가 그 값을 썼는지는 여전히 미상.**
+   - **실측 1 — 코드에 없다**: `outcome="success"`/`outcome='success'` 대입이 **저장소 전 역사·전 브랜치에 0건**
+     (`git log --all -S` 두 형태 모두 출력 없음). 현재 트리 `app/` 전체도 0건. 이 값을 쓰는 파이썬 경로는 **존재한 적이 없다.**
+   - ★**실측 2 — 기제 확정**: `proposal_scoreboard.run_daily`(`:112-116`)의 대상 필터는
+     **`dry_run IS FALSE` ∧ `verify_date IS NOT NULL` ∧ `verify_date <= today` ∧ `outcome IS NULL`** 셋이다.
+     id 974·975는 **`verify_date`가 비어 있고 `outcome`도 NULL이 아니다** ⇒ **두 조건을 동시에 위반해 채점 후보에 영영 못 든다.**
+     ⇒ `success`는 「어휘 밖의 값」이기만 한 게 아니라 **채점 옵트아웃으로 작동한다.**
+     ⚠️**M3 계약 §8(기존 `outcome` 소급 재채점 여부)이 이 2행에 직접 걸린다** — `outcome`을 건드리지 않으면 이 둘은 어떤 새 식으로도 재채점되지 않는다.
+   - **실측 3 — 지문 대조**(재현 §9-⑤b, 관측 2026-08-22 00:2x):
+
+     | outcome | n | proposal_id | predicted_json | actual_json | verify_date |
+     |---|---|---|---|---|---|
+     | improved | 4 | 4 | 4 | 4 | 4 |
+     | declined | 89 | **87** | **87** | 89 | 89 |
+     | neutral | 57 | 57 | 57 | 57 | 57 |
+     | **success** | **2** | **0** | **0** | **0** | **0** |
+
+     ⇒ 채점기가 손댄 150건은 **`actual_json`·`verify_date`를 150/150 보유**(이게 가장 날카로운 판별자다).
+     `success` 2행은 **넷 다 0**이다.
+     ★**`proposal_id`·`predicted_json`은 판별자가 아니다** — `declined` 중 **2건(id 587·590)이 그 둘 없이도 채점됐다.**
+     그 둘도 `[수동] Jino 지시` 행인데(2026-07-23) `verify_date=2026-08-06`을 갖고 `outcome`이 NULL이었기에 정상 채점됐다.
+     ⇒ **수동 행이라서 채점을 못 받는 게 아니다. `verify_date`와 `outcome`의 상태가 가른다.**
+   - **실측 4 — 사람 손의 흔적**: id 974·975의 `rationale`이 *"Jino 지시(2026-07-29 10:5x) 출시 초기 가시성 우선…"*·
+     *"Jino 지시(2026-07-29 10:58) 출시 초기 4위 안 유지…"*이고 둘 다 `dry_run=0`·`update_bid`·`1000→1600`이다.
+   - ⇒ **구조 판정**: 이 2행은 채점기 모집단이 아니므로 **§0·§2·§3의 「채점된 150건」 분모에서 제외한 것이 옳다.**
+     ⇒ **남는 [미상]**: 저장소 밖(수동 SQL·일회성 스크립트) 중 무엇이 썼는지는 **데이터로 못 가른다 — 추정해 적지 않는다.**
+3. `improved` 4건이 **모수게이트(clk≥10)를 통과한 표본**이라 전체 조치의 대표값인지 알 수 없다. 채점된 것은 150건(improved 4 / neutral 57 / declined 89)이고 나머지는 `outcome=NULL`(판정 보류)이다. — **잔존**(이번 검증 범위 밖)
+4. ✅**해소 — §4 표 좌표 전수 재검증 완료.** 27행 30좌표 전건 대조, **미검증 0**. 결과·표기는 §4-3 하단 상자 참조.
+   ⇒ 초판 대비 **24행 정정 · 3행 유지**, 그리고 **좌표가 아닌 판정식 서술 오류 1건**(`probe_revert`)을 추가로 잡았다.
+   ⇒ 표가 인용한 **상수값 8종은 전건 일치**(불일치 0). ⇒ **분류 19/4/4는 불변.**
 
 ### 8-B. 못 본 곳 (스윕이 열지 못한 파일 — 정직한 나열)
 - `auto_operator.py` 3,713줄 중 **약 900줄만** 확인. 미확인: `_hot_set_candidates`·`_probe_trigger`·`_learned_optimal_skip`·`_deep_expansion_ok`·`_run_exploration_for_campaign`·`_fire_vitality_revive`·`_bp_fire`·`run_daily_lane`·`run_hourly_lane` 등
@@ -277,6 +330,42 @@ ssh sellc.ohitech.co.kr "sqlite3 -readonly /home/ubuntu/ohisell/backend/ohisell.
   \"SELECT e.campaign_type, COUNT(*) FROM naver_change_log l \
      LEFT JOIN naver_entity e ON e.entity_type='campaign' AND e.entity_id=l.campaign_id \
     WHERE l.action LIKE 'external%' GROUP BY e.campaign_type;\""
+
+# ⑤ §4 표 좌표 전수 재검증 (2026-08-22, 세션 cd7d21df) — 표의 좌표를 인용하기 전 이걸로 재확인한다.
+#    (a) 「그 줄이 def 줄인가」 일괄 triage — 출력에 def가 뜨면 그 행의 좌표는 다시 틀어진 것이다.
+cd backend/app/services/naver_ad && python3 - <<'EOF'
+C=[("retro_scorer.py",58),("auto_operator.py",438),("auto_operator.py",1744),("auto_operator.py",1762),
+   ("auto_operator.py",1835),("auto_operator.py",1471),("auto_operator.py",1177),("budget_pacing.py",481),
+   ("budget_pacing.py",545),("expansion_pressure.py",173),("account_diagnosis.py",122),("account_diagnosis.py",143),
+   ("account_diagnosis.py",212),("account_diagnosis.py",355),("account_diagnosis.py",702),("account_diagnosis.py",1117),
+   ("search_term_judge.py",483),("search_term_scorecard.py",116),("group_state_badge.py",113),("group_state_badge.py",139),
+   ("creative_scorecard.py",155),("anomaly_feed.py",130),("vitality_signal.py",99),("vitality_signal.py",114),
+   ("search_term_judge.py",220),("search_term_judge.py",226),("search_term_judge.py",231),("account_diagnosis.py",599),
+   ("diary_outcome.py",194),("probe_revert.py",187),("gave_score.py",60),("account_diagnosis.py",819),
+   ("account_diagnosis.py",840),("account_diagnosis.py",864),("probe_revert.py",356),("probe_revert.py",367),
+   ("probe_revert.py",382),("growth_sweeper.py",121),("growth_sweeper.py",125)]
+for f,n in C:
+    L=open(f,encoding="utf-8").read().split("\n"); t=L[n-1].strip()
+    print(("★DEF " if t.startswith("def ") else "     ")+f+":"+str(n)+"| "+t[:90])
+EOF
+
+#    (b) outcome='success' 2행이 «채점기 산물이 아니다»의 지문 대조 — 넷이 전부 비어야 한다.
+ssh sellc.ohitech.co.kr "sqlite3 -readonly /home/ubuntu/ohisell/backend/ohisell.db \
+  \"SELECT outcome, COUNT(*) n, SUM(proposal_id IS NOT NULL) has_prop, \
+     SUM(predicted_json IS NOT NULL AND predicted_json<>'') has_pred, \
+     SUM(actual_json IS NOT NULL AND actual_json<>'') has_actual, \
+     SUM(verify_date IS NOT NULL) has_verify FROM naver_change_log \
+    WHERE outcome IN ('improved','declined','neutral','success') GROUP BY outcome;\""
+#    기대: improved/declined/neutral은 네 지문 = n과 같고, success는 2건 전부 0.
+
+#    (c) 코드에 outcome='success'가 «전 역사» 0건임을 재확인
+git log --all --oneline -S'outcome="success"' -- '*.py'; git log --all --oneline -S"outcome='success'" -- '*.py'
+#    기대: 양쪽 다 출력 없음.
+
+#    (d) §8-A 1번 — id 221·222가 다른 소재임을 보이는 최소 컬럼
+ssh sellc.ohitech.co.kr "sqlite3 -readonly /home/ubuntu/ohisell/backend/ohisell.db \
+  \"SELECT id, entity_id, before_value LIKE '%\\"bidAmt\\": 710%' AS b710, proposal_id \
+    FROM naver_change_log WHERE id IN (221,222);\""
 ```
 
 > ★**왜 ④가 중요한가**: 쇼핑엔 등록 키워드가 없어(`naver_ad_daily.keyword_id`가 SHOPPING 전건 빈 문자열)
