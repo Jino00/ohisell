@@ -113,6 +113,36 @@ Agent: 종합조망 net_profit (intelligence.py / command-center)
 4. **S5b 착수 결정**(Jino): `feat/scheduler-watchdog`(S1 컬럼 추가 7d5d846) 이어서 — cron 잡 실패 표면화(last_status/last_error 기록)+stale 탐지/알림. prod alembic 동반.
 5. (관찰) 정산 성숙 후 adjustment≠0 케이스 모니터 — S4 메커니즘 라이브 효과.
 
+## 운영 기록 — 다른 세션이 이 트랙 영토를 건드린 흔적
+
+> 이 트랙으로 연 세션이 아니라 **운영/소방 세션**이 남긴 줄이다. 트랙의 스프린트 진도가 아니라
+> «이 트랙의 자산에 무슨 일이 있었나»의 기록이다. 계약 헤더는 붙이지 않았다(lazy 부착 규칙 —
+> 이 트랙으로 세션을 열 때 그 세션이 붙인다).
+
+### 2026-08-21 23:0x KST — WING2 요약축 9일 정체 복구 (운영 세션, PAO 아님)
+- **발단**: Jino가 대시보드 배너 「쿠팡 판매분석 요약축(오하이테크) 정체 — 3P 매출 대조 상대가 낡았다 (9일째)」를 지목.
+- **원인**: WING2 쿠팡 Wing **로그인 세션 만료**. 05:23 일일 트리거(`request_wing_vendor_summary_daily`)가
+  **08-14부터 8일 연속** `vendor-summary 실패 status=None — 'login' 재실행 필요`로 죽었다.
+  마지막 성공 **08-13 04:20**(08-12까지 적재) ⇒ 배너의 「9일째」와 일치.
+  같은 시각 **WING1(오픽스)은 정상**이라 코드가 아니라 계정 세션 문제로 좁혀졌다.
+  ★`scheduler_service.request_wing_vendor_summary_daily_job` docstring이 이미 예고해 둔 실패 모드다:
+  *"이 잡의 성패는 쿠팡 Wing 로그인 수명에 달려 있고, 그건 사람이 창에서 푸는 것이다(180초 대기)."*
+- **복구**: 세션이 살아난 것을 확인한 뒤(19:16 RG 경로가 로그인 프롬프트 없이 통과) 일일 크론과
+  **같은 엔드포인트**를 직접 호출 —
+  `POST /api/coupang/ops/wing/vendor-summary/request-refresh?account_key=COUPANG_WING2`
+  (Basic Auth만, ingest 토큰 불필요). 데몬이 30초 폴링에서 소비.
+- **라이브 증거**: 22:35:23 「갱신 요청 감지 — fetch 시작」 → 22:35:54
+  `vendor-summary 2026-07-07~2026-08-20 | 3P GMV=1,224,010 · RG GMV=61,700` **90일 push 성공** +
+  **옵션축 246행**(판매발생 14). prod `/api/scheduler/health`의 `data_stale` **[]**,
+  보존식 `vendor_item_conservation` **compared 28 / mismatch 0**.
+- **★D-5 ①의 전제는 이미 옛말이다**(번복이 아니라 관측 기록): D-5는 *"오하이테크(channel_id=2) 3P는
+  Wing 판매분석 미수집(WING2 vendor-summary 없음, 현재 WING1만)"*이라 적었는데, 그 뒤 D-CPP-36·D-CPP-40으로
+  **WING2도 요약축·옵션축을 받고 있다**. 이번 복구가 그걸 라이브로 재확인했다. D-5 본문은 그대로 둔다
+  (확정 결정 절은 번복 금지) — 처분은 이 트랙으로 세션을 여는 쪽이 정한다.
+- **이 트랙에 남는 취약점**: 복구 경로가 «사람이 창에서 로그인» 하나뿐이라, 로그인이 끊기면
+  **다시 조용히 N일 정체**한다. 배너가 뜨긴 하지만 그건 사후 표면화이고 자동 회복은 없다.
+  (`green-while-dead` — `coupang_wing_cookie.status`는 green인 채 `last_error`에 「로그인 필요」가 쌓인다.)
+
 ## 참고
 - 페처: `tools/wing_browser_fetcher.py`(CDP cmd_chrome), config `~/.ohisell_wing_fetcher.json`(cdp_port 9222).
 - 백엔드: `backend/app/services/coupang/{vendor_summary_sync,revenue_reconcile}.py`, `routers/overview.py`(/revenue-reconcile), `routers/coupang_ops.py`(sales-summary).
