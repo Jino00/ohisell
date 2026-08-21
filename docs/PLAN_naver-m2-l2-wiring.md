@@ -181,7 +181,12 @@ M2는 그 목표의 **L2(판단층)를 여는 칸**이다(북극성 ref 82 §2·
 > - **[미확인] 해소**: 두 숫자는 모순이 아니라 **다른 endpoint**를 잰 것이었다. 「targetTp 4종·GENDER/AGE/TIME_WEEKLY/REGIONAL 전수 0건」 = `/ncc/targets`(533그룹 전수 캡처) · 「실설정 1,271행」 = `/ncc/criterion`(2026-08-17 캡처). ref 65가 둘을 한 경로로 적은 것이 오독의 출처다(§5 개정 각주).
 > - **확장을 막는 구조적 사실 2건**: ①`naver_adgroup_target_current`는 `UniqueConstraint(adgroup_id)`로 **그룹당 1행**인데 criterion은 **그룹당 평균 12.5행**(실측: 1,271행 / distinct ownerId **102**, min 3 · max 26)이다 ②bidWeight는 애초에 `/ncc/targets` 응답에 없어 같은 fetch 경로로 채울 수 없다.
 > - **★분모 정정**: 「385그룹」은 **조사한 그룹 수**이고 실제로 설정을 가진 그룹은 **102개**였다(2026-08-17 캡처 실측). 합격 ① 문언은 안 고치고, 판정은 §4 [⚠️애매] 처리 그대로 «판정 시점 재측정 전수»로 한다 — 판정문에 «조사 분모 / 설정 보유 분모»를 **둘 다** 적는다.
-> - **criterion 행 스키마**(캡처 실측, 키 11종 전부 평면·결측 0): `ownerId`(=adgroup_id) · `type`(AG 1,212 · SD 56 · GN 3) · `dictionaryCode` · `codeName` · `bidWeight`(100=1,263 · 70=6 · 80=2) · `negative`(AG 375행 true) · `enable`(전건 true) · `delFlag`(전건 false) · `regTm` · `editTm` · `customerId`. ⇒ **grain = (adgroup_id, type, dictionary_code)**.
+> - ★★**라이브가 이 각주의 숫자를 정정했다 (2026-08-21 13:36 첫 전수 스윕)**: 아래 캡처 기반 숫자는 **실상의 일부**였다. prod 실측 = **6,920행 / 설정 보유 431그룹**(조사 1,013) · 그룹당 평균 **16.1행**. 「102그룹·평균 12.5행」은 08-17 캡처의 커버리지이지 계정의 실제가 아니다 — **판정·인용은 라이브 숫자로 한다.**
+>   - **캡처에 통째로 없던 4번째 타입 `AD` = 관심사 세그먼트**(190그룹 × 13코드 = 2,470행 · 「건강」「금융/보험」「전자/가전」「여행」…). 매트릭스가 「호출가능·미적재」로 분류해 둔 **A1 관심사**가 이 슬라이스에서 같이 열렸다. 코드 docstring은 AG/GN/SD 3종만 적어 뒀다 — **문서화 누락**(이월).
+>   - **타입별 라이브**: AG 2,616(218그룹) · AD 2,470(190) · SD 1,825(307) · GN 9(3)
+>   - **C-0 필터가 실제로 일한다**: 첫 회전에서 `synthetic_skipped=3,030` — 합성 기본값이 **약 30%**였다. 안 걸렀으면 `_change` 원장이 첫날부터 3,030건의 거짓 변경으로 찼다(§8-Q7 600초의 사후 정당화).
+>   - ⚠️**`bid_weight=130`(상향)이 실재한다** — 비-100 전건 19행 중 `negative=0`인 12행: 70×9(AG6099·AGXXXX) · 80×2(AG3539·AG4044) · **130×1(AG5054)**. ref 65의 전제 *"명목 > 실효라 실효 입찰가를 과대평가한다"*는 **한 방향이 아니다** — 「계통적 과대평가」라고 쓰지 않는다.
+> - **criterion 행 스키마**(캡처 실측 — 위 정정 참조, 키 11종 전부 평면·결측 0): `ownerId`(=adgroup_id) · `type`(캡처 기준 AG 1,212 · SD 56 · GN 3 — **AD 누락**) · `dictionaryCode` · `codeName` · `bidWeight`(100=1,263 · 70=6 · 80=2) · `negative`(AG 375행 true) · `enable`(전건 true) · `delFlag`(전건 false) · `regTm` · `editTm` · `customerId`. ⇒ **grain = (adgroup_id, type, dictionary_code)**.
 > - ⚠️`negative=true` 행의 `bidWeight`는 «제외 대상»에 붙은 값이라 실효 입찰 배율로 읽으면 안 된다 — 소비층에서 `negative`를 반드시 함께 본다.
 
 **Q7. M2-b 구현이 신설한 상수 2개 + 크론 슬롯** *(D-NAO-217에서 사후 등재 — 원 계약엔 없었다)*
