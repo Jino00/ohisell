@@ -339,6 +339,52 @@ def test_semantic_proposal_not_executable_via_console(db):
     assert harness.real_write_blocker(p) is not None  # 구조 가드가 콘솔에서도 비실행으로 막는다
 
 
+# ══════════════════════════════════════════════════════════════════
+# 라이브 실측 수정(2026-08-21) — 의미 단위 경로는 auto_operate 스코프를 안 건다(합격기준 ⑤ 회귀 잠금)
+# ══════════════════════════════════════════════════════════════════
+def test_semantic_proposals_survive_when_auto_operate_is_off_but_stay_blocked_at_execution(db):
+    """★라이브 실측(2026-08-21)이 드러낸 결함의 회귀 잠금 — PAO 전면 정지(D-NAO-132)로
+    naver_campaign_settings 전체가 auto_operate=0인 게 지금 실제 상태다. 수정 전엔 의미 단위
+    경로도 개별 grain과 같은 `_in_scope`(auto_operate)를 타서 이 상태에서 semantic 제안이
+    **영원히 0건**이었다(판정층 전체가 무소비 부품이 됨). 수정 후: ①auto_operate=0이어도 의미
+    단위 pending 제안은 생성된다 ②status='pending' ③approval_source is None(잠김 2 유지)
+    ④harness 실행 경로(target_type 구조 가드)에서는 여전히 차단된다 — 그 차단이 계약
+    (docs/PLAN_naver-m2-l2-wiring.md §4-4)이 요구하는 «잠김 3이 실행 경로에서 막는 라이브
+    증거»고, 여기선 잠김 3 대신 harness 구조 가드가 같은 역할을 한다."""
+    _settings(db, auto_operate=False)  # 라이브와 동일한 상태(PAO 전면 정지, 등록은 돼 있음)
+    _neutral_margin_product(db, "grp-1", "P1")
+    _shopping_group(db, "grp-vocab", "갤럭시 폴드8")
+    _daily(db, "grp-1", "갤럭시폴드8세트", clk=6, cost=6000)
+    _daily(db, "grp-1", "폴드8갤럭시메이트", clk=6, cost=6000)
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["semantic_proposals_created"] >= 1  # ★수정 전엔 0(전부 out_of_scope로 죽었다)
+    assert res["semantic_invalid_adgroup"] == 0
+    p = db.query(NaverProposal).filter(
+        NaverProposal.target_type == judge.SEARCH_TERM_EXCLUDE_SEMANTIC_TARGET_TYPE,
+    ).first()
+    assert p is not None
+    assert p.status == "pending"
+    assert p.approval_source is None  # 잠김 2 유지
+    from app.services.naver_ad import naver_execution_harness as harness
+    assert harness.real_write_blocker(p) is not None  # ★실행 경로에선 여전히 차단(잠김 3의 대체)
+
+
+def test_shopping_individual_grain_still_gated_by_auto_operate_after_fix(db):
+    # ★회귀 확인: 이번 수정은 의미 단위 경로 «전용»이다 — 개별 grain은 auto_operate=0이면
+    # 여전히 0건(기존 test_lane_shopping_out_of_scope_agency_creates_no_proposal과 같은 성질,
+    # 여기선 auto_operate=0 «등록됨» 케이스로 한 번 더 확인 — 위 세미틱 테스트와 대칭).
+    _settings(db, auto_operate=False)
+    _neutral_margin_product(db, "grp-1", "P1")
+    _daily(db, "grp-1", "손실검색어", clk=20, cost=9000)
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["shopping_proposals_created"] == 0
+    assert res["shopping_out_of_scope"] == 1
+    assert db.query(NaverProposal).filter(
+        NaverProposal.target_type == "search_term",
+        NaverProposal.target_id == "손실검색어",
+    ).count() == 0
+
+
 def test_lane_semantic_proposal_zero_when_only_whitelisted_unit_pools(db):
     # ⓔ 경로 통합 확인: 화이트리스트 토큰만 pooling되는 상황에선 semantic 제안이 0건이어야 한다
     # (judge_semantic_units 단위 테스트 test_whitelist_blocks_semantic_unit_pooling_leak의
