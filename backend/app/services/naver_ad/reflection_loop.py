@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.services.naver_ad.diary_outcome import backfill_outcomes
 from app.services.naver_ad.diary_reflection import build_reflection
+from app.services.naver_ad.reflection_health import record_run_status
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -35,12 +36,36 @@ def run_daily_reflection(db: Session, *, now: datetime | None = None) -> dict:
         result["backfill"] = {"error": str(e)}
 
     try:
-        result["reflection"] = build_reflection(db, now=now)
-        result["stage_status"]["daily_reflection"] = "ok"
+        refl = build_reflection(db, now=now)
+        result["reflection"] = refl
+        # ★D-NAO-228: build_reflection은 fail-open이라 LLM 실패도 «예외 없이» {"error": ...}로
+        #   돌아온다. 예외만 failed로 적던 초판은 성공·재료없음 skip·LLM 실패를 전부 'ok'로
+        #   기록했고, 그래서 2026-07-18~08-22 결번 19일이 로그에서 안 보였다(계약 §3).
+        #   반환값을 «판독»해야 로그가 사실을 말한다.
+        if refl.get("error"):
+            result["stage_status"]["daily_reflection"] = "failed"
+            _record(db, "failed", detail=str(refl.get("error")), entries=refl.get("entries"), now=now)
+        elif refl.get("skipped"):
+            reason = str(refl["skipped"])
+            result["stage_status"]["daily_reflection"] = f"skipped:{reason}"
+            # already_exists는 catch-up 이중 방지라 결번이 아니다 — 그 날엔 산출물 행이 이미 있다.
+            if reason != "already_exists":
+                _record(db, "skipped_no_material", detail=reason, entries=0, now=now)
+        else:
+            result["stage_status"]["daily_reflection"] = "ok"
     except Exception as e:  # noqa: BLE001
         db.rollback()
         log.exception("reflection_loop daily_reflection 단계 실패: %s", e)
         result["stage_status"]["daily_reflection"] = "failed"
         result["reflection"] = {"error": str(e)}
+        _record(db, "failed", detail=str(e), entries=None, now=now)
 
     return result
+
+
+def _record(db: Session, status: str, *, detail, entries, now) -> None:
+    """상태 행 기록 — 이 기록의 실패가 잡을 죽이면 안 된다(반성은 관찰 전용, fail-open 계약)."""
+    try:
+        record_run_status(db, status, detail=detail, entries=entries, now=now)
+    except Exception as e:  # noqa: BLE001
+        log.warning("reflection_loop: 상태 행 기록 실패(fail-open): %s", e)

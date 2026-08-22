@@ -3598,7 +3598,42 @@ export interface NaverWisdomScorecard {
     legacy_note: string;
   };
   attribution: { path: string; limitation: string };
+  reflection_health: NaverReflectionHealth;
   wisdom: NaverWisdomScorecardRow[];
+}
+
+// ── 반성 루프 상태(D-NAO-228, 계약 PLAN_naver-m5-reflection-visibility.md §5 ⓐ) ──
+// ★왜 성적표 안에 있나: 성적표의 재료는 «반성»이 만든다. 반성이 도는지 화면에 없으면
+//   성적표가 비었을 때 「지혜가 없어서」인지 「반성이 죽어서」인지 구분이 안 된다.
+//   실제로 2026-07-18~08-22 결번 19일 동안 로그도 전부 'ok'였다(계약 §3).
+// ★skipped_no_material을 «고장»으로 그리지 말 것 — 재료(실집행 일기)가 없는 날 반성이
+//   안 도는 것은 정상이다(북극성 §5-2). L3 정지 중엔 이게 다수다.
+// pending = 오늘 08:35 크론이 아직 안 왔다. 결번이 아니고 경고도 아니다(적대 리뷰 1R P1-2).
+export type NaverReflectionDayState =
+  | "ok"
+  | "skipped_no_material"
+  | "failed"
+  | "unresolved"
+  | "pending";
+
+export interface NaverReflectionHealthDay {
+  date: string;
+  state: NaverReflectionDayState;
+  source: "reflection_row" | "status_row" | "inferred" | "not_due";
+  has_material: boolean;
+  detail: string | null;
+}
+
+export interface NaverReflectionHealth {
+  window: { start: string; end: string; days: number };
+  last_success_kst: string | null;
+  gap_days_since_success: number | null;
+  missing_days: number;
+  counts: Record<NaverReflectionDayState, number>;
+  headline: string;
+  days: NaverReflectionHealthDay[];
+  evidence_gap: string;
+  material_note: string;
 }
 
 export function fetchNaverWisdomScorecard(): Promise<NaverWisdomScorecard> {
