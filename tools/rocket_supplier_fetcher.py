@@ -814,10 +814,15 @@ def _owned_chrome(cfg: dict, owner: "_ChromeOwner | None" = None):
 # 브라우저 세션 (CDP 모드 — 살아있는 Chrome에 연결, 세션은 Chrome이 보관)
 # ════════════════════════════════════════════════════════════════════
 @contextlib.contextmanager
-def _chrome(p, cfg: dict):
+def _chrome(p, cfg: dict, owner=None):
     """전용 Chrome(CDP)에 연결 → 기존 로그인 컨텍스트의 새 탭. Akamai 핑거프린트 없음(실제 Chrome).
 
     yield page. 종료 시 탭만 닫고 Chrome 자체는 유지(disconnect only).
+
+    ★owner를 주면 owner.keep_open일 때 **탭도** 남긴다(2026-08-22, 계약
+      CONTRACT_collection_stability_s1 W3 — 4개 페처 사본에 같은 수리를 착지시킨다).
+      종전엔 `_owned_chrome`이 «프로세스»만 지키고 여기가 «탭»을 무조건 닫아서,
+      「창 유지 — 로그인하세요」라고 로그에 쓰고도 로그인할 탭이 남지 않았다.
     """
     port = int(cfg.get("cdp_port", 9223))
     browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
@@ -826,8 +831,11 @@ def _chrome(p, cfg: dict):
     try:
         yield page
     finally:
-        with contextlib.suppress(Exception):
-            page.close()
+        if owner is not None and getattr(owner, "keep_open", False):
+            log.info("로그인용 탭 유지(닫지 않음) — 이 탭에서 재로그인하세요.")
+        else:
+            with contextlib.suppress(Exception):
+                page.close()
         with contextlib.suppress(Exception):
             browser.close()  # disconnect only, Chrome 자체는 유지
 
@@ -2296,7 +2304,7 @@ def _do_run(cfg: dict) -> int:
     try:
         with _owned_chrome(cfg) as owner:
             with sync_playwright() as p:
-                with _chrome(p, cfg) as page:
+                with _chrome(p, cfg, owner) as page:
                     if not _goto_origin(page):
                         # ★사람을 부르기 전에 스스로 복구한다(2026-08-03): 대부분의 만료는
                         #   aid(1h)이고 keycloak(12h)은 살아 있어 비번 없이 여기서 끝난다.
@@ -2502,7 +2510,7 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
         with _owned_chrome(cfg) as owner:
             owner.keep_open = True   # 로그인 창은 사람 것 — 자동으로 닫지 않는다
             with sync_playwright() as p:
-                with _chrome(p, cfg) as page:
+                with _chrome(p, cfg, owner) as page:
                     with contextlib.suppress(Exception):
                         page.goto(SUPPLIER_ORIGIN, wait_until="domcontentloaded", timeout=40000)
                     waited = 0
@@ -2577,7 +2585,7 @@ def cmd_shipment_backfill(cfg: dict, days: int) -> int:
     try:
         with _owned_chrome(cfg) as owner:
             with sync_playwright() as p:
-                with _chrome(p, cfg) as page:
+                with _chrome(p, cfg, owner) as page:
                     if not _goto_origin(page):
                         log.info("supplier 로그아웃 감지 — 자가 복구 시도.")
                         if coupang_auth.OK != _recover_session(page, cfg) or not _goto_origin(page):

@@ -337,8 +337,16 @@ def _try_lock():
 
 
 @contextlib.contextmanager
-def _cdp_page(cfg: dict):
-    """CDP로 실제 Chrome에 attach → (page, browser). 종료 시 page만 닫고 Chrome은 유지(disconnect)."""
+def _cdp_page(cfg: dict, owner=None):
+    """CDP로 실제 Chrome에 attach → (page, browser). 종료 시 page만 닫고 Chrome은 유지(disconnect).
+
+    ★owner를 주면 owner.keep_open일 때 **탭도** 남긴다(2026-08-22, 계약
+      CONTRACT_collection_stability_s1 W3 — wing_browser_fetcher._chrome과 같은 수리).
+      종전엔 `_owned_chrome`이 «프로세스»만 지키고 여기가 «탭»을 무조건 닫아서,
+      「Chrome 창 유지 — 로그인하세요」라고 로그에 쓰고도 로그인할 탭이 없었다
+      (2026-08-22 12:55 실측: CDP 9222·9223 page 타겟 0개).
+      약속을 한 층에서만 지키고 다른 층에서 깨면 사람이 뒤늦게 와도 회복 경로가 없다.
+    """
     port = int(cfg["cdp_port"])
     if not _cdp_alive(port):
         # 정상 경로에선 _owned_chrome이 먼저 기동을 보장한다 — 여기 걸리면 그 밖의 호출.
@@ -351,8 +359,11 @@ def _cdp_page(cfg: dict):
         try:
             yield page, browser
         finally:
-            with contextlib.suppress(Exception):
-                page.close()
+            if owner is not None and getattr(owner, "keep_open", False):
+                log.info("로그인용 탭 유지(닫지 않음) — 이 탭에서 재로그인하세요.")
+            else:
+                with contextlib.suppress(Exception):
+                    page.close()
             with contextlib.suppress(Exception):
                 browser.close()  # disconnect only — Chrome 자체는 유지
 
@@ -656,7 +667,10 @@ def cmd_capture(cfg: dict, wait_secs: int = 90) -> int:
                     captured["response"] = res.text()[:6000]  # 응답 키 구조 확인용 샘플
 
     try:
-        with _owned_chrome(cfg) as owner, _cdp_page(cfg) as (page, _browser):
+        # ★owner를 넘긴다(W3): 이 경로는 keep_open=True인 수동 캡처라, 탭까지 남겨야
+        #   사람이 그 창에서 조회를 이어갈 수 있다. (with는 왼쪽부터 평가되므로 owner는
+        #   _cdp_page 호출 시점에 이미 바인딩돼 있다.)
+        with _owned_chrome(cfg) as owner, _cdp_page(cfg, owner) as (page, _browser):
             owner.keep_open = True   # 캡처는 사람이 창에서 조회해야 하는 수동 명령 — 창 유지
             page.on("request", _on_request)
             page.on("response", _on_response)
@@ -885,7 +899,7 @@ def cmd_run(cfg: dict) -> int:
     days: list[dict] | None = None
     option_payload = None   # (filename, bytes) — Billboard 옵션×일별 보고서(일 1회, D-13)
     try:
-        with _owned_chrome(cfg, owner), _cdp_page(cfg) as (page, _browser):
+        with _owned_chrome(cfg, owner), _cdp_page(cfg, owner) as (page, _browser):
             try:
                 page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
             except Exception as e:  # noqa: BLE001

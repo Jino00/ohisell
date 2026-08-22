@@ -235,18 +235,72 @@ describe("describeOutcome — 로그인 필요엔 계정명이 반드시 붙는�
     expect(msg).toContain("디스크 가득");
   });
 
-  it("진행 중·완료·무응답", () => {
+  it("진행 중·완료", () => {
     expect(describeOutcome(spec, null)).toContain("진행 중");
     expect(describeOutcome(spec, { state: "done" })).toContain("완료");
-    expect(describeOutcome(spec, { state: "no_response" })).toContain("응답 없음");
+  });
+
+  // ── 타임아웃 3분할 (2026-08-22 W4, 계약 CONTRACT_collection_stability_s1) ──────
+  // ★존재 이유(라이브 실사고 2026-08-22 10:47): 「응답 없음 — Mac이 켜져 있는지 확인하세요」가
+  //   떴을 때 Mac은 **켜져 있었고 수집 중이었다**. 옆 레인이 로그인 대기로 폴 루프를 3분
+  //   점유해 이 요청을 늦게 집었을 뿐이다. 틀린 처방("Mac을 켜세요")은 침묵보다 나은
+  //   실패가 아니다 — 그래서 처방이 다른 세 경우를 문구로 가른다.
+  describe("타임아웃은 한 문구가 아니다 — 처방이 다른 세 경우", () => {
+    it("아무도 집지 않았다(attempt 0) → 그때만 「Mac을 보라」가 참이다", () => {
+      const msg = describeOutcome(spec, { state: "no_response", attemptCount: 0 });
+      expect(msg).toContain("Mac이 요청을 집지 않았습니다");
+      expect(msg).toContain("Mac이 켜져 있는지");
+    });
+
+    it("집어가서 일하는 중(in_flight) → 실패가 아니라 «백그라운드 계속»이다", () => {
+      const msg = describeOutcome(spec, {
+        state: "no_response", attemptCount: 1, inFlight: true,
+      });
+      expect(msg).toContain("백그라운드에서 계속");
+      // ★이 경우에 「Mac이 켜져 있는지」가 뜨면 그게 10:47 오보의 재발이다.
+      expect(msg).not.toContain("Mac이 켜져 있는지");
+    });
+
+    it("집어갔는데 결과가 없다 → Mac 탓으로 돌리지 않는다", () => {
+      const msg = describeOutcome(spec, { state: "no_response", attemptCount: 2 });
+      expect(msg).toContain("응답 지연");
+      expect(msg).not.toContain("Mac이 켜져 있는지");
+    });
+
+    it("kind=login_required면 타임아웃이어도 로그인 안내가 이긴다", () => {
+      const msg = describeOutcome(spec, {
+        state: "no_response", attemptCount: 0, kind: "login_required",
+      });
+      expect(msg).toContain("로그인 필요");
+      expect(msg).toContain("오하이테크(A01029796)");
+      expect(msg).not.toContain("Mac이 켜져 있는지");
+    });
+
+    it("「다시 누르세요」는 더 이상 쓰지 않는다 — 로그인하면 자동으로 이어받는다(W3)", () => {
+      const msg = describeOutcome(spec, {
+        state: "failed", reason: "…", kind: "login_required",
+      });
+      expect(msg).toContain("자동으로 이어받습니다");
+      expect(msg).not.toContain("다시 누르세요");
+    });
   });
 });
 
 describe("isLoginRequired / specsForKeys", () => {
-  it("로그인 필요 문구를 인식한다", () => {
+  it("로그인 필요 문구를 인식한다(kind 없는 구버전 응답 폴백)", () => {
     expect(isLoginRequired("… [로그인 필요 — 재시도 안 함]")).toBe(true);
     expect(isLoginRequired("타임아웃")).toBe(false);
     expect(isLoginRequired(null)).toBe(false);
+  });
+
+  // ★kind가 정본이다(2026-08-22 W1). 종전엔 판정이 문구 매칭 하나뿐이라, 백엔드가 문구를
+  //   바꾸면 화면이 조용히 깨지는 결합이었다. kind가 오면 문구는 보지 않는다.
+  it("kind가 오면 문구가 아니라 kind로 판정한다", () => {
+    // 문구엔 「로그인 필요」가 없는데 kind는 login_required — kind가 이긴다.
+    expect(isLoginRequired("사유 미상", "login_required")).toBe(true);
+    // 반대로 문구엔 있는데 kind가 다른 분류면 로그인 문제가 아니다(오탐 차단).
+    expect(isLoginRequired("브라우저 창이 닫혔습니다 — 로그인 미완료", "no_response")).toBe(false);
+    expect(isLoginRequired("… [로그인 필요 …]", null)).toBe(false);
   });
 
   it("배너 key → spec 매칭, 모르는 key는 **버리지 않고 돌려준다**", () => {

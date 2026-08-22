@@ -56,6 +56,13 @@ KIND_ACCESS_DENIED = "access_denied"
 #   한 kind로 뭉치면 운영자가 멀쩡한 구독을 갱신하며 코드 버그를 쫓는다.
 KIND_MAPPING_BROKEN = "mapping_broken"
 
+# ★no_response(2026-08-22, 계약 CONTRACT_collection_stability_s1 W1) — 페처가 예산을 다 쓰도록
+#   **아무 보고도 하지 않은** 상태. 위 셋과 달리 이건 페처가 «말한» 사유가 아니라 reaper가
+#   «관측한» 사유다: Mac이 꺼졌거나, 데몬이 죽었거나, 데몬이 다른 일에 붙들려 요청을 못 집었다.
+#   구분이 필요한 이유는 처방이 다르기 때문이다 — login_required는 "로그인하세요"지만
+#   no_response는 "Mac/데몬을 보세요"다. 종전엔 둘 다 화면에서 「응답 없음」 한 문구로 뭉쳤다.
+KIND_NO_RESPONSE = "no_response"
+
 # lease TTL(분) — "데몬이 보고도 못 하고 죽었다"고 간주하기까지의 시간.
 # ★실측 근거(2026-07-27, Mac 페처 로그 ~/.ohisell_*_fetcher.log의 claim→활동종료 구간):
 #     ad_cost   run=227회  median 22s  p90 76s  max 684s(11.4분, 2026-06-17 로그인 대기 포함)
@@ -262,6 +269,9 @@ def _reap_exhausted(
         refresh_requested_at=None,
         claimed_at=None,
         last_error=(f"재시도 {MAX_ATTEMPTS}회 소진 — 마지막 시도가 보고 없이 종료(응답 없음)")[:300],
+        # ★이건 페처가 «말한» 사유가 아니라 reaper가 «관측한» 사유다 — 처방이 login_required와
+        #   다르므로(로그인이 아니라 Mac/데몬을 보라) 문구가 아니라 kind로 구분한다(W1).
+        last_error_kind=KIND_NO_RESPONSE,
         last_error_at=now,
     ))
     db.commit()
@@ -338,6 +348,10 @@ def _settle_values(clear_error: bool) -> dict:
     if clear_error:
         values["last_error"] = None
         values["last_error_at"] = None
+        # ★kind도 반드시 같이 지운다(W1). 안 지우면 성공한 뒤에도 last_error_kind가 남아
+        #   상주 배너가 「로그인 필요」를 영원히 띄운다 — 상태로 만든 대가로 «끄는 경로»를
+        #   같은 자리에 둔다. last_error와 짝으로 움직이는 값이므로 여기 한 곳이 유일한 짝이다.
+        values["last_error_kind"] = None
     return values
 
 
@@ -402,6 +416,10 @@ def report_failure(
     values: dict = {
         # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
         "last_error": message[:300],
+        # ★kind를 그대로 싣는다 — None(일시 실패)도 «분류 없음»이라는 유효한 값이라 덮어쓴다(W1).
+        #   덮어쓰지 않으면 지난 회차의 login_required가 일시 실패 위에 남아, 사람이 이미
+        #   로그인했는데도 배너가 「로그인 필요」를 계속 띄운다.
+        "last_error_kind": kind,
         "last_error_at": kst_now(),
         "claimed_at": None,   # lease 반납 → 다음 폴에서 재claim(소멸 케이스에도 해제)
     }
@@ -439,7 +457,7 @@ def status_fields(row: CoupangWingCookie | None) -> dict:
     """
     if row is None:
         return {"attempt_count": 0, "max_attempts": MAX_ATTEMPTS,
-                "claimed_at": None, "in_flight": False}
+                "claimed_at": None, "in_flight": False, "last_error_kind": None}
     claimed_at = row.claimed_at
     in_flight = bool(
         claimed_at is not None
@@ -451,4 +469,7 @@ def status_fields(row: CoupangWingCookie | None) -> dict:
         "max_attempts": MAX_ATTEMPTS,
         "claimed_at": claimed_at.isoformat() if claimed_at else None,
         "in_flight": in_flight,
+        # ★6개 스트림의 refresh_status가 전부 이 함수를 펼쳐 쓰므로, 여기 한 줄이 전 레인에
+        #   전파된다(W1). 프론트는 last_error 문자열 매칭 대신 이 값을 읽는다.
+        "last_error_kind": row.last_error_kind,
     }

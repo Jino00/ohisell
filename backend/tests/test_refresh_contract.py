@@ -468,3 +468,76 @@ def test_mapping_broken_extinguishes_but_says_code_not_subscription(db):
     assert out["retry"] is False
     assert "코드 수정" in out["reason"] and "구독" not in out["reason"].split("(")[0]
     assert _row(db).refresh_requested_at is None
+
+
+# ── ⑥ last_error_kind — 「로그인 필요」를 이벤트가 아니라 상태로 (2026-08-22 W1) ──────
+# ★배경(2026-08-22 라이브): WING 세션이 끊긴 사실이 last_error **문자열** 안에만 있었고,
+#   프론트가 그걸 문구 매칭으로 읽었다. 그래서 ①문구를 바꾸면 화면이 조용히 깨지고
+#   ②«상태»가 아니라 «이벤트»라 버튼을 눌러 실패해 봐야만 알 수 있었다(각 계정 9회 재발견).
+#   status_fields()를 6개 스트림이 전부 공유하므로 이 컬럼 하나가 전 레인에 전파된다.
+
+def test_kind_is_persisted_not_just_in_the_message(db):
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "RG 로그인 필요", kind=rc.KIND_LOGIN_REQUIRED)
+
+    row = _row(db)
+    assert row.last_error_kind == rc.KIND_LOGIN_REQUIRED
+    # 화면이 문구 매칭 없이 읽을 수 있어야 한다 — 그게 이 컬럼의 존재 이유다.
+    assert rc.status_fields(row)["last_error_kind"] == rc.KIND_LOGIN_REQUIRED
+
+
+def test_transient_failure_overwrites_a_stale_login_kind(db):
+    """★일시 실패의 kind=None도 **덮어쓴다**.
+
+    안 덮으면 지난 회차의 login_required가 일시 실패 위에 남아, 사람이 이미 로그인했는데도
+    상주 배너가 「로그인 필요」를 계속 띄운다 — 상태로 만든 대가로 끄는 경로가 필요하다.
+    """
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "로그인 필요", kind=rc.KIND_LOGIN_REQUIRED)
+    assert _row(db).last_error_kind == rc.KIND_LOGIN_REQUIRED
+
+    rc.request_refresh(db, ACC)          # 새 버튼 = 새 예산
+    rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "네트워크 순단", kind=None)
+    assert _row(db).last_error_kind is None
+
+
+def test_success_clears_the_kind(db):
+    """성공하면 kind도 지워진다 — 안 지우면 배너가 영원히 로그인을 요구한다."""
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "로그인 필요", kind=rc.KIND_LOGIN_REQUIRED)
+
+    rc.mark_success(db, ACC, clear_error=True)
+    row = _row(db)
+    assert row.last_error_kind is None and row.last_error is None
+
+
+def test_reaper_marks_no_response_not_login_required(db):
+    """★처방이 다르므로 분류도 다르다.
+
+    login_required는 「로그인하세요」지만 reaper가 관측한 무응답은 「Mac/데몬을 보세요」다.
+    종전엔 둘 다 화면에서 「응답 없음」 한 문구로 뭉쳐, Mac이 켜져 있는데도 「Mac이 켜져
+    있는지 확인하세요」가 떴다(2026-08-22 10:47 실측).
+    """
+    rc.request_refresh(db, ACC)
+    for _ in range(rc.MAX_ATTEMPTS):
+        rc.claim_refresh(db, ACC)
+        # 보고 없이 죽는다 → lease를 TTL 밖으로 밀어 다음 claim이 reaper 역할을 하게 한다.
+        row = _row(db)
+        row.claimed_at = kst_now() - timedelta(minutes=rc.lease_ttl_minutes() + 1)
+        db.commit()
+
+    rc.claim_refresh(db, ACC)   # 예산 소진 → _reap_exhausted
+    row = _row(db)
+    assert row.refresh_requested_at is None
+    assert row.last_error_kind == rc.KIND_NO_RESPONSE
+    assert row.last_error_kind != rc.KIND_LOGIN_REQUIRED
+
+
+def test_status_fields_exposes_kind_for_a_missing_row(db):
+    """행이 없어도 키는 있어야 한다 — 키가 사라지면 소비자가 처방을 못 고른다(교훈 #321)."""
+    assert "last_error_kind" in rc.status_fields(None)
+    assert rc.status_fields(None)["last_error_kind"] is None

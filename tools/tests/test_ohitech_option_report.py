@@ -29,7 +29,13 @@ class TestPushTarget:
             def raise_for_status(self): pass
             def json(self): return {"option_rows": 3}
 
-        def fake_post(url, data=None, headers=None, timeout=None):
+        # ★**kwargs로 받는다(2026-08-22 S1-0): 이 가짜는 인자 목록을 못박고 있어서, Mac
+        #   가동본에 이미 있던 `auth=_basic_auth(cfg)`가 repo로 역이식되자 TypeError로 터졌다.
+        #   즉 이 테스트는 **실제로 도는 코드를 한 번도 검사한 적이 없다**(repo가 가동본보다
+        #   뒤처져 있어서 초록이었을 뿐이다). 가짜가 prod보다 관대해야 할 이유는 없지만,
+        #   «전달 인자 목록»을 고정하는 것은 이 테스트가 지키려는 성질(어느 URL로 가는가)과
+        #   무관하다 — 교훈 #292(테스트 픽스처가 prod보다 관대하다)의 거울상이다.
+        def fake_post(url, data=None, headers=None, timeout=None, **kwargs):
             seen["url"], seen["headers"] = url, headers
             return _Resp()
 
