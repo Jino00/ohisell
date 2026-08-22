@@ -10,7 +10,14 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import NaverChangeLog, NaverProposal, OpsWisdomEntry
+from app.models import (
+    NaverAdgroupProduct,
+    NaverAdgroupTargetCurrent,
+    NaverChangeLog,
+    NaverProductBep,
+    NaverProposal,
+    OpsWisdomEntry,
+)
 from app.services.naver_ad import wisdom_scorecard as ws
 
 
@@ -51,13 +58,24 @@ def _proposal(db, *, pid, status="approved", change_log_id=None, campaign_id="cm
     return p
 
 
+def _actual_json(*, before, after, bep=2.0, cf=1.0, bep_source="product_bep"):
+    """proposal_scoreboard가 실제로 적는 모양(:296-309)을 그대로 흉내낸다."""
+    import json
+    return json.dumps({
+        "before": before, "after": after,
+        "lens": {"bep": bep, "bep_source": bep_source, "gamma": 1.0, "cf": cf},
+    }, ensure_ascii=False)
+
+
 def _change(db, *, cid, proposal_id=None, outcome_profit=None, gave_before=None,
-            gave_after=None, bep_source=None, outcome=None, action="update_bid"):
+            gave_after=None, bep_source=None, outcome=None, action="update_bid",
+            actual_json=None, dry_run=False):
     c = NaverChangeLog(
         id=cid, changed_at=datetime(2026, 7, 28, 9, 0), entity_type="campaign",
-        entity_id="cmp1", campaign_id="cmp1", action=action, dry_run=False,
+        entity_id="cmp1", campaign_id="cmp1", action=action, dry_run=dry_run,
         proposal_id=proposal_id, outcome=outcome, outcome_profit=outcome_profit,
         gave_before=gave_before, gave_after=gave_after, bep_source=bep_source,
+        actual_json=actual_json,
     )
     db.add(c)
     db.commit()
@@ -298,3 +316,176 @@ def test_wisdom_scorecard_route_survives_empty_ledger(db):
         assert r.json()["wisdom"] == []
     finally:
         app.dependency_overrides.pop(get_db, None)
+
+
+# ── ★적대 리뷰 1R P1-1 회귀: 총이익 «금액»이 산출물에 실리는가 ────────────────
+def test_profit_amount_is_rolled_up_not_just_the_label(db):
+    """★이 테스트가 없어서 초판이 나갔다.
+
+    계약 §4-A①은 「GAVE 점수·**ad_profit** 합」을 요구한다. 라벨(improved/declined)만
+    내면 「지혜가 돈을 얼마 벌었나」에 원리적으로 답할 수 없고, 화면의 유일한 크기 숫자가
+    GAVE가 되는데 **GAVE엔 비용을 빼는 항이 없어** 판정과 반대 부호를 가리킬 수 있다.
+    아래 수치가 정확히 그 상황이다(적대 리뷰 재현값).
+    """
+    # before: conv 2,000,000 / cost 566,667 → 2,000,000/2 - 566,667 = 433,333
+    # after : conv 1,000,000 / cost 600,000 → 1,000,000/2 - 600,000 = -100,000
+    aj = _actual_json(
+        before={"clk": 100, "conv_amt": 2_000_000, "cost": 566_667},
+        after={"clk": 60, "conv_amt": 1_000_000, "cost": 600_000},
+        bep=2.0, cf=1.0,
+    )
+    _change(db, cid=60, proposal_id=600, outcome_profit="declined",
+            gave_before=1_000_000.0, gave_after=1_250_000.0, actual_json=aj)
+    _proposal(db, pid=600, change_log_id=60)
+    _wisdom(db, wid=1, proposal_id=600)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["profit_pairs"] == 1
+    assert row["profit_before_sum"] == pytest.approx(433_333.0)
+    assert row["profit_after_sum"] == pytest.approx(-100_000.0)
+    assert row["profit_delta_sum"] == pytest.approx(-533_333.0)
+    d = row["details"][0]
+    assert d["profit_delta"] == pytest.approx(-533_333.0)
+    # ★핵심: GAVE 델타는 «양수»인데 총이익 델타는 «음수»다 — 둘이 반대를 가리킨다.
+    assert d["gave_delta"] > 0 and d["profit_delta"] < 0
+
+
+def test_profit_amount_is_not_invented_when_lens_missing(db):
+    """렌즈(bep·cf)가 없으면 금액을 지어내지 않고 «산출불가»로 센다.
+    prod의 기존 actual_json 249건에는 lens가 0건이다 — 소급되지 않는다."""
+    import json
+    aj = json.dumps({"before": {"clk": 10, "conv_amt": 100, "cost": 50},
+                     "after": {"clk": 10, "conv_amt": 200, "cost": 50}})
+    _change(db, cid=61, proposal_id=601, outcome_profit="improved", actual_json=aj)
+    _proposal(db, pid=601, change_log_id=61)
+    _wisdom(db, wid=1, proposal_id=601)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["profit_pairs"] == 0
+    assert row["profit_delta_sum"] is None
+    assert row["profit_unavailable"] == 1
+    assert row["details"][0]["profit_delta"] is None
+
+
+def test_profit_amount_survives_broken_actual_json(db):
+    _change(db, cid=62, proposal_id=602, outcome_profit="improved", actual_json="{not json")
+    _proposal(db, pid=602, change_log_id=62)
+    _wisdom(db, wid=1, proposal_id=602)
+    row = ws.build(db)["wisdom"][0]
+    assert row["profit_unavailable"] == 1
+    assert row["profit_delta_sum"] is None
+
+
+# ── ★적대 리뷰 BM3 회귀: GAVE 0.0을 짝에서 버리지 않는다 ─────────────────────
+def test_gave_zero_is_a_real_value_not_falsy(db):
+    """GAVE = min((ROAS/BEP)^gamma,1) x revenue 이므로 0.0은 정상값이다.
+    `if gb and ga`로 쓰면 행에는 델타가 있는데 합계는 None이 되어 서로 다른 말을 한다."""
+    _change(db, cid=63, proposal_id=603, outcome_profit="improved",
+            gave_before=0.0, gave_after=4.0)
+    _proposal(db, pid=603, change_log_id=63)
+    _wisdom(db, wid=1, proposal_id=603)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["gave_pairs"] == 1
+    assert row["gave_delta_sum"] == pytest.approx(4.0)
+    assert row["details"][0]["gave_delta"] == pytest.approx(4.0)
+
+
+# ── ★적대 리뷰 BM7 회귀: 커버리지 «숫자»를 검사한다 ─────────────────────────
+def _coverage_fixture(db):
+    db.add(NaverAdgroupTargetCurrent(adgroup_id="g1"))
+    db.add(NaverAdgroupTargetCurrent(adgroup_id="g2"))
+    db.add(NaverAdgroupProduct(adgroup_id="g1", campaign_id="cmp1", mall_product_id="p1"))
+    db.add(NaverProductBep(channel_id=6, channel_product_id="p1", has_cost=True, bep_roas=2.0))
+    db.commit()
+
+
+def test_bep_coverage_counts_only_real_product_bep(db):
+    """has_cost=False나 bep_roas=None을 「상품BEP 확보」로 세면 §4-B⑥이 막으려던
+    오염(근사를 확정값처럼)이 그대로 들어온다."""
+    _coverage_fixture(db)
+    db.add(NaverAdgroupProduct(adgroup_id="g2", campaign_id="cmp1", mall_product_id="p2"))
+    db.add(NaverProductBep(channel_id=6, channel_product_id="p2", has_cost=False, bep_roas=None))
+    db.commit()
+    _wisdom(db, wid=1)
+
+    cov = ws.build(db)["value_definition"]["bep_coverage"]
+    assert cov["groups_total"] == 2
+    assert cov["groups_with_product_bep"] == 1
+    assert cov["ratio"] == pytest.approx(0.5)
+
+
+def test_bep_coverage_numerator_cannot_exceed_denominator(db):
+    """분자(누적 원장)가 분모(현재 스윕)를 넘으면 화면에 250% 같은 숫자가 뜬다."""
+    _coverage_fixture(db)
+    # 현재 스윕에 «없는» 그룹이 누적 원장에만 3개 더 있는 상황
+    for i in range(3):
+        db.add(NaverAdgroupProduct(adgroup_id=f"gone{i}", campaign_id="cmp1",
+                                   mall_product_id=f"px{i}"))
+        db.add(NaverProductBep(channel_id=6, channel_product_id=f"px{i}",
+                               has_cost=True, bep_roas=2.0))
+    db.commit()
+    _wisdom(db, wid=1)
+
+    cov = ws.build(db)["value_definition"]["bep_coverage"]
+    assert cov["groups_with_product_bep"] <= cov["groups_total"]
+    assert cov["ratio"] <= 1.0
+
+
+# ── ★적대 리뷰 BM9 회귀: 라우트 파라미터가 실제로 먹는가 ────────────────────
+def test_route_wisdom_id_query_param_actually_filters(db):
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    from app.database import get_db  # noqa: PLC0415
+    from app.main import app  # noqa: PLC0415
+
+    _wisdom(db, wid=1)
+    _wisdom(db, wid=2, text="두 번째 지혜")
+
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        body = TestClient(app).get("/api/naver/ad/wisdom-scorecard?wisdom_id=2").json()
+        assert body["wisdom_total"] == 1
+        assert body["wisdom"][0]["wisdom_id"] == 2
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+# ── ★적대 리뷰 P2-3·P2-4·P2-5 회귀 ─────────────────────────────────────────
+def test_retired_wisdom_is_not_counted_as_active(db):
+    e = _wisdom(db, wid=1)
+    e.status = "retired"
+    db.commit()
+    out = ws.build(db)
+    assert out["wisdom_total"] == 1
+    assert out["wisdom_active"] == 0
+
+
+def test_dry_run_only_changes_report_distinct_gap(db):
+    """모의 조치는 run_daily가 «영원히» 채점하지 않는다 — 「채점 대기」는 거짓이다."""
+    _change(db, cid=70, proposal_id=700, outcome_profit=None, dry_run=True)
+    _proposal(db, pid=700, change_log_id=70)
+    _wisdom(db, wid=1, proposal_id=700)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["changes_total"] == 1
+    assert row["changes_executed"] == 0
+    assert "모의(dry_run)" in row["evidence_gap"]
+
+
+def test_missing_proposal_row_is_not_disguised_as_zero_execution(db):
+    """링크는 있는데 제안 행이 없는 것은 «데이터 정합 문제»지 운영 상태가 아니다."""
+    _wisdom(db, wid=1, proposal_id=9999)
+    row = ws.build(db)["wisdom"][0]
+    assert "찾지 못했다" in row["evidence_gap"]
+
+
+def test_maturity_state_does_not_claim_disabled_when_flag_is_gone(db, monkeypatch):
+    """★BM5: 상수가 개명·삭제돼도 「보정 미적용」을 확신하면 거짓말이 된다."""
+    from app.services.naver_ad import bid_ceiling_calculator  # noqa: PLC0415
+
+    monkeypatch.delattr(bid_ceiling_calculator, "MATURITY_CORRECTION_ENABLED", raising=True)
+    _wisdom(db, wid=1)
+    delay = ws.build(db)["value_definition"]["conversion_delay"]
+    assert delay["correction_applied"] is None
+    assert "판정불능" in delay["note"]

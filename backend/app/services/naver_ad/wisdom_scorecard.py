@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -63,6 +64,47 @@ def _iso(v: Optional[datetime]) -> Optional[str]:
     return v.isoformat(sep=" ", timespec="seconds") if v else None
 
 
+def _profit_amounts(change: NaverChangeLog) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """조치 1건의 총이익 «금액»(전/후/델타). 원료는 `naver_change_log.actual_json`이다.
+
+    ★적대 리뷰 1R P1-1이 잡은 것: 초판은 총이익 «라벨»(improved/declined)만 냈고 금액을 안 냈다.
+      그러면 화면의 유일한 «크기» 숫자가 GAVE 델타가 되는데, **GAVE에는 비용을 빼는 항이 없어서**
+      「총이익 악화 1건 · GAVE 델타 +250,000」처럼 판정과 크기가 서로 반대를 가리킬 수 있다.
+      그건 D-NAO-225가 채점기에서 걷어낸 바로 그 병이 표시층으로 되돌아온 것이다.
+    ★식은 `proposal_scoreboard._gross_profit`과 «같은 것»이다 —
+      총이익 = (conv_amt x cf / bep) - cost (D-NAO-59가 최대화하라고 한 그 양).
+      그 함수는 module-private이라 크로스임포트하지 않고 여기서 재현한다(이 저장소 관례 —
+      `proposal_pipeline.py`가 `retro_scorer._gamma_for`를 같은 이유로 재현한다).
+    ★렌즈(bep·cf)가 `actual_json`에 없으면 **금액을 지어내지 않는다** — (None,None,None)을
+      돌려주고 호출부가 «산출불가»로 센다. 2026-08-22 실측 기준 prod의 기존 249개
+      `actual_json` 중 `lens`를 가진 것은 0개다(렌즈는 M3-b부터 적히므로 소급되지 않는다).
+    """
+    raw = change.actual_json
+    if not raw:
+        return (None, None, None)
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return (None, None, None)
+    if not isinstance(payload, dict):
+        return (None, None, None)
+    lens = payload.get("lens") or {}
+    bep, cf = lens.get("bep"), lens.get("cf")
+    if bep in (None, 0) or cf is None:
+        return (None, None, None)
+    out: list[Optional[float]] = []
+    for side in ("before", "after"):
+        w = payload.get(side) or {}
+        conv_amt, cost = w.get("conv_amt"), w.get("cost")
+        if conv_amt is None or cost is None:
+            return (None, None, None)
+        try:
+            out.append(round(float(conv_amt) * float(cf) / float(bep) - float(cost), 2))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return (None, None, None)
+    return (out[0], out[1], round(out[1] - out[0], 2))
+
+
 def _maturity_state() -> dict:
     """전환 정착 지연의 «실제» 처리 상태. 곡선은 매일 산출되지만 보정 적용은 꺼져 있다
     (`bid_ceiling_calculator.MATURITY_CORRECTION_ENABLED = False` — 곡선이 days 8~18에서
@@ -70,11 +112,15 @@ def _maturity_state() -> dict:
     try:
         from app.services.naver_ad import bid_ceiling_calculator
 
-        enabled = bool(getattr(bid_ceiling_calculator, "MATURITY_CORRECTION_ENABLED", False))
+        # ★적대 리뷰 BM5: getattr 폴백 False를 쓰면 상수가 개명·삭제돼도 성적표는
+        #   「보정 미적용」을 **확신에 차서** 계속 말한다. 없으면 모른다고 해야 한다.
+        if not hasattr(bid_ceiling_calculator, "MATURITY_CORRECTION_ENABLED"):
+            raise AttributeError("MATURITY_CORRECTION_ENABLED 상수가 없다")
+        enabled = bool(bid_ceiling_calculator.MATURITY_CORRECTION_ENABLED)
     except Exception as e:  # noqa: BLE001 — 상태 조회 실패는 성적표를 죽일 이유가 아니다
         log.warning("wisdom_scorecard: maturity 플래그 조회 실패: %s", e)
         return {"window": CONVERSION_DELAY_WINDOW, "correction_applied": None,
-                "note": "보정 플래그를 읽지 못했다(판정불능)"}
+                "note": "정착 보정 상태를 읽지 못했다(판정불능) — 보정 여부를 단정하지 않는다"}
     return {
         "window": CONVERSION_DELAY_WINDOW,
         "correction_applied": enabled,
@@ -94,11 +140,18 @@ def _bep_coverage(db: Session) -> dict:
       그 숫자를 그대로 인용하면 stale을 확정값처럼 쓰는 것이 된다."""
     try:
         total = db.query(NaverAdgroupTargetCurrent.adgroup_id).distinct().count()
+        # ★적대 리뷰 P2-1: 분자(naver_adgroup_product = 삭제하지 않는 누적 원장)가 분모
+        #   (naver_adgroup_target_current = 현재 스윕)보다 클 수 있다 — 그러면 화면에
+        #   「5/2 그룹(250.0%)」 같은 숫자가 뜬다. 분자를 분모 유니버스로 가둔다.
         resolvable = (
             db.query(NaverAdgroupProduct.adgroup_id)
             .join(
                 NaverProductBep,
                 NaverProductBep.channel_product_id == NaverAdgroupProduct.mall_product_id,
+            )
+            .join(
+                NaverAdgroupTargetCurrent,
+                NaverAdgroupTargetCurrent.adgroup_id == NaverAdgroupProduct.adgroup_id,
             )
             .filter(
                 NaverProductBep.channel_id == 6,
@@ -154,6 +207,11 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
     gave_before_sum = 0.0
     gave_after_sum = 0.0
     gave_pairs = 0
+    profit_before_sum = 0.0
+    profit_after_sum = 0.0
+    profit_pairs = 0
+    profit_unavailable = 0
+    executed = 0
     details = []
     for r in rows:
         if r.outcome_profit:
@@ -161,10 +219,21 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
         src = r.bep_source or "unmeasured"
         bep_sources[src] = bep_sources.get(src, 0) + 1
         gb, ga = _num(r.gave_before), _num(r.gave_after)
+        # ★0.0은 GAVE의 정상값이다(min((ROAS/BEP)^gamma,1) x revenue). `if gb and ga`로 쓰면
+        #   0을 짝에서 버려 행과 합계가 서로 다른 말을 한다(적대 리뷰 BM3 생존 변이).
         if gb is not None and ga is not None:
             gave_before_sum += gb
             gave_after_sum += ga
             gave_pairs += 1
+        pb, pa, pd = _profit_amounts(r)
+        if pb is not None and pa is not None:
+            profit_before_sum += pb
+            profit_after_sum += pa
+            profit_pairs += 1
+        else:
+            profit_unavailable += 1
+        if not r.dry_run:
+            executed += 1
         details.append({
             "change_log_id": r.id,
             "changed_at": _iso(r.changed_at),
@@ -176,11 +245,15 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
             "gave_before": gb,
             "gave_after": ga,
             "gave_delta": (ga - gb) if (gb is not None and ga is not None) else None,
+            "profit_before": pb,          # 총이익 «금액»(원) — 계약 §4-A① "ad_profit 합"
+            "profit_after": pa,
+            "profit_delta": pd,
             "bep_source": r.bep_source,           # 계약 §4-B ⑥ 값 정확도 라벨
         })
     scored = sum(verdicts.values())
     return {
         "changes_total": len(rows),
+        "changes_executed": executed,  # dry_run=False만 — 채점 대상이 될 수 있는 행
         "changes_scored_profit": scored,
         "verdicts": verdicts,
         "bep_sources": bep_sources,
@@ -188,6 +261,13 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
         "gave_after_sum": round(gave_after_sum, 4) if gave_pairs else None,
         "gave_delta_sum": round(gave_after_sum - gave_before_sum, 4) if gave_pairs else None,
         "gave_pairs": gave_pairs,
+        # ★계약 §4-A①이 요구한 «ad_profit 합». 판정 개수만으로는 「얼마나」에 답할 수 없고,
+        #   GAVE는 비용 항이 없어 크기 축으로 쓰면 부호가 어긋난다(적대 리뷰 P1-1).
+        "profit_before_sum": round(profit_before_sum, 2) if profit_pairs else None,
+        "profit_after_sum": round(profit_after_sum, 2) if profit_pairs else None,
+        "profit_delta_sum": round(profit_after_sum - profit_before_sum, 2) if profit_pairs else None,
+        "profit_pairs": profit_pairs,
+        "profit_unavailable": profit_unavailable,  # 렌즈 부재로 «금액 산출불가»인 행수
         "details": details,
     }
 
@@ -207,11 +287,19 @@ def _score_entry(db: Session, entry: OpsWisdomEntry) -> dict:
     if rollup["changes_scored_profit"] == 0:
         if not proposal_ids:
             gap = "이 지혜는 아직 제안을 낳지 않았다(param_proposal_id 없음)."
+        elif not proposals:
+            # ★적대 리뷰 P2-5: 링크는 있는데 그 제안 «행»이 없는 경우를 「실집행 0건」으로
+            #   뭉뚱그리면 데이터 정합 문제가 운영 상태로 위장된다.
+            gap = f"연결된 제안 행을 찾지 못했다(param_proposal_id={proposal_ids[0]})."
         elif not rows:
             gap = (
                 "제안은 났으나 실집행 조치가 0건이다 "
-                f"(제안 상태: {', '.join(sorted({p.status for p in proposals})) or '알 수 없음'})."
+                f"(제안 상태: {', '.join(sorted({p.status for p in proposals}))})."
             )
+        elif rollup["changes_executed"] == 0:
+            # ★적대 리뷰 P2-4: dry_run 행은 run_daily가 «영원히» 채점하지 않는다 —
+            #   그걸 「채점 대기」라고 쓰면 오지 않을 것을 기다린다고 말하는 셈이다.
+            gap = f"조치 {rollup['changes_total']}건이 전부 모의(dry_run)라 채점 대상이 아니다."
         else:
             gap = "조치는 있으나 새 식으로 채점된 행이 0건이다(채점 대기 또는 모수 미달)."
 
@@ -244,6 +332,8 @@ def build(db: Session, *, wisdom_id: int | None = None) -> dict:
     return {
         "generated_at_kst": kst_now().isoformat(sep=" ", timespec="seconds"),
         "wisdom_total": len(rows),
+        # ★적대 리뷰 P2-3: 화면 문구가 「승격 지혜 N건」인데 retired까지 세면 과대표시가 된다.
+        "wisdom_active": sum(1 for r in rows if r["status"] == "active"),
         "wisdom_with_evidence": sum(1 for r in rows if r["has_evidence"]),
         # ★계약 §4-B ⑥ — 「총이익」 값의 정의를 산출물이 스스로 명시한다.
         "value_definition": {

@@ -3538,6 +3538,9 @@ export interface NaverWisdomScorecardChange {
   gave_before: number | null;
   gave_after: number | null;
   gave_delta: number | null;
+  profit_before: number | null;
+  profit_after: number | null;
+  profit_delta: number | null;
   bep_source: string | null;       // product_bep / account_default / unavailable
 }
 
@@ -3565,12 +3568,19 @@ export interface NaverWisdomScorecardRow {
   gave_after_sum: number | null;
   gave_delta_sum: number | null;
   gave_pairs: number;
+  profit_before_sum: number | null;
+  profit_after_sum: number | null;
+  profit_delta_sum: number | null;   // 총이익 «금액» 합(원) — 계약 §4-A① "ad_profit 합"
+  profit_pairs: number;
+  profit_unavailable: number;        // 렌즈 미기록으로 금액 산출불가인 행수
+  changes_executed: number;
   details: NaverWisdomScorecardChange[];
 }
 
 export interface NaverWisdomScorecard {
   generated_at_kst: string;
   wisdom_total: number;
+  wisdom_active: number;
   wisdom_with_evidence: number;
   value_definition: {
     metric: string;
