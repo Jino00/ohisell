@@ -232,12 +232,13 @@ def test_profit_axis_improves_when_roas_falls_but_revenue_grows(db, bep_lens):
     새 자는 BEP 위에 있는 한 매출 증가를 그대로 인정한다.
     """
     bep_lens(3)
-    # before: clk 14 · 매출 100,002 · cost 14,000 → ROAS 7.14
+    # before: clk 14 · 매출 100,002 · cost 14,000 → ROAS 7.14 · 총이익 33,334−14,000 = 19,334
     for r in _ad_rows("nkw-1", EXECUTED - timedelta(days=14), EXECUTED - timedelta(days=1),
                       daily_clk=1, daily_conv_amt=7143, daily_cost=1000):
         db.add(r)
-    # after: clk 140 · 매출 200,004 · cost 56,000 → ROAS 3.57 (BEP 3 위)
-    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=10, daily_conv_amt=14286, daily_cost=4000):
+    # after: clk 140 · 매출 300,006 · cost 70,000 → ROAS 4.29(BEP 3 위, 전보다 «낮다»)
+    #        총이익 100,002−70,000 = 30,002 ⇒ ROAS는 7.14→4.29로 떨어졌는데 총이익은 늘었다
+    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=10, daily_conv_amt=21429, daily_cost=5000):
         db.add(r)
     db.commit()
 
@@ -245,7 +246,6 @@ def test_profit_axis_improves_when_roas_falls_but_revenue_grows(db, bep_lens):
 
     assert result["outcome"] == "declined"          # 옛 자 — 목표가 잡으라는 구간을 버린다
     assert result["outcome_profit"] == "improved"   # 새 자 — 총이익이 늘었다
-    assert result["gave_after"] > result["gave_before"]
 
 
 def test_profit_axis_penalises_growth_that_falls_below_bep(db, bep_lens):
@@ -379,3 +379,64 @@ def test_run_daily_writes_profit_columns_without_touching_existing_outcome(db, b
     assert untouched.outcome == "improved"       # 원 값 불변
     assert untouched.outcome_profit is None      # 소급 채점 0건
     assert untouched.gave_before is None
+
+
+def test_profit_axis_improves_when_bleeding_spend_is_cut(db, bep_lens):
+    """★D-NAO-225의 핵심 — 적자 대상의 지출을 줄이면 «매출이 줄어도» 총이익은 는다.
+
+    ref 90 §2-2 id 942(set_user_lock)의 실수치를 옮긴 것이다: 매출 59,400 → 50,400(−15.2%)인데
+    비용은 90,627 → 16,930(−81%)이라 총이익은 −70,827 → −130으로 **7만원 개선**됐다.
+
+    ★이 테스트가 계약 §4-B ④의 검산 문언 «매출 절대액 감소인데 개선 = 0건»이 **왜 틀렸는지**를
+      코드로 고정한다 — 「매출 감소 = 나쁨」이라는 전제가 D-NAO-59(총이익 최대화)와 어긋난다.
+      문언은 고치지 않고(Jino 2026-08-22 확정), 틀린 이유를 여기와 판정문에 남긴다.
+    ★그리고 이것이 GAVE 배율을 판정에서 뺀 이유이기도 하다 — GAVE엔 비용을 빼는 항이 없어
+      「매출이 줄었다」만 보고 이런 조치를 악화로 읽는 경우가 나온다(실측 3/4건).
+    """
+    bep_lens(3)
+    # before: 매출 59,402 · cost 90,622 → 총이익 19,801 − 90,622 = −70,821 (심한 적자)
+    for r in _ad_rows("nkw-1", EXECUTED - timedelta(days=14), EXECUTED - timedelta(days=1),
+                      daily_clk=4, daily_conv_amt=4243, daily_cost=6473):
+        db.add(r)
+    # after: 매출 50,400(−15%) · cost 16,926(−81%) → 총이익 16,800 − 16,926 = −126
+    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=1, daily_conv_amt=3600, daily_cost=1209):
+        db.add(r)
+    db.commit()
+
+    result = sb.evaluate_change(db, _change(), today=TODAY)
+
+    assert result["outcome_profit"] == "improved"   # 매출은 줄었지만 총이익은 7만원 늘었다
+    # 이 행에서는 크기 축(GAVE)도 같은 방향이다 — 효율이 워낙 크게 올랐기 때문.
+    # 두 축이 «갈리는» 경우는 아래 test_profit_axis_and_gave_disagree_on_real_row_761.
+    assert result["gave_after"] > result["gave_before"]
+
+
+def test_profit_axis_and_gave_disagree_on_real_row_761(db, bep_lens):
+    """★D-NAO-225를 낳은 바로 그 반증 — 총이익은 늘었는데 GAVE 배율은 「악화」라고 찍는다.
+
+    ref 90 §2-2 id 761의 prod 실수치(2026-08-22 재계산, 원장 actual_json과 일치):
+      before 매출 174,900 · 비용 122,426  →  after 매출 90,500 · 비용 43,310
+      BEP 3 기준 총이익 −64,126 → −13,143 (**5만원 개선**)
+      GAVE               83,287 →  63,036 (배율 0.757 ⇒ declined)
+
+    GAVE = min{(roas/bep)^γ,1} × 매출 에는 **비용을 빼는 항이 없다.** 성장 후보를 «정렬»할 땐
+    맞지만, 비용이 함께 변하는 «전/후 판정»에선 적자 축소를 악화로 읽는다. 계약 §8-Q5가
+    예고한 *"재사용 불가가 나오면 멈추고 §8 경로로 올린다"*가 발동한 자리이고, Jino가
+    2026-08-22에 «총이익 델타»로 확정했다(D-NAO-225).
+
+    ★이 테스트가 깨지면 판정식이 다시 GAVE 배율로 돌아갔다는 뜻이다.
+    """
+    bep_lens(3)
+    # before: 매출 174,902 · cost 122,430 (실수치 근사 — 14일 균등 분배)
+    for r in _ad_rows("nkw-1", EXECUTED - timedelta(days=14), EXECUTED - timedelta(days=1),
+                      daily_clk=6, daily_conv_amt=12493, daily_cost=8745):
+        db.add(r)
+    # after: 매출 90,496 · cost 43,316
+    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=2, daily_conv_amt=6464, daily_cost=3094):
+        db.add(r)
+    db.commit()
+
+    result = sb.evaluate_change(db, _change(), today=TODAY)
+
+    assert result["outcome_profit"] == "improved"        # 총이익 −64,129 → −13,151
+    assert result["gave_after"] < result["gave_before"]  # 그런데 GAVE는 줄었다 = 판정에 쓸 수 없다

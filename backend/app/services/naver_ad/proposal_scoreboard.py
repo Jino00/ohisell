@@ -8,7 +8,11 @@
 #   「클릭·매출이 함께 줄어도 매출이 덜 줄었으면 개선」이 되고, 라이브 improved 전건 4/4가
 #   실제로 매출 감소였다(ref 90 §2, id 761은 클릭 −68.5%·매출 −48.3%인데 「개선」). 트랙
 #   목표(D-NAO-59)는 총이익 **절대액**이므로 목적함수 정합 축을 **나란히** 붙인다:
-#   outcome_profit = GAVE 배율(S = min{(roas/bep)^γ, 1} × cf보정매출). 기존 outcome은
+#   outcome_profit = **총이익 델타**((cf보정매출/BEP) − 비용의 전/후 비교, D-NAO-225).
+#   GAVE 점수는 «크기» 축으로 gave_before/gave_after에 계속 저장하되 **판정에는 쓰지
+#   않는다** — GAVE엔 비용을 빼는 항이 없어 적자 대상의 지출을 줄인 조치(총이익 증가)를
+#   「매출이 줄었다」고 악화로 읽는다(실측: ref 90 정본 4건 전부 총이익 증가인데 GAVE
+#   배율은 3건을 declined로 찍었다). 기존 outcome은
 #   **불변**이다(§8-Q1 — 「교정 전 채점기가 무엇을 찍었나」가 증거로 남아야 한다, 교훈 #274).
 #   ★이 모듈이 gave_score를 쓰는 것은 새 발명이 아니라 **원래 설계**다 — gave_score.py 모듈
 #   docstring이 처음부터 "제안 성적표(proposal_scoreboard)·flight_loop 목적함수로 채택"이라
@@ -130,45 +134,71 @@ def _cf_for(db: Session, date_to: date, cache: dict[date, Decimal]) -> Decimal:
     return cf
 
 
+def _gross_profit(conv_amt: int, cost: int, *, bep: Decimal, cf: Decimal) -> Decimal:
+    """총이익(절대액) = (cf 보정 매출 / BEP) − 비용.
+
+    `bep_roas`는 «본전 ROAS»(공헌이익률의 역수)이므로 `매출/BEP`가 그 매출이 낳은 공헌이익이고,
+    거기서 광고비를 빼면 이 창의 총이익이다. **D-NAO-59가 최대화하라고 한 그 양 자체**다.
+    """
+    return (Decimal(conv_amt) * cf / bep - Decimal(cost)).quantize(_Q4)
+
+
 def _profit_verdict(before: dict, after: dict, *, bep, gamma: Decimal, cf: Decimal) -> dict:
-    """★D-NAO-223 — 목적함수(총이익 절대액) 정합 판정. 반환 {outcome_profit, gave_before, gave_after}.
+    """★D-NAO-223 + **D-NAO-225** — 목적함수(총이익 절대액) 정합 판정.
 
     기존 `outcome`은 전/후 **RPC(매출/클릭) 배율**을 재는데, 분모가 클릭이라 **클릭이 줄면
     RPC는 오른다** — 「클릭·매출이 함께 줄어도 매출이 덜 줄었으면 개선」이 된다(ref 90 §2:
     improved 전건 4/4가 매출 감소, id 761은 클릭 −68.5%·매출 −48.3%인데 「개선」).
 
-    새 자는 **GAVE 점수의 배율**을 잰다: S = min{(roas/bep)^γ, 1} × (cf 보정 매출).
-    효율은 «페널티»로만 들어오고 크기는 «절대액»으로 남으므로, ROAS가 떨어져도 매출이
-    늘어 총이익이 느는 구간이 개선으로 잡힌다(D-NAO-59 원문의 그 구간).
+    ★★**D-NAO-225(2026-08-22, Jino 확정) — 판정식은 «총이익 델타»다.**
+      계약 §8-Q5의 초기 확정값은 «GAVE 배율»(S = min{(roas/bep)^γ,1} × 매출)이었으나, 구현
+      실측이 그 재사용을 반증했다: **GAVE에는 비용을 빼는 항이 없다.** 그래서 적자 대상의
+      지출을 줄인 조치(= 총이익 증가)를 「매출이 줄었다」는 이유로 악화로 읽는다. ref 90 §2-2의
+      정본 4건을 재계산하니 **4건 전부 총이익은 증가**했는데 GAVE 배율은 그중 **3건을
+      declined**로 찍었다(BEP 2·3·5 전 구간 동일). Q5 본문이 예고한 *"재사용 불가가 나오면
+      멈추고 §8 경로로 올린다"*가 발동한 자리다.
+      ⇒ 판정은 `_gross_profit`의 전/후 비교로 하고, **GAVE 점수는 «크기» 축으로 계속 저장한다**
+      (gave_before/gave_after) — Q5의 재사용 지시는 그 형태로 살아 있다.
 
-    ★새 문턱을 만들지 않는다(계약 §3) — IMPROVED_RATIO/DECLINED_RATIO를 그대로 쓴다.
-      바뀌는 것은 «문턱»이 아니라 «재는 양»이다.
-    ★cf는 전·후 창에 **같은 값**을 쓴다(렌즈 통일) — 서로 다른 cf를 쓰면 배율에 계정
-      단위 변동이 섞여 조치의 효과와 구분되지 않는다(retro의 `cf_asof` 고정과 같은 이유).
-    ★전 창 GAVE가 0이면 배율이 정의되지 않아 **판정 보류**(None)다 — 기존 판정식이
-      `before.rpc <= 0`을 보류하는 것과 같은 처분이고, 억지로 improved를 매기지 않는다.
+    ★**새 문턱을 만들지 않았다**(계약 §3): 기존 IMPROVED_RATIO/DECLINED_RATIO(±10% 배율 밴드)는
+      **부호 있는 양에 옮길 수 없다** — 총이익은 음수가 될 수 있어 「−70,827 → −130」의 배율은
+      의미가 없다(0.002배지만 실제로는 큰 개선이다). 그래서 밴드를 억지로 이식하는 대신
+      **부호 비교**만 한다: 늘었으면 improved, 줄었으면 declined, 같으면 neutral.
+      노이즈 방어는 이미 있는 모수게이트(양쪽 창 clk >= LOW_CLICK_THRESHOLD)가 맡는다.
+      ⚠️알려진 한계: 아주 작은 델타도 판정이 된다. 이 축은 «표시 + 자기 롤업»에만 흐르고
+      조작 경로가 없어(ref 90 §2-3) 지금은 무해하지만, M3-a 성적표가 이 값을 롤업할 때
+      델타 크기를 함께 봐야 한다(그 크기가 gave_before/gave_after와 actual_json의 lens다).
+
+    ★전 창의 BEP 렌즈가 없으면(bep None) 판정하지 않는다 — 억지로 찍지 않는다.
     """
     if bep is None:
         return {"outcome_profit": None, "gave_before": None, "gave_after": None}
     bep = Decimal(str(bep))
+    if bep <= 0:
+        return {"outcome_profit": None, "gave_before": None, "gave_after": None}
+
+    # 크기 축(Q5 재사용) — 판정에는 쓰지 않지만 「얼마나 큰 건이었나」를 행에 남긴다.
     scored_before = gave_score.compute_gave_score(
         revenue=(Decimal(before["conv_amt"]) * cf), cost=before["cost"], bep_roas=bep, gamma=gamma,
     )
     scored_after = gave_score.compute_gave_score(
         revenue=(Decimal(after["conv_amt"]) * cf), cost=after["cost"], bep_roas=bep, gamma=gamma,
     )
-    gb = scored_before["score"]
-    ga = scored_after["score"]
-    outcome_profit = None
-    if gb > 0:
-        ratio = (ga / gb).quantize(_Q4)
-        if ratio >= IMPROVED_RATIO:
-            outcome_profit = "improved"
-        elif ratio <= DECLINED_RATIO:
-            outcome_profit = "declined"
-        else:
-            outcome_profit = "neutral"
-    return {"outcome_profit": outcome_profit, "gave_before": float(gb), "gave_after": float(ga)}
+
+    profit_before = _gross_profit(before["conv_amt"], before["cost"], bep=bep, cf=cf)
+    profit_after = _gross_profit(after["conv_amt"], after["cost"], bep=bep, cf=cf)
+    if profit_after > profit_before:
+        outcome_profit = "improved"
+    elif profit_after < profit_before:
+        outcome_profit = "declined"
+    else:
+        outcome_profit = "neutral"
+
+    return {
+        "outcome_profit": outcome_profit,
+        "gave_before": float(scored_before["score"]),
+        "gave_after": float(scored_after["score"]),
+    }
 
 
 def evaluate_change(

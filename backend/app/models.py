@@ -2572,9 +2572,15 @@ class NaverChangeLog(Base):
     #   기존 값을 덮으면 「교정 전 채점기가 무엇을 찍었나」라는 증거가 사라진다(교훈 #274) →
     #   §8-Q1 확정 = 소급 UPDATE 없이 «별도 컬럼»에만 새 식을 적는다. 옛 자와 새 자가 같은
     #   행에 나란히 남아 대조가 영구 보존된다.
-    #   식: GAVE S = min{(roas_c/bep)^γ, 1} × (cf 보정 매출) — `gave_score.compute_gave_score`
-    #   그대로 재사용(§8-Q5). 판정 문턱도 기존 IMPROVED_RATIO/DECLINED_RATIO 재사용(§3 새
-    #   문턱 발명 금지) — 바뀌는 건 «문턱»이 아니라 «재는 양»이다(RPC 배율 → GAVE 배율).
+    #   식(D-NAO-225): **총이익 델타** — (cf 보정 매출 / bep_roas) − 비용 의 전/후 비교.
+    #   bep_roas는 본전 ROAS(공헌이익률의 역수)라 «매출/BEP»가 그 매출이 낳은 공헌이익이고,
+    #   광고비를 빼면 총이익이다 = D-NAO-59가 최대화하라고 한 그 양.
+    #   ★§8-Q5의 초기 확정값은 «GAVE 배율»이었으나 구현 실측이 재사용을 반증했다 — GAVE엔
+    #   비용을 빼는 항이 없어 적자 대상의 지출을 줄인 조치(총이익 증가)를 「매출이 줄었다」는
+    #   이유로 악화로 읽는다(ref 90 정본 4건 전부 총이익 증가인데 GAVE 배율은 3건 declined).
+    #   GAVE 점수는 «크기» 축으로 gave_before/gave_after에 계속 남는다(Q5 재사용은 그 형태로 생존).
+    #   ★새 문턱을 만들지 않았다 — ±10% 배율 밴드는 «부호 있는 양»에 옮길 수 없다(−70,827 →
+    #   −130은 0.002배지만 실제로는 큰 개선이다). 부호 비교만 하고 노이즈 방어는 기존 모수게이트.
     outcome_profit: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # improved/declined/neutral
     gave_before: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 조치 «전» 창 GAVE
     gave_after: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 조치 «후» 창 GAVE
