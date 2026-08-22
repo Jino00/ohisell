@@ -683,6 +683,9 @@ def _extract_cost_rows(
                     tax_amount=tax,
                     # ★이름 매칭 하나에 의존한다(docstring 참조). 「부가세」로 시작하면 배부 제외.
                     is_costing=not _compact(name).startswith("부가세"),
+                    # 「관세」로 시작하면 귀속 대상(D-CPP-50). 「통관수수료」는 관세가 아니다 —
+                    # startswith라 걸리지 않는다(‘통관…’으로 시작하므로).
+                    is_duty=_compact(name).startswith("관세"),
                 )
             )
         name, nums = None, []

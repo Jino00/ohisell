@@ -196,6 +196,138 @@ def test_inc_vat_multiplier_is_not_the_actual_tax():
 
 
 # ──────────────────────────────────────────────
+# 관세 귀속 (D-CPP-50) — 품목별 세율이 다르다
+#
+# 실측 근거(2026-08-22, 실서류 2건): cleaning kits(부자재) 관세 **0%**, 유리·필름 **5.6%**.
+#   · 8/18: 예측 (1 − 1,920/23,100) × 5.6% = 5.1345% vs 실제 관세율 5.1344%
+#   · 7/22: 예측 과세금액 × (1,220/10,820) × 5.6% = 15,204원 vs 실제 관세 15,200원
+# 금액 일괄 배부는 무관세 품목에 관세를 얹어 나머지 품목 원가를 과소 계상한다.
+# ──────────────────────────────────────────────
+RATE_FILM = D("0.056")
+RATE_KIT = D("0")
+
+DUTY_COSTS = [
+    CostLine("OCEAN FREIGHT(해상운임)", D("156550")),
+    CostLine("OVER WEIGHT CHARGES", D("18000")),
+    CostLine("C/O(원산지증명서비용)", D("35000")),
+    CostLine("신고비", D("44000")),
+    CostLine("PICKUP CHARGE IN CHINA", D("18400")),
+    CostLine("DOCUMENT FEE", D("25000")),
+    CostLine("국내운송료 ( 라보 * 1 )", D("90000"), D("9000")),
+    CostLine("관세", D("249670"), is_duty=True),          # ← 귀속 대상
+    CostLine("부가세", D("511230"), is_costing=False),
+    CostLine("통관수수료", D("25000"), D("2500")),
+]
+CUSTOMS_VALUE = D("4862657")
+
+
+def _rated_lines():
+    return [
+        InvoiceLine(
+            ln.seq, ln.item_name, ln.quantity, ln.unit_price_foreign,
+            ln.gross_weight_kg, ln.cbm,
+            duty_rate=(RATE_KIT if ln.item_name == "cleaning kits" else RATE_FILM),
+        )
+        for ln in INVOICE_LINES
+    ]
+
+
+def test_duty_pools_are_split():
+    from app.services.import_cost.allocator import common_pool, duty_pool
+
+    assert duty_pool(DUTY_COSTS) == D("249670")
+    assert common_pool(DUTY_COSTS) == D("411950")
+    assert costing_pool(DUTY_COSTS) == D("661620")  # 합은 종전과 같다
+
+
+def test_duty_free_line_gets_zero_duty():
+    """★부자재(무관세)에 관세가 한 푼도 안 붙는다 — 이 결정의 전부다."""
+    r = allocate(_rated_lines(), DUTY_COSTS, FX, "amount", customs_value_krw=CUSTOMS_VALUE)
+    assert r.duty_mode == "by_rate"
+    kits = _by_name(r, "cleaning kits")
+    assert kits.allocated_duty_krw == D("0")
+    assert kits.allocated_common_krw > D("0")
+    # 과세 품목은 관세를 받는다
+    assert _by_name(r, "Glass_Ip17Pro").allocated_duty_krw > D("0")
+
+
+def test_duty_self_check_reproduces_declared_total():
+    """라인 세율로 계산한 관세가 **서류의 관세 총액을 재현**한다 — 세율이 맞다는 증명.
+
+    이 검산이 크게 어긋나면 세율 입력이 틀린 것이다. 실측 오차는 5원 남짓이었다.
+    """
+    r = allocate(_rated_lines(), DUTY_COSTS, FX, "amount", customs_value_krw=CUSTOMS_VALUE)
+    assert r.duty_computed_krw is not None
+    assert abs(r.duty_check_diff) < D("50"), (r.duty_pool_krw, r.duty_computed_krw)
+
+
+def test_duty_attribution_keeps_total_invariant():
+    """관세를 갈라도 **Σ배부 == pool**은 깨지지 않는다."""
+    r = allocate(_rated_lines(), DUTY_COSTS, FX, "amount", customs_value_krw=CUSTOMS_VALUE)
+    assert r.unallocated_krw == D("0")
+    assert sum((x.allocated_cost_krw for x in r.lines), D("0")) == D("661620")
+    # 내역의 합도 총액과 같다
+    assert sum((x.allocated_common_krw for x in r.lines), D("0")) == D("411950")
+    assert sum((x.allocated_duty_krw for x in r.lines), D("0")) == D("249670")
+
+
+def test_duty_attribution_raises_film_cost_and_lowers_material():
+    """귀속으로 바꾸면 필름 원가는 오르고 부자재 원가는 내린다 — 방향이 뒤집히면 결함이다."""
+    blended = allocate(INVOICE_LINES, DUTY_COSTS, FX, "amount", customs_value_krw=CUSTOMS_VALUE)
+    rated = allocate(_rated_lines(), DUTY_COSTS, FX, "amount", customs_value_krw=CUSTOMS_VALUE)
+    assert blended.duty_mode == "blended"   # 세율이 없으면 종전 동작
+    assert _by_name(rated, "Glass_Ip17Pro").unit_cost_ex_vat > _by_name(
+        blended, "Glass_Ip17Pro"
+    ).unit_cost_ex_vat
+    assert _by_name(rated, "cleaning kits").unit_cost_ex_vat < _by_name(
+        blended, "cleaning kits"
+    ).unit_cost_ex_vat
+
+
+def test_no_duty_rates_is_backward_compatible():
+    """세율을 하나도 안 넣으면 **종전과 완전히 같은 결과**다 — prod의 기존 확정 건이 안 흔들린다."""
+    old_style = [
+        CostLine(c.item_name, c.supply_amount, c.tax_amount, c.is_costing) for c in DUTY_COSTS
+    ]
+    a = allocate(INVOICE_LINES, old_style, FX, "amount")
+    b = allocate(INVOICE_LINES, DUTY_COSTS, FX, "amount", customs_value_krw=CUSTOMS_VALUE)
+    assert b.duty_mode == "blended"
+    assert [x.allocated_cost_krw for x in a.lines] == [x.allocated_cost_krw for x in b.lines]
+    assert [x.unit_cost_ex_vat for x in a.lines] == [x.unit_cost_ex_vat for x in b.lines]
+
+
+def test_second_shipment_duty_matches_settlement_document():
+    """★7/22 실건(자금정산서 SETR2607220324) — 전혀 다른 구성에서도 세율이 재현된다.
+
+    유리 100개 + 부자재 12,000개(금액의 88.7%). 무관세 부자재가 대부분이라
+    일괄 배부와 귀속의 차이가 가장 크게 나는 건이다(유리 개당 약 +135원).
+    """
+    costs = [
+        CostLine("관세", D("15200"), is_duty=True),
+        CostLine("부가세", D("242300"), is_costing=False),
+        CostLine("통관수수료", D("25000"), D("2500")),
+    ]
+    lines = [
+        InvoiceLine(1, "Glass_Ip16", D("100"), D("12.2"), duty_rate=RATE_FILM),
+        InvoiceLine(2, "cleaning kits", D("12000"), D("0.8"), duty_rate=RATE_KIT),
+    ]
+    r = allocate(lines, costs, D("221.16"), "amount", customs_value_krw=D("2407850"))
+    assert r.duty_mode == "by_rate"
+    assert abs(r.duty_check_diff) < D("20"), (r.duty_pool_krw, r.duty_computed_krw)
+    assert _by_name(r, "cleaning kits").allocated_duty_krw == D("0")
+    assert _by_name(r, "Glass_Ip16").allocated_duty_krw == D("15200")
+    assert r.unallocated_krw == D("0")
+
+    blended = allocate(
+        [InvoiceLine(l.seq, l.item_name, l.quantity, l.unit_price_foreign) for l in lines],
+        [CostLine(c.item_name, c.supply_amount, c.tax_amount, c.is_costing) for c in costs],
+        D("221.16"), "amount",
+    )
+    gap = _by_name(r, "Glass_Ip16").unit_cost_ex_vat - _by_name(blended, "Glass_Ip16").unit_cost_ex_vat
+    assert gap > D("130"), gap   # 개당 130원 넘게 과소 계상되고 있었다
+
+
+# ──────────────────────────────────────────────
 # 실패 경로 — 조용히 0을 반환하지 않는다
 # ──────────────────────────────────────────────
 def test_missing_weight_raises_not_zero():

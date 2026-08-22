@@ -55,6 +55,7 @@ def _to_cost_lines(rows: list[ImportCostLine]) -> list[CostLine]:
             supply_amount=Decimal(r.supply_amount or 0),
             tax_amount=Decimal(r.tax_amount or 0),
             is_costing=bool(r.is_costing),
+            is_duty=bool(r.is_duty),   # NULL은 False로 읽는다(기존 행 호환)
         )
         for r in rows
     ]
@@ -69,6 +70,7 @@ def _to_invoice_lines(rows: list[ImportInvoiceLine]) -> list[InvoiceLine]:
             unit_price_foreign=Decimal(r.unit_price_foreign),
             gross_weight_kg=None if r.gross_weight_kg is None else Decimal(r.gross_weight_kg),
             cbm=None if r.cbm is None else Decimal(r.cbm),
+            duty_rate=None if r.duty_rate is None else Decimal(r.duty_rate),
         )
         for r in sorted(rows, key=lambda x: x.seq)
     ]
@@ -115,7 +117,13 @@ def build_reconcile(ship: ImportShipment, basis: AllocationBasis | None = None) 
     error = ""
     if inv_lines:
         try:
-            result = allocate(inv_lines, cost_lines, Decimal(ship.fx_rate), basis)
+            result = allocate(
+                inv_lines, cost_lines, Decimal(ship.fx_rate), basis,
+                customs_value_krw=(
+                    None if ship.customs_value_krw is None
+                    else Decimal(ship.customs_value_krw)
+                ),
+            )
         except AllocationError as exc:
             error = str(exc)
 
@@ -152,7 +160,13 @@ def basis_comparison(ship: ImportShipment) -> list[dict]:
     inv_lines = _to_invoice_lines(list(ship.invoice_lines))
     for basis in ALLOCATION_BASES:
         try:
-            r = allocate(inv_lines, cost_lines, Decimal(ship.fx_rate), basis)
+            r = allocate(
+                inv_lines, cost_lines, Decimal(ship.fx_rate), basis,
+                customs_value_krw=(
+                    None if ship.customs_value_krw is None
+                    else Decimal(ship.customs_value_krw)
+                ),
+            )
         except AllocationError as exc:
             out.append({"basis": basis, "available": False, "reason": str(exc), "lines": []})
             continue
@@ -291,6 +305,7 @@ def shipment_payload(ship: ImportShipment, *, detail: bool = True) -> dict:
                     "supply_amount": _d(r.supply_amount),
                     "tax_amount": _d(r.tax_amount),
                     "is_costing": bool(r.is_costing),
+                    "is_duty": bool(r.is_duty),
                     "note": r.note,
                 }
                 for r in sorted(ship.cost_lines, key=lambda x: x.seq)
@@ -307,6 +322,7 @@ def shipment_payload(ship: ImportShipment, *, detail: bool = True) -> dict:
                     "internal_sku": r.internal_sku,
                     "gross_weight_kg": _d(r.gross_weight_kg),
                     "cbm": _d(r.cbm),
+                    "duty_rate": _d(r.duty_rate),
                     # 확정 전엔 null이다 — 0으로 채우지 않는다(0=미계산 혼동 금지)
                     "goods_amount_krw": _d(r.goods_amount_krw),
                     "allocated_cost_krw": _d(r.allocated_cost_krw),
@@ -351,6 +367,12 @@ def shipment_payload(ship: ImportShipment, *, detail: bool = True) -> dict:
                     "pool_krw": _d(result.pool_krw),
                     "allocated_total_krw": _d(result.allocated_total_krw),
                     "unallocated_krw": _d(result.unallocated_krw),
+                    # ★관세 귀속(D-CPP-50). duty_mode="blended"면 «세율을 안 넣어서 섞였다»는 뜻이다.
+                    "common_pool_krw": _d(result.common_pool_krw),
+                    "duty_pool_krw": _d(result.duty_pool_krw),
+                    "duty_mode": result.duty_mode,
+                    "duty_computed_krw": _d(result.duty_computed_krw),
+                    "duty_check_diff": _d(result.duty_check_diff),
                     "lines": [
                         {
                             "seq": ln.seq,
@@ -358,6 +380,8 @@ def shipment_payload(ship: ImportShipment, *, detail: bool = True) -> dict:
                             "quantity": _d(ln.quantity),
                             "goods_amount_krw": _d(ln.goods_amount_krw),
                             "allocated_cost_krw": _d(ln.allocated_cost_krw),
+                            "allocated_common_krw": _d(ln.allocated_common_krw),
+                            "allocated_duty_krw": _d(ln.allocated_duty_krw),
                             "unit_cost_ex_vat": _d(ln.unit_cost_ex_vat),
                             "unit_cost_inc_vat": _d(ln.unit_cost_inc_vat),
                         }

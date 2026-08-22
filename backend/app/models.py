@@ -4337,6 +4337,9 @@ class ImportCostLine(Base):
     supply_amount: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False, default=0)
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False, default=0)
     is_costing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # ★관세는 «배부»가 아니라 «귀속»이다(D-CPP-50) — 품목마다 세율이 다르기 때문이다
+    #   (실측: cleaning kits 0% / 유리·필름 5.6%). NULL은 False로 읽는다(기존 행 호환).
+    is_duty: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     shipment: Mapped[ImportShipment] = relationship(back_populates="cost_lines")
@@ -4381,6 +4384,9 @@ class ImportInvoiceLine(Base):
     # 배부 기준 원료 (PL에서 온다). 없으면 그 기준으로는 배부 불가.
     gross_weight_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 3), nullable=True)
     cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 6), nullable=True)
+    # ★품목별 관세율(0.0560 = 5.6%). **NULL은 «모름»이지 0%가 아니다** — 하나라도 값이 있으면
+    #   관세를 라인별로 귀속하고, 전부 NULL이면 종전대로 공통비에 섞어 배부한다(D-CPP-50).
+    duty_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 4), nullable=True)
 
     # ── 계산 결과 (확정 저장) ──
     goods_amount_krw: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2), nullable=True)

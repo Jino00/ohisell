@@ -68,7 +68,12 @@ class CostLine:
     item_name: str
     supply_amount: Decimal       # 예상공급가액
     tax_amount: Decimal = _ZERO  # 예상세액
-    is_costing: bool = True      # 배부 대상인가 (부가세 라인은 False)
+    is_costing: bool = True      # 원가 대상인가 (부가세 라인은 False)
+    # ★관세는 «배부»가 아니라 «귀속»이다 (D-CPP-50). 품목마다 세율이 다르기 때문이다 —
+    #   실측 2건에서 cleaning kits(부자재)는 0%, 유리·필름은 5.6%였다.
+    #   금액 기준으로 일괄 배부하면 무관세 품목이 관세를 떠안고 나머지 품목 원가가 과소 계상된다
+    #   (7/22 건 실측: 유리 개당 −135원 = 원가의 5.0%).
+    is_duty: bool = False
 
     @property
     def total(self) -> Decimal:
@@ -86,6 +91,9 @@ class InvoiceLine:
     # 배부 기준 원료 — Packing List에서 온다. 없으면 그 기준으로는 배부 불가(예외를 던진다).
     gross_weight_kg: Decimal | None = None
     cbm: Decimal | None = None
+    # 품목별 관세율(0.056 = 5.6%). **None은 «모름»이지 0%가 아니다** — 하나라도 값이 있으면
+    # 관세를 라인별로 귀속하고, 전부 None이면 종전대로 공통비에 섞어 배부한다(사유가 결과에 실린다).
+    duty_rate: Decimal | None = None
 
     @property
     def amount_foreign(self) -> Decimal:
@@ -100,9 +108,12 @@ class AllocatedLine:
     item_name: str
     quantity: Decimal
     goods_amount_krw: Decimal      # 물품대 (외화 × 신고환율)
-    allocated_cost_krw: Decimal    # 배부받은 통관비 (원 단위 정수)
+    allocated_cost_krw: Decimal    # 배부받은 통관비 합계 = 공통비 + 관세 (원 단위 정수)
     unit_cost_ex_vat: Decimal      # (물품대 + 배부액) / 수량
     unit_cost_inc_vat: Decimal     # ex_vat × 1.1
+    # 내역을 갈라 둔다 — 「이 품목이 관세를 얼마 물었나」가 화면에서 보여야 세율 입력이 검증된다.
+    allocated_common_krw: Decimal = _ZERO
+    allocated_duty_krw: Decimal = _ZERO
 
     @property
     def total_cost_ex_vat(self) -> Decimal:
@@ -112,15 +123,31 @@ class AllocatedLine:
 @dataclass(frozen=True)
 class AllocationResult:
     lines: list[AllocatedLine]
-    pool_krw: Decimal              # 배부 대상 총액
+    pool_krw: Decimal              # 배부 대상 총액(공통비 + 관세)
     allocated_total_krw: Decimal   # Σ배부액
     basis: AllocationBasis
     fx_rate: Decimal
+    common_pool_krw: Decimal = _ZERO   # 운임·수수료 등 — basis로 배부
+    duty_pool_krw: Decimal = _ZERO     # 관세 — 라인 세율로 귀속
+    duty_mode: str = "blended"         # "by_rate"(라인별 세율) | "blended"(세율 미입력 → 공통비에 섞음)
+    # 라인 세율로 «계산»한 관세 총액. 서류의 관세 총액(duty_pool_krw)과 대조하면 세율이 맞는지 보인다.
+    duty_computed_krw: Decimal | None = None
 
     @property
     def unallocated_krw(self) -> Decimal:
         """미배분 잔액. **항상 0이어야 한다** — 0이 아니면 산술 결함이다."""
         return self.pool_krw - self.allocated_total_krw
+
+    @property
+    def duty_check_diff(self) -> Decimal | None:
+        """서류 관세 − 라인 세율로 계산한 관세. 0에 가까울수록 세율이 맞다.
+
+        **이 값이 크면 세율 입력이 틀렸다는 신호다.** 실측(2026-08-22) 두 건에서 오차는 4원과
+        0.0001%p였다 — 맞는 세율이면 이 정도로 재현된다.
+        """
+        if self.duty_computed_krw is None:
+            return None
+        return self.duty_pool_krw - self.duty_computed_krw
 
 
 class AllocationError(ValueError):
@@ -131,11 +158,46 @@ class AllocationError(ValueError):
 # 배부
 # ──────────────────────────────────────────────
 def costing_pool(cost_lines: Iterable[CostLine]) -> Decimal:
-    """배부 대상 총액 = 원가성 라인의 **공급가액** 합계.
+    """배부 대상 총액 = 원가성 라인의 **공급가액** 합계(공통비 + 관세).
 
     세액(`tax_amount`)은 더하지 않는다 — 매입세액 공제 대상이라 원가가 아니다.
     """
     return sum((c.supply_amount for c in cost_lines if c.is_costing), _ZERO)
+
+
+def duty_pool(cost_lines: Iterable[CostLine]) -> Decimal:
+    """관세 총액 — 원가이지만 **배부가 아니라 귀속** 대상이다(D-CPP-50)."""
+    return sum((c.supply_amount for c in cost_lines if c.is_costing and c.is_duty), _ZERO)
+
+
+def common_pool(cost_lines: Iterable[CostLine]) -> Decimal:
+    """공통비 총액 — 운임·통관수수료 등. `basis`로 배부한다."""
+    return sum(
+        (c.supply_amount for c in cost_lines if c.is_costing and not c.is_duty), _ZERO
+    )
+
+
+def _largest_remainder(pool: Decimal, weights: list[Decimal]) -> list[Decimal]:
+    """`pool`을 `weights` 비율로 원 단위로 나눈다. **Σ == pool을 산술로 보장**한다.
+
+    가중치 합이 0이면 전액을 첫 칸에 둔다 — 돈을 없애지 않는 것이 이 함수의 계약이다.
+    """
+    n = len(weights)
+    total_w = sum(weights, _ZERO)
+    if pool == _ZERO:
+        return [_ZERO] * n
+    if total_w <= _ZERO:
+        return [pool] + [_ZERO] * (n - 1)
+    exact = [pool * w / total_w for w in weights]
+    floors = [e.to_integral_value(rounding=ROUND_FLOOR) for e in exact]
+    remainder = int(pool - sum(floors, _ZERO))
+    order = sorted(
+        range(n), key=lambda i: (exact[i] - floors[i], weights[i], -i), reverse=True
+    )
+    out = list(floors)
+    for k in range(max(remainder, 0)):
+        out[order[k % n]] += _ONE
+    return out
 
 
 def actual_vat_pool(cost_lines: Iterable[CostLine]) -> Decimal:
@@ -177,10 +239,19 @@ def allocate(
     cost_lines: list[CostLine],
     fx_rate: Decimal,
     basis: AllocationBasis = "amount",
+    customs_value_krw: Decimal | None = None,
 ) -> AllocationResult:
     """통관비를 인보이스 라인에 배부한다.
 
     Σ배부액 == 배부대상 총액이 **산술로 보장**된다(최대잔여법).
+
+    비용은 **두 몫**으로 갈린다(D-CPP-50):
+    - **공통비**(운임·통관수수료 등) → `basis`로 배부
+    - **관세** → 라인의 `duty_rate`로 **귀속**. 세율이 하나도 없으면 종전대로 공통비에 섞는다
+      (`duty_mode="blended"`가 결과에 실려 «세율을 안 넣어서 섞였다»가 화면에 보인다).
+
+    `customs_value_krw`는 서류의 과세금액이다. 관세 과세표준은 CIF라 물품대와 다르므로
+    있으면 그걸 쓰고, 없으면 물품대 합으로 근사한다.
     """
     if not invoice_lines:
         raise AllocationError("인보이스 라인이 없다 — 배부할 대상이 없다.")
@@ -205,21 +276,40 @@ def allocate(
             f"배부기준 '{basis}'의 합계가 0이다 — 비율을 만들 수 없다."
         )
 
-    # 1차: 내림. 잔여는 소수부가 큰 순서로 1원씩 나눠 준다(최대잔여법).
-    exact = [pool * w / total_weight for w in weights]
-    floors = [e.to_integral_value(rounding=ROUND_FLOOR) for e in exact]
-    remainder = int(pool - sum(floors, _ZERO))
-    order = sorted(
-        range(len(exact)),
-        key=lambda i: (exact[i] - floors[i], weights[i], -i),
-        reverse=True,
-    )
-    alloc = list(floors)
-    for k in range(max(remainder, 0)):
-        alloc[order[k % len(order)]] += _ONE
+    # ── 관세를 «귀속»으로 가를지 결정한다 (D-CPP-50) ──
+    duty_total = duty_pool(cost_lines).quantize(_ONE, ROUND_HALF_UP)
+    has_rates = any(ln.duty_rate is not None for ln in invoice_lines)
+    duty_mode = "by_rate" if (has_rates and duty_total > _ZERO) else "blended"
+
+    if duty_mode == "by_rate":
+        common_total = (pool - duty_total).quantize(_ONE, ROUND_HALF_UP)
+        # 관세 과세표준: 서류의 과세금액이 있으면 그것을, 없으면 물품대 합을 쓴다.
+        # (과세가격은 CIF라 물품대와 조금 다르다 — 있으면 서류 값이 정확하다.)
+        amount_total = sum((ln.amount_foreign for ln in invoice_lines), _ZERO)
+        base_total = customs_value_krw if customs_value_krw is not None else (
+            amount_total * fx_rate
+        )
+        # 라인별 «계산 관세» = 과세표준 몫 × 라인 세율. 이게 관세 배부의 **가중치**가 된다.
+        computed = [
+            (base_total * (ln.amount_foreign / amount_total) * (ln.duty_rate or _ZERO))
+            if amount_total > _ZERO
+            else _ZERO
+            for ln in invoice_lines
+        ]
+        duty_computed = sum(computed, _ZERO).quantize(_CENT, ROUND_HALF_UP)
+        # ★서류의 관세 총액을 «계산값 비율»로 나눈다 — 세율이 맞으면 계산값과 거의 같고,
+        #   틀려도 Σ == 서류 총액은 깨지지 않는다(돈이 새거나 생기지 않는다).
+        duty_alloc = _largest_remainder(duty_total, computed)
+        common_alloc = _largest_remainder(common_total, weights)
+    else:
+        common_total = pool
+        duty_computed = None
+        duty_alloc = [_ZERO] * len(invoice_lines)
+        common_alloc = _largest_remainder(pool, weights)
 
     out: list[AllocatedLine] = []
-    for ln, a in zip(invoice_lines, alloc):
+    for ln, c, d in zip(invoice_lines, common_alloc, duty_alloc):
+        a = c + d
         goods = (ln.amount_foreign * fx_rate).quantize(_CENT, ROUND_HALF_UP)
         unit_ex = ((goods + a) / ln.quantity).quantize(_CENT, ROUND_HALF_UP)
         unit_inc = (unit_ex * VAT_MULTIPLIER).quantize(_CENT, ROUND_HALF_UP)
@@ -232,8 +322,11 @@ def allocate(
                 allocated_cost_krw=a,
                 unit_cost_ex_vat=unit_ex,
                 unit_cost_inc_vat=unit_inc,
+                allocated_common_krw=c,
+                allocated_duty_krw=d,
             )
         )
+    alloc = [x.allocated_cost_krw for x in out]
 
     return AllocationResult(
         lines=out,
@@ -241,4 +334,8 @@ def allocate(
         allocated_total_krw=sum(alloc, _ZERO),
         basis=basis,
         fx_rate=fx_rate,
+        common_pool_krw=common_total,
+        duty_pool_krw=duty_total if duty_mode == "by_rate" else _ZERO,
+        duty_mode=duty_mode,
+        duty_computed_krw=duty_computed,
     )

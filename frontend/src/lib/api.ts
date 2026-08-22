@@ -4607,6 +4607,8 @@ export interface ImportCostLine {
   tax_amount: string;
   // ★기본값이 없다 — 매 줄 명시해야 한다(부가세 라인이 배부에 실수로 섞이면 원가가 부푼다).
   is_costing: boolean;
+  // 이 비용 라인이 관세인가(D-CPP-50). true면 금액배부가 아니라 인보이스 라인의 duty_rate로 귀속된다.
+  is_duty?: boolean;
   note?: string | null;
 }
 
@@ -4621,6 +4623,8 @@ export interface ImportInvoiceLine {
   internal_sku?: string | null;
   gross_weight_kg?: string | null;
   cbm?: string | null;
+  // 품목별 관세율(D-CPP-50). "0.056"=5.6%. null="모름"(0%가 아니다 — 0으로 바꾸지 말 것).
+  duty_rate?: string | null;
   // 확정 전엔 null이다 — 0으로 그리지 않는다(0=미계산 혼동 금지).
   goods_amount_krw?: string | null;
   allocated_cost_krw?: string | null;
@@ -4682,7 +4686,12 @@ export interface ImportAllocationLine {
   allocated_cost_krw: string;
   unit_cost_ex_vat: string;
   unit_cost_inc_vat: string;
+  // 배부액 내역(D-CPP-50): 공통비 몫 / 관세 몫. 둘의 합 = allocated_cost_krw.
+  allocated_common_krw?: string;
+  allocated_duty_krw?: string;
 }
+
+export type ImportDutyMode = "by_rate" | "blended";
 
 export interface ImportAllocation {
   basis: ImportAllocationBasis;
@@ -4690,6 +4699,13 @@ export interface ImportAllocation {
   allocated_total_krw: string;
   unallocated_krw: string;
   lines: ImportAllocationLine[];
+  // 관세 귀속 방식(D-CPP-50). by_rate=라인 세율로 정확 귀속 / blended=세율 미입력이라 공통비에 섞여 배부(부정확).
+  duty_mode?: ImportDutyMode;
+  common_pool_krw?: string;
+  duty_pool_krw?: string;
+  // 라인 세율로 계산한 관세 총액 — duty_pool_krw(서류)와 대조해 세율 입력이 맞는지 검산한다.
+  duty_computed_krw?: string;
+  duty_check_diff?: string;
 }
 
 export interface ImportShipmentDetail extends ImportShipmentListItem {

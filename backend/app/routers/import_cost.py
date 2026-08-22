@@ -53,6 +53,9 @@ class CostLineIn(BaseModel):
     # ★기본값을 True로 두지 않는다 — 부가세 라인을 실수로 배부에 넣으면 원가가 통째로 부푼다.
     #   호출자가 매 줄 명시하게 한다.
     is_costing: bool
+    # ★관세 라인인가 — 관세는 배부가 아니라 «귀속»이다(D-CPP-50).
+    #   기본 False다: 안 정하면 종전대로 공통비에 섞여, 기존 동작이 바뀌지 않는다.
+    is_duty: bool = False
     note: Optional[str] = None
 
 
@@ -66,6 +69,8 @@ class InvoiceLineIn(BaseModel):
     internal_sku: Optional[str] = None
     gross_weight_kg: Optional[Decimal] = None
     cbm: Optional[Decimal] = None
+    # 품목별 관세율(0.056 = 5.6%). None은 «모름»이지 0%가 아니다.
+    duty_rate: Optional[Decimal] = None
 
 
 class PackingLineIn(BaseModel):
