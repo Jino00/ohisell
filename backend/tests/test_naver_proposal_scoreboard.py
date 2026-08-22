@@ -189,10 +189,12 @@ def bep_lens(monkeypatch):
         from decimal import Decimal as D
         from app.services.naver_ad import campaign_target_resolver as ctr
         from app.services.naver_ad import diagnosis as diag
+        # ★사다리의 «원료»만 패치한다 — resolve_bep_roas의 우선순위·source 라벨 로직 자체는
+        #   패치되지 않고 실제로 실행된다(그 로직이 이 교정의 핵심이라 테스트 밖에 두면 안 된다).
         if source == "product_bep":
-            monkeypatch.setattr(ctr, "weighted_product_value_for_campaign", lambda db, cid, col: D(str(bep)))
+            monkeypatch.setattr(ctr, "_weighted_target_for_cpids", lambda db, cpids, col: D(str(bep)))
         else:
-            monkeypatch.setattr(ctr, "weighted_product_value_for_campaign", lambda db, cid, col: None)
+            monkeypatch.setattr(ctr, "_weighted_target_for_cpids", lambda db, cpids, col: None)
             monkeypatch.setattr(ctr, "account_default_bep_roas", lambda db: D(str(bep)))
         monkeypatch.setattr(diag, "correction_factor", lambda db, date_to: {"factor": D(cf)})
     return _install

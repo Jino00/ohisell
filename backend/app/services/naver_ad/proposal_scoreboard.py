@@ -31,9 +31,7 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import (
-    NaverAdDaily, NaverCampaignSettings, NaverChangeLog, NaverLearningState, NaverProductBep,
-)
+from app.models import NaverAdDaily, NaverCampaignSettings, NaverChangeLog, NaverLearningState
 from app.services.naver_ad import campaign_target_resolver, diagnosis, gave_score
 from app.services.naver_ad.account_diagnosis import LOW_CLICK_THRESHOLD
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
@@ -93,7 +91,7 @@ def _gamma_for(db: Session, campaign_id: str, cache: dict[str, Decimal]) -> Deci
 def _bep_for(db: Session, campaign_id: str, cache: dict[str, tuple]) -> tuple:
     """캠페인 손익분기 ROAS와 **그 출처**. 반환 (bep|None, source).
 
-    우선순위는 campaign_target_resolver의 기존 사다리를 그대로 탄다 —
+    사다리는 `campaign_target_resolver.resolve_bep_roas`가 단일 정본이다 —
       ① 상품 파생: 그룹 매핑 상품의 bep_roas 매출가중평균(source='product_bep')
       ② 계정 블렌디드 기본값(source='account_default')
       ③ 둘 다 없음(source='unavailable') → 이 행은 새 식으로 판정하지 않는다.
@@ -107,18 +105,9 @@ def _bep_for(db: Session, campaign_id: str, cache: dict[str, tuple]) -> tuple:
     """
     if campaign_id in cache:
         return cache[campaign_id]
-    bep = None
-    source = "unavailable"
     try:
-        bep = campaign_target_resolver.weighted_product_value_for_campaign(
-            db, campaign_id, NaverProductBep.bep_roas
-        )
-        if bep is not None:
-            source = "product_bep"
-        else:
-            bep = campaign_target_resolver.account_default_bep_roas(db)
-            if bep is not None:
-                source = "account_default"
+        resolved = campaign_target_resolver.resolve_bep_roas(db, campaign_id)
+        bep, source = resolved["bep_roas"], resolved["source"]
     except Exception as e:  # noqa: BLE001 — 렌즈 해석 실패는 «판정 보류»지 오판이 아니다
         log.warning("proposal_scoreboard: BEP 해석 실패(새 식 판정 보류): campaign=%s: %s", campaign_id, e)
         bep, source = None, "unavailable"
