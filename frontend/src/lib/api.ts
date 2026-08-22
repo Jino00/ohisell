@@ -5051,17 +5051,44 @@ export interface CostPriceShipmentRef {
   quantity: string | null;
 }
 
+/** 단가 행 ↔ 원장 라인 **조회 시점 재검사** (적대 리뷰 1R P1).
+ *
+ * ★단가는 연결 시점 값을 복사해 보존한다 — 그건 의도다(근거 보존). 결함은 그 보존값이
+ * **어긋난 뒤에도** 아무 표시 없이 「최신 확정 로트 단가」 자리를 차지하던 것이다. 이 칸이
+ * 그 자백이다: `ok=false`면 화면이 **왜** 어긋났는지 말하고, 그 행은 최신 단가에서 빠진다. */
+export interface CostLedgerCheck {
+  status:
+    | "manual"
+    | "ok"
+    | "missing" // 원장 라인이 사라졌다(고아 행)
+    | "unconfirmed" // 수입건 확정 해제(reopen) — 원장은 단가를 지웠다
+    | "item_mismatch" // 같은 id가 다른 품목을 가리킨다(rowid 재사용)
+    | "changed"; // 원장 재확정으로 값이 달라졌다
+  ok: boolean;
+  label: string;
+  detail: string;
+  counts_as_evidence: boolean;
+  refreshable: boolean;
+  ledger_unit_price_ex_vat: string | null;
+  ledger_unit_price_inc_vat: string | null;
+  ledger_item_name: string | null;
+}
+
 export interface CostMaterialPrice {
   id: number;
   material_id: number;
   source: "ledger" | "manual";
   import_invoice_line_id: number | null;
   supplier: string | null;
+  /** 연결 «당시» 원장 품목명 — 지금 값과 다르면 라인 id가 재사용된 것이다. */
+  linked_item_name: string | null;
+  linked_shipment_id: number | null;
   unit_price_ex_vat: string | null;
   unit_price_inc_vat: string | null;
   effective_date: string | null;
   note: string | null;
   shipment: CostPriceShipmentRef | null;
+  ledger_check: CostLedgerCheck;
 }
 
 export interface CostMaterial {
@@ -5075,8 +5102,11 @@ export interface CostMaterial {
   form_factor: string | null;
   part: string | null;
   note: string | null;
+  /** 근거로 «세는» 로트 수 = 원장 파생 + 재검사 통과분. 어긋난 행은 여기 안 들어간다. */
   lot_count: number;
   price_count: number;
+  /** 원장과 어긋난 연결 수. 0이 아니면 화면이 「최신 단가에서 왜 빠졌나」를 말해야 한다. */
+  stale_count: number;
   latest_price_ex_vat: string | null;
   latest_price_inc_vat: string | null;
   latest_price_source: "ledger" | "manual" | null;
@@ -5106,6 +5136,10 @@ export interface CostLedgerMaterialLine {
   linked_material_id: number | null;
   linked_material_name: string | null;
   linked_price_id: number | null;
+  /** 이 라인이 속한 수입건의 «지금» 상태. `confirmed`가 아니면 원장은 단가를 지운 상태다. */
+  shipment_status: string;
+  /** 붙어 있는 단가 행의 재검사 결과(안 붙었으면 null). */
+  linked_price_check: CostLedgerCheck | null;
   suggestion: CostLedgerSuggestion;
 }
 
@@ -5139,6 +5173,19 @@ export function linkCostLedgerPrice(
   return fetchApi(`/api/cost/materials/${materialId}/prices/link`, {
     method: "POST",
     body: JSON.stringify({ import_invoice_line_id: importInvoiceLineId }),
+  });
+}
+
+/** 어긋난 원장 단가 행을 **원장 현재값으로 다시 맞춘다**(적대 리뷰 1R P1-2).
+ *
+ * 이게 없으면 환율 정정 후 재확정된 로트를 화면이 영영 못 따라간다 — 재연결은 유일 제약
+ * 때문에 409이기 때문이다. 품목이 달라진 행은 백엔드가 거부한다(해제 후 사람이 재연결). */
+export function refreshCostLedgerPrice(
+  materialId: number,
+  priceId: number,
+): Promise<{ price_id: number; was: CostLedgerCheck; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices/${priceId}/refresh`, {
+    method: "POST",
   });
 }
 

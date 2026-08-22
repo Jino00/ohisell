@@ -4574,10 +4574,21 @@ class CostMaterialPrice(Base):
     source: Mapped[str] = mapped_column(String(10), nullable=False)  # ledger / manual
     # ledger일 때만 채워진다. FK는 걸되 원장 라인이 지워지면 단가 행도 같이 간다 —
     # 근거가 사라진 파생값이 남는 것이 stale 증거의 정의다.
+    # ⚠**FK 선언만으로는 안 지켜진다**(적대 리뷰 1R P1-1 실증): 이 앱의 SQLite 연결에
+    #   `PRAGMA foreign_keys=ON`이 없어 CASCADE가 강제되지 않고 단가 행이 **고아로 남는다.**
+    #   전역 PRAGMA는 저장소 전체에 영향을 주므로 이번 슬라이스에서 켜지 않고(계약 §9-10 이월),
+    #   대신 조회 시점 재검사가 고아를 「원장 라인 없음」으로 **표면화**한다.
     import_invoice_line_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("import_invoice_line.id", ondelete="CASCADE"), nullable=True, index=True
     )
     supplier: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # ★**저장 시점의 원장 신원 스냅샷** (적대 리뷰 1R P1-2). FK를 걸지 않는다 — 관계가 아니라
+    #   «그때 무엇을 보고 복사했나»의 증거이고, 원장이 바뀌어도 따라 바뀌면 안 된다.
+    #   `import_invoice_line_id`만으로는 부족하다: 계약 B `_replace_lines`가 라인을 지우고
+    #   다시 넣으면 **SQLite rowid가 재사용**돼 같은 id가 다른 품목을 가리킨다(실증됨).
+    #   재검사(`services/cost_menu/ledger_check.py`)가 대조하는 «왼쪽»이 이 두 칸이다.
+    linked_item_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    linked_shipment_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # ★nullable이다 — 「단가를 아직 모른다」와 「0원이다」는 다른 사실이다(계약 §2-7).
     unit_price_ex_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
     unit_price_inc_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)

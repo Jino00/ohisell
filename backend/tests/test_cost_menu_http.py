@@ -432,3 +432,222 @@ def test_cost_menu_router_never_touches_cost_price():
             for a in n.names
         }
         assert "ProductMaster" not in imported, mod.__name__
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R P1 — 「보존된 값이 지금도 유효한가」를 조회 시점에 되묻는다
+#
+# 리뷰가 재현한 네 갈래는 **뿌리가 하나**다: 단가 행이 연결 시점 값을 복사해 두고 그 뒤
+# 원장이 어떻게 되든 재검사하지 않았다. 그래서 여기 넷을 **한 가드로** 잰다 —
+# ①reopen ②값 변경 ③수입건 삭제 ④라인 순서 정정(rowid 재사용).
+#
+# ★공통 전제: 이 절의 시나리오는 **수입건 1건만** 만든다. SQLite는 빈 테이블에서 rowid를
+#   1부터 다시 주므로, 라인 교체(`_replace_lines`)가 **같은 id를 다른 행에 재사용**하는
+#   것이 그때 결정적으로 재현된다(리뷰가 실증한 그 경로다).
+# ══════════════════════════════════════════════════════════════════
+def _link_kit(client, ship) -> tuple[int, int]:
+    """kit 라인을 연결하고 (material_id, price_id)를 돌려준다."""
+    mid = _kit_material_id(client)
+    r = client.post(
+        f"/api/cost/materials/{mid}/prices/link",
+        json={"import_invoice_line_id": _kits_line(ship)["id"]},
+    )
+    assert r.status_code == 201, r.text
+    return mid, r.json()["linked_price_id"]
+
+
+def test_reopen_makes_the_stored_price_confess_instead_of_posing_as_latest(client):
+    """★①reopen — 원장은 단가를 지웠는데 화면이 낡은 값을 「최신」이라 부르면 안 된다.
+
+    계약 B `reopen`이 스스로 적어 둔 이유: *"낡은 단가가 「확정된 값」인 척 남는 것이 이
+    도메인에서 가장 위험하다."* A′가 그걸 되살리면 계약 B의 안전장치가 무효가 된다.
+    """
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    mid, price_id = _link_kit(client, aug)
+    assert client.get(f"/api/cost/materials/{mid}").json()["latest_price_ex_vat"] == "190.82"
+
+    assert client.post(f"/api/import-cost/shipments/{aug['id']}/reopen").status_code == 200
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    p = next(x for x in body["prices"] if x["id"] == price_id)
+    # 값은 **남는다**(근거 보존은 이 테이블의 존재 이유다)…
+    assert p["unit_price_ex_vat"] == "190.82"
+    # …그러나 「최신 확정 로트 단가」 자리는 못 차지한다.
+    assert p["ledger_check"]["status"] == "unconfirmed"
+    assert p["ledger_check"]["ok"] is False
+    assert p["ledger_check"]["counts_as_evidence"] is False
+    assert body["latest_price_ex_vat"] is None      # ★ "190.82"가 아니다
+    assert body["lot_count"] == 0                   # 어긋난 근거는 근거가 아니다
+    assert body["stale_count"] == 1                 # …대신 «몇 건이 어긋났나»를 말한다
+
+    # ★그리고 그 사실이 원장 라인 목록에서도 사라지지 않는다(초판은 통째로 빠졌다).
+    rows = client.get("/api/cost/ledger-material-lines").json()["items"]
+    row = next(r for r in rows if r["line_id"] == p["import_invoice_line_id"])
+    assert row["shipment_status"] == "draft"
+    assert row["linked_price_check"]["status"] == "unconfirmed"
+
+
+def test_recomputed_ledger_value_is_surfaced_and_refreshable(client):
+    """★②값 변경 — 환율을 고쳐 재확정하면 원장은 새 값인데 저장 행은 옛 값이다.
+
+    초판은 그 어긋남을 아무 데서도 말하지 않았고, 재연결은 유일 제약 때문에 409라
+    **원장이 스스로 고칠 길이 없었다.** 지금은 ①어긋남을 자백하고 ②「갱신」이 길을 연다.
+    """
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    mid, price_id = _link_kit(client, aug)
+
+    # 환율 정정 → 재확정. 라인 순서는 그대로이므로 같은 id가 같은 품목을 가리킨다.
+    client.post(f"/api/import-cost/shipments/{aug['id']}/reopen")
+    fixed = {**LOT_AUG, "fx_rate": "215.00"}
+    assert client.put(f"/api/import-cost/shipments/{aug['id']}", json=fixed).status_code == 200
+    again = client.post(f"/api/import-cost/shipments/{aug['id']}/confirm").json()
+    assert again["confirm_result"]["confirmed"] is True
+    new_ex = _kits_line(again)["unit_cost_ex_vat"]
+    assert new_ex != "190.82", "환율을 고쳤는데 원장 단가가 그대로면 이 시나리오가 성립 안 한다"
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    p = next(x for x in body["prices"] if x["id"] == price_id)
+    assert p["ledger_check"]["status"] == "changed"
+    assert p["unit_price_ex_vat"] == "190.82"                        # 저장값(근거)
+    assert p["ledger_check"]["ledger_unit_price_ex_vat"] == new_ex   # 현 원장값 — 나란히 보인다
+    assert body["latest_price_ex_vat"] is None                        # 어긋난 값은 최신이 아니다
+    assert body["stale_count"] == 1
+
+    # ★고칠 길 — 「갱신」이 원장 현재값을 다시 옮긴다(409로 막히지 않는다).
+    r = client.post(f"/api/cost/materials/{mid}/prices/{price_id}/refresh")
+    assert r.status_code == 200, r.text
+    assert r.json()["was"]["status"] == "changed"      # 무엇이 어긋나 있었는지도 말한다
+    after = r.json()["material"]
+    p2 = next(x for x in after["prices"] if x["id"] == price_id)
+    assert p2["unit_price_ex_vat"] == new_ex
+    assert p2["ledger_check"]["status"] == "ok"
+    assert after["latest_price_ex_vat"] == new_ex
+    assert after["stale_count"] == 0
+    # ★옛 값을 버리지 않는다 — 갱신이 근거를 지우면 이 테이블의 존재 이유와 앞뒤가 안 맞는다.
+    assert "190.82" in (p2["note"] or "")
+
+
+def test_deleted_shipment_leaves_an_orphan_and_the_screen_says_so(client):
+    """★③삭제 — FK에 CASCADE가 걸려 있어도 이 앱은 `PRAGMA foreign_keys=ON`을 안 켠다.
+
+    그래서 단가 행이 **고아로 살아남는다**. 전역 PRAGMA는 이번 슬라이스 밖이므로(계약 §9-10
+    이월) 재검사가 그 고아를 「원장 라인 없음」으로 **표면화**하는 것이 이 슬라이스의 처방이다.
+    """
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    mid, price_id = _link_kit(client, aug)
+    client.post(f"/api/import-cost/shipments/{aug['id']}/reopen")
+    assert client.delete(f"/api/import-cost/shipments/{aug['id']}").status_code == 200
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    p = next(x for x in body["prices"] if x["id"] == price_id)
+    assert p["ledger_check"]["status"] == "missing"     # ★고아라고 «말한다»
+    assert p["shipment"] is None
+    assert p["linked_item_name"] == "cleaning kits"     # 무엇에 붙어 있었는지는 남는다
+    assert body["latest_price_ex_vat"] is None
+    assert body["lot_count"] == 0
+    assert body["stale_count"] == 1
+    # 갱신은 못 한다 — 옮겨 올 원장 값 자체가 없다. 처방은 「해제」다.
+    r = client.post(f"/api/cost/materials/{mid}/prices/{price_id}/refresh")
+    assert r.status_code == 400
+    assert "원장 라인 없음" in r.json()["detail"]
+
+
+def test_rowid_reuse_is_caught_by_the_stored_item_name(client):
+    """★④라인 순서 정정 — `_replace_lines`가 지우고 다시 넣으면 **rowid가 재사용**된다.
+
+    리뷰 실증: `import_invoice_line_id=15`가 가리키던 cleaning kit이 Glass_iP12promax로
+    바뀐다. **id만 믿으면 화면의 「근거」가 다른 품목을 가리킨다** — 그래서 저장 시점
+    품목명을 함께 두고 대조한다.
+    """
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    mid, price_id = _link_kit(client, aug)
+    line_id = _kits_line(aug)["id"]
+
+    # 서류의 **순서만** 정정한다 — 마지막 두 줄(seq 14 Glass_iP12promax · seq 15 kits)을 뒤집는다.
+    reordered = {**LOT_AUG, "invoice_lines": [
+        *LOT_AUG["invoice_lines"][:13],
+        LOT_AUG["invoice_lines"][14],   # kits가 먼저 들어간다
+        LOT_AUG["invoice_lines"][13],   # Glass_iP12promax가 나중에 → 옛 kits의 id를 받는다
+    ]}
+    client.post(f"/api/import-cost/shipments/{aug['id']}/reopen")
+    assert client.put(f"/api/import-cost/shipments/{aug['id']}", json=reordered).status_code == 200
+    again = client.post(f"/api/import-cost/shipments/{aug['id']}/confirm").json()
+    assert again["confirm_result"]["confirmed"] is True
+
+    now_at_that_id = next(x for x in again["invoice_lines"] if x["id"] == line_id)
+    assert now_at_that_id["item_name"] != "cleaning kits", (
+        "이 시나리오는 rowid 재사용을 전제한다 — 재사용이 안 일어났으면 전제가 깨진 것이다"
+    )
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    p = next(x for x in body["prices"] if x["id"] == price_id)
+    assert p["ledger_check"]["status"] == "item_mismatch"
+    assert p["ledger_check"]["ledger_item_name"] == now_at_that_id["item_name"]
+    assert "cleaning kits" in p["ledger_check"]["detail"]   # 연결 당시 품목을 말한다
+    assert body["latest_price_ex_vat"] is None
+    assert body["stale_count"] == 1
+    # ★갱신으로 «삼키지» 않는다 — 다른 품목의 단가를 조용히 받아들이면 그게 더 나쁘다.
+    r = client.post(f"/api/cost/materials/{mid}/prices/{price_id}/refresh")
+    assert r.status_code == 400
+    assert "다른 품목" in r.json()["detail"]
+
+
+def test_stale_link_409_tells_the_person_what_to_do(client):
+    """어긋난 연결 위에 다시 연결하면 여전히 409지만, **다음 수**를 말한다."""
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    mid, _ = _link_kit(client, aug)
+    line_id = _kits_line(aug)["id"]
+    client.post(f"/api/import-cost/shipments/{aug['id']}/reopen")
+    client.put(f"/api/import-cost/shipments/{aug['id']}", json={**LOT_AUG, "fx_rate": "215.00"})
+    client.post(f"/api/import-cost/shipments/{aug['id']}/confirm")
+
+    r = client.post(
+        f"/api/cost/materials/{mid}/prices/link", json={"import_invoice_line_id": line_id}
+    )
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "원장 값이 달라졌다" in detail       # 무엇이 어긋났는지
+    assert "갱신" in detail                     # 무엇을 하면 되는지
+
+
+def test_manual_price_is_not_dragged_into_the_ledger_check(client):
+    """수동 입력은 원장 대조 대상이 아니다 — 「어긋났다」고 말하면 그게 거짓말이다."""
+    mid = _kit_material_id(client)
+    r = client.post(f"/api/cost/materials/{mid}/prices", json={"unit_price_ex_vat": "168"})
+    price_id = r.json()["price_id"]
+    p = r.json()["material"]["prices"][0]
+    assert p["ledger_check"]["status"] == "manual"
+    assert p["ledger_check"]["counts_as_evidence"] is True
+    # 원장으로 덮지 않는다 — 사람이 입력한 값을 시스템이 갈아치우면 그게 창작이다.
+    bad = client.post(f"/api/cost/materials/{mid}/prices/{price_id}/refresh")
+    assert bad.status_code == 400
+    assert "수동 입력" in bad.json()["detail"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R P2 채택분 — 「코드는 옳은데 불변식이 무방비」인 자리들
+# ══════════════════════════════════════════════════════════════════
+def test_draft_lot_lines_are_not_listed(client):
+    """★P2-2: 확정 전 로트의 라인이 목록에 실리면 안 된다(계약 §9-8).
+
+    변이 주입: `materials.py`의 `ImportShipment.status == "confirmed"` 필터를 지우면
+    이 단언이 깨진다 — 초판은 그 변이가 살아남았다.
+    """
+    r = client.post("/api/import-cost/shipments", json=LOT_AUG)
+    assert r.status_code == 201
+    assert client.get("/api/cost/ledger-material-lines").json()["items"] == []
+
+
+def test_lot_count_counts_lots_not_rows(client):
+    """★P2-3: `lot_count`가 수동 입력까지 세면 「이 표준의 근거는 로트 N건」이 거짓말이 된다.
+
+    변이 주입: `p.source == "ledger"` 조건을 지우면 아래 `lot_count == 1`이 2가 된다.
+    """
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    mid, _ = _link_kit(client, aug)
+    client.post(f"/api/cost/materials/{mid}/prices", json={"unit_price_ex_vat": "168"})
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    assert body["price_count"] == 2      # 행은 둘
+    assert body["lot_count"] == 1        # ★로트는 하나
+    assert body["stale_count"] == 0

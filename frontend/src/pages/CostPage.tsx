@@ -21,6 +21,8 @@ import {
   fetchCostSettings,
   linkCostLedgerPrice,
   patchCostMaterial,
+  refreshCostLedgerPrice,
+  type CostLedgerCheck,
   type CostLedgerMaterialLine,
   type CostMaterial,
   type CostMaterialPrice,
@@ -75,13 +77,41 @@ export function valuationBadgeText(settings: CostSetting[]): string | null {
     : `재고 평가방법: ${method}(무신고 시 법정 기본값) — 신고 내역 미확인`;
 }
 
-/** 「이 표준의 근거는 로트 N건」 — 표본 부족을 숨기지 않는다(계약 §9-5). */
-export function lotCountText(m: Pick<CostMaterial, "lot_count" | "price_count">): string {
+/** 「이 표준의 근거는 로트 N건」 — 표본 부족을 숨기지 않는다(계약 §9-5).
+ *
+ * ★어긋난 연결(`stale_count`)을 **따로 말한다**(적대 리뷰 1R P1-1). 그 행들은 최신 단가
+ * 산정에서 빠지는데, 왜 빠졌는지를 화면이 안 말하면 「단가가 왜 없지?」가 결함 조사로 번진다. */
+export function lotCountText(
+  m: Pick<CostMaterial, "lot_count" | "price_count" | "stale_count">,
+): string {
+  const stale = m.stale_count ?? 0;
   if (m.price_count === 0) return "단가 없음 — 원장 연결 또는 수동 입력 필요";
-  const manual = m.price_count - m.lot_count;
+  const manual = m.price_count - m.lot_count - stale;
   const parts = [`로트 ${m.lot_count}건`];
   if (manual > 0) parts.push(`수동 ${manual}건`);
+  if (stale > 0) parts.push(`⚠ 원장과 어긋난 연결 ${stale}건 — 최신 단가에서 제외`);
   return parts.join(" · ");
+}
+
+/** 재검사 결과의 한 줄 요약 — **어긋남을 한 단어로 접지 않는다**(처방이 저마다 다르다).
+ *
+ * ★문구(label·detail)는 **백엔드가 준 것을 그대로 쓴다.** 화면이 사유를 자기 말로 다시
+ * 지으면 두 벌이 되고 두 벌은 반드시 갈라진다(계약 §2-6과 같은 결). */
+export function ledgerCheckText(check: CostLedgerCheck | null | undefined): string | null {
+  if (!check || check.ok) return null;
+  return `⚠ ${check.label}`;
+}
+
+/** 「최신 단가」 칸이 왜 비었나 / 왜 그 값인가. 침묵하지 않는다(계약 §2-7·§9-5). */
+export function latestPriceNote(
+  m: Pick<CostMaterial, "lot_count" | "price_count" | "stale_count">,
+): string | null {
+  const stale = m.stale_count ?? 0;
+  if (stale === 0) return null;
+  if (m.lot_count === 0 && m.price_count === stale) {
+    return `최신 단가 없음 — 단가 행 ${stale}건이 전부 원장과 어긋나 근거로 못 쓴다. 아래 이력에서 처분한다.`;
+  }
+  return `어긋난 연결 ${stale}건은 최신 단가 산정에서 뺐다 — 이력에는 근거로 남아 있다.`;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -119,10 +149,13 @@ export function VatBasisBadge() {
 export function MaterialPriceHistory({
   material,
   onDelete,
+  onRefresh,
   busy,
 }: {
   material: CostMaterial;
   onDelete?: (priceId: number) => void;
+  /** 어긋난 원장 행을 원장 현재값으로 다시 맞춘다(적대 리뷰 1R P1-2). */
+  onRefresh?: (priceId: number) => void;
   busy?: boolean;
 }) {
   if (material.prices.length === 0) {
@@ -143,41 +176,78 @@ export function MaterialPriceHistory({
           <th className="py-1.5 pr-3">공급처</th>
           <th className="py-1.5 pr-3 text-right">단가(VAT 포함)</th>
           <th className="py-1.5 pr-3 text-right">단가(VAT 제외)</th>
-          {onDelete ? <th className="py-1.5" /> : null}
+          <th className="py-1.5 pr-3">원장 대조</th>
+          {onDelete || onRefresh ? <th className="py-1.5" /> : null}
         </tr>
       </thead>
       <tbody>
-        {material.prices.map((p: CostMaterialPrice) => (
-          <tr key={p.id} className="border-b last:border-0" data-testid={`price-row-${p.id}`}>
-            <td className="py-1.5 pr-3">{p.effective_date ?? "—"}</td>
-            <td className="py-1.5 pr-3">{priceSourceLabel(p.source)}</td>
-            <td className="py-1.5 pr-3">
-              {p.shipment ? (
-                <span title={`수입건 id=${p.shipment.id}`}>{p.shipment.hbl_no}</span>
-              ) : (
-                "—"
-              )}
-            </td>
-            <td className="py-1.5 pr-3">{p.supplier ?? "—"}</td>
-            <td className="py-1.5 pr-3 text-right font-medium">
-              {formatCostWon(p.unit_price_inc_vat)}
-            </td>
-            <td className="py-1.5 pr-3 text-right text-gray-500">
-              {formatCostWon(p.unit_price_ex_vat)}
-            </td>
-            {onDelete ? (
-              <td className="py-1.5 text-right">
-                <button
-                  className="text-xs text-red-600 hover:underline disabled:opacity-40"
-                  disabled={busy}
-                  onClick={() => onDelete(p.id)}
-                >
-                  해제
-                </button>
+        {material.prices.map((p: CostMaterialPrice) => {
+          const check = p.ledger_check;
+          const warn = ledgerCheckText(check);
+          return (
+            <tr
+              key={p.id}
+              className={`border-b last:border-0 ${warn ? "bg-amber-50" : ""}`}
+              data-testid={`price-row-${p.id}`}
+            >
+              <td className="py-1.5 pr-3">{p.effective_date ?? "—"}</td>
+              <td className="py-1.5 pr-3">{priceSourceLabel(p.source)}</td>
+              <td className="py-1.5 pr-3">
+                {p.shipment ? (
+                  <span title={`수입건 id=${p.shipment.id}`}>{p.shipment.hbl_no}</span>
+                ) : (
+                  "—"
+                )}
               </td>
-            ) : null}
-          </tr>
-        ))}
+              <td className="py-1.5 pr-3">{p.supplier ?? "—"}</td>
+              <td className="py-1.5 pr-3 text-right font-medium">
+                {formatCostWon(p.unit_price_inc_vat)}
+              </td>
+              <td className="py-1.5 pr-3 text-right text-gray-500">
+                {formatCostWon(p.unit_price_ex_vat)}
+              </td>
+              {/* ★재검사 칸 — 「보존된 값이 지금도 유효한가」. 이 칸이 없으면 낡은 값이
+                  「최신 확정 로트 단가」인 척 앉아 있는다(적대 리뷰 1R P1). */}
+              <td className="py-1.5 pr-3" data-testid={`price-check-${p.id}`}>
+                {warn ? (
+                  <span className="text-amber-800">
+                    {warn}
+                    <span className="block text-[11px] text-gray-600">{check.detail}</span>
+                    {check.ledger_unit_price_ex_vat ? (
+                      <span className="block text-[11px] text-gray-600">
+                        현 원장값(VAT 제외): {formatCostWon(check.ledger_unit_price_ex_vat)}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : (
+                  <span className="text-gray-500">{check?.label ?? "—"}</span>
+                )}
+              </td>
+              {onDelete || onRefresh ? (
+                <td className="py-1.5 text-right whitespace-nowrap">
+                  {warn && check.refreshable && onRefresh ? (
+                    <button
+                      className="text-xs text-blue-600 hover:underline disabled:opacity-40 mr-2"
+                      disabled={busy}
+                      onClick={() => onRefresh(p.id)}
+                    >
+                      갱신
+                    </button>
+                  ) : null}
+                  {onDelete ? (
+                    <button
+                      className="text-xs text-red-600 hover:underline disabled:opacity-40"
+                      disabled={busy}
+                      onClick={() => onDelete(p.id)}
+                    >
+                      해제
+                    </button>
+                  ) : null}
+                </td>
+              ) : null}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -227,7 +297,10 @@ export function MaterialList({
             <span data-testid={`material-${m.id}-latest`}>
               {formatCostWon(m.latest_price_inc_vat)}
             </span>
-            <span className="text-gray-400"> · {lotCountText(m)}</span>
+            <span className={m.stale_count > 0 ? "text-amber-700" : "text-gray-400"}>
+              {" "}
+              · {lotCountText(m)}
+            </span>
           </div>
           {onApprove && m.status !== "approved" ? (
             <button
@@ -291,7 +364,16 @@ export function LedgerMaterialLines({
           return (
             <tr key={r.line_id} className="border-b last:border-0" data-testid={`ledger-line-${r.line_id}`}>
               <td className="py-1.5 pr-3">{r.declaration_date ?? "—"}</td>
-              <td className="py-1.5 pr-3">{r.hbl_no}</td>
+              <td className="py-1.5 pr-3">
+                {r.hbl_no}
+                {/* ★확정이 풀린 수입건은 그렇다고 말한다 — 초판은 이 행을 목록에서 통째로
+                    빼서, 어긋났다는 사실이 화면에서 사라졌다(적대 리뷰 1R P1-1). */}
+                {r.shipment_status !== "confirmed" ? (
+                  <span className="block text-[11px] text-red-600">
+                    ⚠ 확정 해제됨({r.shipment_status}) — 원장이 단가를 지운 상태다
+                  </span>
+                ) : null}
+              </td>
               <td className="py-1.5 pr-3">{r.item_name}</td>
               <td className="py-1.5 pr-3 text-right">{r.quantity ?? "—"}</td>
               <td className="py-1.5 pr-3 text-right">{formatCostWon(r.unit_cost_inc_vat)}</td>
@@ -300,7 +382,16 @@ export function LedgerMaterialLines({
               </td>
               <td className="py-1.5 pr-3">
                 {r.linked_material_id ? (
-                  <span className="text-green-700">연결됨 · {r.linked_material_name}</span>
+                  ledgerCheckText(r.linked_price_check) ? (
+                    <span className="text-amber-800">
+                      연결됨 · {r.linked_material_name}
+                      <span className="block text-[11px]">
+                        {ledgerCheckText(r.linked_price_check)}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="text-green-700">연결됨 · {r.linked_material_name}</span>
+                  )
                 ) : (
                   <span className={r.suggestion.unmatched ? "text-red-600" : "text-amber-700"}>
                     {r.suggestion.unmatched ? "미매칭" : "미연결"}
@@ -478,6 +569,11 @@ export default function CostPage() {
                 <div className="text-xs text-gray-500 mt-0.5">
                   엑셀 대응: {excelLabelText(selected.excel_label)} · {lotCountText(selected)}
                 </div>
+                {latestPriceNote(selected) ? (
+                  <div className="text-xs text-amber-800 mt-1" data-testid="latest-price-note">
+                    {latestPriceNote(selected)}
+                  </div>
+                ) : null}
                 <div className="mt-2">
                   <MaterialPriceHistory
                     material={selected}
@@ -486,6 +582,12 @@ export default function CostPage() {
                       run(
                         () => deleteCostMaterialPrice(selected.id, priceId),
                         "단가 행을 해제했다",
+                      )
+                    }
+                    onRefresh={(priceId) =>
+                      run(
+                        () => refreshCostLedgerPrice(selected.id, priceId),
+                        "원장 현재값으로 갱신했다 (이전 값은 비고에 남는다)",
                       )
                     }
                   />
@@ -514,10 +616,11 @@ export default function CostPage() {
 
             <section>
               <h2 className="text-sm font-semibold text-gray-700">
-                원장 부자재 라인 (확정된 수입건)
+                원장 부자재 라인 (확정된 수입건 + 이미 연결된 라인)
               </h2>
               <div className="text-xs text-gray-500 mt-0.5">
-                제안은 제안이다 — 「연결」을 눌러야 단가 이력이 생긴다(확정은 사람).
+                제안은 제안이다 — 「연결」을 눌러야 단가 이력이 생긴다(확정은 사람). 이미 연결한
+                라인은 수입건의 확정이 풀려도 목록에 남는다 — 사라지면 어긋남이 안 보인다.
               </div>
               <div className="mt-2">
                 <LedgerMaterialLines

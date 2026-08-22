@@ -47,10 +47,12 @@ class MaterialIn(BaseModel):
 
 
 class MaterialPatch(BaseModel):
-    """부분 갱신. **주지 않은 필드는 안 건드린다** — `None`을 「비워라」로 읽지 않는다.
+    """부분 갱신. **주지 않은 필드는 안 건드린다**(라우터가 `exclude_unset=True`로 거른다).
 
-    (「값을 지워라」가 필요해지면 그때 명시적 표현을 만든다. 지금 `None`을 삭제로 읽으면
-    화면의 부분 저장이 다른 칸을 조용히 지운다.)
+    ★정확히 말하면(적대 리뷰 1R P2-7): 「보내지 않은 필드」와 「명시적으로 `null`을 보낸
+    필드」는 다르다 — 앞은 무시되고, **뒤는 실제로 그 칸을 비운다.** 초판 주석은 이 둘을 뭉쳐
+    *"None을 「비워라」로 읽지 않는다"*고 적었는데 그건 사실이 아니었다. 화면은 지금 명시적
+    `null`을 보내지 않으므로 동작은 그대로고, 고친 것은 **주석의 거짓말**이다.
     """
 
     name: Optional[str] = None
@@ -151,6 +153,26 @@ def link_price(material_id: int, body: LinkIn, db: Session = Depends(get_db)):
     db.commit()
     m = M.get_material(db, material_id)
     return {"linked_price_id": p.id, "material": M.material_payload(m, list(m.prices))}
+
+
+@router.post("/materials/{material_id}/prices/{price_id}/refresh")
+def refresh_price(material_id: int, price_id: int, db: Session = Depends(get_db)):
+    """어긋난 `ledger` 단가 행을 **원장 현재값으로 다시 맞춘다** (적대 리뷰 1R P1-2).
+
+    ★이게 없으면 원장이 스스로 고칠 길이 없다: 환율 정정 후 재확정으로 원장 값이 바뀌어도
+    저장 행은 옛 값 그대로이고, 다시 연결하려 하면 유일 제약 때문에 409였다.
+    ★품목이 달라진 행(rowid 재사용)은 **여기서 거부한다** — 갱신은 「같은 것의 새 값」을
+    옮기는 일이지 「다른 것」을 삼키는 일이 아니다. 그건 사람이 해제·재연결한다.
+    """
+    p, before = _guard(M.refresh_ledger_price, db, material_id, price_id)
+    db.commit()
+    m = M.get_material(db, material_id)
+    return {
+        "price_id": p.id,
+        # 갱신 «전» 판정을 함께 낸다 — 화면이 「무엇이 어긋나 있었나」를 말할 수 있어야 한다.
+        "was": M.check_payload(before),
+        "material": M.material_payload(m, list(m.prices)),
+    }
 
 
 @router.post("/materials/{material_id}/prices", status_code=201)

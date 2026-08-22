@@ -20,6 +20,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, cleanup, within } from "@testing-library/react";
 
+//   FE-7 재검사 자백(`ledger_check`) 렌더 삭제 → 낡은 값이 「최신」인 척 앉아 있는다
+//        (적대 리뷰 1R P1: reopen·값변경·삭제·rowid 재사용 넷의 공통 표면)
 import {
   LedgerMaterialLines,
   MaterialList,
@@ -27,17 +29,32 @@ import {
   ValuationBadge,
   excelLabelText,
   formatCostWon,
+  latestPriceNote,
+  ledgerCheckText,
   lotCountText,
   materialStatusLabel,
   valuationBadgeText,
 } from "./CostPage";
 import type {
+  CostLedgerCheck,
   CostLedgerMaterialLine,
   CostMaterial,
   CostSetting,
 } from "../lib/api";
 
 afterEach(cleanup);
+
+const OK_CHECK: CostLedgerCheck = {
+  status: "ok",
+  ok: true,
+  label: "원장과 일치",
+  detail: "원장 라인이 지금도 확정 상태이고 값·품목이 저장값과 같다.",
+  counts_as_evidence: true,
+  refreshable: true,
+  ledger_unit_price_ex_vat: "190.82",
+  ledger_unit_price_inc_vat: "209.90",
+  ledger_item_name: "cleaning kits",
+};
 
 // ── prod 실측값 (2026-08-22, `GET /api/import-cost/shipments/{1,2}`) ──
 //    id=1 SETR2608170216 통관 2026-08-18 → 190.82 / 209.90
@@ -55,6 +72,7 @@ const KIT: CostMaterial = {
   note: null,
   lot_count: 2,
   price_count: 2,
+  stale_count: 0,
   latest_price_ex_vat: "190.82",
   latest_price_inc_vat: "209.90",
   latest_price_source: "ledger",
@@ -64,6 +82,8 @@ const KIT: CostMaterial = {
       material_id: 1,
       source: "ledger",
       import_invoice_line_id: 15,
+      linked_item_name: "cleaning kits",
+      linked_shipment_id: 1,
       supplier: "SHENZHEN OTAO TECHNOLOGY LIMITED",
       unit_price_ex_vat: "190.82",
       unit_price_inc_vat: "209.90",
@@ -76,12 +96,15 @@ const KIT: CostMaterial = {
         item_name: "cleaning kits",
         quantity: "2400.000",
       },
+      ledger_check: OK_CHECK,
     },
     {
       id: 12,
       material_id: 1,
       source: "ledger",
       import_invoice_line_id: 17,
+      linked_item_name: "cleaning kits",
+      linked_shipment_id: 2,
       supplier: "SHENZHEN OTAO TECHNOLOGY CO L",
       unit_price_ex_vat: "178.78",
       unit_price_inc_vat: "196.66",
@@ -94,6 +117,11 @@ const KIT: CostMaterial = {
         item_name: "cleaning kits",
         quantity: "12000.000",
       },
+      ledger_check: {
+        ...OK_CHECK,
+        ledger_unit_price_ex_vat: "178.78",
+        ledger_unit_price_inc_vat: "196.66",
+      },
     },
   ],
 };
@@ -102,11 +130,27 @@ const EMPTY_KIT: CostMaterial = {
   ...KIT,
   lot_count: 0,
   price_count: 0,
+  stale_count: 0,
   latest_price_ex_vat: null,
   latest_price_inc_vat: null,
   latest_price_source: null,
   prices: [],
 };
+
+/** 어긋난 연결 1건만 가진 종 — 「최신 단가」가 **비어야** 하는 상태(적대 리뷰 1R P1-1). */
+function staleKit(check: Partial<CostLedgerCheck>): CostMaterial {
+  const c: CostLedgerCheck = { ...OK_CHECK, ok: false, counts_as_evidence: false, ...check };
+  return {
+    ...KIT,
+    lot_count: 0,
+    price_count: 1,
+    stale_count: 1,
+    latest_price_ex_vat: null,
+    latest_price_inc_vat: null,
+    latest_price_source: null,
+    prices: [{ ...KIT.prices[0], ledger_check: c }],
+  };
+}
 
 function ledgerRow(over: Partial<CostLedgerMaterialLine> = {}): CostLedgerMaterialLine {
   return {
@@ -122,6 +166,8 @@ function ledgerRow(over: Partial<CostLedgerMaterialLine> = {}): CostLedgerMateri
     linked_material_id: null,
     linked_material_name: null,
     linked_price_id: null,
+    shipment_status: "confirmed",
+    linked_price_check: null,
     suggestion: {
       line_id: 15,
       item_name: "cleaning kits",
@@ -164,9 +210,11 @@ describe("materialStatusLabel / lotCountText / excelLabelText — 자백 문구"
   });
 
   it("★로트 수를 말한다 — 표본 부족을 숨기지 않는다(계약 §9-5)", () => {
-    expect(lotCountText({ lot_count: 2, price_count: 2 })).toBe("로트 2건");
-    expect(lotCountText({ lot_count: 2, price_count: 3 })).toBe("로트 2건 · 수동 1건");
-    expect(lotCountText({ lot_count: 0, price_count: 0 })).toContain("단가 없음");
+    expect(lotCountText({ lot_count: 2, price_count: 2, stale_count: 0 })).toBe("로트 2건");
+    expect(lotCountText({ lot_count: 2, price_count: 3, stale_count: 0 })).toBe(
+      "로트 2건 · 수동 1건",
+    );
+    expect(lotCountText({ lot_count: 0, price_count: 0, stale_count: 0 })).toContain("단가 없음");
   });
 
   it("★엑셀 대응이 비면 「미확정」이라고 자백한다 (FE-6 · 계약 §9-3)", () => {
@@ -357,5 +405,146 @@ describe("평가방법 배지 — 시스템이 스스로 미확인을 자백한�
     );
     expect(screen.getByText(/신고 내역 미확인/)).toBeTruthy();
     expect(screen.getByText(/⚠/)).toBeTruthy();
+  });
+});
+
+// ══════════════ 재검사 자백 — 적대 리뷰 1R P1의 표면 ══════════════
+//
+// ★재는 것은 하나다: **어긋난 단가가 아무 말 없이 「최신」 자리에 앉아 있지 않는가.**
+// 네 갈래(reopen · 값 변경 · 삭제 · rowid 재사용)는 백엔드가 판정하고, 화면은 그 판정을
+// 사람이 읽을 수 있게 내놓는지가 여기서 결정된다.
+describe("lotCountText / latestPriceNote — 「왜 최신 단가가 비었나」를 말한다", () => {
+  it("★어긋난 연결을 따로 센다 — 침묵하면 「단가가 왜 없지?」가 결함 조사로 번진다", () => {
+    expect(lotCountText({ lot_count: 1, price_count: 2, stale_count: 1 })).toContain(
+      "원장과 어긋난 연결 1건",
+    );
+    expect(lotCountText({ lot_count: 1, price_count: 3, stale_count: 1 })).toContain("수동 1건");
+  });
+
+  it("★전부 어긋나면 「최신 단가 없음」의 이유를 말한다 (0원이 아니라 «근거가 없다»)", () => {
+    const t = latestPriceNote({ lot_count: 0, price_count: 1, stale_count: 1 })!;
+    expect(t).toContain("최신 단가 없음");
+    expect(t).toContain("어긋나");
+  });
+
+  it("일부만 어긋나면 «뺐다»고 말하되 이력엔 남아 있음을 밝힌다", () => {
+    const t = latestPriceNote({ lot_count: 1, price_count: 2, stale_count: 1 })!;
+    expect(t).toContain("뺐다");
+    expect(t).toContain("이력");
+  });
+
+  it("어긋남이 없으면 잔소리하지 않는다 — 늘 뜨는 경고는 안 읽힌다", () => {
+    expect(latestPriceNote({ lot_count: 2, price_count: 2, stale_count: 0 })).toBeNull();
+    expect(ledgerCheckText(OK_CHECK)).toBeNull();
+    expect(ledgerCheckText(null)).toBeNull();
+  });
+});
+
+describe("★MaterialPriceHistory — 어긋난 행이 «스스로 자백»한다 (FE-7)", () => {
+  it("①reopen: 「수입건 확정 해제됨」과 그 사유가 값 옆에 그려진다", () => {
+    const m = staleKit({
+      status: "unconfirmed",
+      label: "수입건 확정 해제됨",
+      detail: "수입건이 확정 상태가 아니다(status=draft) — 원장은 그때 단가를 지웠다.",
+      refreshable: false,
+    });
+    render(<MaterialPriceHistory material={m} />);
+    const cell = screen.getByTestId("price-check-11");
+    expect(within(cell).getByText(/수입건 확정 해제됨/)).toBeTruthy();
+    expect(within(cell).getByText(/원장은 그때 단가를 지웠다/)).toBeTruthy();
+    // 값 자체는 남는다 — 근거 보존이 이 테이블의 존재 이유다
+    expect(screen.getByText("190.82원")).toBeTruthy();
+  });
+
+  it("②값 변경: 저장값과 «현 원장값»이 나란히 보이고 「갱신」이 열린다", () => {
+    const onRefresh = vi.fn();
+    const m = staleKit({
+      status: "changed",
+      label: "원장 값이 달라졌다",
+      detail: "저장값 190.82 / 현 원장값 198.91 (VAT 제외) — 원장이 재계산됐다.",
+      refreshable: true,
+      ledger_unit_price_ex_vat: "198.91",
+    });
+    render(<MaterialPriceHistory material={m} onRefresh={onRefresh} />);
+    const cell = screen.getByTestId("price-check-11");
+    expect(within(cell).getByText(/원장 값이 달라졌다/)).toBeTruthy();
+    expect(within(cell).getByText(/198.91원/)).toBeTruthy();
+    const row = screen.getByTestId("price-row-11");
+    within(row).getByRole("button", { name: "갱신" }).click();
+    expect(onRefresh).toHaveBeenCalledWith(11);
+  });
+
+  it("③삭제: 고아 행이 「원장 라인 없음」으로 보이고 「갱신」 버튼은 없다", () => {
+    const m = staleKit({
+      status: "missing",
+      label: "원장 라인 없음",
+      detail: "이 단가가 나온 원장 라인이 지금은 없다 — 해제하고 다시 연결한다.",
+      refreshable: false,
+    });
+    render(<MaterialPriceHistory material={m} onRefresh={() => {}} onDelete={() => {}} />);
+    expect(within(screen.getByTestId("price-check-11")).getByText(/원장 라인 없음/)).toBeTruthy();
+    const row = screen.getByTestId("price-row-11");
+    expect(within(row).queryByRole("button", { name: "갱신" })).toBeNull();
+    expect(within(row).getByRole("button", { name: "해제" })).toBeTruthy();  // 처분 경로는 있다
+  });
+
+  it("④rowid 재사용: 「다른 품목을 가리킨다」가 보이고 갱신으로 삼킬 수 없다", () => {
+    const m = staleKit({
+      status: "item_mismatch",
+      label: "다른 품목을 가리킨다",
+      detail:
+        "연결 당시 품목은 「cleaning kits」인데 지금 그 라인은 「Glass_iP12promax」이다 — id가 재사용됐다.",
+      refreshable: false,
+    });
+    render(<MaterialPriceHistory material={m} onRefresh={() => {}} />);
+    const cell = screen.getByTestId("price-check-11");
+    expect(within(cell).getByText(/다른 품목을 가리킨다/)).toBeTruthy();
+    expect(within(cell).getByText(/Glass_iP12promax/)).toBeTruthy();
+    expect(
+      within(screen.getByTestId("price-row-11")).queryByRole("button", { name: "갱신" }),
+    ).toBeNull();
+  });
+
+  it("정상 행엔 경고가 없다 — 늘 노란 화면은 아무것도 못 말한다", () => {
+    render(<MaterialPriceHistory material={KIT} />);
+    expect(screen.queryByText(/⚠/)).toBeNull();
+    expect(within(screen.getByTestId("price-check-11")).getByText("원장과 일치")).toBeTruthy();
+  });
+});
+
+describe("★원장 라인 목록 — 확정이 풀린 건도 사라지지 않는다 (적대 리뷰 1R P1-1)", () => {
+  it("「확정 해제됨」이 그려진다 — 목록에서 빠지면 어긋남이 화면에서 통째로 사라진다", () => {
+    render(
+      <LedgerMaterialLines
+        rows={[
+          ledgerRow({
+            shipment_status: "draft",
+            linked_material_id: 1,
+            linked_material_name: "cleaning kit",
+            linked_price_id: 11,
+            linked_price_check: {
+              ...OK_CHECK,
+              status: "unconfirmed",
+              ok: false,
+              counts_as_evidence: false,
+              label: "수입건 확정 해제됨",
+              refreshable: false,
+            },
+          }),
+        ]}
+        materials={[KIT]}
+        onLink={() => {}}
+      />,
+    );
+    const row = screen.getByTestId("ledger-line-15");
+    // 수입건 칸: 「이 로트는 지금 확정이 아니다」
+    expect(within(row).getByText(/확정 해제됨\(draft\)/)).toBeTruthy();
+    // 상태 칸: 「그래서 붙어 있는 단가가 어긋났다」 — 둘은 다른 사실이고 둘 다 필요하다
+    expect(within(row).getByText(/⚠ 수입건 확정 해제됨/)).toBeTruthy();
+  });
+
+  it("확정 상태면 그 경고를 안 그린다", () => {
+    render(<LedgerMaterialLines rows={[ledgerRow()]} materials={[KIT]} onLink={() => {}} />);
+    expect(screen.queryByText(/확정 해제됨/)).toBeNull();
   });
 });
