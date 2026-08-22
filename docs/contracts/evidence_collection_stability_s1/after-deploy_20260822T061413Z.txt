@@ -1,0 +1,126 @@
+════ 수집 안정화 S1 라이브 증거 — after-deploy ════
+수집 시각(UTC): 20260822T061413Z
+수집 시각(KST): 2026-08-22 15:14:13 KST
+로컬 HEAD     : af518754 (worktree-collection-stability-s1)
+
+── ③ CDP 로그인 탭 실존 (page 타겟 ≥1이어야 합격) ──
+  CDP 9222: page 1개
+      https://m-wing.coupang.com/tenants/business-insight/sales-analysis?start_date=2026-08-16&end_date=2026-08-22
+  CDP 9223: page 0개
+  CDP 9224: 접속 불가 (URLError)
+  CDP 9225: page 3개
+      https://loginca.ecount.com/ec5/view/erp?w_flag=1&ec_req_sid=CA-ETleR_GdWmFVv
+      https://chatgpt.com/?utm_source=google&utm_medium=paid_search&gbraid=0AAAAA-I0E5fYDcncDyAkJN0dqzNIQxkJO&gclid=EAIaIQobCh
+      chrome://settings/downloads
+
+── ⑦ repo ↔ Mac 가동본 대조 (6개 전부 «차이 없음»이어야 합격) ──
+  차이없음  wing_browser_fetcher.py
+  차이없음  rocket_supplier_fetcher.py
+  차이없음  ad_cost_browser_fetcher.py
+  차이없음  ohitech_ad_fetcher.py
+  차이없음  scheduler_watchdog_poll.py
+  차이없음  promo_file_fetcher.py
+
+── launchd 데몬 ──
+67049	0	com.ohisell.adcost
+67505	0	com.ohisell.scheduler-watchdog
+67319	0	com.ohisell.rocket
+67398	0	com.ohisell.ohitech-ad
+67235	0	com.ohisell.wing2
+-	0	com.ohisell.vaultpull
+67156	0	com.ohisell.wing
+
+── prod: 새 컬럼이 갔는가 / alembic / 코드 반영 ──
+    컬럼: id account_key cookie_blob xsrf_token status last_error last_saved_at last_success_at created_at refresh_requested_at last_error_at claimed_at attempt_count last_error_kind 
+    alembic: cs1kind0a1b2 (head)
+    refresh_contract에 last_error_kind: 6
+    collection_status에 needs_login: 5
+
+── prod: 상태행 (①②④의 원장) ──
+  account_key             status  last_error_kind  err                                         last_error_at               req  n
+  ----------------------  ------  ---------------  ------------------------------------------  --------------------------  ---  -
+  COUPANG_ADS1            green                                                                                                 0
+  COUPANG_OHITECH_AD      green                                                                                                 0
+  COUPANG_ROCKET          green                                                                                                 0
+  COUPANG_ROCKET_FETCHER  green                                                                                                 0
+  COUPANG_WING1           red                      Wing 세션쿠키 만료(리다이렉트 302)                                                      0
+  COUPANG_WING2           red                      Wing 세션쿠키 만료(리다이렉트 302)                                                      0
+  COUPANG_WING_RG         green                    RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다). [재  2026-08-22 10:50:11.065130       3
+  COUPANG_WING_RG2        green                    RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다). [재  2026-08-22 10:49:33.390676       3
+  COUPANG_WING_VS         green                                                                                                 0
+  COUPANG_WING_VS2        green                                                                                                 0
+
+── ②⑤ collection-status 응답 (배너의 원천) ──
+  as_of: 2026-08-22T15:14:15.079466
+  ofix_sales     fresh        kind=None             age_h=4.388748568055555
+  ofix_ad        fresh        kind=None             age_h=4.4454054688888895
+  ohitech_ad     fresh        kind=None             age_h=4.406943093055555
+  supplier_hub   fresh        kind=None             age_h=4.404790200277778
+  rg_wing1       failed       kind=None             age_h=175.5536410213889
+  rg_wing2       failed       kind=None             age_h=175.5509102722222
+
+── ①④ Mac 페처 로그 꼬리 (오늘분, 사건만) ──
+  [wing]
+    2026-08-22 09:34:24,102 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 09:50:26,051 INFO 갱신 요청 감지 — fetch 시작
+    2026-08-22 09:50:55,959 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 09:51:01,081 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 09:51:01,082 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 09:54:01,475 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 09:54:16,884 INFO 갱신 요청 감지 — fetch 시작
+    2026-08-22 09:54:45,989 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 09:54:51,056 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 09:54:51,057 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 09:57:51,422 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 09:58:22,058 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 09:58:27,155 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 09:58:27,155 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:01:27,506 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 10:39:08,147 INFO 갱신 요청 감지 — fetch 시작
+    2026-08-22 10:39:37,870 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 10:39:43,540 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 10:39:43,541 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:42:43,829 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 10:43:14,490 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 10:43:19,530 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 10:43:19,532 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:46:19,916 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 10:46:35,287 INFO 갱신 요청 감지 — fetch 시작
+    2026-08-22 10:47:04,948 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 10:47:10,496 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 10:47:10,497 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:50:10,852 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 10:50:26,220 INFO 갱신 요청 감지 — fetch 시작
+    (참고) 오늘 「RG 세션 프로브 auth」 반복 횟수: 324
+  [wing2]
+    2026-08-22 09:27:21,877 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 09:30:22,204 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 09:30:52,907 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 09:30:58,368 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 09:30:58,369 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 09:33:58,800 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 09:50:16,886 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 09:50:22,036 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 09:50:22,037 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 09:53:22,383 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 09:53:53,056 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 09:53:57,992 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 09:53:57,993 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 09:56:58,290 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 09:57:29,121 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 09:57:34,154 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 09:57:34,155 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:00:34,511 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 10:39:15,376 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 10:39:20,447 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 10:39:20,448 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:42:20,690 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 10:42:51,392 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 10:42:56,543 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 10:42:56,544 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:45:56,853 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    2026-08-22 10:46:27,575 INFO RG 정산 다운로드 트리거(버튼)
+    2026-08-22 10:46:32,769 INFO RG 진입 프로브 auth — 로그인 필요(오리진 이탈 — url=https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth?response_type=code&client_)
+    2026-08-22 10:46:32,771 INFO RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 180초).
+    2026-08-22 10:49:33,153 ERROR RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).
+    (참고) 오늘 「RG 세션 프로브 auth」 반복 횟수: 324
