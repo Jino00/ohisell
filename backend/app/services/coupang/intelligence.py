@@ -1326,7 +1326,12 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     rg_settlement = {
         "summary": {
             "total": rg_total,
-            "has_data": len(rg_fees) > 0,
+            # ★적대 리뷰 2R 회귀 4(쌍둥이 칸): 아래 세 칸은 `account_sum`의 같은 뜻 칸과 **짝**인데
+            #   P1-2 수정이 한쪽만 고쳐서, 정산 원장 row가 없는 창에 **같은 화면**이
+            #   「🚧 RG 정산 비용(미반영) — 데이터 없음」 배너(이 칸)와 「RG정산 −4,550 · 판매일 축」
+            #   카드를 **동시에** 띄웠다. 차감이 일어났는지는 원장 row 유무가 아니라
+            #   **실제로 뺐는지**가 정한다 — P1-2와 같은 이유, 같은 규칙.
+            "has_data": len(rg_fees) > 0 or rg_deducted != _Z,
             "note": (
                 "RG 정산 비용 반영됨(계정 단위, D-14/D-CPP-43). "
                 "★정산 광고비는 광고센터 PA 광고비의 «공제»이므로 여기서 차감하지 않는다 — "
@@ -1334,10 +1339,18 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
                 "(광고유형 전부 PA · 캠페인 이름이 광고센터와 동일 · 미공제분은 다음 정산으로 이월). "
                 "정산주기 기준(부분 윈도우도 주기 전액)."
             ),
-            "flip_status": "applied_ex_ad" if len(rg_fees) > 0 else "not_applied_no_data",
+            "flip_status": (
+                "applied_ex_ad" if (rg_deducted != _Z or len(rg_fees) > 0)
+                else "not_applied_no_data"
+            ),
             # ★D-CPP-43: 실제 차감액은 **광고 제외분**이다(광고는 PA에서 이미 차감 — 이중계상 방지).
-            "deducted": rg_total - rg_ad_settlement,        # ★net_profit에서 실제 차감된 값
-            "non_ad_deducted": rg_total - rg_ad_settlement,  # 동일값(하위호환 유지)
+            # ★2026-08-22 판매일 축 전환: 「실제 차감된 값」은 이제 **축을 탄다.** 종전처럼
+            #   원장 값을 실으면 이 배너와 순이익 카드가 **한 화면에서 서로 다른 차감액**을
+            #   말한다(2R 실측: 배너 30,000 vs 카드 23,766.67). 이름이 「실제 차감」이면
+            #   실제 차감을 실어야 한다 — 원장 값은 아래 `non_ad_deducted`가 그대로 보존한다.
+            "deducted": rg_deducted,                        # ★net_profit에서 실제 차감된 값
+            "axis": "sales_date" if _sd_ok else "recognition_date",
+            "non_ad_deducted": rg_ledger_deducted,           # 원장 축(정산 인식일) 광고 제외분 — 대조용
             "ad_settlement": rg_ad_settlement,      # 정산 광고비 = PA 공제분. **차감 안 함**(표시 전용)
             "ad_xlsx_rg_overlap": rg_ad_xlsx_overlap,  # 광고비 XLSX의 RG(2P)분(현재 0, 미래 겹침 감시용)
         },

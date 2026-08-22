@@ -74,10 +74,16 @@ export function rgFeeNote(f: RgFeeFacts): RowNote | null {
 
   const cov = f.coverage == null ? null : num(f.coverage);
   if (cov != null && cov < 1) {
-    parts.push(`단가 커버리지 ${(cov * 100).toFixed(1)}%`);
+    parts.push(`비용 커버리지 ${(cov * 100).toFixed(1)}%`);
     const un = num(f.unmappedRevenue);
     if (un > 0) {
-      why.push(`단가를 모르는 옵션의 매출 ${won(un)}은 물류비를 0으로 «채우지 않았다» — 그만큼 이 공제는 하한이다.`);
+      // ★사유를 두 갈래로 적는다(적대 리뷰 2R P2): 이 금액엔 ①단가를 모르는 옵션과
+      //   ②옵션축에 아예 없는 매출(요약축에만 있는 날)이 **함께** 들어온다. 종전 문구는
+      //   ①만 말해서 금액은 맞는데 사유가 틀렸다.
+      why.push(
+        `매출 ${won(un)}에는 이 방식이 비용을 못 붙였다(단가를 모르는 옵션 또는 옵션축이 비어 있는 날) — ` +
+          "그 몫을 0으로 «채우지 않았다». 그만큼 이 공제는 하한이다.",
+      );
     }
   }
 

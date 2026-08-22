@@ -85,7 +85,7 @@ describe("Dashboard 채널 요약표 — RG 정산공제 자백 칸", () => {
     // 한 <div>의 텍스트 노드 하나에 " · "로 이어 붙는다(rgSettlementAxis.ts의 rgFeeNote).
     const note = screen.getByText((content) => content.includes("판매일 축") && content.includes("요율"));
     expect(note.textContent).toContain("10.50%");
-    expect(note.textContent).toContain("단가 커버리지 90.0%");
+    expect(note.textContent).toContain("비용 커버리지 90.0%");
     expect(note.textContent).toContain("장부대조 −500원");
   });
 
@@ -152,6 +152,21 @@ describe("CommandCenter 순이익 카드 — rg_settlement_axis 분기", () => {
     await waitFor(() => expect(screen.getByText(/RG정산/)).toBeTruthy());
     expect(screen.getAllByText(/정산 인식일 축/).length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText(/판매일 축/)).toBeNull();
+  });
+
+  // M5(★표면 변이, 위임 세션 2026-08-23): CommandCenter.tsx 순이익 카드 sub의
+  //   `−${won(s.rg_settlement_deducted ...)}` 금액 부분만 지우고 라벨·축 문구는 남기는 변이.
+  //   위 두 테스트는 "판매일 축"/"정산 인식일 축" 문구의 «개수»만 세므로(sub·note 두 곳) 이
+  //   변이엔 안 죽는다 — sub의 라벨이 살아 있으면 개수는 그대로 2다. 금액 «숫자» 자체가
+  //   DOM에 실제로 찍히는지를 봐야 이 변이를 잡는다.
+  it("sub에 실제 차감 금액이 «숫자로» 찍힌다 — 라벨만 남고 금액이 지워지면 안 된다", async () => {
+    h.overview = makeOverview("sales_date");
+    render(<CommandCenter />);
+    await waitFor(() => expect(screen.getByText(/RG정산/)).toBeTruthy());
+    // sub 문구는 "RG정산 −250,000원(광고 제외, 판매일 축)"로 시작한다(note는 "판매일 축"으로
+    // 시작해 겹치지 않는다) — 이 접두어로 sub 텍스트 노드를 특정한다.
+    const sub = screen.getByText((content) => content.startsWith("RG정산"));
+    expect(sub.textContent).toContain("250,000원");
   });
 });
 

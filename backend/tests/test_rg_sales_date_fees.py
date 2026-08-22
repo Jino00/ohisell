@@ -664,3 +664,149 @@ def test_rg_settlement_axis_falls_back_when_rate_unknown_in_command_center(db):
     assert s["rg_fee_basis"] == "rate_unknown"
     assert s["rg_settlement_axis"] == "recognition_date", \
         "요율을 못 재면 판매일 축을 내면 안 된다 — 항상 sales_date이면 안 된다"
+
+
+# ════════════════════════════════════════════════
+# 13. 2R NEW P1 변이 5종 보강 (2026-08-23, 위임 세션)
+#
+# 적대 리뷰 2R이 보고: 우연코드 P1 2건(커버리지 분모 «화면이 싣는 매출» · flip_status
+# «실제 차감 기준»)을 고치면서 추가된 테스트는 0건이었고, 그 3줄(rg_channel_pnl.py 호출부 1줄·
+# intelligence.py 호출부 1줄·intelligence.py flip_status 1줄)에 대한 5종 변이가 전건 생존했다.
+# 아래 4개(M1·M2·M3/M4·M6)가 백엔드 몫이다. M5(프론트 표면)는 rgSettlementAxisSurface.test.tsx.
+# ════════════════════════════════════════════════
+
+def test_compute_rg_summary_row_wires_revenue_reference_into_coverage(db):
+    """M1 — `rg_channel_pnl.compute_rg_summary_row`의 «호출부 제거» — `sales_date_fees(...)`에
+    `revenue_reference=revenue`를 안 넘기면(함수 자체는 그대로 살아 있다) 빨개진다.
+
+    옵션축(60,000, 전부 단가 앎)이 요약축(100,000)보다 작은 창을 심는다. 호출부가
+    `revenue_reference`를 넘기면 분모가 100,000이 되어 커버리지 60%·게이트 미달로
+    원장 축 폴백이 나온다. 인자를 빼면 분모가 옵션축 자기 자신(60,000)이 되어 커버리지가
+    거짓으로 100%가 되고 §4 ⓔ 게이트가 침묵한다 — 적대 리뷰 1R P1-1이 잡았던 바로 그 결손이
+    호출부만 지워도 재발한다는 것을 이 테스트가 보인다.
+    """
+    win = (date(2026, 8, 15), date(2026, 8, 15))
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_summary(db, date(2026, 8, 3), 100_000, 10)   # 완결 주기 요율 8%
+
+    _seed_option_fee(db, "RG1", "delivery", 500, 5, dfrom=date(2026, 8, 8), dto=date(2026, 8, 14))
+    _seed_summary(db, win[0], 100_000, 10)              # 요약축(호출부가 화면에 싣는 매출)
+    _seed_option(db, win[0], "RG1", 60_000, 6)          # 옵션축 — 요약축보다 작다(전부 단가는 앎)
+    db.commit()
+
+    row = compute_rg_summary_row(db, ACC, *win, _cost_master(db), VENDOR)
+    assert Decimal(row["fee_coverage"]) == Decimal("0.6000"), \
+        "분모가 요약축(100,000)이어야 60%가 나온다 — 옵션축(60,000)만 쓰면 100%로 거짓 완전해진다"
+    assert row["commission_axis"] == "recognition_date", \
+        "커버리지 60%는 임계(95%) 미달이라 판매일 축을 내면 안 된다"
+    assert row["fee_unmapped_revenue"] == "40000"
+
+
+def test_compute_command_center_wires_revenue_reference_into_coverage(db):
+    """M2 — `intelligence.compute_command_center`의 «호출부 제거» — `sales_date_fees(...)`에
+    `revenue_reference=_rg_rev_ref`를 안 넘기면 빨개진다. M1과 같은 시드·같은 결손을
+    종합조망 진입점에서 검사한다 — D-CPP-47이 고쳤던 「두 화면이 같은 계정을 다른 금액으로
+    잰다」 병이 이 두 호출부 중 하나만 지워져도 재발한다.
+    """
+    win = (date(2026, 8, 15), date(2026, 8, 15))
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_summary(db, date(2026, 8, 3), 100_000, 10)
+
+    _seed_option_fee(db, "RG1", "delivery", 500, 5, dfrom=date(2026, 8, 8), dto=date(2026, 8, 14))
+    _seed_summary(db, win[0], 100_000, 10)
+    _seed_option(db, win[0], "RG1", 60_000, 6)
+    db.commit()
+
+    cc = compute_command_center(db, *win, account=ACC)
+    s = cc["account"]["summary"]
+    assert s["rg_fee_coverage"] == Decimal("0.6"), \
+        "종합조망도 같은 분모(요약축 100,000)를 써야 한다"
+    assert s["rg_settlement_axis"] == "recognition_date", \
+        "종합조망도 같은 규칙 — 커버리지 60%(임계 미달)면 원장 축으로 물러서야 한다"
+    assert s["rg_fee_unmapped_revenue"] == Decimal("40000")
+
+
+def test_sales_date_fees_denominator_uses_revenue_reference(db):
+    """M3 — `sales_date_fees`가 `revenue_reference`를 인자로 받되 분모 계산에서 무시하면
+    (`denom`이 항상 `revenue_total`이면) 빨개진다.
+
+    옵션축(60,000, 전부 단가 앎)보다 큰 요약축(100,000)을 직접 넘긴다. denom이
+    `revenue_reference`를 반영하면 커버리지는 60%(100,000분의 60,000)여야 한다 —
+    revenue_total(60,000)로만 나누면 옵션축이 자기 자신과 나뉘어 거짓으로 100%가 나온다.
+    """
+    _seed_option_fee(db, "RG1", "delivery", 500, 5)   # 100원/개
+    _seed_option(db, date(2026, 8, 15), "RG1", 60_000, 6)
+    db.commit()
+
+    fees = sales_date_fees(db, ACC, date(2026, 8, 15), date(2026, 8, 15),
+                           revenue_reference=Decimal("100000"), reconcile=False)
+    assert fees["revenue_total"] == Decimal("60000")
+    assert fees["revenue_priced"] == Decimal("60000")
+    assert fees["coverage"] == Decimal("0.6"), \
+        "denom이 revenue_reference(100,000)를 반영해야 한다 — revenue_total(60,000)로 재면 1.0이 나온다"
+
+
+def test_unmapped_revenue_counts_axis_gap_beyond_unpriced_options(db):
+    """M4 — `sales_date_fees`의 `unmapped_revenue` 재계산 블록
+    (`if revenue_reference is not None: unmapped_revenue = max(ZERO, denom - revenue_priced)`)이
+    삭제되면 빨개진다.
+
+    두 종류의 결손을 함께 심는다: ①옵션축 «안»에 있지만 단가를 모르는 옵션(UNK, 10,000)
+    ②옵션축에 아예 없는 매출(요약축에만 있는 몫 — revenue_reference 100,000 중 옵션축 합
+    70,000을 넘는 30,000). 블록이 복원해야 하는 것은 **둘의 합(40,000)**이다 — 옵션 루프만
+    남으면(블록이 삭제되면) ①(10,000)만 자백되고 ②는 조용히 사라진다.
+    """
+    _seed_option_fee(db, "RG1", "delivery", 500, 5)   # 100원/개
+    _seed_option(db, date(2026, 8, 15), "RG1", 60_000, 6)     # 단가 앎
+    _seed_option(db, date(2026, 8, 15), "UNK", 10_000, 1)     # 단가 모름(옵션축 안 결손 ①)
+    db.commit()
+
+    fees = sales_date_fees(db, ACC, date(2026, 8, 15), date(2026, 8, 15),
+                           revenue_reference=Decimal("100000"), reconcile=False)
+    assert fees["revenue_total"] == Decimal("70000")
+    assert fees["revenue_priced"] == Decimal("60000")
+    assert fees["unmapped_revenue"] == Decimal("40000"), \
+        "옵션축 안 결손(10,000) + 옵션축 밖 결손(30,000) = 40,000이어야 한다 — " \
+        "루프만 남으면(블록 삭제) 10,000만 남는다"
+
+
+def test_flip_status_reflects_actual_deduction_not_ledger_row_presence(db):
+    """M6 — `intelligence.py`의 `rg_flip_status`가 `len(rg_fees) > 0`(정산 원장 row의 유무)으로
+    되돌아가면 빨개진다. `rg_settlement.summary`의 `has_data`·`flip_status`·`deducted`도
+    같은 규칙을 따라야 한다(2R 회귀4 「쌍둥이 칸」 — 하나만 고치면 같은 화면이 서로 다른
+    차감 여부를 말한다).
+
+    주기 롤오버 시나리오: 요율·단가는 «옛 완결 주기»(08-01~08-14)에서 왔고, 조회 창(08-15)에
+    겹치는 정산 원장 row는 **0건**이다(`rg_fees` 비어 있음). 그런데 판매일 축은 옛 요율·단가로
+    여전히 값을 낸다(`rg_deducted=4,550`). 실제로 차감했으면 원장 row가 없어도 「반영됨」이라고
+    말해야 한다 — 원장 row 유무가 아니라 **실제 차감 여부**가 기준이다(적대 리뷰 1R P1-2).
+    """
+    win = (date(2026, 8, 15), date(2026, 8, 15))
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_summary(db, date(2026, 8, 3), 100_000, 10)   # 완결 주기 요율 8%
+    _seed_option_fee(db, "RG1", "delivery", 500, 5, dfrom=date(2026, 8, 8), dto=date(2026, 8, 14))
+
+    # 조회 창(08-15) — 겹치는 정산 원장 row는 하나도 없다. 그런데 판매는 있었다.
+    _seed_summary(db, win[0], 50_000, 5)
+    _seed_option(db, win[0], "RG1", 50_000, 5)
+    db.commit()
+
+    cc = compute_command_center(db, *win, account=ACC)
+    s = cc["account"]["summary"]
+    rg = cc["rg_settlement"]["summary"]
+
+    assert s["rg_settlement_axis"] == "sales_date", \
+        "이 창은 요율·단가를 둘 다 알아 판매일 축을 낼 수 있어야 한다"
+    deducted = s["rg_settlement_deducted"]
+    assert deducted == Decimal("4550"), "물류비 550 + 수수료 4,000 + 기간비용 0"
+
+    assert s["rg_flip_status"] == "applied_ex_ad", \
+        "원장 row 유무가 아니라 실제 차감 여부(rg_deducted != 0)로 판정해야 한다"
+    assert rg["flip_status"] == "applied_ex_ad"
+    assert rg["has_data"] is True, "차감이 일어났으면 has_data도 True여야 한다(쌍둥이 칸)"
+    assert rg["deducted"] == deducted, \
+        "rg_settlement.summary.deducted는 account_sum.rg_settlement_deducted와 같은 값이어야 한다"
+    # 원장 축 값(non_ad_deducted)은 이 창에 겹치는 원장이 없으므로 0이다 — 판매일 축 값(위)과
+    # 실제로 분리돼 있는지 확인한다(둘을 합쳐 하나로 되돌리면 이 부등식이 깨진다).
+    assert rg["non_ad_deducted"] == _Z
+    assert deducted != rg["non_ad_deducted"]

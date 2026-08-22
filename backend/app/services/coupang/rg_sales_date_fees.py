@@ -354,12 +354,22 @@ def sales_date_fees(
 
     # ★커버리지의 분모 — 호출부가 화면에 싣는 매출이 있으면 **그것**으로 잰다(위 docstring ★).
     #   두 축이 어긋난 만큼이 그대로 「비용을 못 붙인 매출」이 되어 게이트에 걸린다.
-    denom = revenue_reference if revenue_reference is not None else revenue_total
+    # ★`max`인 이유(적대 리뷰 2R NEW P1): 요약축만 분모로 쓰면 **옵션축이 더 큰 창**에서
+    #   커버리지가 1을 넘고(예 1.25) 게이트가 열리는데, 그 창에도 단가를 모르는 옵션은 그대로
+    #   있어서 물류비는 0으로 채워진다 — 그런데 `unmapped_revenue`는 `max(0, 분모−priced)`라
+    #   0이 되고, 프론트는 `cov < 1`일 때만 커버리지를 표시하므로 **화면에 자백이 한 줄도 안 뜬다.**
+    #   구코드가 닫던 게이트를 신코드가 여는 회귀였다. 두 축 중 **큰 쪽**을 분모로 세우면
+    #   어느 쪽에 결손이 있든 커버리지가 떨어진다.
+    denom = (
+        max(revenue_reference, revenue_total)
+        if revenue_reference is not None
+        else revenue_total
+    )
     coverage = (revenue_priced / denom) if denom > 0 else None
     if revenue_reference is not None:
-        # 요약축이 옵션축보다 크면 그 차액도 «못 붙인 매출»이다 — 그 매출의 비용은 0으로 갔다.
-        # 반대(옵션축이 더 큼)는 여기서 음수로 만들지 않는다: 자백 칸은 「못 붙인 몫」이지
-        # 두 축의 부호 있는 차이가 아니고, 그 진단은 `revenue_reconcile`의 몫이다.
+        # 「이 방식이 비용을 못 붙인 매출」 = 분모(두 축 중 큰 쪽) − 단가를 아는 매출.
+        # 두 종류가 여기 함께 들어온다: ①옵션축에 있는데 단가를 모르는 옵션 ②옵션축에 아예
+        # 없는 매출(요약축에만 있는 날). **둘 다 비용이 0으로 갔다**는 점에서 같다.
         unmapped_revenue = max(ZERO, denom - revenue_priced)
 
     out = {
