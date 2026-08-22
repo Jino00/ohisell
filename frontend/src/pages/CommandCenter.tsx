@@ -423,14 +423,17 @@ function Card({ label, value, sub }: { label: string; value: React.ReactNode; su
 //   `react-hooks/static-components`가 **사용처마다** 경고를 냈다(8건). 렌더마다 새 컴포넌트
 //   타입이 만들어져 React가 subtree를 통째로 재마운트하는 것도 실제 비용이다.
 //   행을 하나 더 붙일 때마다 lint 부채가 늘어나는 구조라, 이번에 행을 늘리면서 같이 없앤다.
-function ReconRow({ label, value, hint, gross }: {
-  label: string; value: string | null; hint: string; gross?: boolean;
+function ReconRow({ label, value, hint, warn }: {
+  label: string; value: string | null; hint: string; warn?: string;
 }) {
   return (
     <div className="flex items-baseline justify-between py-1.5 border-b border-indigo-100 last:border-0">
       <div>
         <span className="text-sm text-gray-700">{label}</span>
-        {gross && <span className="ml-1 text-xs text-indigo-400">(gross·취소 미차감)</span>}
+        {/* ★구 `gross` 표식(「gross·취소 미차감」)은 D-CPP-49로 사실이 아니게 됐다. 자리를
+            비우지 않고 «부분치 경고»로 바꾼다 — 값이 불완전할 수 있는 조건은 여전히 있고,
+            그때 아무 말도 안 하는 것이 종전 gross 오표기보다 나쁘다. */}
+        {warn && <span className="ml-1 text-xs text-amber-600" title={warn}>⚠ 부분치</span>}
         <div className="text-xs text-gray-400">{hint}</div>
       </div>
       <span className="text-sm font-semibold text-gray-900 tabular-nums">{won(value)}</span>
@@ -454,7 +457,20 @@ export function ReconciliationCard({ data }: { data: OverviewResponse }) {
           <div className="text-xs font-medium text-indigo-500 mb-1">매출 (쿠팡 [판매분석])</div>
           <Row label="매출 합계 (3P+RG)" value={s.revenue} hint="판매분석 · 전체 매출" />
           <Row label="ㄴ 마켓플레이스 3P" value={s.revenue_3p ?? "0"} hint="판매분석 · 마켓플레이스" />
-          <Row label="ㄴ 로켓그로스 RG" value={s.revenue_rg ?? "0"} hint="판매분석 · 로켓그로스" gross />
+          {/* ★D-CPP-49: RG 매출 원천이 gross 주문 원장 → 콘솔 net으로 바뀌었다(계약 ⓑ).
+              「(gross·취소 미차감)」 표식을 지우는 것이 이 변경의 표면 절반이다 — 값만 바꾸고
+              라벨을 두면 화면이 net을 gross라고 부르게 된다. */}
+          <Row
+            label="ㄴ 로켓그로스 RG"
+            value={s.revenue_rg ?? "0"}
+            hint={
+              "판매분석 · 로켓그로스 (콘솔 net)" +
+              (s.rg_option_axis_days ? ` · 옵션축 ${s.rg_option_axis_days}일` : "")
+            }
+            warn={s.rg_option_axis_complete === false
+              ? "옵션축이 이 기간을 다 덮지 못했다 — RG 매출은 부분치다(빈 날은 0원이 아니라 «미상»)."
+              : undefined}
+          />
         </div>
         <div>
           {/* ★광고센터 소스는 «광고주 단위»다 — 광고주 계정(오픽스)에만 적용된다.
@@ -492,7 +508,8 @@ export function ReconciliationCard({ data }: { data: OverviewResponse }) {
       {/* ★각주도 계정에 따라 갈라야 한다 — 미적용 계정에 「ALL로 차감 · 집행+비-PA로 분해」라
           적으면 위에서 고친 거짓 단정이 각주로 되살아난다(둘 다 그 계정엔 사실이 아니다). */}
       <p className="text-xs text-indigo-600 mt-2 bg-indigo-100 rounded px-2 py-1">
-        RG 매출은 주문 API 기준 <b>gross(취소 미차감)</b> — 쿠팡 판매분석의 net과 ~5% 차이는 기준 차이이며 계산 오류 아님(D-11).
+        RG 매출은 쿠팡 <b>판매분석 콘솔 net</b> 기준이다(D-CPP-49) — 아래 대시보드 「로켓그로스」 행과 같은 축이라 두 화면 숫자가 일치한다.
+        우리 gross 주문 원장(취소 미차감)과의 간극은 매출이 아니라 <b>수집 대조</b>로 아래 드리프트 표의 「gross 원장」 줄에서 본다.
         {a.ad_confirmed_applies === false ? (
           <> 이 계정은 쿠팡 <b>광고센터 보고서에 광고주로 잡히지 않아</b> 「전체 광고비(ALL)」·비-PA 분해가 없다 —
           순이익에서 차감되는 값은 <b>옵션축 실집행(PA)</b>이다(D-CPP-38).</>
@@ -611,7 +628,10 @@ function RevenueDriftCard({
             <tbody className="tabular-nums">
               {([
                 ["마켓플레이스 3P", reconcile.ours.revenue_3p, reconcile.official.gmv_3p, reconcile.drift.abs_3p, reconcile.drift.pct_3p],
-                ["로켓그로스 RG", reconcile.ours.revenue_rg, reconcile.official.gmv_rg, reconcile.drift.abs_rg, reconcile.drift.pct_rg],
+                ["로켓그로스 RG (net)", reconcile.ours.revenue_rg, reconcile.official.gmv_rg, reconcile.drift.abs_rg, reconcile.drift.pct_rg],
+                // ★매출이 아니라 «수집 대조» 줄이다. 라벨을 달리해 한 화면에 같은 이름의 두 값이
+                //   생기지 않게 한다(교훈 #235: 위쪽 단정이 아래쪽 사실을 덮는 사고).
+                ["ㄴ RG gross 원장 (수집 대조)", reconcile.ours.revenue_rg_gross ?? "0", reconcile.official.gmv_rg, reconcile.drift.abs_rg_gross ?? "0", reconcile.drift.pct_rg_gross ?? null],
                 ["합계", reconcile.ours.revenue_total, reconcile.official.gmv_total, reconcile.drift.abs_total, reconcile.drift.pct_total],
               ] as [string, string, number, string, string | null][]).map(([label, ours, official, abs, pct], i, arr) => (
                 <tr key={label} className={`border-b border-violet-100 ${i === arr.length - 1 ? "font-semibold" : ""}`}>
@@ -632,7 +652,9 @@ function RevenueDriftCard({
               <b> ⚠ 참고치 — 권위 판정은 계정 지정(오픽스/오하이테크) + 완전 적재일 때만(D-7).</b>
             )}
             <span className="block mt-0.5 text-violet-500">
-              알려진 잔차: 3P 잔여 stale 취소(D-5), RG gross-vs-net(우리 gross·쿠팡 net, D-11) — 계산 오류 아님.
+              알려진 잔차: 3P 잔여 stale 취소(D-5). ★RG 「net」 줄은 <b>우리도 콘솔 net</b>이라(D-CPP-49)
+              차이 0이 정상이고, 그 0은 「정합」이 아니라 <b>같은 숫자를 두 번 읽었다</b>는 뜻이다 —
+              수집 간극은 바로 아래 <b>「ㄴ RG gross 원장」</b> 줄이 잰다(구 D-11 신호).
             </span>
           </p>
         </>

@@ -134,6 +134,18 @@ def _agg_by_type(db: Session, dfrom: date, dto: date, acc: dict) -> dict[str, di
 
     기존 SA 재사용(원칙18-4): _agg_orders=3P(채널), _agg_rg_orders=RG(account_key).
     같은 vid가 3P·RG 양쪽이면 각각 보존(타입 팩터가 달라 분리 필수).
+
+    ★★여기 RG는 **gross가 맞다 — 바꾸지 말 것**(D-CPP-49 검토 결과).
+      종합조망(`compute_command_center`)과 손익 대조(`product_pnl`)는 콘솔 net 옵션축으로 옮겼는데
+      이 함수만 gross로 남은 것은 누락이 아니라 **판단**이다. 이 모듈에서 「우리 매출」은 두 가지로
+      쓰인다:
+        ① 닫힌일 — Wing net 정본을 옵션에 안분하는 **가중치**. 정본 금액 자체는 이미 net이라
+           가중치가 gross든 net이든 합계는 안 바뀌고, gross는 창 전체를 덮는다.
+        ② 당일분 — 콘솔은 **D+1**이라 오늘의 net이 원리적으로 존재하지 않는다. gross 주문 원장이
+           유일한 프록시다.
+      net으로 바꾸면 `factor_rg`가 ≈1이 되어 gross→net 환산이 죽고(정본화의 목적이 사라진다),
+      당일 RG 매출이 통째로 **0으로 사라진다**. 「일관성」을 이유로 여길 net으로 맞추는 것은
+      두 화면을 같게 만드는 대신 **오늘 매출을 지우는** 거래다.
     """
     p3 = intelligence._agg_orders(db, dfrom, dto, acc["channel_ids"])
     rg = intelligence._agg_rg_orders(db, dfrom, dto, acc["account_key"])

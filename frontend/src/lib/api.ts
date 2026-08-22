@@ -85,10 +85,18 @@ export interface RevenueReconcile {
     days_with_data: number;
     last_refresh: string | null;
   } | null;
-  ours: { revenue_3p: string; revenue_rg: string; revenue_total: string } | null;
+  // revenue_rg_gross = 우리 gross 주문 원장(수집 대조용 진단값 — 매출 아님, D-CPP-49).
+  ours: {
+    revenue_3p: string; revenue_rg: string; revenue_total: string;
+    revenue_rg_gross?: string;
+  } | null;
+  // RG 행이 «같은 축끼리의 비교»가 됐음을 알리는 플래그 — 드리프트 0을 「정합」으로 오독하지 않게.
+  rg_same_axis?: boolean;
   drift: {
     abs_3p: string; abs_rg: string; abs_total: string;
     pct_3p: string | null; pct_rg: string | null; pct_total: string | null;
+    // ★우리 gross 원장 vs 콘솔 net — 구 `*_rg`가 재던 수집 간극을 이어받은 칸(D-CPP-49).
+    abs_rg_gross?: string; pct_rg_gross?: string | null;
   } | null;
   note: string;
 }
@@ -866,7 +874,13 @@ export interface OverviewResponse {
       };
       // S3/S7(정합성 트랙): 매출 분해 — 쿠팡 판매분석 수동 대조용. revenue = revenue_3p + revenue_rg.
       revenue_3p?: string;            // 마켓플레이스(Wing) 3P 매출
-      revenue_rg?: string;            // 로켓그로스 매출(gross·취소 미차감, D-11)
+      // ★D-CPP-49(계약 ⓑ): 원천이 gross 주문 원장 → **콘솔 net 옵션축**으로 바뀌었다.
+      //   대시보드 「로켓그로스」 행과 같은 축이라 두 화면 숫자가 일치한다.
+      revenue_rg?: string;            // 로켓그로스 매출(콘솔 net)
+      revenue_rg_basis?: 'console_net';
+      revenue_rg_gross?: string;      // 우리 gross 주문 원장 — **매출이 아니다**(수집 대조 진단값)
+      rg_option_axis_days?: string | null;      // "16/16" — 옵션축이 창을 덮은 날짜 수
+      rg_option_axis_complete?: boolean | null; // false면 revenue_rg는 부분치(빈 날은 0원 아닌 «미상»)
       net_profit_basis?: string;      // 순이익 날짜축 설명(D-9 투명화)
       // S7(D-14/D-16): RG 정산 비용 net_profit 플립 브리지 필드(계정 단위, 전액 차감)
       net_profit_pre_rg?: string;     // 플립 전 순이익
