@@ -517,6 +517,76 @@ def test_numeric_item_name_is_rejected(client):
         parse_commercial_invoice(buf.getvalue())
 
 
+# ──────────────────────────────────────────────
+# 13개월 전수(2026-08-22, 세아트랜스 메일 14건 + Drive 30건)에서 나온 두 양식 변종
+# ──────────────────────────────────────────────
+def test_sheet_name_variant_ci_2_is_accepted():
+    """시트명이 `CI (2)`여도 읽는다 — 엑셀에서 시트를 복제하면 붙는 접미사다.
+
+    실측: 2026-03-18 선적건의 워크북 시트가 `['CI (2)', 'PL']`이었고, 정확 일치만 보던
+    초판은 그 선적건을 통째로 못 읽었다(14건 중 1건).
+    """
+    from openpyxl import load_workbook as _lw
+    from app.services.import_cost.parser import parse_commercial_invoice
+
+    book = _lw(io.BytesIO(_build_workbook()))
+    book["CI"].title = "CI (2)"
+    buf = io.BytesIO()
+    book.save(buf)
+    ci = parse_commercial_invoice(buf.getvalue())
+    assert len(ci.lines) == 15
+    assert ci.lines[2].item_name == "Glass_Ip17Pro"
+
+
+def test_item_column_is_resolved_from_data_not_label():
+    """헤더의 `Item` 라벨이 한 칸 왼쪽이어도 실제 품목 열을 찾는다.
+
+    실측: 2026-04-01 선적건은 헤더 `Item`이 C열인데 품목명은 D열이고, C열엔 분류어
+    (`screen protector`)가 첫 행에만 있었다. 같은 공급사의 다른 파일은 라벨이 D였다.
+    ⇒ 라벨을 그대로 믿으면 「품명이 비었는데 수량은 있다」로 죽는다(14건 중 1건).
+    ★헤더 라벨은 «힌트»이고 판정은 **데이터**가 한다.
+    """
+    from app.services.import_cost.parser import parse_commercial_invoice
+
+    wb = Workbook()
+    ci = wb.active
+    ci.title = "CI"
+    ci["F10"], ci["G10"] = "Invoice No.:", "SO-WSOH-TEST"
+    # ★라벨은 C에 두고 실제 품목은 D에 둔다(실물 그대로)
+    ci["B14"], ci["C14"] = "Order No.", "Item "
+    ci["E14"], ci["F14"], ci["G14"] = "Quantity   (pcs)", "Unit Price     (CNY)", "Total(CNY)"
+    rows = [("Order 111", "screen protector", "Glass_Ip16 Pro", 200, 12.2),
+            (None, None, "Glass_iP15 promax", 100, 12.2),
+            (None, None, "cleaning kits", 7000, 0.8)]
+    r = 15
+    for order, cat, item, qty, price in rows:
+        if order:
+            ci.cell(row=r, column=2, value=order)
+        if cat:
+            ci.cell(row=r, column=3, value=cat)
+        ci.cell(row=r, column=4, value=item)
+        ci.cell(row=r, column=5, value=qty)
+        ci.cell(row=r, column=6, value=price)
+        ci.cell(row=r, column=7, value=round(qty * price, 2))
+        r += 1
+    ci.cell(row=r, column=2, value="Total QTY:")
+    ci.cell(row=r, column=5, value=7300)
+    ci.cell(row=r, column=6, value="Total(RMB):")
+    # 200×12.2 + 100×12.2 + 7000×0.8 = 9,260 (처음에 9,270으로 썼다가 자기검산에 걸렸다 —
+    # 그 가드가 실제로 «내 산수 오류»를 잡은 것이라 기록해 둔다)
+    ci.cell(row=r, column=7, value=9260.0)
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    res = parse_commercial_invoice(buf.getvalue())
+    assert [l.item_name for l in res.lines] == [
+        "Glass_Ip16 Pro", "Glass_iP15 promax", "cleaning kits"
+    ]
+    assert [D(str(l.quantity)) for l in res.lines] == [D("200"), D("100"), D("7000")]
+    # 분류어가 품목명 자리에 들어오면 안 된다
+    assert "screen protector" not in [l.item_name for l in res.lines]
+
+
 def test_xls_without_xlrd_says_what_to_do(client, monkeypatch):
     """`xlrd`가 없으면 **무엇을 하면 되는지** 말한다 — 조용히 빈 폼을 주지 않는다."""
     import builtins

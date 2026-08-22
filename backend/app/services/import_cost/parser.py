@@ -192,6 +192,56 @@ class _XlsSheet:
         return _Cell(None if v == "" else v)
 
 
+def _resolve_item_col(ws, header_row: int, guess: int, qty_col: int, probe: int = 12) -> int:
+    """품목명 열을 **데이터로** 확정한다. 헤더 라벨이 한 칸 어긋나는 양식이 실재한다.
+
+    규칙: 헤더 행 아래 `probe`행을 훑어, `order`~`qty` 사이 열 중 «숫자가 아닌 글자»가
+    가장 많이 들어 있는 열을 고른다. 동점이면 헤더가 가리킨 열을 유지한다(추측을 최소화).
+    후보가 하나도 없으면 헤더 값을 그대로 쓴다 — 여기서 실패로 만들지 않고,
+    뒤의 「품명 자리에 숫자」 가드와 자기검산이 잡게 둔다.
+    """
+    lo, hi = min(guess, qty_col - 1), qty_col - 1
+    if hi < 1:
+        return guess
+    scores: dict[int, int] = {}
+    for c in range(max(lo, 1), hi + 1):
+        n = 0
+        for r in range(header_row + 1, header_row + 1 + probe):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            s = " ".join(str(v).split())
+            if not s or _NUMERIC_ONLY_RE.match(s.replace(",", "")):
+                continue
+            if "total" in s.casefold():
+                break
+            n += 1
+        scores[c] = n
+    best = max(scores.values(), default=0)
+    if best == 0:
+        return guess
+    if scores.get(guess, 0) == best:
+        return guess
+    return max((c for c, n in scores.items() if n == best))
+
+
+def _pick_sheet(names: list[str], want: str) -> str:
+    """시트명을 «정확히»가 아니라 «느슨하게» 고른다.
+
+    실측(2026-08-22, 13개월 전수): 같은 공급사 파일에 `CI` 말고 **`CI (2)`**가 있었다
+    (엑셀에서 시트를 복제하면 붙는 접미사다). 정확 일치만 보면 그 선적건 하나가 통째로 안 읽힌다.
+    ★그래도 «아무거나»는 아니다 — 정확 일치 → 접두 일치 순으로 보고, 후보가 여럿이면
+      가장 짧은 이름(원본일 가능성이 높다)을 고른다.
+    """
+    if want in names:
+        return want
+    key = want.casefold()
+    cands = [n for n in names if _compact(n).casefold().startswith(key)]
+    if not cands:
+        raise CustomsDocParseError(f"시트 '{want}'이 없다 — 워크북 시트: {names}")
+    return min(cands, key=len)
+
+
 def _load_sheet(data: bytes, sheet_name: str):
     """.xlsx면 openpyxl, .xls(BIFF8)면 xlrd로 연다.
 
@@ -214,11 +264,8 @@ def _load_sheet(data: bytes, sheet_name: str):
             wb = xlrd.open_workbook(file_contents=data)
         except Exception as exc:
             raise CustomsDocParseError(f".xls를 열지 못했다({exc}).") from exc
-        if sheet_name not in wb.sheet_names():
-            raise CustomsDocParseError(
-                f"시트 '{sheet_name}'이 없다 — 워크북 시트: {wb.sheet_names()}"
-            )
-        return _XlsSheet(wb.sheet_by_name(sheet_name))
+        picked = _pick_sheet(wb.sheet_names(), sheet_name)
+        return _XlsSheet(wb.sheet_by_name(picked))
 
     try:
         wb = load_workbook(BytesIO(data), data_only=True)
@@ -226,9 +273,7 @@ def _load_sheet(data: bytes, sheet_name: str):
         raise CustomsDocParseError(
             f"유효한 엑셀 파일이 아니다({exc}). .xlsx 또는 .xls를 올려야 한다."
         ) from exc
-    if sheet_name not in wb.sheetnames:
-        raise CustomsDocParseError(f"시트 '{sheet_name}'이 없다 — 워크북 시트: {wb.sheetnames}")
-    return wb[sheet_name]
+    return wb[_pick_sheet(wb.sheetnames, sheet_name)]
 
 
 def _header_text(ws, row: int, col: int) -> str:
@@ -335,6 +380,11 @@ def parse_commercial_invoice(data: bytes) -> InvoiceParseResult:
             f"CI 헤더에서 필수 열을 못 찾음: {missing} "
             f"(찾은 것: { {k: v for k, v in cols.items()} }). 양식이 예상과 다르다."
         )
+    # ★헤더 라벨은 «힌트»이고 판정은 **데이터**가 한다.
+    #   실측(2026-08-22, 13개월 전수): 어떤 파일은 `Item` 라벨이 C열인데 실제 품목명은 D열이고,
+    #   C열엔 분류어(`screen protector`)가 첫 행에만 있었다. 같은 공급사의 다른 파일은 라벨이 D였다.
+    #   ⇒ 라벨 위치를 그대로 믿으면 그 선적건이 「품명이 비었는데 수량은 있다」로 통째로 죽는다.
+    cols["item"] = _resolve_item_col(ws, header_row, cols["item"], cols["qty"])
 
     # 인보이스 번호·날짜도 라벨로 찾는다(열 고정 금지 — 위 헤더와 같은 이유).
     invoice_no = invoice_date = None
