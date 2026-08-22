@@ -21,7 +21,7 @@ server_default를 두지 않는다: NULL(아직 새 식으로 안 잰 행)과 �
 함정이 원리적으로 없다(String/Float만 쓴다).
 
 Revision ID: m3bprofitscore
-Revises: m2b2devw1eight
+Revises: mrg48s1heads
 Create Date: 2026-08-22 KST
 """
 from typing import Sequence, Union
@@ -30,7 +30,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "m3bprofitscore"
-down_revision: Union[str, None] = "m2b2devw1eight"
+down_revision: Union[str, None] = "mrg48s1heads"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
