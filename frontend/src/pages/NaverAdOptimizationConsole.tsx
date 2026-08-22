@@ -1279,6 +1279,36 @@ export default function NaverAdOptimizationConsole() {
           )}
         </div>
         {wisdomError && <div className="p-3 text-sm text-red-600 bg-red-50">{wisdomError}</div>}
+
+        {/* 반성 루프 상태(D-NAO-228 · 계약 PLAN_naver-m5-reflection-visibility.md §5 ⓐ)
+            ★성적표가 비었을 때 「지혜가 없어서」인지 「반성이 죽어서」인지 구분하는 자리다.
+              2026-07-18~08-22 결번 19일 동안 스케줄러 로그는 전부 'ok'였고 아무도 몰랐다.
+            ★재료없음(skipped_no_material)은 «고장이 아니다» — L3 정지 중엔 정상이다(북극성 §5-2).
+              그래서 색은 failed/unresolved가 있을 때만 경고색으로 바뀐다. */}
+        {wisdomCard?.reflection_health && (() => {
+          const rh = wisdomCard.reflection_health;
+          const broken = (rh.counts.failed ?? 0) + (rh.counts.unresolved ?? 0);
+          return (
+            <div
+              className={`px-4 py-2 border-b text-xs ${
+                broken > 0
+                  ? "bg-amber-50 border-amber-200 text-amber-900"
+                  : "bg-gray-50 border-gray-200 text-gray-600"
+              }`}
+            >
+              <div className="font-medium">{rh.headline}</div>
+              <div className="mt-1 text-[11px] opacity-80">
+                {broken > 0
+                  ? `실패 ${rh.counts.failed ?? 0}일 · 원인미상 ${rh.counts.unresolved ?? 0}일 — 반성이 돌지 않은 날은 그날의 학습이 없다.`
+                  : rh.missing_days > 0
+                    ? "결번은 전부 «재료 없음»이다 — 실집행 일기가 없는 날 반성이 안 도는 것은 정상이다."
+                    : "결번 없음 — 창 전체에서 반성이 돌았다."}{" "}
+                {rh.material_note}
+              </div>
+            </div>
+          );
+        })()}
+
         <div className="p-4 space-y-3">
           {avaLoading && !wisdomCard ? (
             <div className="text-center text-gray-400 text-sm py-4">불러오는 중...</div>

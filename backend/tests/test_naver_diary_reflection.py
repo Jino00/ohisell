@@ -611,11 +611,27 @@ def test_harness_stage_isolation_backfill_failure_still_runs_reflection(db, monk
     res = reflection_loop.run_daily_reflection(db, now=NOW)  # 이벤트 0건 → reflection은 no_entries
 
     assert res["stage_status"]["outcome_backfill"] == "failed"
-    assert res["stage_status"]["daily_reflection"] == "ok"  # ①실패해도 ② 시도됨
+    # ①이 실패해도 ②는 시도된다(단계 격리). ②의 값은 «시도했다»가 아니라 «무슨 일이 났나»다
+    # — 이벤트 0건이므로 skipped다(D-NAO-228). 초판은 여기서도 'ok'였고, 그 'ok'가
+    # 2026-07-18~08-22 결번 19일을 로그에서 지웠다(계약 PLAN_naver-m5-reflection-visibility.md §3).
+    assert res["stage_status"]["daily_reflection"] == "skipped:no_entries"
 
 
-def test_harness_happy_path_both_stages_ok(db, monkeypatch):
+def test_harness_reports_skip_not_ok_when_no_entries(db, monkeypatch):
+    """★D-NAO-228: 재료가 없어 «안 돈» 것을 'ok'로 적지 않는다.
+
+    옛 이름은 test_harness_happy_path_both_stages_ok였다 — 반성이 아예 안 돌았는데
+    «happy path»라 부르고 'ok'를 기대하던 것이 결함의 화석이다.
+    """
     monkeypatch.setattr(reflection_loop, "build_reflection", lambda db, *, now=None: {"skipped": "no_entries"})
+    res = reflection_loop.run_daily_reflection(db, now=NOW)
+    assert res["stage_status"] == {"outcome_backfill": "ok", "daily_reflection": "skipped:no_entries"}
+
+
+def test_harness_reports_ok_only_when_reflection_written(db, monkeypatch):
+    """실제로 써졌을 때만 'ok'다 — 세 결과가 한 값으로 뭉개지지 않는지 짝으로 고정한다."""
+    monkeypatch.setattr(reflection_loop, "build_reflection",
+                        lambda db, *, now=None: {"written": True, "entries": 5, "text_len": 120})
     res = reflection_loop.run_daily_reflection(db, now=NOW)
     assert res["stage_status"] == {"outcome_backfill": "ok", "daily_reflection": "ok"}
 
