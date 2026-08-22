@@ -158,3 +158,36 @@
 3. **보관비 처분** — WING1은 0.095%지만 **WING2는 전체 차감의 71%**다. 판매일 귀속이
    원리적으로 안 되는 비용이라 「계정 기간비용으로 분리 표시」가 기본안이나, WING2에서
    결과를 지배하므로 실측 후 확정한다.
+
+---
+
+## 8. 착수 실측 결과 (2026-08-22 22:1x KST · §1의 「착수 실측으로 판정한다」에 대한 답)
+
+### 8-1. 소비처 전수 — **셋이고, 구현이 «둘»이다**
+
+| 소비처 | 경로 | 이번 처분 |
+|---|---|---|
+| **대시보드** | `dashboard.py:383` `get_rg_total_by_account` → `_merge_rg_summary:379` → `rg_channel_pnl.py:86` | ✅ **교체(본체)** |
+| **종합조망** | `intelligence.py:593` `_agg_rg_settlement_fees(grain="account")` → `:1209-1210` `rg_settlement_deducted` | ✅ **같이 옮긴다** — 안 옮기면 또 두 화면이 다른 말을 한다. D-CPP-47이 고쳤던 바로 그 병이다(같은 계정의 RG 수수료를 두 화면이 다른 금액으로 빼고 있었다) |
+| **상품손익** | `product_pnl.py:360-361`(옵션·계정 둘 다) · `:341` `rg_settlement_flip` | ⚠️ **권위값이 종합조망의 `rg_settlement_deducted`다** → 종합조망을 옮기면 동반 이동. **보존식이 깨지면 SKU 손익 표가 렌더 자체가 안 된다**(`ProductConnectionMap.tsx`의 `trustworthy &&` 가드 — 코드 주석에 라이브 사고 기록) → **회귀 검사 필수** |
+
+★`get_rg_total_by_account`(profit_calculator)와 `_agg_rg_settlement_fees`(intelligence)는 **같은 일을 하는 두 구현**이다. 둘 다 같은 overlap 필터·`vendor_item_id=''` 가드를 쓴다. 한쪽만 고치면 갈라진다.
+
+### 8-2. ★설계를 베낄 곳은 3P가 아니라 `product_pnl`이다
+
+`product_pnl.py:349-375`가 **이미** 다음을 한다:
+- 옵션 단위 정산 수수료를 읽는다 — `_agg_rg_settlement_fees(..., grain="option")`
+- **VAT gross-up ×1.1**(`_RG_VAT_GROSSUP`) — 옵션 row는 **VAT前(A−B)**, 계정 row는 **VAT後**
+- 잔차를 **두 이름으로 분리**한다(단일 plug 금지 — 「×1.1 오류·과귀속을 숨긴다」):
+  - `rg_account_only_fees` = 옵션 row가 아예 없는 fee_type의 계정 VAT後 총액(정상 귀속불가분)
+  - `rg_vat_grossup_gap` = 옵션 row가 있는 fee_type의 (계정VAT後 − Σ옵션×1.1). 정상 ≈0
+- **보존식이 정확히 성립**한다: `Σ(옵션귀속) + rg_unmapped + rg_account_only_fees + rg_vat_grossup_gap == rg_total`
+
+⇒ **계약 §4 ⓒ(장부 총액 보존)의 설계가 이미 존재한다.** 이번에 새로 만들 것은 **날짜 배분 한 겹**뿐이다 — `product_pnl`은 창 단위이지 일별이 아니다.
+⇒ 따라서 §2 판단기준 5의 「3P 구조 차용」은 **판매수수료 요율 부분에만** 적용된다. 물류비는 `product_pnl` 패턴이다.
+
+### 8-3. VAT 질문 부분 해소
+
+코드가 명시한다 — **옵션 row = VAT前 · 계정 row = VAT後**(`intelligence.py:606-612`, `models.py` §8-1).
+⇒ 부록 A-4 ①에서 역산한 `sale_fee` 요율 **8.42~10.23%는 VAT 포함 값**이고, ÷1.1 하면 **7.65~9.30%**가 VAT前이다.
+★요율 «흔들림»(1.8%p)의 원인은 이것과 별개다 — S1에서 계속 규명 중(정산 인식 지연 / 카테고리 믹스 / `CoupangRevenueFee`에 RG 옵션 요율이 실재하는지).
