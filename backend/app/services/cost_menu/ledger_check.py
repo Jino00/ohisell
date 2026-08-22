@@ -100,8 +100,9 @@ def _norm(name: Optional[str]) -> Optional[str]:
 def check(snapshot: PriceSnapshot, fact: Optional[LedgerFact]) -> CheckResult:
     """단가 행 1개의 «지금도 유효한가»를 판정한다.
 
-    우선순위: 없음 > 확정 해제 > 품목 불일치 > 값 변경 > 정상. **더 근본적인 어긋남이
-    덜 근본적인 것을 가린다** — 라인이 사라졌는데 「값이 다르다」고 말하면 처방이 틀린다.
+    우선순위: 없음 > 확정 해제 > 신원 불일치(품목·수입건) > 값 변경(신원 미확인이면 갱신
+    거부) > 정상. **더 근본적인 어긋남이 덜 근본적인 것을 가린다** — 라인이 사라졌는데
+    「값이 다르다」고 말하면 처방이 틀린다.
     """
     if snapshot.source != "ledger":
         return CheckResult(
@@ -143,17 +144,48 @@ def check(snapshot: PriceSnapshot, fact: Optional[LedgerFact]) -> CheckResult:
             ledger_item_name=fact.item_name,
         )
 
-    if snapshot.linked_item_name is not None and _norm(snapshot.linked_item_name) != _norm(
-        fact.item_name
-    ):
+    # ★수입건 동일성도 신원의 일부다 (P2-a, 적대 리뷰 2R 채택).
+    # 재현: 수입건을 삭제한 뒤 **다른 서류**(다른 HBL)의 라인이 같은 SQLite rowid를
+    # 물려받는데, 그 라인의 품목명이 우연히 같으면(예: 둘 다 「cleaning kits」) 품목명
+    # 비교만으론 못 잡는다 — 값 비교로 새어 나가 STATUS_CHANGED가 되고, 「갱신」이
+    # **다른 서류의 단가를 조용히 흡수**한다(실측: 198.91원). 뿌리가 item_mismatch와
+    # 같으므로(rowid 재사용이 다른 것을 가리킴) 상태값을 늘리지 않고 **여기 흡수**한다 —
+    # 처방도 같다(해제 후 재연결, refreshable=False).
+    item_changed = snapshot.linked_item_name is not None and _norm(
+        snapshot.linked_item_name
+    ) != _norm(fact.item_name)
+    shipment_changed = (
+        snapshot.linked_shipment_id is not None
+        and snapshot.linked_shipment_id != fact.shipment_id
+    )
+    if item_changed or shipment_changed:
+        if item_changed and shipment_changed:
+            what = (
+                f"연결 당시 품목은 「{snapshot.linked_item_name}」(수입건 id="
+                f"{snapshot.linked_shipment_id})인데 지금 그 라인은 「{fact.item_name}」"
+                f"(수입건 id={fact.shipment_id})이다"
+            )
+            label = "다른 품목을 가리킨다"
+        elif shipment_changed:
+            what = (
+                f"연결 당시 수입건은 id={snapshot.linked_shipment_id}인데 지금 이 라인은 "
+                f"수입건 id={fact.shipment_id}에 속한다 — 품목명(「{fact.item_name}」)이 "
+                "같아 보여도 다른 서류다"
+            )
+            label = "다른 서류를 가리킨다"
+        else:
+            what = (
+                f"연결 당시 품목은 「{snapshot.linked_item_name}」인데 지금 그 라인은 "
+                f"「{fact.item_name}」이다"
+            )
+            label = "다른 품목을 가리킨다"
         return CheckResult(
             status=STATUS_ITEM_MISMATCH,
             ok=False,
-            label="다른 품목을 가리킨다",
+            label=label,
             detail=(
-                f"연결 당시 품목은 「{snapshot.linked_item_name}」인데 지금 그 라인은 "
-                f"「{fact.item_name}」이다 — 라인이 지워지고 다시 들어가면서 id가 재사용됐다. "
-                "값을 덮어쓰지 않는다(그러면 다른 품목의 단가를 조용히 삼킨다) — "
+                f"{what} — 라인이 지워지고 다시 들어가면서 id가 재사용됐다. "
+                "값을 덮어쓰지 않는다(그러면 다른 서류의 단가를 조용히 삼킨다) — "
                 "해제하고 사람이 다시 연결한다."
             ),
             counts_as_evidence=False,
@@ -166,6 +198,36 @@ def check(snapshot: PriceSnapshot, fact: Optional[LedgerFact]) -> CheckResult:
     if not _eq(snapshot.unit_price_ex_vat, fact.unit_cost_ex_vat) or not _eq(
         snapshot.unit_price_inc_vat, fact.unit_cost_inc_vat
     ):
+        # ★신원 스냅샷이 없는 «구 연결»(마이그 backfill이 못 채운 행 — 이 컬럼이 생기기 전에
+        # 원장 라인이 이미 사라졌던 경우)은 방금 위의 신원 대조를 **아예 못 받는다**
+        # (item_changed·shipment_changed 둘 다 `snapshot.*_id is not None` 게이트에 막혀
+        # 무조건 스킵된다). 그런 행에서 값이 다르면 그건 「같은 품목의 가격이 바뀌었다」일
+        # 수도 있지만 「rowid가 재사용돼 완전히 다른 품목을 가리키게 됐다」일 수도 있다 —
+        # **구분할 근거가 없다.** refreshable=True로 두면 「갱신」 한 번에 다른 품목의 값을
+        # 흡수한다(P2-b 재현: cleaning kit 구 연결이 2,909.96원을 흡수). 「모른다」를
+        # 「같다」로 접지 않는다(계약 §2-7) — 갱신을 막고 사람이 해제 후 재확인하게 한다.
+        identity_unverifiable = (
+            snapshot.linked_item_name is None or snapshot.linked_shipment_id is None
+        )
+        if identity_unverifiable:
+            return CheckResult(
+                status=STATUS_CHANGED,
+                ok=False,
+                label="원장 값이 달라졌다(구 연결 — 품목 동일성 미확인)",
+                detail=(
+                    f"저장값 {_show(snapshot.unit_price_ex_vat)} / 현 원장값 "
+                    f"{_show(fact.unit_cost_ex_vat)} (VAT 제외) — 값이 다르다. 그런데 이 "
+                    "행은 저장 시점 품목·수입건 스냅샷이 없어(구 연결) 「같은 품목의 가격이 "
+                    "바뀐 것」인지 「rowid 재사용으로 다른 품목을 가리키게 된 것」인지 "
+                    "구분할 수 없다. 그래서 「갱신」으로 넘기지 않는다 — 해제한 뒤 지금 "
+                    "원장에서 품목명을 직접 확인하고 다시 연결한다."
+                ),
+                counts_as_evidence=False,
+                refreshable=False,
+                ledger_item_name=fact.item_name,
+                ledger_unit_price_ex_vat=fact.unit_cost_ex_vat,
+                ledger_unit_price_inc_vat=fact.unit_cost_inc_vat,
+            )
         return CheckResult(
             status=STATUS_CHANGED,
             ok=False,
@@ -183,10 +245,18 @@ def check(snapshot: PriceSnapshot, fact: Optional[LedgerFact]) -> CheckResult:
         )
 
     detail = "원장 라인이 지금도 확정 상태이고 값·품목이 저장값과 같다."
+    missing_snapshots = []
     if snapshot.linked_item_name is None:
+        missing_snapshots.append("품목명")
+    if snapshot.linked_shipment_id is None:
+        missing_snapshots.append("수입건 id")
+    if missing_snapshots:
         # 이 컬럼이 생기기 전에 만들어진 행. 값·확정 여부는 대조했으므로 미달이 아니지만,
-        # «품목 동일성은 못 봤다»는 사실을 삼키지 않는다(계약 §2-7의 결).
-        detail += " (저장 시점 품목명이 없어 품목 동일성은 대조하지 못했다 — 구 연결)"
+        # «동일성은 못 봤다»는 사실을 삼키지 않는다(계약 §2-7의 결). 실제로는 둘 다 같은
+        # backfill 서브쿼리에서 채워지므로(마이그 `cst2snap53b`) 늘 함께 비거나 함께 차지만,
+        # 개별로 나열해 어느 축이 비었는지 스스로 말하게 한다 — 훗날 값이 갈라져도 침묵하지
+        # 않도록.
+        detail += f" (저장 시점 {'·'.join(missing_snapshots)}이 없어 그 동일성은 대조하지 못했다 — 구 연결)"
     return CheckResult(
         status=STATUS_OK,
         ok=True,

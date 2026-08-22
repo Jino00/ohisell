@@ -651,3 +651,81 @@ def test_lot_count_counts_lots_not_rows(client):
     assert body["price_count"] == 2      # 행은 둘
     assert body["lot_count"] == 1        # ★로트는 하나
     assert body["stale_count"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 2R P2 채택분 — 저장해 둔 `linked_shipment_id`를 판정에 쓴다(P2-a) ·
+#   구 연결(신원 스냅샷 없음)이 값 변경에서도 스스로 자백한다(P2-b)
+#
+# ★둘 다 **GET 응답의 HTTP body**로 잰다(dict가 아니라) — 서비스층 판정이 옳아도
+#   `check_payload()`의 직렬화가 한 줄 빠지면 화면은 여전히 옛 값을 「최신」으로 읽는다
+#   (교훈 #321과 같은 모양의 구멍). `/refresh`의 400은 서비스 함수를 직접 부르므로 이
+#   직렬화 구멍을 못 잡는다 — 그래서 GET 바디를 따로 본다.
+# ══════════════════════════════════════════════════════════════════
+def test_shipment_identity_mismatch_reaches_the_http_body_and_blocks_refresh(client):
+    """★P2-a — 품목명이 우연히 같아도(둘 다 「cleaning kits」) **다른 수입건**을 가리키게
+    되면 「값 변경」이 아니라 신원 불일치다.
+
+    재현: `import_invoice_line_id`가 rowid 재사용으로 **다른 수입건**의 라인을 가리키게 된
+    상태를 직접 흉내낸다(저장된 신원 스냅샷은 연결 당시 그대로 두고, id가 가리키는 실제
+    라인만 다른 수입건 것으로 바꾼다) — 리뷰가 재현한 «수입건 삭제 후 다른 HBL이 rowid를
+    물려받는다»와 관측 결과가 같다.
+    """
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    jul = _make_confirmed_lot(client, LOT_JUL)
+    mid, price_id = _link_kit(client, aug)
+    other_line_id = _kits_line(jul)["id"]
+
+    with client.testing_session() as s:
+        from app.models import CostMaterialPrice
+
+        p = s.get(CostMaterialPrice, price_id)
+        p.import_invoice_line_id = other_line_id
+        s.commit()
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    p = next(x for x in body["prices"] if x["id"] == price_id)
+    check = p["ledger_check"]
+    assert check["status"] == "item_mismatch", check   # ★changed로 새면 안 된다
+    assert check["refreshable"] is False               # ★HTTP body까지 온 값
+    assert check["counts_as_evidence"] is False
+    assert body["latest_price_ex_vat"] is None
+    assert body["stale_count"] == 1
+
+    r = client.post(f"/api/cost/materials/{mid}/prices/{price_id}/refresh")
+    assert r.status_code == 400
+    assert "다른 서류" in r.json()["detail"]
+
+
+def test_legacy_row_without_identity_snapshot_refuses_refresh_over_http_when_value_differs(
+    client,
+):
+    """★P2-b — 신원 스냅샷이 없는 구 연결에서 값이 다르면 «모른다»를 «가격이 바뀐 것»으로
+    접지 않는다. HTTP 응답까지 `refreshable=False`가 와야 화면의 「갱신」 버튼이 실제로
+    숨는다 — 화면은 이 JSON 말고 다른 걸 보지 않는다.
+    """
+    aug = _make_confirmed_lot(client, LOT_AUG)
+    jul = _make_confirmed_lot(client, LOT_JUL)
+    mid, price_id = _link_kit(client, aug)
+    other_line_id = _kits_line(jul)["id"]  # 값이 다른 라인(178.78 vs 190.82)
+
+    # 마이그 이전 행(신원 스냅샷 없음)을 흉내낸 뒤, id가 다른 값을 가리키게 한다.
+    with client.testing_session() as s:
+        from app.models import CostMaterialPrice
+
+        p = s.get(CostMaterialPrice, price_id)
+        p.linked_item_name = None
+        p.linked_shipment_id = None
+        p.import_invoice_line_id = other_line_id
+        s.commit()
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    p = next(x for x in body["prices"] if x["id"] == price_id)
+    check = p["ledger_check"]
+    assert check["status"] == "changed"
+    assert check["refreshable"] is False   # ★핵심 — 신원 불명인데 갱신을 열어 두지 않는다
+    assert "구 연결" in check["detail"]
+
+    r = client.post(f"/api/cost/materials/{mid}/prices/{price_id}/refresh")
+    assert r.status_code == 400
+    assert "구 연결" in r.json()["detail"]

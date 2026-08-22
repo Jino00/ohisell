@@ -75,6 +75,57 @@ def test_item_mismatch_beats_value_change():
     assert "cleaning kits" in r.detail and "Glass_iP12promax" in r.detail
 
 
+def test_shipment_mismatch_with_same_item_name_is_item_mismatch_not_changed():
+    """★P2-a: 품목명이 우연히 같아도 «다른 서류»면 값 변경이 아니라 신원 불일치다.
+
+    재현(적대 리뷰 2R): 수입건 삭제 뒤 다른 HBL의 라인이 같은 rowid를 물려받는다. 그 라인의
+    품목명이 우연히 저장값과 같으면(둘 다 「cleaning kits」) 품목명 비교만으론 못 잡고,
+    값 비교로 새서 STATUS_CHANGED(refreshable=True)가 됐다 — 「갱신」이 다른 서류의 단가를
+    조용히 흡수했다.
+    """
+    r = LC.check(snap(), fact(shipment_id=99, unit_cost_ex_vat=D("198.91")))
+    assert r.status == LC.STATUS_ITEM_MISMATCH
+    assert not r.ok
+    assert not r.refreshable
+    assert not r.counts_as_evidence
+    assert "1" in r.detail and "99" in r.detail  # 옛/새 수입건 id가 둘 다 문구에 있다
+
+
+def test_shipment_mismatch_without_stored_shipment_id_is_not_checked():
+    """수입건 스냅샷이 없으면(구 연결) 그 축은 대조하지 못한다 — 값이 같으면 여전히 OK다."""
+    r = LC.check(snap(linked_shipment_id=None), fact(shipment_id=99))
+    assert r.status == LC.STATUS_OK
+
+
+def test_legacy_row_with_value_change_refuses_refresh_not_forced_ok():
+    """★P2-b: 신원 스냅샷이 없는 구 연결에서 값이 다르면 「모른다」를 「가격이 바뀐 것」으로
+    접지 않는다 — 갱신을 막고 사람이 확인하게 한다.
+
+    재현(적대 리뷰 2R): `linked_item_name`이 NULL인 구 연결 행이 rowid 재사용으로 다른
+    품목을 가리키게 됐을 때, 값이 다르다는 이유만으로 STATUS_CHANGED(refreshable=True)가
+    되어 「갱신」 클릭 한 번에 다른 품목(cleaning kit)의 단가(2,909.96원)를 흡수했다.
+    """
+    r = LC.check(
+        snap(linked_item_name=None, linked_shipment_id=None),
+        fact(item_name="다른 품목", unit_cost_ex_vat=D("2909.96")),
+    )
+    assert r.status == LC.STATUS_CHANGED
+    assert not r.refreshable          # ★핵심 — 신원 불명인데 갱신을 열어 두지 않는다
+    assert not r.counts_as_evidence
+    assert "구 연결" in r.detail and "품목" in r.detail
+    assert "2909.96" in r.detail or "2,909.96" in r.detail
+
+
+def test_legacy_row_with_partial_snapshot_and_value_change_also_refuses_refresh():
+    """품목명 스냅샷만 없어도(수입건은 있어도) 신원을 완전히 확인 못 한 것이므로 갱신을 막는다."""
+    r = LC.check(
+        snap(linked_item_name=None),
+        fact(unit_cost_ex_vat=D("198.91")),
+    )
+    assert r.status == LC.STATUS_CHANGED
+    assert not r.refreshable
+
+
 def test_missing_beats_everything():
     assert LC.check(snap(linked_item_name="다른것"), None).status == LC.STATUS_MISSING
 
@@ -90,6 +141,17 @@ def test_legacy_row_without_snapshot_is_not_forced_stale_but_says_so():
     r = LC.check(snap(linked_item_name=None), fact(item_name="무엇이든"))
     assert r.status == LC.STATUS_OK
     assert "대조하지 못했다" in r.detail
+    assert "품목명" in r.detail
+
+
+def test_legacy_row_without_any_snapshot_names_both_missing_axes():
+    """★품목·수입건 둘 다 스냅샷이 없으면 둘 다 못 봤다고 말한다(P2-b — 침묵하지 않는다)."""
+    r = LC.check(
+        snap(linked_item_name=None, linked_shipment_id=None),
+        fact(item_name="무엇이든", shipment_id=99),
+    )
+    assert r.status == LC.STATUS_OK
+    assert "품목명" in r.detail and "수입건 id" in r.detail
 
 
 def test_manual_row_is_not_a_ledger_check_target():
