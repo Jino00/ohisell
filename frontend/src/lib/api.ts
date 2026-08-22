@@ -934,7 +934,10 @@ export interface OverviewResponse {
       // D-CPP-43: 'applied_full'(광고 포함 전액 차감)은 폐기됐다. 옛 응답 호환으로 유니온엔 남긴다.
       flip_status?: 'applied_ex_ad' | 'applied_full' | 'not_applied_no_data';
       deducted?: string;             // ★net_profit에서 실제 차감된 값(= 광고 제외분, D-CPP-43)
-      non_ad_deducted?: string;      // deducted와 동일값(하위호환)
+      // ★2026-08-22 판매일 축 전환: `deducted`는 이제 **축을 탄다**. 어느 축인지 이 칸이 말한다 —
+      //   안 밝히면 헤드라인(실제 차감)과 아래 계정 카드(정산 원장 축)가 근거 없이 갈린다.
+      axis?: 'sales_date' | 'recognition_date';
+      non_ad_deducted?: string;      // **원장 축**(정산 인식일) 광고 제외분 — 대조용(deducted와 다를 수 있다)
       ad_settlement?: string;        // 정산 광고비 = 광고센터 PA의 «공제». **차감 안 함**(표시 전용)
       ad_xlsx_rg_overlap?: string;   // 광고비 XLSX RG(2P)분(현재 0, 미래 겹침 감시용)
     };

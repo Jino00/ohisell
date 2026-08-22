@@ -88,7 +88,10 @@ describe("rgFeeNote — 커버리지", () => {
   it("커버리지 < 1인데 unmappedRevenue가 0/없음이면 그 금액 문구는 title에 안 붙는다", () => {
     const n = rgFeeNote({ axis: AXIS_SALES_DATE, basis: BASIS_SETTLED, rate: 10, coverage: 0.9 });
     expect(n!.text).toContain("90.0%");
-    expect(n!.title).not.toContain("물류비를 0으로");
+    // ★문구가 바뀌면 부정 단언은 «조용히» 공허해진다(적대 리뷰 3R P2). 옛 단언은
+    //   `"물류비를 0으로"`를 봤는데 그 문자열이 새 사유 문구엔 아예 없어서, 자백을 항상
+    //   붙이는 변이(`un > 0` → `un >= 0`)가 그대로 살아남았다. 지금 문구를 가리킨다.
+    expect(n!.title).not.toContain("비용을 못 붙였다");
   });
 });
 

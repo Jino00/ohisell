@@ -767,6 +767,14 @@ function RgSettlementCard({
             return <span className="text-base font-bold text-orange-900">{sign}{won(String(Math.abs(d)))}{d < 0 ? " (환급)" : ""}</span>;
           })()}
           <span className="block text-xs text-orange-500">정산총액 {won(rg.summary.total)} 중 광고 {won(rg.summary.ad_settlement ?? '0')}는 <b>차감 제외</b></span>
+          {/* ★이 배너가 «어느 축»의 차감인지 말한다(적대 리뷰 3R P2). 헤드라인은 실제 차감액
+              (판매일 축일 수 있다)인데 아래 계정 카드는 정산 원장 축 그대로라, 축을 안 밝히면
+              한 배너가 서로 다른 두 숫자를 근거 없이 나란히 보인다. */}
+          <span className="block text-xs text-orange-500">
+            {rg.summary.axis === "sales_date"
+              ? "헤드라인은 «판매일 축»(그 창에 판 것에 붙는 비용) · 아래 계정 카드는 «정산 원장 축»이라 값이 다를 수 있다"
+              : "«정산 인식일 축» — 정산 주기 통짜라 그 주기를 덮는 어느 하루를 물어도 같은 값이다"}
+          </span>
           </span>
         </div>
       </div>
