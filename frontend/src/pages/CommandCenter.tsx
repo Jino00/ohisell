@@ -30,6 +30,9 @@ import {
   specByKey,
   RG_STREAM_SPECS,
 } from "../lib/streamRefresh";
+import type { RowNote } from "../lib/netScope";
+// RG 정산공제의 축·근거 자백 — 대시보드 행과 **같은 함수**를 쓴다(두 화면이 갈라지지 않게).
+import { rgFeeFactsFromSummary, rgFeeNote } from "../lib/rgSettlementAxis";
 
 function isoKST(d: Date): string {
   const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
@@ -409,12 +412,28 @@ export default function CommandCenter() {
 
 // value가 ReactNode인 이유: 손익 카드가 음수를 빨강으로, 하한을 "≥ …"로 렌더해야 한다
 //   (적대적 리뷰 F3·F13). 기존 호출부는 전부 문자열이라 그대로 호환된다.
-function Card({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
+function Card({
+  label,
+  value,
+  sub,
+  note,
+}: {
+  label: string;
+  value: React.ReactNode;
+  sub?: string;
+  // 자백 한 줄 — 툴팁(title)에 「왜 그런가」가 실린다. `sub`와 달리 **판정 결과**라 색이 다르다.
+  note?: RowNote | null;
+}) {
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-3">
       <div className="text-xs text-gray-500">{label}</div>
       <div className="text-lg font-bold text-gray-900">{value}</div>
       {sub && <div className="text-xs text-gray-400">{sub}</div>}
+      {note && (
+        <div className="text-xs text-gray-500" title={note.title}>
+          {note.text}
+        </div>
+      )}
     </div>
   );
 }
@@ -748,6 +767,14 @@ function RgSettlementCard({
             return <span className="text-base font-bold text-orange-900">{sign}{won(String(Math.abs(d)))}{d < 0 ? " (환급)" : ""}</span>;
           })()}
           <span className="block text-xs text-orange-500">정산총액 {won(rg.summary.total)} 중 광고 {won(rg.summary.ad_settlement ?? '0')}는 <b>차감 제외</b></span>
+          {/* ★이 배너가 «어느 축»의 차감인지 말한다(적대 리뷰 3R P2). 헤드라인은 실제 차감액
+              (판매일 축일 수 있다)인데 아래 계정 카드는 정산 원장 축 그대로라, 축을 안 밝히면
+              한 배너가 서로 다른 두 숫자를 근거 없이 나란히 보인다. */}
+          <span className="block text-xs text-orange-500">
+            {rg.summary.axis === "sales_date"
+              ? "헤드라인은 «판매일 축»(그 창에 판 것에 붙는 비용) · 아래 계정 카드는 «정산 원장 축»이라 값이 다를 수 있다"
+              : "«정산 인식일 축» — 정산 주기 통짜라 그 주기를 덮는 어느 하루를 물어도 같은 값이다"}
+          </span>
           </span>
         </div>
       </div>
@@ -950,12 +977,17 @@ function AccountView({
         <Card
           label="순이익"
           value={won(s.net_profit)}
+          note={rgFeeNote(rgFeeFactsFromSummary(s as unknown as Record<string, unknown>))}
           sub={
             // D-CPP-33: 배송수입·납부세액이 순이익에 들어왔다. 옛 문구("매출−반품−수수료−광고−원가")는
             // 이제 사실이 아니라 그대로 두면 화면이 거짓말을 한다.
             [
+              // ★축이 바뀌었다(계약 CONTRACT_rg_sales_date_axis) — 「광고 제외」만 적으면
+              //   이 값이 **그 창에 판 것**의 공제인지 정산 주기 통짜인지 화면이 말하지 않는다.
               s.rg_flip_status === "applied_ex_ad" || s.rg_flip_status === "applied_full"
-                ? `RG정산 −${won(s.rg_settlement_deducted ?? s.rg_non_ad_deducted ?? "0")}(광고 제외)`
+                ? `RG정산 −${won(s.rg_settlement_deducted ?? s.rg_non_ad_deducted ?? "0")}(광고 제외, ${
+                    s.rg_settlement_axis === "sales_date" ? "판매일 축" : "정산 인식일 축"
+                  })`
                 : "RG 정산 데이터 없음",
               `배송 수입 +${won(s.shipping_income_3p ?? "0")} / 비용 −${won(s.seller_shipping_3p ?? "0")}`,
               // ★납부세액은 «음수»(매입세액 환급)가 될 수 있다 — 매출이 없고 비용만 있는 창에서

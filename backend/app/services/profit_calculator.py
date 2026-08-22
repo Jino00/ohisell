@@ -1747,6 +1747,13 @@ _LEAF_PASSTHROUGH = (
     "ad_unallocated",           # 카탈로그에 없는 옵션에 쓰인 광고비(= 이 행에 안 실린 돈)
     "ad_unallocated_options",
     "units_sold",               # 판매수량 — `order_count`(주문 건수)와 뜻이 다르다
+    # RG 정산공제의 축·근거(CONTRACT_rg_sales_date_axis §4 ⓒⓓⓔ) — 실측 요율과 「못 잼」이
+    # 화면에서 같은 얼굴을 하지 않게 하는 칸들. `schemas.GroupedSummaryRow`와 짝이다.
+    "commission_axis", "commission_basis", "commission_rate", "commission_rate_cycles",
+    "commission_logistics", "commission_sale_fee", "commission_period",
+    "fee_coverage", "fee_unmapped_revenue",
+    "settlement_reconcile_cycle", "settlement_reconcile_computed",
+    "settlement_reconcile_actual", "settlement_reconcile_diff", "settlement_reconcile_pct",
 )
 
 

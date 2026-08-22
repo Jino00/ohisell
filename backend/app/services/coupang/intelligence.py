@@ -1203,16 +1203,73 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     account_sum["net_profit_pre_rg"] = account_sum["net_profit"]
     # ★D-CPP-43: 차감액은 **광고 제외분**이다. 정산 ad_sales는 광고센터 PA 광고비의 «공제»이고
     #   PA는 이미 ad_spend로 차감됐으므로 여기서 또 빼면 이중계상이다(1차 출처: 윙 「광고비 내역」).
-    rg_deducted = rg_total - rg_ad_settlement
+    rg_ledger_deducted = rg_total - rg_ad_settlement
+    # ★2026-08-22 계약 CONTRACT_rg_sales_date_axis: 차감액의 **축**을 바꾼다.
+    #   `rg_ledger_deducted`(위)는 정산 «인식일» 창 겹침이라 한 주기를 덮는 어느 하루를 물어도
+    #   같은 값이 나온다 — 08-17·18·19·20·21 다섯 날이 전부 153,058원이었고, 08-21은 그날
+    #   매출의 81.8%라 순이익 부호가 뒤집혔다. 그날 판 것에 그날 붙는 비용을 붙인다.
+    #   ★대시보드(`rg_channel_pnl`)와 **같은 함수**를 쓴다 — 두 구현이 갈라지면 두 화면이
+    #     같은 계정을 다른 금액으로 뺀다(D-CPP-47이 고쳤던 바로 그 병이다).
+    #   ★못 재면(요율 미상·단가 커버리지 얇음) **원장 축으로 물러선다** — 여기는 종합조망의
+    #     계정 순이익이라 값을 안 낼 자리가 없다. 그 사실을 `rg_settlement_axis`가 자백한다.
+    from app.services.coupang.rg_sales_date_fees import (  # noqa: PLC0415
+        FEE_COVERAGE_MIN,
+        sales_date_fees,
+    )
+
+    #   ★계정을 안 고른 전체 합산 뷰(`account=None`)에선 판매일 축을 «내지 않는다** — 요율은
+    #     계정마다 다르고(WING1·WING2가 다른 믹스다) 계정별로 재서 더해야 뜻이 있다.
+    #     그 뷰는 원장 축으로 남고, 축 필드가 그렇게 말한다.
+    #   ★커버리지 분모는 **요약축 RG 매출**을 준다(적대 리뷰 1R P1-1) — 비용은 옵션축에서 오고
+    #     매출은 요약축이라, 두 축이 어긋난 창에선 그 차액의 비용이 0으로 채워지는데 옵션축
+    #     안에서만 재면 커버리지가 100%로 나와 게이트가 침묵한다. 대시보드와 **같은 분모**다.
+    from app.services.coupang.rg_net_revenue import (  # noqa: PLC0415
+        net_revenue_by_account as _net_rev_by_acc,
+    )
+
+    _rg_rev_ref = (
+        (_net_rev_by_acc(db, dfrom, dto).get(acc["account_key"]) or {}).get("revenue")
+        if acc["account_key"]
+        else None
+    )
+    _sd = (
+        sales_date_fees(db, acc["account_key"], dfrom, dto, revenue_reference=_rg_rev_ref)
+        if acc["account_key"]
+        else {"total": _Z, "rate": None, "rate_basis": "rate_unknown", "coverage": None,
+              "unmapped_revenue": _Z, "reconciliation": None}
+    )
+    _sd_ok = (
+        _sd["rate"] is not None
+        and _sd["coverage"] is not None
+        and _sd["coverage"] >= FEE_COVERAGE_MIN
+    )
+    rg_deducted = _sd["total"] if _sd_ok else rg_ledger_deducted
     account_sum["rg_settlement_total"] = rg_total                 # 정산 총액(광고 포함) — 표시·검산용
     account_sum["rg_ad_settlement"] = rg_ad_settlement            # 표시 전용: PA 공제분(**차감 안 함**)
-    account_sum["rg_non_ad_deducted"] = rg_deducted               # 광고 제외분(= 실제 차감액)
+    account_sum["rg_non_ad_deducted"] = rg_ledger_deducted        # 원장 축 광고 제외분(대조용)
     account_sum["rg_settlement_deducted"] = rg_deducted           # ★순이익에서 실제로 뺀 값(명시 필드)
+    # ── 이 차감액이 «어느 축이고 무엇을 근거로 하는가» (계약 §4 ⓑⓒⓓⓔ) ──
+    account_sum["rg_settlement_axis"] = "sales_date" if _sd_ok else "recognition_date"
+    account_sum["rg_fee_basis"] = _sd["rate_basis"]
+    account_sum["rg_fee_rate"] = _sd["rate"]
+    account_sum["rg_fee_coverage"] = _sd["coverage"]
+    account_sum["rg_fee_unmapped_revenue"] = _sd["unmapped_revenue"]
+    account_sum["rg_fee_reconcile"] = _sd["reconciliation"]
     account_sum["net_profit"] = apply_rg_net_profit_flip(
         account_sum["net_profit"], rg_deducted
     )
     # status enum(Codex #6): money basis 명시. 불리언 안 씀.
-    account_sum["rg_flip_status"] = "applied_ex_ad" if len(rg_fees) > 0 else "not_applied_no_data"
+    # ★적대 리뷰 1R P1-2: 종전엔 이 값이 **정산 원장 row의 유무**(`len(rg_fees)`)로 정해졌다.
+    #   차감액이 판매일 축으로 바뀌면서 둘이 디커플됐다 — 그 창에 겹치는 원장 row가 없어도
+    #   (주기 롤오버 직후·정산 수집 지연: 신선도 허용이 14일이다) 판매일 축은 요율·단가를 옛
+    #   주기에서 가져와 **차감을 계속한다.** 그런데 화면(`CommandCenter.tsx`)은 이 칸으로
+    #   분기하므로 **차감이 일어난 창에 「RG 정산 데이터 없음」을 렌더하고 금액을 지웠다.**
+    #   자백이 아니라 반대 진술이다(§2 판단기준 7 「판정은 화면에서 한다」).
+    #   ⇒ **실제로 뺐는지**로 정한다. 뺀 게 0인데 원장 row는 있는 창(전액 광고분 등)도
+    #     「데이터 없음」이 아니므로 같이 applied로 둔다.
+    account_sum["rg_flip_status"] = (
+        "applied_ex_ad" if (rg_deducted != _Z or len(rg_fees) > 0) else "not_applied_no_data"
+    )
 
     # ─── 3P 배송 손익(한진 1,900 비용 − 고객이 낸 배송비 수입) — 계정 단위 최종 반영 ───
     # 구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15).
@@ -1269,7 +1326,12 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     rg_settlement = {
         "summary": {
             "total": rg_total,
-            "has_data": len(rg_fees) > 0,
+            # ★적대 리뷰 2R 회귀 4(쌍둥이 칸): 아래 세 칸은 `account_sum`의 같은 뜻 칸과 **짝**인데
+            #   P1-2 수정이 한쪽만 고쳐서, 정산 원장 row가 없는 창에 **같은 화면**이
+            #   「🚧 RG 정산 비용(미반영) — 데이터 없음」 배너(이 칸)와 「RG정산 −4,550 · 판매일 축」
+            #   카드를 **동시에** 띄웠다. 차감이 일어났는지는 원장 row 유무가 아니라
+            #   **실제로 뺐는지**가 정한다 — P1-2와 같은 이유, 같은 규칙.
+            "has_data": len(rg_fees) > 0 or rg_deducted != _Z,
             "note": (
                 "RG 정산 비용 반영됨(계정 단위, D-14/D-CPP-43). "
                 "★정산 광고비는 광고센터 PA 광고비의 «공제»이므로 여기서 차감하지 않는다 — "
@@ -1277,10 +1339,18 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
                 "(광고유형 전부 PA · 캠페인 이름이 광고센터와 동일 · 미공제분은 다음 정산으로 이월). "
                 "정산주기 기준(부분 윈도우도 주기 전액)."
             ),
-            "flip_status": "applied_ex_ad" if len(rg_fees) > 0 else "not_applied_no_data",
+            "flip_status": (
+                "applied_ex_ad" if (rg_deducted != _Z or len(rg_fees) > 0)
+                else "not_applied_no_data"
+            ),
             # ★D-CPP-43: 실제 차감액은 **광고 제외분**이다(광고는 PA에서 이미 차감 — 이중계상 방지).
-            "deducted": rg_total - rg_ad_settlement,        # ★net_profit에서 실제 차감된 값
-            "non_ad_deducted": rg_total - rg_ad_settlement,  # 동일값(하위호환 유지)
+            # ★2026-08-22 판매일 축 전환: 「실제 차감된 값」은 이제 **축을 탄다.** 종전처럼
+            #   원장 값을 실으면 이 배너와 순이익 카드가 **한 화면에서 서로 다른 차감액**을
+            #   말한다(2R 실측: 배너 30,000 vs 카드 23,766.67). 이름이 「실제 차감」이면
+            #   실제 차감을 실어야 한다 — 원장 값은 아래 `non_ad_deducted`가 그대로 보존한다.
+            "deducted": rg_deducted,                        # ★net_profit에서 실제 차감된 값
+            "axis": "sales_date" if _sd_ok else "recognition_date",
+            "non_ad_deducted": rg_ledger_deducted,           # 원장 축(정산 인식일) 광고 제외분 — 대조용
             "ad_settlement": rg_ad_settlement,      # 정산 광고비 = PA 공제분. **차감 안 함**(표시 전용)
             "ad_xlsx_rg_overlap": rg_ad_xlsx_overlap,  # 광고비 XLSX의 RG(2P)분(현재 0, 미래 겹침 감시용)
         },
