@@ -295,6 +295,9 @@ def test_rg_row_withholds_net_when_option_axis_incomplete(db):
     assert Decimal(row["net_basis_revenue"]) == _Z, "원가 미상 매출을 이익률 분모에 넣지 않는다"
     assert row["option_axis_days"] == "1/2"
     assert Decimal(row["ad_spend"]) == Decimal("1000"), "광고비는 확정 비용이라 하한 근거로 남는다"
+    # ★2R NEW P1: `order_count`도 **같은 게이트**를 거쳐야 한다. 이 테스트가 바로 이 상황을
+    #   세팅해 두고도 이 칸을 안 봐서, 부분 합산값이 완전한 숫자처럼 나가는 것을 놓쳤다.
+    assert row["order_count"] == 0, "옵션축이 창을 못 덮으면 주문 수도 «모른다»여야 한다"
 
 
 def test_rg_row_none_when_nothing_happened(db):
@@ -353,6 +356,27 @@ def test_order_count_is_orders_not_units(db):
     row = _rg_row_with(db, units=1000, orders=100)
     assert row["order_count"] == 100, "「주문 건수」 칸에는 주문 수가 들어가야 한다"
     assert row["units_sold"] == 1000, "판매수량은 뜻이 다른 별도 칸으로 나온다"
+
+
+def test_order_count_gate_matches_net_profit_gate(db):
+    """★2R NEW P1: `order_count`가 `net_profit`·`cost`와 **같은 게이트**를 쓰는가.
+
+    옵션축이 창을 전혀 안 덮으면 주문 수를 알 길이 없다. 그때 부분치(또는 0)를 완전한 숫자처럼
+    내면 「미상」이 「주문 0건」으로 읽힌다 — WING2는 옵션축이 07-27부터라 기본 30일 창에서
+    **상시 재현**되던 조건이다.
+    """
+    # 매출은 요약축에 있는데(창 전체) 옵션축은 통째로 없다
+    for d in (date(2026, 8, 5), date(2026, 8, 6)):
+        _seed_summary(db, d, 50_000, 5)
+    _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
+    _seed_ad(db, "RG1", 1_000)
+    db.commit()
+
+    row = compute_rg_summary_row(db, ACC, *WIN, _cost_master(db), VENDOR)
+    assert Decimal(row["revenue"]) == Decimal("100000"), "매출은 요약축이라 창 전체를 덮는다"
+    assert row["net_profit"] is None
+    assert row["order_count"] == 0
+    assert row["option_axis_days"] == "0/2", "읽는 쪽이 «부분치»임을 알 수 있어야 한다"
 
 
 def test_order_count_survives_company_aggregation(db):
