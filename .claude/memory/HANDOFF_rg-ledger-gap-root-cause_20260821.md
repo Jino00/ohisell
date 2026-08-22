@@ -149,4 +149,5 @@ Jino 지시로 탐색한 결과 **`coupang_vendor_item_sales_daily`** 발견.
 - `docs/references/89_rg_ledger_gap_root_cause_20260821.md` (160줄 — §6이 완료 QA 이후 추가된 정정 절)
 - `docs/tracks/active/track_coupang-rocket-1p.md` 헤더 `확인:` 줄
 - `.claude/anchors/586fba5c-*.md` (판정 3줄 + 이월 3건, 커밋 대상 아님)
+- **사슬 등록부**: `.claude/memory/chains/쿠팡-손익정합.jsonl` — 이 세션이 **n=1**. 다음 세션은 `/session-relay 쿠팡-손익정합`으로 이어받고 n=2로 등록한다. (PAO 논의 갈래와 별개 사슬이다 — 이 저장소는 두 갈래가 병행한다.)
 - **코드·마이그레이션·prod 배포·DB 쓰기 0건** · 새 D-N 번호 미부여(다음 세션이 `scripts/next_ids.sh`로 받을 것)
