@@ -253,7 +253,12 @@ Fable이 「기반」이라 한 것 중 **외부가 전제로 안 보는 항목�
 
 ## §9. 증거 재현 명령
 
-⚠️**ssh 키 경로 주의**: 기본 `~/.ssh/config`의 `IdentityFile`이 iCloud 경로(`~/Library/Mobile Documents/...`)를 가리킨다. **iCloud 접근이 막히면 ssh도 같이 죽는다.** iCloud 밖 사본이 `~/.ssh/oracle_cloud_legacy`에 있다(2026-08-22 실사용 확인).
+✅**ssh 키 경로 — 2026-08-22 13:0x 해소됨.** 초판 작성 시점엔 `~/.ssh/config`의 `IdentityFile`이 **iCloud 경로**를 가리켜
+**iCloud가 막히면 ssh도 같이 죽었다**(그날 실제로 그랬다). Jino 지시로 **4개 Host**(`os`·`metaad`·`agentbox`·`sellc`)를
+iCloud 밖 사본 **`~/.ssh/oracle_cloud_legacy`**로 교체했다 — **같은 키**(지문 `SHA256:+A5pBE+4dbPsAf10Zue98/QXNpkBTluM3JfwRd2ajms`
+양쪽 일치)라 서버 등록 변경은 없었고, 5개 Host 전건 접속 확인. 백업 `~/.ssh/config.bak-20260822`.
+⇒ 아래 명령의 `-i "$K"`는 이제 **없어도 된다**(config가 로컬 키를 가리키므로). 그대로 둔 것은 명시성 때문이다.
+⚠️**남은 근본 문제**: 저장소 자체가 iCloud 위에 있다 — TCC가 다시 회수되면 **ssh는 살아도 저장소는 통째로 안 보인다.**
 
 ```bash
 K="$HOME/.ssh/oracle_cloud_legacy"; H="ubuntu@sellc.ohitech.co.kr"
