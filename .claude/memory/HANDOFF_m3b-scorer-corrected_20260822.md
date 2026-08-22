@@ -79,6 +79,30 @@
 ## 5. 알려진 이슈 / 주의사항
 
 ### 5-1. ★★배포 차단 — alembic 체인이 갈라져 있다 (다음 세션 1순위)
+> ★★**16:0x KST 갱신 — 상황이 «두 번» 바뀌었다. 아래 원 서술보다 이 상자가 최신이다.**
+>
+> **(1) 첫 차단은 해소됐다** — PR **#325**가 병합되어 `worktree-collection-stability-s1`(=`cs1kind0a1b2`)이 origin/main에 들어왔다. 그리고 PR #324(`worktree-import-ledger`, `imp1ledger47a`)도 병합됐다.
+>
+> **(2) 그런데 «머지 리비전»이 둘 만들어져 prod와 main이 갈라졌다.** 같은 두 부모(`cs1kind0a1b2`·`imp1ledger47a`)를 합치는 **기능적으로 동일한 머지 리비전이 두 개** 있다:
+>
+> | 리비전 | 어디에 있나 | 상태 |
+> |---|---|---|
+> | **`mrg2heads0822`** | **origin/main**(커밋 `b7ceb63f`) | prod에 **파일 없음** |
+> | **`mrg48s1heads`** | 브랜치 **`worktree-import-ledger`**(커밋 `2b8eaf96`, 15:48:49) — **main에 없다** | **prod에 배포·적용됨**(`alembic_version = mrg48s1heads`) |
+>
+> ⇒ **prod의 alembic 트리와 main의 alembic 트리가 서로 다르다.** 내 마이그를 어느 쪽에 붙여도 반대쪽에서 head가 갈라진다.
+>
+> ### 그래서 이번 세션은 배포하지 않았다
+> 여기에 `m3bprofitscore`를 얹으면 **세 번째 head**가 되어 분기를 굳힌다. 그리고 이 두 머지 리비전은 **지난 한 시간 안에 병행 세션이 만든 것**이라 그 세션의 소관이다(D-CPP-48).
+>
+> ### 다음 세션이 할 일 (순서)
+> 1. **먼저 alembic 트리를 하나로 만든다** — `worktree-import-ledger`를 main에 병합하든, `mrg2heads0822`/`mrg48s1heads` 중 하나를 다른 하나의 자손으로 재배선하든. **이건 쿠팡 손익정합 트랙(D-CPP-48) 소관**이니 그 세션·Jino와 맞춰라. ★**prod가 이미 `mrg48s1heads`를 적용했으므로 그것을 되돌리는 방향은 위험하다** — main 쪽을 prod에 맞추는 것이 안전한 방향이다.
+> 2. 그 다음 이 브랜치에서 `m3bprofitscore`의 `down_revision`을 **통합된 head**로 재배선.
+> 3. `scripts/safe_deploy.sh backend/alembic/versions/m3bprofitscore_*.py backend/app/models.py backend/app/services/naver_ad/{proposal_scoreboard,wisdom_candidates,campaign_target_resolver}.py --migrate --restart`
+> 4. `scripts/safe_merge.sh 323`
+>
+> ★**로컬 main은 이미 origin/main과 merge해 뒀다**(커밋 `9a663694`) — 워크트리 브랜치도 같은 merge를 해야 재배선이 가능하다.
+
 prod alembic head = **`cs1kind0a1b2`**. 출처는 커밋 `6661d926`(2026-08-22 13:55), 브랜치 **`worktree-collection-stability-s1`**(origin/main 대비 7커밋, 최신 `907552c9`) — **origin/main에 없고 열린 PR도 없는데 15:11 KST에 prod에 배포됐다**(이 저장소의 반복 패턴: PR 미병합인데 prod 배포, PR #315 전례).
 내 마이그 `m3bprofitscore`의 `down_revision`은 `m2b2devw1eight`라 **같은 부모에서 갈라진다** ⇒ `--migrate`가 **multiple heads로 거부**된다.
 **선행 조건(순서 지킬 것)**: ①`worktree-collection-stability-s1` 병합 → ②이 브랜치 rebase + `down_revision`을 **`cs1kind0a1b2`**로 재배선 → ③`scripts/safe_deploy.sh backend/alembic/versions/m3bprofitscore_*.py backend/app/models.py backend/app/services/naver_ad/{proposal_scoreboard,wisdom_candidates,campaign_target_resolver}.py --migrate --restart` → ④`scripts/safe_merge.sh 323`
