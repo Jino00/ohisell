@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.services.coupang import (
     ad_cost_sync,
     ohitech_ad_sync,
+    rg_settlement_sync,
     rocket_supplier_sync,
     vendor_summary_sync,
 )
@@ -21,13 +22,35 @@ log = logging.getLogger(__name__)
 WARN_HOURS = 24
 CRIT_HOURS = 48
 
+# ★RG 정산 2큐는 «주 단위» 산출물이라 24/48시간 임계로는 상시 critical이 된다. 배너를 무의미한
+#   빨강으로 채우면 아무도 안 본다 — 스트림별 임계를 둔다(기본값은 위 상수).
+_RG_WARN_HOURS = 24 * 9      # 정산 주기(7일) + 생성 지연 여유
+_RG_CRIT_HOURS = 24 * 16     # 두 주기를 통째로 놓친 상태
+
 # (key, label, refresh_status 콜러블) — 표시 순서 = 이 순서.
+# ★RG 2큐 편입(2026-08-22, 계약 CONTRACT_collection_stability_s1 W1): 종전엔 4스트림뿐이라
+#   RG 정산이 **전역 배너에 아예 안 떴다**. 그래서 「오픽스 WING 로그인이 끊겼다」는 사실이
+#   Jino가 버튼을 눌러 실패를 보기 전에는 어디에도 나타나지 않았다(2026-08-22 각 계정 9회
+#   재발견). 배너가 낡음·실패의 단일 표면인데 그 표면에 구멍이 있었던 것이다.
+# ★튜플 형태(3원소)는 유지한다 — 이 상수를 언패킹해 쓰는 소비자가 있다(tests). 스트림별
+#   임계값은 아래 별도 맵으로 뺀다: 없는 키는 기본 임계로 떨어지므로 누락이 조용한 오판이
+#   아니라 «기본값 적용»이 된다.
 _STREAMS = [
     ("ofix_sales", "ofix 판매분석", lambda db: vendor_summary_sync.refresh_status(db)),
     ("ofix_ad", "ofix 광고비", lambda db: ad_cost_sync.refresh_status(db)),
     ("ohitech_ad", "ohitech 로켓광고", lambda db: ohitech_ad_sync.refresh_status(db)),
     ("supplier_hub", "로켓 발주/정산", lambda db: rocket_supplier_sync.rocket_refresh_status(db)),
+    ("rg_wing1", "오픽스 RG 정산",
+     lambda db: rg_settlement_sync.rg_refresh_status(db, "COUPANG_WING1")),
+    ("rg_wing2", "오하이테크 RG 정산",
+     lambda db: rg_settlement_sync.rg_refresh_status(db, "COUPANG_WING2")),
 ]
+
+# key → (warn_hours, crit_hours). 미등재 키는 (WARN_HOURS, CRIT_HOURS).
+_STREAM_THRESHOLDS: dict[str, tuple[float, float]] = {
+    "rg_wing1": (_RG_WARN_HOURS, _RG_CRIT_HOURS),
+    "rg_wing2": (_RG_WARN_HOURS, _RG_CRIT_HOURS),
+}
 
 
 def _parse_kst(iso: str | None) -> datetime | None:
@@ -48,24 +71,49 @@ def compute_stream_state(
     last_error_at: str | None,
     requested: bool,
     now_kst: datetime,
+    last_error_kind: str | None = None,
+    warn_hours: float = WARN_HOURS,
+    crit_hours: float = CRIT_HOURS,
 ) -> dict:
-    """순수 판정. 우선순위: in_flight > failed > (never/critical/warn/fresh).
+    """순수 판정. 우선순위: needs_login > in_flight > failed > (never/critical/warn/fresh).
 
     age_hours = 마지막 성공 이후 경과(시간). last_success_at 없으면 None.
+
+    ★needs_login이 in_flight보다 앞선다(2026-08-22, W1). 왜냐하면 로그인이 끊긴 상태에서
+      버튼을 누르면 requested=true라 종전 판정은 「수집 중」이 되는데, 실제로는 **사람이
+      로그인하기 전까지 영원히 진행되지 않는다**. 「수집 중」으로 보이는 동안 아무도
+      Mac 앞으로 가지 않는 것이 2026-08-22 사고의 형태였다.
+    ★그리고 needs_login은 requested가 false여도 유지된다 — 요청이 소멸(login_required는
+      재시도 없이 소멸)한 뒤에도 계정은 여전히 잠겨 있고, 그게 «상태»로 만든 이유다.
+      성공하거나 다음 실패가 다른 kind로 오면 last_error_kind가 갈려 자동으로 풀린다.
+    ★warn/crit 임계를 인자로 받는다 — RG 정산은 주 단위라 24/48시간이면 상시 빨강이다.
     """
     suc = _parse_kst(last_success_at)
     err = _parse_kst(last_error_at)
     age_hours = None if suc is None else (now_kst - suc).total_seconds() / 3600.0
 
-    if requested:
+    # 「성공이 실패보다 나중」이면 이미 회복된 것 — 낡은 kind가 배너를 붙들지 않게 한다.
+    # ★`err is None`은 «살아있음»이 아니라 «실패 흔적이 없음»이다 (2026-08-22 적대 리뷰 1R P1-1).
+    #   초판은 이걸 or 항으로 넣어 「실패 시각이 지워졌는데 kind만 남은」 상태를 needs_login으로
+    #   읽었다 — 그리고 prod 성공 경로들이 정확히 그 상태를 만든다(last_error_at은 지우고
+    #   kind는 못 지운다). 두 결함이 겹쳐야 사고가 나므로 양쪽 다 막는다(refresh_contract의
+    #   _settle_values가 근본 수리, 여기는 판정층 방어).
+    kind_live = (
+        last_error_kind is not None
+        and err is not None
+        and (suc is None or err >= suc)
+    )
+    if kind_live and last_error_kind == "login_required":
+        state = "needs_login"
+    elif requested:
         state = "in_flight"
     elif err is not None and (suc is None or err > suc):
         state = "failed"
     elif suc is None:
         state = "critical"
-    elif age_hours >= CRIT_HOURS:
+    elif age_hours >= crit_hours:
         state = "critical"
-    elif age_hours >= WARN_HOURS:
+    elif age_hours >= warn_hours:
         state = "warn"
     else:
         state = "fresh"
@@ -86,6 +134,7 @@ def collection_status(db: Session) -> dict:
     now = kst_now()
     streams = []
     for key, label, getter in _STREAMS:
+        warn_h, crit_h = _STREAM_THRESHOLDS.get(key, (WARN_HOURS, CRIT_HOURS))
         try:
             st = getter(db)
         except Exception as e:  # noqa: BLE001 — 어떤 예외든 나머지 스트림을 살린다
@@ -96,7 +145,7 @@ def collection_status(db: Session) -> dict:
                 "key": key, "label": label, "state": "unknown", "age_hours": None,
                 "last_success_at": None, "last_error_at": None,
                 "last_error": f"상태 조회 실패: {type(e).__name__}: {e}"[:300],
-                "requested_at": None,
+                "requested_at": None, "last_error_kind": None,
             })
             continue
         derived = compute_stream_state(
@@ -104,6 +153,9 @@ def collection_status(db: Session) -> dict:
             last_error_at=st.get("last_error_at"),
             requested=bool(st.get("requested")),
             now_kst=now,
+            last_error_kind=st.get("last_error_kind"),
+            warn_hours=warn_h,
+            crit_hours=crit_h,
         )
         streams.append({
             "key": key,
@@ -118,5 +170,8 @@ def collection_status(db: Session) -> dict:
             #   in_flight로 보고 건너뛰면 **영원히 침묵**한다(요청 플래그는 아무도 claim
             #   하지 않으면 스스로 사라지지 않는다). 소비자가 대기 시간을 재도록 시각을 준다.
             "requested_at": st.get("requested_at"),
+            # ★kind를 그대로 실어 보낸다(W1) — state는 판정이고 kind는 «왜»다. 배너가
+            #   「로그인 필요」와 「Mac 응답 없음」에 서로 다른 처방을 쓰려면 둘 다 필요하다.
+            "last_error_kind": st.get("last_error_kind"),
         })
     return {"streams": streams, "as_of": now.isoformat()}

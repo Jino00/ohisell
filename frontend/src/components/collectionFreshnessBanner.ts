@@ -11,7 +11,7 @@ import { isLoginRequired } from "../lib/streamRefresh";
 export interface FreshnessBannerItem {
   key: string;
   label: string;
-  kind: "stale" | "failed" | "unknown";
+  kind: "stale" | "failed" | "unknown" | "needs_login";
   text: string;
 }
 export interface FreshnessBanner {
@@ -41,8 +41,9 @@ function errAtText(iso: string | null): string {
  *    `includes("로그인")`을 쓰면 더 넓어져, 로그인이 아닌 크래시 문구
  *    ('브라우저 창이 닫혔습니다 — 로그인 미완료')에도 꼬리표가 붙는다. 사본이 원본보다
  *    관대하면 원본의 결함을 은폐하는 게 아니라 **새 오탐을 만든다**. */
-function reasonText(lastError: string | null): string {
-  return isLoginRequired(lastError) ? " · 로그인 필요" : "";
+function reasonText(lastError: string | null, kind?: string | null): string {
+  // ★kind가 오면 그것이 정본이다(2026-08-22 W1) — isLoginRequired가 kind 우선으로 판정한다.
+  return isLoginRequired(lastError, kind) ? " · 로그인 필요" : "";
 }
 
 /** 마지막 성공이 얼마나 전인지. failed 항목에 **반드시** 붙인다(2026-08-07 적대리뷰 P1).
@@ -74,7 +75,19 @@ export function buildCollectionFreshnessBanner(
   if (!status || !Array.isArray(status.streams)) return null;
   const items: FreshnessBannerItem[] = [];
   for (const st of status.streams as CollectionStreamStatus[]) {
-    if (st.state === "failed") {
+    if (st.state === "needs_login") {
+      // ★상주 배너(2026-08-22 W1) — 이 계약의 합격기준 ②다. 버튼을 누르지 않아도, 요청이
+      //   이미 소멸한 뒤에도 계정이 잠겨 있으면 계속 보인다. 종전엔 「로그인 필요」가
+      //   버튼 결과 문구로 잠깐 스쳐 지나갈 뿐이라 화면을 그 순간에 보고 있지 않으면
+      //   존재하지 않는 사실이었다(2026-08-22 각 계정 9회 재발견의 형태).
+      // ★처방을 문구에 넣는다: 어느 계정인지 + 어디서 하는지 + 그 뒤 무슨 일이 일어나는지.
+      items.push({
+        key: st.key, label: st.label, kind: "needs_login",
+        text: `${st.label} 로그인 필요 — Mac Chrome 탭에서 로그인하세요`
+          + ` · ${lastSuccessText(st.age_hours)}`
+          + ` · 로그인하면 자동으로 이어받습니다(버튼 재클릭 불필요)`,
+      });
+    } else if (st.state === "failed") {
       // ★시각을 반드시 붙인다(2026-08-07 실사고): 33시간 전 실패가 시각 없이 현재형으로 읽혀
       //   "지금 고장 나 있다"로 오인됐다 — 실제론 그냥 누르니 47초 만에 성공했다.
       //   "마지막 시도가 실패했다"와 "지금 망가져 있다"는 다른 말이다.
@@ -82,7 +95,7 @@ export function buildCollectionFreshnessBanner(
       items.push({
         key: st.key, label: st.label, kind: "failed",
         text: `${st.label} 갱신 실패${at ? `(${at})` : ""}`
-          + ` · ${lastSuccessText(st.age_hours)}${reasonText(st.last_error)}`,
+          + ` · ${lastSuccessText(st.age_hours)}${reasonText(st.last_error, st.last_error_kind)}`,
       });
     } else if (st.state === "unknown") {
       // ★백엔드가 판정 자체를 못 한 스트림(getter 예외). 예전엔 이 경우 엔드포인트가 500이라
@@ -112,7 +125,8 @@ export function buildCollectionFreshnessBanner(
   }
   if (items.length === 0) return null;
   const hasRed =
-    items.some((i) => i.kind === "failed" || i.kind === "unknown") ||
+    // ★needs_login은 빨강이다 — 사람이 움직이기 전까지 그 레인은 원리적으로 멈춰 있다.
+    items.some((i) => i.kind === "failed" || i.kind === "unknown" || i.kind === "needs_login") ||
     status.streams.some(
       (st) =>
         st.state === "critical" ||

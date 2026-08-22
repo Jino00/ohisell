@@ -26,6 +26,49 @@ describe("buildCollectionFreshnessBanner", () => {
     const b = buildCollectionFreshnessBanner(wrap([s({ state: "warn" }), s({ state: "critical", age_hours: 60 })]));
     expect(b?.severity).toBe("red");
   });
+  // ── needs_login 상주 배너 (2026-08-22 W1, 계약 CONTRACT_collection_stability_s1 합격기준 ②) ──
+  // ★존재 이유: 종전엔 「로그인 필요」가 **버튼 결과 문구로 잠깐 스쳐 지나갈 뿐**이라,
+  //   화면을 그 순간에 보고 있지 않으면 존재하지 않는 사실이었다. 그래서 같은 사실을
+  //   2026-08-22 하루에 계정당 9번 재발견했다. 이 배너가 그걸 «상태»로 만든다.
+  //   이 테스트가 지키는 것은 「배너 빌더가 새 state를 모르면 조용히 아무것도 안 그린다」는
+  //   실패 모드다 — else-if 사슬에 안 걸리면 침묵이고, 침묵은 배포 후에나 드러난다.
+  it("needs_login은 red + 상주 배너 항목을 만든다(조용히 사라지지 않는다)", () => {
+    const b = buildCollectionFreshnessBanner(wrap([
+      s({ state: "needs_login", key: "rg_wing1", label: "오픽스 RG 정산",
+          last_error_kind: "login_required", age_hours: 3 }),
+    ]));
+    expect(b).not.toBeNull();
+    expect(b?.severity).toBe("red");
+    expect(b?.items[0].kind).toBe("needs_login");
+  });
+  it("needs_login 문구는 «어디서 무엇을 하면 그다음 무슨 일이 나는지»를 말한다", () => {
+    const b = buildCollectionFreshnessBanner(wrap([
+      s({ state: "needs_login", key: "rg_wing2", label: "오하이테크 RG 정산",
+          last_error_kind: "login_required", age_hours: 3 }),
+    ]));
+    const t = b!.items[0].text;
+    expect(t).toContain("오하이테크 RG 정산");
+    expect(t).toContain("Mac Chrome");          // 어디서
+    expect(t).toContain("로그인");               // 무엇을
+    expect(t).toContain("자동으로 이어받습니다");  // 그다음(W3) — 「다시 누르세요」가 아니다
+    expect(t).not.toContain("다시 누르세요");
+  });
+  it("kind가 login_required면 failed 항목에도 로그인 꼬리표가 붙는다(문구 매칭 아님)", () => {
+    // 문구엔 「로그인 필요」가 없는데 kind는 login_required — kind가 정본이다.
+    const b = buildCollectionFreshnessBanner(wrap([
+      s({ state: "failed", key: "rg_wing1", label: "오픽스 RG 정산",
+          last_error: "사유 미상", last_error_kind: "login_required" }),
+    ]));
+    expect(b?.items[0].text).toContain("로그인 필요");
+  });
+  it("kind가 login_required가 아니면 문구에 「로그인」이 있어도 꼬리표를 안 붙인다(오탐 차단)", () => {
+    const b = buildCollectionFreshnessBanner(wrap([
+      s({ state: "failed", label: "ofix 광고비",
+          last_error: "브라우저 창이 닫혔습니다 — 로그인 미완료", last_error_kind: null }),
+    ]));
+    expect(b?.items[0].text).not.toContain("· 로그인 필요");
+  });
+
   it("failed는 red + kind failed", () => {
     const b = buildCollectionFreshnessBanner(wrap([s({ state: "failed", key: "supplier_hub", label: "로켓 발주/정산" })]));
     expect(b?.severity).toBe("red");

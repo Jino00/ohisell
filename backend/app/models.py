@@ -6,8 +6,8 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, BigInteger, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer, Numeric,
-    String, Text, UniqueConstraint, event, func, text,
+    JSON, BigInteger, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer,
+    LargeBinary, Numeric, String, Text, UniqueConstraint, event, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -875,6 +875,13 @@ class CoupangWingCookie(Base):
         String(12), nullable=False, server_default="unknown"
     )  # green/red/unknown
     last_error: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    # 마지막 실패의 **분류**(refresh_contract.KIND_*). last_error 문자열과 달리 기계가 읽는다.
+    # ★왜 컬럼인가(2026-08-22, 계약 CONTRACT_collection_stability_s1 W1): 종전엔 「로그인 필요」의
+    #   유일한 흔적이 last_error 안의 "[로그인 필요 …]" 문구였고 프론트가 그걸 문자열 매칭으로
+    #   읽었다 — 문구를 바꾸면 화면이 조용히 깨지고, 무엇보다 «상태»가 아니라 «이벤트»라
+    #   버튼을 눌러 실패해 봐야만 로그인 필요를 알 수 있었다(2026-08-22 각 계정 9회 재발견).
+    #   None = 아직 분류된 실패가 없음(성공했거나 한 번도 실패 안 함).
+    last_error_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     last_saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 쿠키 저장 시각
     last_success_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True
@@ -4257,3 +4264,216 @@ class NaverProductMetaChange(Base):
     __table_args__ = (
         Index("ix_naver_product_meta_change_cpn_at", "channel_product_no", "observed_at"),
     )
+
+
+# ──────────────────────────────────────────────
+# 수입건 원장 (landed cost) — D-CPP-48 / 계약 docs/PLAN_import-cost-ledger.md
+#
+# ★이 다섯 테이블은 **순수 추가**다. `product_master.cost_price`와 그 소비처 14곳을
+#   한 줄도 건드리지 않는다(계약 §3 금지선). 원가 반영은 계약 C 몫이다.
+# ──────────────────────────────────────────────
+class ImportShipment(Base):
+    """수입 1건(선적 1회) — 서류 3종(CI·PL·통관경비서)이 한 건을 이룬다.
+
+    grain: HBL(House B/L) 1건. 8/18 실건 = `SETR2608170216`.
+
+    ★`status`는 draft / confirmed 둘뿐이다. **검산 3종을 통과하지 못하면 confirmed가 될 수
+    없다**(계약 §3) — 그 판정은 `services/import_cost/reconciler.py`가 하고 라우터가 강제한다.
+
+    ★`fx_rate`는 **통관경비서의 신고환율**이다(8/18 = 209.88). 과세금액÷INV로 역산하면
+    210.50이 나와 0.3% 어긋나는데 원인이 확인 안 됐다(과세가격이 CIF 기준이라 그럴 가능성).
+    둘 중 하나를 못 박지 않으면 합격 판정이 결정적이지 않아 신고환율로 고정했다.
+    `remittance_fx_rate`는 실송금 환율 자리인데 **이번 범위가 아니다** — 필드만 예약한다.
+    """
+
+    __tablename__ = "import_shipment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    hbl_no: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    declaration_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 신고번호
+    declaration_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    eta: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    shipper_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    invoice_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    vessel: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="CNY")
+    fx_rate: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)  # 신고환율
+    remittance_fx_rate: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True
+    )  # 실송금 환율 — 이번 범위 밖(필드만 예약)
+    declared_inv_value: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(16, 2), nullable=True
+    )  # 경비서의 INV Value (외화) — 검산 ②의 기대값
+    customs_value_krw: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(16, 2), nullable=True
+    )  # 과세금액(원)
+
+    carton_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    gross_weight_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 3), nullable=True)
+    cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 6), nullable=True)
+
+    allocation_basis: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="amount"
+    )  # amount(기본·D-CPP-48) / weight / volume / quantity
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="draft")
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    cost_lines: Mapped[list[ImportCostLine]] = relationship(
+        back_populates="shipment", cascade="all, delete-orphan"
+    )
+    invoice_lines: Mapped[list[ImportInvoiceLine]] = relationship(
+        back_populates="shipment", cascade="all, delete-orphan"
+    )
+    packing_lines: Mapped[list[ImportPackingLine]] = relationship(
+        back_populates="shipment", cascade="all, delete-orphan"
+    )
+    documents: Mapped[list[ImportDocument]] = relationship(
+        back_populates="shipment", cascade="all, delete-orphan"
+    )
+
+
+class ImportCostLine(Base):
+    """통관경비서의 비용 한 줄 (8/18 실건 = 12줄).
+
+    ★`is_costing`이 이 테이블의 전부다 — **배부 대상인가**를 가른다.
+    부가세 라인은 `is_costing=False`다: 매입세액으로 공제받으므로 원가가 아니라 국가에 대한
+    채권이기 때문이다. 단 **값은 버리지 않는다** — 「부가세 제외가 회계 정답」이 법령 조문으로
+    확인되지 않았고(법인세법 시행령 §72에 「부가가치세」·「매입세액」·「관세」라는 단어가 없다),
+    세무사 확인이 오면 플래그만 뒤집으면 되게 원본을 보존한다.
+    """
+
+    __tablename__ = "import_cost_line"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(
+        ForeignKey("import_shipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    supply_amount: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False, default=0)
+    tax_amount: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False, default=0)
+    is_costing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    shipment: Mapped[ImportShipment] = relationship(back_populates="cost_lines")
+
+    __table_args__ = (
+        UniqueConstraint("shipment_id", "seq", name="uq_import_cost_line_seq"),
+    )
+
+
+class ImportInvoiceLine(Base):
+    """Commercial Invoice의 한 줄 = **배부를 받는 단위**이자 이 원장의 산출물.
+
+    ★`line_type`이 「판매 SKU / 부자재」를 가른다(D-CPP-48 부수 확정).
+    8/18 실건의 `cleaning kits` 2,400개는 Jino 확인 결과 **판매 상품이 아니라 우리 제품에
+    들어가는 부품**이다. 부자재 라인의 실제 단가는 계약 A′(층1)의 부자재 마스터가 소비할 값이라
+    여기서 «보존»한다 — 지금 엑셀에 「알콜솜 2EA 60원」처럼 수기로 박혀 있는 그 자리다.
+    분류는 **사람이 확정한다**(계약 §2-4) — 매핑되면 자동 제안까지만.
+
+    ★단가를 **두 값 다** 확정 저장한다(D-CPP-48 ②). `inc_vat = ex_vat × 1.1`은 손익 엔진
+    규약(D-NAO-150)과 같은 모양이지 «실제로 낸 부가세»가 아니다 — 실제 세액은
+    `ImportCostLine.tax_amount`에 원본 그대로 남는다. 자세한 이유는 allocator 모듈 docstring.
+    """
+
+    __tablename__ = "import_invoice_line"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(
+        ForeignKey("import_shipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    order_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    item_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit_price_foreign: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+
+    # 판매 SKU / 부자재 / 미분류. 미분류를 판매 SKU로 접지 않는다(0=미입력 혼동 재생산 금지).
+    line_type: Mapped[str] = mapped_column(String(12), nullable=False, default="unknown")
+    internal_sku: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True, index=True
+    )  # product_master.internal_sku 문자열 참조 — FK를 걸지 않는다(계약 §3: 원가 층 미접촉)
+
+    # 배부 기준 원료 (PL에서 온다). 없으면 그 기준으로는 배부 불가.
+    gross_weight_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 3), nullable=True)
+    cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 6), nullable=True)
+
+    # ── 계산 결과 (확정 저장) ──
+    goods_amount_krw: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2), nullable=True)
+    allocated_cost_krw: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2), nullable=True)
+    unit_cost_ex_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    unit_cost_inc_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+
+    shipment: Mapped[ImportShipment] = relationship(back_populates="invoice_lines")
+
+    __table_args__ = (
+        UniqueConstraint("shipment_id", "seq", name="uq_import_invoice_line_seq"),
+    )
+
+
+class ImportPackingLine(Base):
+    """Packing List의 박스 라인 — **대조 전용**이다(배부를 직접 받지 않는다).
+
+    ★CI와 **라인 분해가 다르다**: 8/18 실건에서 CI는 `Glass_Ip16 Pro 350` 한 줄인데 PL은
+    `7-9번 박스 300` + `10번 박스 50`으로 나뉜다. 그래서 검산은 라인 대 라인이 아니라
+    **품목명으로 묶은 합계**로 한다(reconciler 참조).
+    """
+
+    __tablename__ = "import_packing_line"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(
+        ForeignKey("import_shipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    carton_range: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # "2-6"
+    item_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    qty_per_carton: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 3), nullable=True)
+    carton_count: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    gross_weight_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 3), nullable=True)
+    measure: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # "50.5*44*24"
+    cbm: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 6), nullable=True)
+    remark: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    shipment: Mapped[ImportShipment] = relationship(back_populates="packing_lines")
+
+    __table_args__ = (
+        UniqueConstraint("shipment_id", "seq", name="uq_import_packing_line_seq"),
+    )
+
+
+class ImportDocument(Base):
+    """원본 서류 보관 — 근거 보존(계약 §3 금지선: 파일 없이 저장 금지).
+
+    ★파일 본문을 **DB에 담는다**. 파일시스템에 두면 배포·백업 경로가 갈라지고, 이 저장소는
+    iCloud 위에 있어 파일시스템 메타데이터를 근거로 못 쓴다(원칙 23-A와 같은 이유).
+    건당 3파일 · 합계 500KB 수준이라 볼륨이 문제되지 않는다.
+    """
+
+    __tablename__ = "import_document"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(
+        ForeignKey("import_shipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    doc_type: Mapped[str] = mapped_column(String(20), nullable=False)  # ci / pl / expense / etc
+    filename: Mapped[str] = mapped_column(String(300), nullable=False)
+    content_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # ★`deferred=True` — 이 컬럼을 **명시적으로 읽을 때만** SELECT한다(적대 리뷰 P2-1).
+    #   목록 API가 `document_count`를 세려고 documents를 selectinload 하는데, 그때 파일 본문까지
+    #   딸려 올라온다: limit 500 × 상한 20MB면 목록 조회 한 번에 수백 MB가 메모리로 온다.
+    #   prod 디스크가 94%인 상황에서 이건 이론적 위험이 아니다. 다운로드 경로는 `doc.content`를
+    #   직접 읽으므로 그때 지연 로드된다.
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, deferred=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    shipment: Mapped[ImportShipment] = relationship(back_populates="documents")

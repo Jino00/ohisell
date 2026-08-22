@@ -274,6 +274,7 @@ const NAV_ITEMS = [
   { to: "/product-connection-map", label: "상품 연결맵", icon: "🔗" },
   // 로켓1P 화면 3개는 ROCKET_1P_GROUP(대시보드 하위)으로 옮겼다 — 최상위에서 제거.
   { to: "/inventory", label: "재고 관리", icon: "🏭" },
+  { to: "/import-cost", label: "수입건 원장", icon: "📥" },
   { to: "/settlements", label: "정산 관리", icon: "💰" },
   { to: "/ad-report", label: "광고 리포트", icon: "📈" },
   { to: "/naver-ad", label: "네이버 광고", icon: "🟢" },

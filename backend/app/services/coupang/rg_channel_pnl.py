@@ -1,0 +1,183 @@
+# rg_channel_pnl.py — 로켓그로스(RG) 채널을 대시보드 요약에 올린다 (D-CPP-47).
+#
+# 왜 별도 모듈인가: `rg_net_revenue`는 **데이터 접근층**(net 매출·원가·커버리지·광고 분해)이고,
+#   여기는 그것들을 «화면 행 한 줄»로 조립하는 층이다. 같은 분업을 로켓1P가 이미 쓰고 있다
+#   (`rocket_1p_channel_pnl`). 층을 섞으면 조회 함수가 화면 사정을 알게 되고, 그때부터
+#   같은 조회를 쓰는 다른 화면이 이 행의 규칙에 끌려간다.
+#
+# ★이 모듈은 «세 번째 손익 엔진»이 아니다(금지선). 공식·부품을 전부 기존 것에서 가져온다:
+#     순이익 = 매출 − 원가 − 수수료 − 광고비 − payable_vat(...)   ← `calculate_channel_summary`와 동일
+#     하한 판정(net=None인데 광고비가 있으면 −광고비)               ← 집계층 `net_contribution`(D-22)
+#     원가 다리                                                     ← `intelligence._cost_master`
+#     정산 수수료                                                   ← `profit_calculator.get_rg_total_by_account`
+#   여기서 새로 만드는 것은 **행의 모양**뿐이다.
+from __future__ import annotations
+
+import logging
+import os
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy.orm import Session
+
+from app.services.coupang.rg_net_revenue import (
+    net_cost,
+    net_revenue_by_account,
+    option_axis_coverage,
+    rg_channel_for_account,
+    split_wing_ad_spend,
+)
+
+log = logging.getLogger(__name__)
+
+ZERO = Decimal("0")
+
+#: 원가 커버리지 하한 — 이 아래면 순이익을 «내지 않는다»(None + 광고비 하한).
+#: 로켓1P(`ROCKET_1P_COST_COVERAGE_MIN`, 기본 0.95)와 **같은 계열·같은 기본값**으로 둔다.
+#: ref 89 실측 커버리지는 99.44%라 통상은 넉넉히 넘는다 — 이 게이트는 옵션축 백필이 안 닿은
+#: 구간이 창에 섞여 커버리지가 무너질 때를 위한 것이다.
+_COST_COVERAGE_MIN = Decimal(os.getenv("RG_COST_COVERAGE_MIN") or "0.95")
+
+
+def compute_rg_summary_row(
+    db: Session,
+    account_key: str,
+    date_from: date,
+    date_to: date,
+    cost_master: dict[str, dict],
+    vendor_id: str,
+    ad: dict | None = None,
+) -> dict | None:
+    """RG 채널 요약 행 — `calculate_channel_summary` 출력과 **같은 모양**.
+
+    매출 = 콘솔 net 요약축(RFM). gross 주문 원장이 아니다 — 그쪽은 취소·반품이 안 빠져
+      오픽스 30일 기준 +11.8% 과대다(ref 89).
+    원가 = 옵션축 net 수량 × 옵션 원가. 커버리지가 임계 미만이면 **순이익을 내지 않는다**
+      (원가를 모르는 매출로 이익률을 내면 뜻 없는 비율이 나온다 — D-22와 같은 판단).
+    수수료 = 정산 실측 `rg_total − ad_sales`(D-CPP-43). 금액표 되계산이 아니다.
+    광고비 = 실판매 경로로 «측정 귀속»된 몫만(라벨 아님). 미배분은 이 행에 안 실린다.
+
+    매출·광고비가 둘 다 0이면 None — 빈 행을 화면에 만들지 않는다(로켓1P와 같은 규율).
+    """
+    ch = rg_channel_for_account(db, account_key)
+    if ch is None:
+        log.warning("account %s에 대응하는 RG 채널이 없다 — RG 행을 만들지 않는다", account_key)
+        return None
+
+    rev_by_acc = net_revenue_by_account(db, date_from, date_to).get(account_key)
+    revenue = rev_by_acc["revenue"] if rev_by_acc else ZERO
+    units = rev_by_acc["units"] if rev_by_acc else 0
+
+    # ★호출부가 이미 구했으면 주입받는다 — `option_sell_route`가 쿼리 5종을 도는데, 호출부가
+    #   3P 행 갱신용으로 한 번 부르고 여기서 또 부르면 계정마다 그게 2배가 된다(적대 리뷰 P2).
+    if ad is None:
+        ad = split_wing_ad_spend(db, date_from, date_to, account_key, vendor_id)
+    ad_spend = ad["rg"]
+
+    if revenue == ZERO and ad_spend == ZERO:
+        return None
+
+    # 수수료 — 지연 임포트(순환 참조 방지: profit_calculator는 이 모듈을 모른다).
+    from app.services.profit_calculator import (  # noqa: PLC0415
+        get_rg_total_by_account,
+        payable_vat,
+    )
+
+    commission = get_rg_total_by_account(db, date_from, date_to).get(account_key, ZERO)
+
+    cost_info = net_cost(db, date_from, date_to, account_key, cost_master)
+    coverage = cost_info["coverage"]
+    cov_days = option_axis_coverage(db, date_from, date_to, account_key)
+
+    # ★순이익을 낼 수 있는가 — 두 조건을 **둘 다** 본다.
+    #   ① 원가 커버리지(매출 기준)가 임계 이상인가
+    #   ② 옵션축이 창 «전체»를 덮는가
+    #   ②가 따로 필요한 이유: 커버리지는 «옵션축이 있는 날들 안에서»의 비율이라, 창의 절반이
+    #   통째로 비어 있어도 100%가 나온다. 그 경우 원가는 절반만 세고 매출은 요약축에서 전부
+    #   세므로 **순이익이 위로 부푼다** — 조용히 틀리는 가장 나쁜 모양이다.
+    cost_trustworthy = (
+        coverage is not None
+        and coverage >= _COST_COVERAGE_MIN
+        and cov_days["complete"]
+    )
+
+    if cost_trustworthy:
+        cost = cost_info["cost"]
+        net = revenue - cost - commission - ad_spend - payable_vat(
+            revenue, cost, commission, ad_spend
+        )
+        scope, net_basis = "full", revenue
+        rate = (
+            str((net / revenue * Decimal("100")).quantize(Decimal("0.01")))
+            if revenue > 0
+            else None
+        )
+    else:
+        # 원가를 못 믿는다 → 순이익 없음. 단 **광고비는 확정 비용**이라 하한을 낸다(D-22).
+        #   여기서 하한을 «만들지 않고» 집계층에 맡기는 것이 원칙이지만(net_contribution),
+        #   `cost`를 0으로 실어 보내면 화면이 「원가 0」으로 읽으므로 0이 아니라 미상을 싣는다.
+        cost = ZERO
+        net = None
+        scope, net_basis, rate = None, ZERO, None
+
+    return {
+        "channel_id": ch.id,
+        "channel_name": ch.name or "",
+        "revenue": str(revenue),
+        # RG 매출은 콘솔 GMV(소비자 결제액)라 배송비 수취분이 따로 없다 — 전액 상품매출.
+        "product_revenue": str(revenue),
+        "shipping_revenue": "0",
+        "cost": str(cost),
+        "commission": str(commission),
+        "ad_spend": str(ad_spend),
+        "shipping": "0",   # 판매자 배송비 없음(쿠팡 물류) — 그 비용은 정산 풀필먼트에 들어 있다
+        "fixed_cost": "0",
+        "net_profit": None if net is None else str(net),
+        "net_scope": scope,
+        "net_basis_revenue": str(net_basis),
+        "unmapped_revenue": str(cost_info["unmapped_revenue"]),
+        "profit_rate": rate,
+        # ★「주문 건수」다 — **판매수량이 아니다**(적대 리뷰 1R P1-1).
+        #   초판은 여기 요약축 `units_sold`를 넣었는데, 이 칸을 소비하는 두 집계층이
+        #   (`_kpi_totals`·`group_summary_by_company`) 전 채널 값을 그냥 더하므로 「주문 건수」
+        #   카드와 회사 소계가 부풀었다. 로켓1P가 **정확히 같은 이유로** `_kpi_totals`에서
+        #   제외돼 있는데(그 칸이 판매수량이라서), RG를 세 번째 예외로 추가하는 대신
+        #   **칸의 뜻을 지키는 쪽**으로 고쳤다 — 옵션축이 실제 net 주문 수를 준다.
+        #
+        # ★★그런데 그 축은 **창을 다 안 덮을 수 있다**(2R NEW P1). `net_profit`·`cost`는
+        #   `cost_trustworthy` 게이트를 통과해야 값을 내는데 이 칸만 게이트를 안 거쳐서,
+        #   덮은 날짜만 부분 합산한 값이 **완전한 숫자처럼** 나갔다. 옵션축이 아예 없으면
+        #   정확히 0이 되어 「미상」이 「주문 0건」으로 읽힌다 — WING2는 옵션축이 07-27부터라
+        #   기본 30일 창에서 **상시 재현**되는 조건이었다.
+        #   ⇒ 같은 게이트를 씌운다. 부분 커버리지면 0을 낸다.
+        #
+        # ⚠️ 남는 한계(의도적, 자백): 0으로 내면 그 창의 RG 주문이 「주문 건수」 합계에서
+        #   **빠진다**(과소). 종전 동작은 판매수량이 섞여 **과대**였다. 둘 다 완벽하지 않지만
+        #   과소가 안전한 방향이고 — 무엇보다 이 행은 `option_axis_days`("16/16")를 같이 실어
+        #   보내므로 **읽는 쪽이 부분치임을 알 수 있다.** 「모르는데 아는 척」만은 피한다.
+        #   완전한 해법은 `order_count`를 Optional로 바꿔 집계에서 «제외»하는 것인데, 그건
+        #   스키마·두 집계층·프론트를 함께 건드려야 해서 이번 범위 밖이다(트랙 「안함」 참조).
+        "order_count": cost_info["net_orders"] if cost_trustworthy else 0,
+        # 판매수량은 뜻이 다른 별도 칸으로 낸다(요약축 기준 — 창 전체를 덮는다).
+        "units_sold": units,
+        # ── 이 행이 «자기 신뢰도»를 스스로 말하는 칸 (로켓1P의 revenue_basis/cost_coverage와 같은 계열) ──
+        "revenue_basis": "console_net",
+        "cost_coverage": None if coverage is None else str(coverage.quantize(Decimal("0.0001"))),
+        "option_axis_days": f"{cov_days['days_covered']}/{cov_days['days_total']}",
+        # ★카탈로그에 없는 옵션에 쓰인 광고비 — **이 행에 안 실린 돈**이다(귀속 불가).
+        #   그만큼 회사 광고비가 어느 채널 행에도 안 잡히므로 화면이 실토해야 한다.
+        #   ★prod 라이브 실측(2026-08-22 15:1x, WING1 08-05~08-20): **0원**(옵션 14개는 전부 지출 0).
+        #     즉 그 창의 광고비는 **한 푼도 빠짐없이** 3P/RG로 귀속된다.
+        #   ⚠️이 주석은 두 번 틀렸다가 라이브가 고쳤다:
+        #     ①초판 「0이 정상(모든 상품은 카탈로그에 있으므로)」 — 카탈로그만 보면 틀리다.
+        #     ②2판 「26옵션 57,787원(4.2%)」 — 그건 내가 **카탈로그만으로 3P를 판정한 임시 쿼리**의
+        #       산물이고, 실제 코드는 `카탈로그 ∪ orders ∪ 옵션축 NORMAL`을 쓴다. 그 57,787원은
+        #       미배분이 아니라 **3P였다**(Z폴드8 `95854992864`: 카탈로그 0행인데 orders 8건·
+        #       옵션축 NORMAL 11행). 배포된 코드가 내 임시 쿼리보다 정확했다.
+        #   ⇒ 「카탈로그가 우주」라는 말은 **부정확하다**. 실측: WING1 카탈로그 413행인데 실제 3P
+        #     판매 옵션 88개 중 **67개(76%)가 카탈로그에 없다**(최종 동기화 08-20 20:35이라
+        #     시간 문제도 아니다). 카탈로그는 «참고»이고 **판매 원장이 실질 우주**다.
+        #   ⇒ 이 값이 0이 아니면 = 카탈로그에도 판매 원장에도 없는 옵션에 돈이 쓰였다는 뜻이다.
+        "ad_unallocated": str(ad["unallocated"]),
+        "ad_unallocated_options": ad["opt_unknown"],
+    }

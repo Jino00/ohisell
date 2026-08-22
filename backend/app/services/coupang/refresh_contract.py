@@ -56,6 +56,13 @@ KIND_ACCESS_DENIED = "access_denied"
 #   한 kind로 뭉치면 운영자가 멀쩡한 구독을 갱신하며 코드 버그를 쫓는다.
 KIND_MAPPING_BROKEN = "mapping_broken"
 
+# ★no_response(2026-08-22, 계약 CONTRACT_collection_stability_s1 W1) — 페처가 예산을 다 쓰도록
+#   **아무 보고도 하지 않은** 상태. 위 셋과 달리 이건 페처가 «말한» 사유가 아니라 reaper가
+#   «관측한» 사유다: Mac이 꺼졌거나, 데몬이 죽었거나, 데몬이 다른 일에 붙들려 요청을 못 집었다.
+#   구분이 필요한 이유는 처방이 다르기 때문이다 — login_required는 "로그인하세요"지만
+#   no_response는 "Mac/데몬을 보세요"다. 종전엔 둘 다 화면에서 「응답 없음」 한 문구로 뭉쳤다.
+KIND_NO_RESPONSE = "no_response"
+
 # lease TTL(분) — "데몬이 보고도 못 하고 죽었다"고 간주하기까지의 시간.
 # ★실측 근거(2026-07-27, Mac 페처 로그 ~/.ohisell_*_fetcher.log의 claim→활동종료 구간):
 #     ad_cost   run=227회  median 22s  p90 76s  max 684s(11.4분, 2026-06-17 로그인 대기 포함)
@@ -262,6 +269,9 @@ def _reap_exhausted(
         refresh_requested_at=None,
         claimed_at=None,
         last_error=(f"재시도 {MAX_ATTEMPTS}회 소진 — 마지막 시도가 보고 없이 종료(응답 없음)")[:300],
+        # ★이건 페처가 «말한» 사유가 아니라 reaper가 «관측한» 사유다 — 처방이 login_required와
+        #   다르므로(로그인이 아니라 Mac/데몬을 보라) 문구가 아니라 kind로 구분한다(W1).
+        last_error_kind=KIND_NO_RESPONSE,
         last_error_at=now,
     ))
     db.commit()
@@ -334,7 +344,23 @@ def mark_run_complete(db: Session, account_key: str, lease: str, *,
 
 def _settle_values(clear_error: bool) -> dict:
     """요청 소멸 시 쓰는 컬럼 묶음 — mark_success와 mark_run_complete가 공유한다."""
-    values: dict = {"refresh_requested_at": None, "claimed_at": None, "attempt_count": 0}
+    values: dict = {
+        "refresh_requested_at": None,
+        "claimed_at": None,
+        "attempt_count": 0,
+        # ★kind는 clear_error와 **무관하게 항상** 지운다 (2026-08-22 적대 리뷰 1R P1-1).
+        #   왜 조건부면 안 되나: prod 성공 경로 6곳이 **전부** 기본값(clear_error=False)으로
+        #   부른다(ad_cost×3 · ohitech · rocket · vendor_summary). 그 호출부들은 last_error·
+        #   last_error_at을 자기가 직접 지우지만 **새 컬럼은 모른다** — 그래서 조건부로 두면
+        #   「성공했는데 last_error_kind='login_required'가 남는」 상태가 4레인에서 만들어지고,
+        #   compute_stream_state가 그걸 needs_login으로 읽어 **정상 가동 중인 레인에 빨간
+        #   상주 배너와 Slack 알림이 영구히** 붙는다(끄는 경로 없음 — 다른 kind의 실패가
+        #   새로 나야만 풀린다).
+        #   ★의미로도 이쪽이 맞다: kind는 «살아있는 실패의 분류»이고, 요청이 성공으로
+        #   소멸했다는 것은 살아있는 실패가 없다는 뜻이다. clear_error는 «호출부가 이미
+        #   지웠는가»를 말할 뿐 «실패가 남아있는가»를 말하지 않는다.
+        "last_error_kind": None,
+    }
     if clear_error:
         values["last_error"] = None
         values["last_error_at"] = None
@@ -402,6 +428,10 @@ def report_failure(
     values: dict = {
         # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
         "last_error": message[:300],
+        # ★kind를 그대로 싣는다 — None(일시 실패)도 «분류 없음»이라는 유효한 값이라 덮어쓴다(W1).
+        #   덮어쓰지 않으면 지난 회차의 login_required가 일시 실패 위에 남아, 사람이 이미
+        #   로그인했는데도 배너가 「로그인 필요」를 계속 띄운다.
+        "last_error_kind": kind,
         "last_error_at": kst_now(),
         "claimed_at": None,   # lease 반납 → 다음 폴에서 재claim(소멸 케이스에도 해제)
     }
@@ -439,7 +469,7 @@ def status_fields(row: CoupangWingCookie | None) -> dict:
     """
     if row is None:
         return {"attempt_count": 0, "max_attempts": MAX_ATTEMPTS,
-                "claimed_at": None, "in_flight": False}
+                "claimed_at": None, "in_flight": False, "last_error_kind": None}
     claimed_at = row.claimed_at
     in_flight = bool(
         claimed_at is not None
@@ -451,4 +481,7 @@ def status_fields(row: CoupangWingCookie | None) -> dict:
         "max_attempts": MAX_ATTEMPTS,
         "claimed_at": claimed_at.isoformat() if claimed_at else None,
         "in_flight": in_flight,
+        # ★6개 스트림의 refresh_status가 전부 이 함수를 펼쳐 쓰므로, 여기 한 줄이 전 레인에
+        #   전파된다(W1). 프론트는 last_error 문자열 매칭 대신 이 값을 읽는다.
+        "last_error_kind": row.last_error_kind,
     }
