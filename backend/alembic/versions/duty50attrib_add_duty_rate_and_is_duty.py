@@ -14,8 +14,13 @@ prod에 이미 확정된 수입건 1건이 있으므로 이게 전제조건이�
 ★`is_duty`에 server_default를 두지 않는다(교훈 #341: Boolean 기본값은 PostgreSQL에서
 터지는 자리다). nullable이라 기존 행 백필도 필요 없고, 코드는 `bool(None) == False`로 읽는다.
 
+★분기 대신 «선형»으로 잇는다: 처음엔 `mrg48s1heads`를 부모로 썼는데, 그 사이 병행 세션의
+`m3bprofitscore`가 같은 부모에서 갈라져 **origin/main에 먼저 들어갔다**. 내 마이그는 아직
+prod에 적용 전이라 부모를 그쪽 head로 옮기는 것이 가능하고, 그러면 merge revision 없이 끝난다
+(이번 세션에 이미 한 번 merge revision을 만들었다 — 안 만들 수 있으면 안 만드는 게 낫다).
+
 Revision ID: duty50attrib
-Revises: mrg48s1heads
+Revises: m3bprofitscore
 Create Date: 2026-08-22 KST
 """
 from typing import Sequence, Union
@@ -24,7 +29,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "duty50attrib"
-down_revision: Union[str, None] = "mrg48s1heads"
+down_revision: Union[str, None] = "m3bprofitscore"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
