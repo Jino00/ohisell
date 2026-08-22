@@ -11,7 +11,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Channel, CoupangProductItem, CoupangRgOrderItem, Order
+from app.models import (
+    Channel, CoupangProductItem, CoupangRgOrderItem,
+    CoupangVendorItemSalesDaily, Order,
+)
 from app.services.coupang import vendor_summary_sync as vss
 from app.services.coupang.intelligence import compute_command_center
 from app.services.coupang.revenue_reconcile import reconcile_revenue
@@ -107,12 +110,23 @@ def test_unknown_registration_type_ignored(db):
 
 # ════════════════════════════════ reconcile Harness ════════════════════════════════
 def test_drift_reproduces_ref18(db):
-    """ref 18 수동 대조 자동 재현: 3P +1.8%, RG +7.4% (단일 닫힌일 = 완전 적재)."""
+    """ref 18 수동 대조 자동 재현: 3P +1.8%, RG +7.4%.
+
+    ★D-CPP-49로 RG 칸의 «뜻이 바뀌었다». 종합조망 RG 매출이 콘솔 net으로 옮겨갔으므로
+      `pct_rg`는 이제 **같은 축끼리의 비교**이고 0인 것이 정상이다 — 그 0은 「정합한다」가 아니라
+      「같은 숫자를 두 번 읽었다」는 뜻이다. ref 18이 실제로 재던 것(우리 gross 원장 vs 콘솔 net,
+      = 취소·반품 간극)은 **`pct_rg_gross`가 이어받았다.** 이 테스트는 그 이관이 됐는지를 본다 —
+      신호를 살려 뒀는지가 핵심이고, 살아 있지 않으면 「드리프트 0」이 「감시 안 됨」을 덮는다.
+    """
     _ch(db, 1, "COUPANG_WING1", "오픽스")
     _product(db, "V3P", "COUPANG_WING1", "A01564720")
     _product(db, "VRG", "COUPANG_WING1", "A01564720")
     _three_p(db, 1, "O1", "V3P", 1724230)                              # 우리 3P 1,724,230
-    _rg_order(db, "COUPANG_WING1", "A01564720", "VRG", 1918700, 1, "RG1")  # 우리 RG 1,918,700
+    _rg_order(db, "COUPANG_WING1", "A01564720", "VRG", 1918700, 1, "RG1")  # 우리 gross RG 1,918,700
+    db.add(CoupangVendorItemSalesDaily(   # 콘솔 net 옵션축 = 요약축 RFM과 같은 값
+        sale_date=D_FROM, account_key="COUPANG_WING1", vendor_item_id="VRG",
+        registration_type="RFM", item_name="optVRG", gmv=1786500,
+        units_sold=1, total_orders=1))
     _ingest(db, "COUPANG_WING1", [
         {"date": D_FROM, "registration_type": "NORMAL", "gmv": 1693230, "units_sold": 1},
         {"date": D_FROM, "registration_type": "RFM", "gmv": 1786500, "units_sold": 1},
@@ -124,13 +138,20 @@ def test_drift_reproduces_ref18(db):
     assert r["coverage"]["complete"] is True
     assert r["coverage"]["expected_days"] == 1
     assert r["ours"]["revenue_3p"] == Decimal("1724230")
-    assert r["ours"]["revenue_rg"] == Decimal("1918700")
     assert r["official"]["gmv_3p"] == 1693230
     assert r["official"]["gmv_rg"] == 1786500
     assert round(float(r["drift"]["pct_3p"]), 1) == 1.8
-    assert round(float(r["drift"]["pct_rg"]), 1) == 7.4
     assert r["drift"]["abs_3p"] == Decimal("31000")
-    assert r["drift"]["abs_rg"] == Decimal("132200")
+
+    # RG net 축 — 같은 축이라 0. 그리고 그 0을 «정합»으로 읽지 않도록 플래그가 서 있다.
+    assert r["ours"]["revenue_rg"] == Decimal("1786500")
+    assert r["drift"]["abs_rg"] == _Z
+    assert r["rg_same_axis"] is True
+
+    # ★ref 18이 재던 신호는 여기로 이관됐다 — 살아 있는지 확인한다.
+    assert r["ours"]["revenue_rg_gross"] == Decimal("1918700")
+    assert round(float(r["drift"]["pct_rg_gross"]), 1) == 7.4
+    assert r["drift"]["abs_rg_gross"] == Decimal("132200")
 
 
 def test_partial_coverage_flagged_incomplete(db):
