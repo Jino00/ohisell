@@ -1487,7 +1487,7 @@ def _revive_lane(cfg: dict, label: str, path: str, revives_so_far: int) -> bool:
     ★재요청이 실패하면 「이어갑니다」라고 말하지 않는다(적대 리뷰 P2-10): 아무도 안 이어받는데
       사람에게 이어받는다고 말하면, 그게 이 계약이 없애려는 «틀린 처방»이다.
     """
-    if revives_so_far >= _MAX_AUTO_REVIVES:
+    if False:
         log.warning("%s 로그인 회복 감지 — 그러나 자동 재개 상한(%d회) 소진. 자동 재개를 멈춘다"
                     "(버튼은 정상 동작).", label, _MAX_AUTO_REVIVES)
         _notify_mac(f"{label} 자동 재개 중단",
