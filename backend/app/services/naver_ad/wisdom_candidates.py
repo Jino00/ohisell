@@ -67,24 +67,43 @@ def _outcome_window(outcome: dict) -> dict | None:
     return None
 
 
-def _outcome_direction(db: Session, entry: OpsDiaryEntry, window: dict) -> str | None:
+def _outcome_direction(
+    db: Session, entry: OpsDiaryEntry, window: dict, *, bep_cache: dict | None = None,
+) -> str | None:
     """결과 방향 3분류. cost가 0/None/결측이면 'neutral'(돈 안 쓴 관찰 = 패턴 증거 아님 →
-    tally 미기여·후보 skip, 리뷰 P2-3). 비용이 있으면 target 대비 good/bad — good = roas_c ≥
-    캠페인 target. target은 campaign_target_resolver 재사용, 조회 실패/미확보(None)면 None
-    반환(후보 생성 skip, neutral과 구분)."""
+    tally 미기여·후보 skip, 리뷰 P2-3). 비용이 있으면 **손익분기(BEP) 대비** good/bad —
+    good = roas_c >= 캠페인 bep_roas. 해석 실패/미확보(None)면 None 반환(후보 생성 skip,
+    neutral과 구분).
+
+    ★D-NAO-223(M3-b 축 ⓑ, 2026-08-22) — 기준자를 `target_roas` → `bep_roas`로 교정했다.
+      `models.py`가 `target_roas = bep_roas x 공격성 배수`로 정의하므로 `target >= bep`이고,
+      target을 기준자로 쓰면 **본전을 넘겨 실제로 총이익을 낸 구간(bep <= roas < target)이
+      통째로 `bad`로 떨어진다.** 그 구간이 정확히 트랙 목표(D-NAO-59) 원문
+      *"Roas는 떨어지지만 매출이 늘어서 총 이익이 늘어나는 경우"*가 사는 자리다.
+      그리고 이 tally가 그대로 패턴 후보의 승률이 되어 **지혜 승격 게이트**로 올라가는데
+      (`_observation`), 북극성 M5의 성공 정의는 「지혜 -> 총이익 기여 양수」다 —
+      승격 게이트와 그 층의 성공 정의가 다른 것을 재고 있었다(ref 90 §3).
+    ★`target_roas_override`가 개입하지 않는 것도 의도다 — 본전은 사람이 덮어쓰는 값이 아니다
+      (`campaign_target_resolver.resolve_bep_roas` 참조).
+    ★`bep_cache`: 회차 내 캠페인별 캐시. 없으면 이 호출 한정(기존 호출부 호환).
+    """
     cost = window.get("cost")
     if not cost:  # 0·None·결측 모두 중립 — 돈을 안 쓴 관찰은 원칙 증거가 아님
         return "neutral"
-    try:
-        resolved = campaign_target_resolver.resolve_target_roas(db, entry.campaign_id)
-        target = resolved.get("target_roas")
-    except Exception as e:  # noqa: BLE001 — 해석 실패는 후보 생성 skip(부풀림 방지)
-        log.warning("wisdom_candidates: target 해석 실패(후보 skip): campaign=%s: %s", entry.campaign_id, e)
-        return None
-    if target is None:
+    bep_cache = bep_cache if bep_cache is not None else {}
+    if entry.campaign_id in bep_cache:
+        bep = bep_cache[entry.campaign_id]
+    else:
+        try:
+            bep = campaign_target_resolver.resolve_bep_roas(db, entry.campaign_id).get("bep_roas")
+        except Exception as e:  # noqa: BLE001 — 해석 실패는 후보 생성 skip(부풀림 방지)
+            log.warning("wisdom_candidates: BEP 해석 실패(후보 skip): campaign=%s: %s", entry.campaign_id, e)
+            bep = None
+        bep_cache[entry.campaign_id] = bep
+    if bep is None:
         return None
     roas_c = window.get("roas_c")
-    good = roas_c is not None and roas_c >= float(target)
+    good = roas_c is not None and roas_c >= float(bep)
     return "good" if good else "bad"
 
 
@@ -117,6 +136,7 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
         )
         .all()
     )
+    bep_cache: dict[str, object] = {}  # 회차 내 캠페인별 BEP 캐시(행마다 재해석하지 않는다)
     totals = {"scanned": 0, "new": 0, "updated": 0, "revived": 0,
               "skipped_no_outcome": 0, "skipped_no_target": 0, "skipped_neutral": 0,
               "skipped_terminal": 0, "skipped_search_term_grain": 0, "errors": 0}
@@ -137,7 +157,7 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
                 totals["skipped_no_outcome"] += 1
                 continue
             totals["scanned"] += 1
-            direction = _outcome_direction(db, entry, window)
+            direction = _outcome_direction(db, entry, window, bep_cache=bep_cache)
             if direction is None:
                 totals["skipped_no_target"] += 1
                 continue

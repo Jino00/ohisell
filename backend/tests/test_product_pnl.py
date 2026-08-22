@@ -16,7 +16,8 @@ from app.models import (
     Channel, CoupangAdOptionDaily, CoupangAdReport, CoupangProductItem,
     CoupangReturnItem, CoupangRevenueFee, CoupangRgOrderItem,
     CoupangRgSettlementFee, CoupangRocketPurchaseOrder,
-    CoupangRocketPurchaseOrderItem, Order, ProductChannelMapping,
+    CoupangRocketPurchaseOrderItem, CoupangVendorItemSalesDaily,
+    Order, ProductChannelMapping,
     ProductMaster, RocketProductCostMap,
 )
 from app.services.coupang.intelligence import compute_command_center
@@ -103,12 +104,21 @@ def test_coupang_rg_revenue_conservation(db):
     _ch(db, 2, "COUPANG_RG1", company="ofix")
     _pm(db, 10, "OHI-0001")
     _map(db, 10, 1, "V1")  # V1 매핑(3P 채널 경유지만 vid 전역 고유)
+    # ★D-CPP-49: RG 매출 원천이 gross 주문 원장 → 콘솔 net 옵션축으로 바뀌었다(계약 ⓑ).
+    #   대조원장은 command_center의 revenue_rg를 «권위값»으로 쓰므로 **같은 축을 읽어야** 한다 —
+    #   여기만 gross로 두면 보존식이 정확히 그 차액만큼 깨지고, trustworthy=false가 되어
+    #   SKU 손익 표가 렌더 자체가 안 된다(라이브 전례: :369 D-CPP-43 P1-1 주석).
+    db.add(CoupangVendorItemSalesDaily(
+        sale_date=OD.date(), account_key="COUPANG_WING1", vendor_item_id="V1",
+        registration_type="RFM", item_name="optV1", gmv=10000, units_sold=2, total_orders=2))
+    db.add(CoupangVendorItemSalesDaily(
+        sale_date=OD.date(), account_key="COUPANG_WING1", vendor_item_id="V9",
+        registration_type="RFM", item_name="optV9", gmv=3000, units_sold=1,
+        total_orders=1))  # V9 미매핑
+    # gross 원장도 같이 둔다 — 이게 매출로 «새지 않는지»까지 이 테스트가 지킨다.
     db.add(CoupangRgOrderItem(
         order_id="RG1", vendor_item_id="V1", account_key="COUPANG_WING1", vendor_id="A01564720",
-        sales_quantity=2, unit_sales_price=Decimal("5000"), paid_at=OD))
-    db.add(CoupangRgOrderItem(
-        order_id="RG2", vendor_item_id="V9", account_key="COUPANG_WING1", vendor_id="A01564720",
-        sales_quantity=1, unit_sales_price=Decimal("3000"), paid_at=OD))  # V9 미매핑
+        sales_quantity=3, unit_sales_price=Decimal("5000"), paid_at=OD))  # gross 15,000(≠net)
     db.commit()
 
     result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
@@ -116,7 +126,9 @@ def test_coupang_rg_revenue_conservation(db):
 
     comp = _component(result, "coupang_rg", "revenue")
     assert comp["authoritative_total"] == cc["account"]["summary"]["revenue_rg"]
-    assert comp["authoritative_total"] == Decimal("13000")  # 5000*2 + 3000
+    assert comp["authoritative_total"] == Decimal("13000")  # 콘솔 net 10,000 + 3,000
+    # gross(15,000)가 권위값으로 새지 않았다 — 축 전환의 본체.
+    assert cc["account"]["summary"]["revenue_rg_gross"] == Decimal("15000")
     assert comp["allocated_to_sku"] == Decimal("10000")  # V1→OHI-0001
     assert comp["residuals"]["unmapped_coupang"] == Decimal("3000")  # V9
     assert _conserved(comp)

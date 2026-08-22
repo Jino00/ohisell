@@ -31,9 +31,15 @@ from app.models import (
     ProductMaster,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.utils.kst import kst_today
 from app.services.coupang.ad_sell_type import (
     AD_SELL_TYPE_2P,
     ORDER_BASED_SELL_TYPES,
+)
+from app.services.coupang.rg_net_revenue import (
+    accounts_in_window,
+    net_revenue_by_option,
+    option_axis_coverage,
 )
 from app.services.coupang.option_fee_rate import (
     BASIS_DEFAULT,
@@ -166,7 +172,17 @@ def _agg_orders(db: Session, dfrom: date, dto: date,
 
 def _agg_rg_orders(db: Session, dfrom: date, dto: date,
                    account_key: str | None = None) -> dict[str, dict]:
-    """로켓그로스(RG) 주문을 옵션ID별 집계. 매출=Σ(unit_sales_price×sales_quantity), paid_at 기준.
+    """로켓그로스(RG) **gross 주문 원장**을 옵션ID별 집계. 매출=Σ(unit_sales_price×sales_quantity), paid_at 기준.
+
+    ★D-CPP-49(계약 ⓑ) 이후 **이 함수는 종합조망 매출의 원천이 아니다.** compute_command_center는
+      `rg_net_revenue.net_revenue_by_option`(콘솔 net 옵션축)을 읽는다 — 대시보드가 이미 서 있는
+      축이고, 둘이 다른 축에 서 있으면 같은 화면이 RG 매출을 두 값으로 말한다.
+      이 함수가 남아 있는 이유는 둘이다:
+        ① `revenue_canonical._agg_by_type` — 여기선 gross가 **옳다**. 닫힌일은 Wing net을 옵션에
+           안분하는 «가중치»로 쓰이고, 당일분은 콘솔이 D+1이라 net이 원리적으로 없어 gross가
+           유일한 프록시다. net으로 바꾸면 factor_rg≈1이 되어 gross→net 환산이 죽는다.
+        ② `revenue_reconcile` — 「우리 수집이 콘솔과 얼마나 벌어졌나」를 재는 진짜 신호.
+           ref 89 실측 +11.8%가 그것이고, 그 갭은 net끼리 비교하면 정의상 사라진다.
 
     ★S3(트랙 reconciliation D-2): RG 매출은 이미 CoupangRgOrderItem로 수집되나 종합조망 매출에
     미편입이었다(라이브 진단: 오픽스 6/1~6/11 쿠팡 판매분석 4,901,500 중 절반이 RG인데 우리는
@@ -224,6 +240,59 @@ def _merge_rg_orders(orders: dict[str, dict], rg_orders: dict[str, dict]) -> Dec
         o["name"] = o.get("name") or rg.get("name")
         # unit_price는 의도적으로 건드리지 않음 — 3P 단가 보존(위 docstring, Codex P1#1).
     return rg_total_rev
+
+
+def _rg_axis_coverage(db: Session, dfrom: date, dto: date,
+                      account_key: str | None) -> dict:
+    """창 안에서 RG 옵션축이 며칠을 덮었나 — **절대 None을 반환하지 않는다.**
+
+    ★None 금지가 규칙인 이유(적대 리뷰 1R P1): 프론트는 「complete === false」일 때만 경고를
+      그린다. None이 나가면 경고도 「N/M일」 힌트도 통째로 사라져 화면이 「RG 0원」이라고
+      **단정**한다 — 이 변경이 막겠다고 선언한 바로 그 실패 모양이다(교훈 #123).
+      초판은 요약축에 RFM 행이 하나도 없는 창(예: 「어제」 버튼 = 오늘~오늘)에서 None을 냈고,
+      같은 사실인데 계정 지정 뷰는 실토하고 전체합산 뷰는 침묵했다.
+      ⇒ 「모른다」를 표현하는 방법은 필드를 지우는 것이 아니라 **complete=False**다.
+
+    ★«닫힌 날»만 분모로 센다(적대 리뷰 1R P2-5): 콘솔은 D+1이라 오늘은 원리적으로 못 덮는다.
+      오늘을 분모에 넣으면 **오늘이 포함된 모든 창**(기본 7일 창 포함)이 영원히 미완이 되어
+      경고가 상시 켜지고 무뎌진다 — 「백필 구멍」과 「오늘이라 당연히 빈 것」이 구분이 안 된다.
+      아직 안 닫힌 날은 경고가 아니라 **사실**(`open_days`)로 따로 낸다.
+      ⚠️`option_axis_coverage` 자체의 뜻은 안 바꾼다 — 대시보드(`rg_channel_pnl`)가 그걸로
+      원가·순이익을 게이트하는 배포된 경로라, 여기 사정으로 그 의미를 흔들면 안 된다.
+
+    ★account=None이면 **가장 나쁜 계정 기준**으로 답한다(한 계정이라도 못 덮으면 합계는 부분치).
+      분모 계정 목록은 `accounts_in_window`(두 축 합집합·등록유형 무필터)에서 온다.
+    """
+    yesterday = kst_today() - timedelta(days=1)
+    closed_end = min(dto, yesterday)
+    # ★`dto - closed_end`로 세면 안 된다(적대 리뷰 2R P2-2): `dfrom`이 미래면 창 밖의 날까지
+    #   세어 「5일 창에 미확정 6일」 같은 값이 나온다. 창 «안»의 안 닫힌 날만 센다.
+    open_start = max(dfrom, yesterday + timedelta(days=1))
+    open_days = (dto - open_start).days + 1 if dto >= open_start else 0
+
+    if closed_end < dfrom:
+        # 창 전체가 아직 안 닫혔다(오늘만 보는 창 등). 「0일 덮었다」가 아니라 「닫힌 날이 없다」다.
+        return {"days_total": 0, "days_covered": 0, "first_date": None, "last_date": None,
+                "complete": False, "open_days": open_days, "accounts": []}
+
+    days_total = (closed_end - dfrom).days + 1
+    keys = [account_key] if account_key is not None else accounts_in_window(db, dfrom, closed_end)
+    if not keys:
+        # 어느 계정의 콘솔 축도 이 창에 없다 → 「RG 0원」이 아니라 「미상」이다.
+        return {"days_total": days_total, "days_covered": 0, "first_date": None,
+                "last_date": None, "complete": False, "open_days": open_days, "accounts": []}
+
+    covs = [option_axis_coverage(db, dfrom, closed_end, k) for k in keys]
+    worst = min(covs, key=lambda c: c["days_covered"])
+    return {
+        "days_total": worst["days_total"],
+        "days_covered": worst["days_covered"],
+        "first_date": worst["first_date"],
+        "last_date": worst["last_date"],
+        "complete": all(c["complete"] for c in covs),
+        "open_days": open_days,
+        "accounts": list(keys),
+    }
 
 
 def _orphan_return_stats(db: Session, dfrom: date, dto: date,
@@ -793,9 +862,27 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     master = _product_master(db, acc["account_key"])
     cost_master = _cost_master(db)  # D-12: 내부 원가·정식상품명 다리(vid 키 룩업 — all_vids에 안 들어가 계정필터 불필요)
     orders = _agg_orders(db, dfrom, dto, acc["channel_ids"])
-    # S3(D-2): RG 매출 편입 — CoupangRgOrderItem을 옵션ID로 orders에 병합. summary·by_option 모두 RG 포함.
-    rg_orders = _agg_rg_orders(db, dfrom, dto, acc["account_key"])
+    # S3(D-2): RG 매출 편입 — 옵션ID로 orders에 병합. summary·by_option 모두 RG 포함.
+    # ★D-CPP-49(계약 ⓑ): 원천을 gross 주문 원장 → **콘솔 net 옵션축**으로 바꿨다.
+    #   왜: 대시보드 RG 행(`rg_channel_pnl`)은 이미 콘솔 net 위에 서 있는데 여기만 gross라
+    #   **같은 화면이 RG 매출을 두 값으로 말했다**(오픽스 30일 기준 gross가 +11.8%·+694,070원
+    #   과대 — ref 89). 쿠팡 RG 주문 API엔 취소·상태 축이 없어 gross에서 net을 뺄 길이 원리적으로
+    #   없으므로, net을 알려면 net을 주는 표면을 읽어야 한다.
+    #   ★대시보드는 요약축·여기는 옵션축(옵션 grain이 필요하다)이라 축이 갈리는데, 두 축의 등가는
+    #     prod 전 구간 실측으로 확인됐다 — WING1 76일·WING2 71일 **147 계정-일 전건**에서
+    #     금액·수량 불일치 0, 한쪽에만 있는 날 0(2026-08-22 15:47 KST).
+    rg_orders = net_revenue_by_option(db, dfrom, dto, acc["account_key"])
     rg_revenue = _merge_rg_orders(orders, rg_orders)
+    # ★커버리지를 화면이 실토하게 한다 — 옵션축은 페처 `vi_days` 롤링이라 창 앞쪽이 빌 수 있고,
+    #   빈 날의 RG 매출은 «0원»이 아니라 «미상»이다. 이걸 안 실으면 「그날 RG가 0이었다」로 읽힌다
+    #   (교훈 #123 — 「발견 0건」과 「실행 안 됨」이 같은 숫자로 보이면 안 된다).
+    #   그리고 당일(오늘)은 콘솔이 D+1이라 «항상» 비어 있다 — 대시보드도 같다(축이 같아 갈리지 않는다).
+    rg_axis = _rg_axis_coverage(db, dfrom, dto, acc["account_key"])
+    # 참고 지표: 같은 창의 gross 주문 원장 합. **매출이 아니다** — 우리 수집과 콘솔의 간극을
+    # 재는 진단값이고, 이 값이 없으면 net 전환 뒤 드리프트 대조가 통째로 «자기 자신과의 비교»가 된다.
+    rg_gross_revenue = sum(
+        (o["revenue"] for o in _agg_rg_orders(db, dfrom, dto, acc["account_key"]).values()), _Z
+    )
     ads = _agg_ads(db, dfrom, dto, acc["vendor_id"])
     returns = _agg_returns(db, dfrom, dto, acc["account_key"], acc["channel_ids"])
     fees = _agg_fees(db, dfrom, dto, acc["account_key"])
@@ -994,6 +1081,16 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # S3(D-2): 매출 중 로켓그로스(RG) 편입분 표시 — 쿠팡 판매분석(3P+RG)과 1:1 대조용.
     account_sum["revenue_rg"] = rg_revenue
     account_sum["revenue_3p"] = account_sum["revenue"] - rg_revenue
+    # ── D-CPP-49: 이 숫자가 «무엇인지»와 «얼마나 믿을 수 있는지»를 같이 낸다 ──
+    account_sum["revenue_rg_basis"] = "console_net"   # 대시보드 RG 행과 같은 축(계약 ⓑ)
+    account_sum["revenue_rg_gross"] = rg_gross_revenue  # 우리 주문 원장(진단용 — 매출 아님)
+    # 옵션축이 창을 덮은 날짜 수. complete=False면 revenue_rg는 **부분치**다.
+    #   ★셋 다 **항상 값이 있다** — 「모른다」는 필드를 지워서가 아니라 complete=False로 말한다.
+    account_sum["rg_option_axis_days"] = f"{rg_axis['days_covered']}/{rg_axis['days_total']}"
+    account_sum["rg_option_axis_complete"] = bool(rg_axis["complete"])
+    # 아직 콘솔이 닫지 않은 날 수(오늘 등). 경고가 아니라 **사실**이다 — RG 매출이 그날 없는 것은
+    # 결함이 아니라 D+1의 결과고, 이걸 분모에서 빼야 「백필 구멍」 경고가 무뎌지지 않는다.
+    account_sum["rg_open_days"] = rg_axis["open_days"]
     # S4(D-9, Codex S3 P1#2): net_profit 날짜축 명시 — 오인 방지(투명화). 매출은 주문일 기준이라
     # 쿠팡 판매분석과 일치하나, RG 정산차감(rg_total)은 정산인식일 기준(판매보다 지연)이라 단기
     # 윈도우 RG 순이익은 낙관적(매출 전액 인식·정산 일부만 차감), 장기·정산완료 구간에서 수렴.

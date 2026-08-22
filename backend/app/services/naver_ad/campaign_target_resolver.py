@@ -200,3 +200,30 @@ def resolve_target_roas(db: Session, campaign_id: str) -> dict:
 
     default = account_default_target_roas(db)
     return {"target_roas": default, "source": "account_default" if default is not None else "unavailable"}
+
+
+def resolve_bep_roas(db: Session, campaign_id: str) -> dict:
+    """캠페인의 **손익분기** ROAS를 해석. 반환: {bep_roas, source}.
+
+    우선순위(resolve_target_roas와 같은 사다리, 다른 컬럼):
+      ① 상품 파생 — 이 캠페인의 그룹들에 매핑된 상품 bep_roas 가중평균 → source='product_bep'
+      ② 계정 기본값(BEP 매출가중) → source='account_default'
+      ③ 둘 다 없음 → {bep_roas: None, source: 'unavailable'}
+
+    ★`resolve_target_roas`와 «다른 자»다 — `models.py`의 정의가
+      `target_roas = bep_roas × 공격성 배수`이므로 `target >= bep`이다. target은 «효율 목표»고
+      bep는 «본전»이다. **총이익(D-NAO-59) 판정의 기준자는 본전이어야 한다** — target을 쓰면
+      본전을 넘겨 실제로 돈을 번 구간(bep <= roas < target)이 통째로 「나쁨」으로 떨어지는데,
+      그 구간이 정확히 트랙 목표가 잡으라고 한 자리다(D-NAO-223 / ref 90 §3).
+    ★`target_roas_override`는 여기 개입하지 않는다 — 그건 «목표 다이얼»이지 손익분기가
+      아니다. 본전을 사람이 덮어쓸 수 있게 하면 채점기가 다시 임의의 자가 된다.
+    ★source를 함께 돌려주는 이유: ②는 «근사»다(상품BEP 미확보 그룹의 계정 블렌디드).
+      근사를 확정값처럼 합산하면 산출 숫자 자체가 오염된다(M3 계약 §4-B ⑥).
+    """
+    product_val = _weighted_target_for_cpids(
+        db, _cpids_for_campaign(db, campaign_id), NaverProductBep.bep_roas
+    )
+    if product_val is not None:
+        return {"bep_roas": product_val, "source": "product_bep"}
+    default = account_default_bep_roas(db)
+    return {"bep_roas": default, "source": "account_default" if default is not None else "unavailable"}

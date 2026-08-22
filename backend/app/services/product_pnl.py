@@ -23,9 +23,10 @@ from app.models import (
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang.intelligence import (
-    _agg_orders, _agg_rg_orders, _agg_rg_settlement_fees, _resolve_account,
+    _agg_orders, _agg_rg_settlement_fees, _resolve_account,
     compute_command_center,
 )
+from app.services.coupang.rg_net_revenue import net_revenue_by_option
 from app.services.coupang.rocket_intelligence import (
     _kst_window_utc, compute_rocket_overview,
 )
@@ -290,8 +291,12 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
         {"unmapped_coupang": unmapped_rev},
     ))
 
-    # ── 쿠팡 RG 매출: revenue_rg = Σ _agg_rg_orders ──
-    rg_orders = _agg_rg_orders(db, dfrom, dto, acc["account_key"])
+    # ── 쿠팡 RG 매출: revenue_rg = Σ net_revenue_by_option (콘솔 net 옵션축) ──
+    # ★D-CPP-49(계약 ⓑ): command_center가 net으로 옮겨갔으므로 **여기도 같이** 옮겨야 한다.
+    #   권위값은 `cc_sum["revenue_rg"]`(net)인데 할당분만 gross로 두면 보존식이 정확히
+    #   그 차액만큼 깨지고 → `trustworthy=false` → SKU 손익 표가 **렌더 자체가 안 된다**
+    #   (:369 근처 D-CPP-43 P1-1 주석에 같은 사고가 적혀 있다). 두 함수는 한 몸이다.
+    rg_orders = net_revenue_by_option(db, dfrom, dto, acc["account_key"])
     rev_rg_by_vid = {vid: o["revenue"] for vid, o in rg_orders.items()}
     alloc_rg, unmapped_rg = _partition_by_sku(rev_rg_by_vid, vid_sku)
     components.append(_reconcile_component(

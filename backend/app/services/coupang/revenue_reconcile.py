@@ -77,6 +77,17 @@ def reconcile_revenue(db: Session, dfrom: date, dto: date,
     ours_3p = csum["revenue_3p"]
     ours_rg = csum["revenue_rg"]
     ours_total = ours_3p + ours_rg
+    # ★★D-CPP-49: RG 행은 이제 **같은 축끼리의 비교**다 — 드리프트가 0인 게 정상이고, 그 0은
+    #   「정합한다」가 아니라 「같은 숫자를 두 번 읽었다」는 뜻이다. 종전 이 표의 RG 잔차는
+    #   우리 gross 원장과 콘솔 net의 간극(ref 89: 오픽스 30일 +11.8%)을 보여주는 **진짜 신호**였고,
+    #   net으로 옮기면 그 신호가 정의상 사라진다. 「발견 0건」과 「측정 안 됨」이 같은 숫자로 보이는
+    #   바로 그 함정이다(교훈 #123).
+    #   ⇒ 신호를 버리지 않고 **이름이 다른 칸**으로 옮긴다. 같은 라벨의 두 값을 한 화면에 두지
+    #     않으면서(교훈 #235) 수집 건전성 감시를 살려 두는 유일한 방법이다.
+    #   ★`.get(..., 0)` 폴백을 쓰지 않는다(적대 리뷰 1R P2-6): 키가 사라지면 조용히 0이 되고
+    #     `abs_rg_gross = 0 − off_rg`가 «큰 음수 드리프트»로 그려진다 — 감시 장치가 거짓 경보를
+    #     내는 것이 KeyError로 죽는 것보다 나쁘다. 이 파일의 다른 값들도 전부 직접 읽는다.
+    ours_rg_gross = csum["revenue_rg_gross"]
 
     # 쿠팡 공식 GMV — 같은 닫힌 윈도우.
     official = vendor_summary_sync.get_vendor_summary_totals(db, account, dfrom, closed_end)
@@ -111,10 +122,16 @@ def reconcile_revenue(db: Session, dfrom: date, dto: date,
         "pct_3p": _drift_pct(ours_3p, off_3p),
         "pct_rg": _drift_pct(ours_rg, off_rg),
         "pct_total": _drift_pct(ours_total, off_total),
+        # ★수집 건전성 — 우리 **gross 주문 원장** vs 콘솔 net. 위 abs_rg/pct_rg를 대체하는 게 아니라
+        #   그것이 재던 것을 이어받는다. 여기 값이 커지면 취소·반품이 늘었거나 수집이 샌 것이다.
+        "abs_rg_gross": ours_rg_gross - off_rg,
+        "pct_rg_gross": _drift_pct(ours_rg_gross, off_rg),
     }
     note = (
         "드리프트% = (우리−쿠팡)/쿠팡. 닫힌 과거일만 대조(D-3). 사실·지표만(D-2). "
-        "잔차 해석: 3P 잔여 stale 취소(D-5), RG gross-vs-net(D-11)."
+        "★RG는 D-CPP-49로 우리 매출도 콘솔 net(같은 축)이 됐다 — RG 드리프트 0은 «정합»이 아니라 "
+        "«같은 숫자»라는 뜻이다. 수집 간극은 `*_rg_gross`(우리 gross 원장 vs 콘솔 net)로 본다. "
+        "잔차 해석: 3P 잔여 stale 취소(D-5), RG gross-vs-net은 이제 rg_gross 칸(구 D-11)."
     )
     if account is None:
         note = (
@@ -136,7 +153,11 @@ def reconcile_revenue(db: Session, dfrom: date, dto: date,
             "revenue_3p": ours_3p,
             "revenue_rg": ours_rg,
             "revenue_total": ours_total,
+            # 매출이 아니다 — 수집 대조용 진단값(라벨을 달리해 한 화면 두 값 오독을 막는다).
+            "revenue_rg_gross": ours_rg_gross,
         },
+        # 소비자가 「RG 드리프트 0」을 정합으로 오독하지 않게 하는 플래그(문장이 아니라 값으로).
+        "rg_same_axis": True,
         "drift": drift,
         "note": note,
     }

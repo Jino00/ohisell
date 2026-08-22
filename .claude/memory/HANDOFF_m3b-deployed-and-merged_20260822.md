@@ -1,0 +1,118 @@
+# 세션 인수인계: **M3-b 배포·병합 완주** — 인계의 1순위 차단이 이미 풀려 있었다
+
+> 저장일시: 2026-08-22 16:2x KST · 체인 「PAO 논의 **35**」 (세션 `6d619137`)
+> 새 대화 시작 시 이 파일을 먼저 읽을 것. 체인 이어받기: `/session-relay PAO 논의` — 이번이 **35**번이었다(다음은 36).
+
+## 1. 프로젝트 위치 및 환경
+- 로컬: `~/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling` (**main**, push 완료·미푸시 0)
+- 작업 워크트리: `~/.claude-worktrees/Ohiselling/m3b-scorer-correction` — **PR #323 병합 완료**, 정리 대상
+- prod: **`sellc.ohitech.co.kr`** (ssh 별칭은 반드시 FQDN) · prod DB는 항상 `sqlite3 -readonly`
+- ★**prod alembic head = `m3bprofitscore`** (이번 세션이 올림. 직전 인계의 `cs1kind0a1b2`가 **아니다**)
+- **prod 디스크 81%** (79G/97G, 여유 19G — 16:02 실측)
+- 테스트 인터프리터(절대경로, 이것만): `.claude/worktrees/naver-ad-execution-loop-6cc75b/backend/.venv/bin/python3`
+  ⚠️`--timeout`은 `pytest-timeout` 미설치라 즉시 인자 오류. 소요 ~5분.
+  **현 기준선 = `2 failed, 6116 passed`** — 실패 2건(`test_health_partial_sync::test_health_route_actually_returns_partial_sync`·`test_vendor_item_axis::test_health_route_actually_returns_conservation`)은 **origin/main에서도 동일 재현**되는 기존 결함이다.
+- ⚠️`git status`에 **`CLAUDE.md` 수정 11줄 + `.claude/settings.local.json.bak-20260821`(미추적)** 그대로 — **8세션째 Jino 판단 대기.** 이번에도 안 건드렸다.
+
+## 2. 이번 세션 완료 목록
+- ✅ 체인 등록부 `n=35` append → 마감(§7)
+- ✅ 착수 필독+실측 위임(Sonnet) — **인계 주장 3건 정정**(§5-2)
+- ✅ **ⓐ alembic 트리 단일 head 확인** — main·워크트리·prod 세 값 전부 `m3bprofitscore`
+- ✅ **ⓑ `m3bprofitscore.down_revision` 재배선** `m2b2devw1eight` → `mrg48s1heads` (커밋 `42ae3d62`)
+- ✅ **ⓒ 배포** `safe_deploy --migrate --restart` — 마이그 `mrg48s1heads→m3bprofitscore` · CAS 4파일 통과 · 블루그린 다운타임 0초(활성 :8011)
+- ✅ **ⓓ PR #323 병합** `969e6afc`(16:13:21) — `--force`, 자백 `$TMPDIR/safe_merge.log`
+- ✅ **ⓕ 트랙 `확인:` 줄** 1건(누적 **34**) · 커밋 `c2ef9a31`
+- ✅ **ⓖ 완료 QA**(별도 Sonnet·읽기 전용) 3대조 판정 3줄
+- ⏳ **ⓔ 판정불능** — 첫 라이브 채점은 **08-23 08:10** 크론 몫(§5-1)
+
+## 2-1. 완료 QA (판정 원문 그대로 — 미달 포함)
+
+### 작업 목적(정본 원문 — 트랙 계약 헤더 `목표:`)
+*"무조건 이익스팟 순위에 있어서 매출 증가가 없는것보다 Roas는 떨어지지만 매출이 늘어서 총 이익이 늘어나는 경우, 구간도 분명히 있거든. 우리의 최종목표는 이거야. 이게 우리가 만든 MOP프로그램의 최종 목적이고 목표야."* (Jino 2026-07-19 · D-NAO-59)
+
+**판정(계약 `docs/PLAN_naver-m3-wisdom-scorecard.md` §4·§6): 달성** — §6의 M3-b 완료 정의(§4 합격 ④⑤ + 회귀 0)를 라이브로 충족. §4-B⑤ 경계 문언이 *"새 식의 «첫 라이브 채점»은 M4 창의 관측 항목"*이라 ⓔ 미도래를 **계약이 예정한 정상 상태**로 명시. QA가 전건 테스트 독립 재실행(`2 failed, 6116 passed`, 255.86s) + 실패 2건을 origin/main에서 독립 재현 ⇒ 신규 실패 0.
+
+**판정(직전 인계 §6 ① 지시 원문): 달성** — §5-1 4단계 전부 완주, 순서 위반 0. QA가 커밋 타임스탬프로 검증(`42ae3d62` 16:05:51 → 배포 16:12 → 병합 16:13:19).
+
+**판정(트랙 궁극 목표 D-NAO-59): 미달** — 새 채점식이 실제로 소비된 라이브 사례 **0건**. `outcome_profit` 6,939행 전건 NULL · `_outcome_direction`의 `bep_roas` 교정이 승격 후보 판정을 바꾼 관측 사례 없음 · 대기 101건의 첫 채점은 08-23 08:10.
+★**이 미달은 낮추지 않는다 — 여덟 번째다.** 다만 QA가 짚은 차이 하나: 직전 일곱 세션과 달리 **이번에 처음으로 «코드가 prod에 살아 있는» 상태가 됐다**(그 자체는 배포 상태이지 총이익 기여가 아니다).
+
+- **「안 함」·금지선 침범 0건**(QA가 앵커 `안 함:` 7항목 각각을 diff와 대조) · **목적 전환 없음** · **예산 위반 없음**
+- ★QA 독립 확인: 기존 `outcome` **358건 분포 완전 불변**(`declined 89 / failed 206 / improved 4 / neutral 57 / success 2`) = §8-Q1 준수
+
+### QA 미확인 4건 (그대로 기록)
+①PR #323의 「별도 서브에이전트 적대 리뷰」 **공정** 주장 — 전전 세션(`c7105dae`) 산물이고 PR에 리뷰 기록 0건이라 원리적으로 독립 검증 불가 ②ⓔ 라이브 발화(08-23 08:10) ③`_outcome_direction` 교정이 실제 승격 후보 목록을 바꾸는지 ④08-22 08:30 GAVE 산출(`naver_retro_signal.gave_score_d3/d7`) 지속 여부 — 전 세션 실측을 인용만 함
+
+## 2-2. 트랙 진행률
+- **트랙**: `docs/tracks/active/track_naver-ad-optimization.md`
+- **트랙 목표 원문**: §2-1과 동일(D-NAO-59)
+- **진행률**: 시작 **2/7** → 종료 **2/7** — 달성 M0·M1 / 미달 M2·M3·M4·M5·M6
+- **이번 세션이 움직인 항목**: **체크박스 없음.** M3은 **b만** 닫혔고 a·c·z가 남아 M3을 못 찍는다.
+  증거: 커밋 `42ae3d62`(재배선)·`c2ef9a31`(트랙) · PR **#323 MERGED** `969e6afc` · prod `alembic_version=m3bprofitscore` · prod 새 컬럼 4개
+- **확인 줄**: 1건 추가 → 누적 **34건** · **트랙 종결 여부**: 미도달(2/7)
+- ⚠️계약 헤더를 파일 전체로 grep하면 **4/14**가 나온다(기존 확인 줄이 백틱 안에 `- [ ] M2` 등을 인용). **`합격:` 블록만 세야 2/7**이다.
+
+## 3. 확정된 결정사항
+- **새 D-NAO 없음.** 이번 세션은 직전 세션이 확정한 D-NAO-225의 **집행**이다.
+- **새 교훈 없음.** `next_ids.sh` 발급값 **교훈 #346은 여전히 미사용**.
+
+## 4. 핵심 파일
+| 파일 | 역할 |
+|------|------|
+| `docs/PLAN_naver-m3-wisdom-scorecard.md` | M3 계약 정본(D-NAO-224). §4-B⑤가 「첫 라이브 채점은 M4 창」을 명시 — ⓔ 판정불능의 근거 |
+| `backend/app/services/naver_ad/proposal_scoreboard.py` | 축 ⓐ. prod 배포 확인: `_gross_profit:137`·`_profit_verdict:146`·`_frozen_lens:204` |
+| `backend/app/services/naver_ad/wisdom_candidates.py` | 축 ⓑ. `_outcome_direction`이 `bep_roas`를 본다(:98) |
+| `backend/app/services/naver_ad/campaign_target_resolver.py` | `resolve_bep_roas:205` — 두 축의 단일 정본 사다리 |
+| `backend/app/services/scheduler_service.py:2194` | `run_naver_learning_loops` = **08:10 KST 일 1회**. ⓔ의 유일한 발화 경로 |
+| `.claude/anchors/6d619137-….md` | 이번 세션 앵커(합격 ⓐ~ⓖ·대조 3·판정 3줄) |
+
+## 5. 알려진 이슈 / 주의사항
+
+### 5-1. ★다음 세션 1순위 = **08-23 08:10 크론의 첫 채점을 관측**하는 것
+배포로 «채점 대기» 상태가 열렸다. 다음 발화 때 채점될 대상:
+- `outcome IS NULL ∧ dry_run=0 ∧ verify_date<=오늘` = **101건**(`update_bid` **86** · `set_user_lock` **15**) — 배포 전후 동일 실측
+- 관측 명령:
+  `ssh sellc.ohitech.co.kr "sqlite3 -readonly /home/ubuntu/ohisell/backend/ohisell.db \"SELECT COALESCE(outcome_profit,'(null)'), COUNT(*) FROM naver_change_log GROUP BY 1;\""`
+- **동시에 확인할 것**: 기존 `outcome` 358건 분포가 **여전히 불변**인가(§8-Q1). 변했으면 Q1 위반이다.
+- ⚠️**수동 강제 실행 금지** — 교훈 #274(강제 backfill이 틀린 값을 영구히 굳힌다)가 이 잡을 정확히 가리킨다. 이번 세션도 안 했다(전건 NULL이 그 증거).
+
+### 5-2. ★실측이 인계를 정정한 것 3건 (인용 전 알고 갈 것)
+- **「alembic 트리 통합이 다음 세션 1순위」는 이미 남이 했다** — 병행 세션 PR **#326**이 **16:02:20 KST 병합**(커밋 `67f9d052`→`0150f659`)되어 `mrg2heads0822`를 삭제하고 **prod가 실제로 돌리는 `mrg48s1heads`를 정본화**했다. ⇒ 인계가 지목한 목표 head `cs1kind0a1b2`는 **틀렸다** — 실제 목표는 `mrg48s1heads`였다. 인계 §5-1의 「순서를 뒤집지 말 것」 경고도 그 전제 위에 있었으므로 그대로 적용하면 안 됐다.
+- **「미푸시 7커밋」은 유령** — `origin/main..HEAD` = **0건**, 전건 이미 push 상태였다.
+- **prod 디스크는 81%**(인계 이력에 94~95%가 섞여 있으나 현재값은 81%).
+
+### 5-3. CI 빨강은 여전히 결제 정지다 (직접 실측)
+`gh api .../actions/jobs/96996810490` → `conclusion=failure · started 07:06:03Z · completed 07:06:05Z(2초) · steps_count=0` · 로그 없음. **워크플로가 한 스텝도 안 돌았다.** 그래서 `safe_merge --force`를 썼고 자백이 `$TMPDIR/safe_merge.log`에 남았다. 열린 PR은 **#294** 1건뿐.
+
+### 5-4. 기타
+- **다음 구조 감사 트리거 = 08-25 이후**(마지막 §4 감사는 ref 69, 08-18).
+- 병행 세션(체인 「쿠팡-손익정합」)이 이 세션과 동시 가동했다 — 그쪽 산물 `HANDOFF_rg-net-ledger-wired_20260822.md`·`HANDOFF_collection-stability-s1_20260822.md`가 미추적으로 워킹트리에 있다. **미접촉 유지.**
+- 병합된 워크트리 `m3b-scorer-correction`은 정리 대상(브랜치·디렉터리).
+
+## 6. 다음에 할 작업 (미완료)
+- **이어지는 작업의 목적(원문)** — 트랙 계약 헤더 `목표:` 줄 그대로:
+  *"무조건 이익스팟 순위에 있어서 매출 증가가 없는것보다 Roas는 떨어지지만 매출이 늘어서 총 이익이 늘어나는 경우, 구간도 분명히 있거든. 우리의 최종목표는 이거야. 이게 우리가 만든 MOP프로그램의 최종 목적이고 목표야."*
+  이번 칸 = **M3(L4 부품 + 채점기 교정, 계약 D-NAO-224)**. 남은 슬라이스 = **M3-a → M3-c → M3-z**. (M3-b는 이 세션에서 닫혔다.)
+
+- [ ] ①★★**08-23 08:10 크론의 첫 채점 관측** — §5-1. 이게 ⓔ 판정불능을 해소하고, D-NAO-59 대비 「미달」을 처음으로 움직일 수 있는 유일한 관측이다.
+- [ ] ②**M3-a** — 지혜 성적표 조인 배선(북극성 §5-3 ①) + §4-B⑥ 값 정확도 라벨. 원료 `bep_source`는 이미 prod 컬럼으로 있다. ★`outcome_profit`을 롤업할 때 델타 «크기»를 함께 볼 것(부호 비교라 작은 델타도 판정이 된다 — 크기는 `gave_before`/`gave_after`와 `actual_json.lens`에 있다).
+- [ ] ③**M3-c** — A#8 라벨 API 층. **M2-d(08-28 이후) 의존**.
+- [ ] ④**M2-d / M2-z** — 진입 08-28 이후.
+- [ ] ⑤**계약 §8-Q5(M2) 콘솔 캡처 1장** — Jino 개입이 유일 경로. 없으면 M2 S1①은 영원히 부분달성.
+- [ ] ⑥**「실시간 성과 감지」 = M4 계약의 재료** — 직전 인계 §6 ⑥의 이월 7건 그대로 승계(`conversion_maturity` 곡선 퇴화 · CPC 급등 26일 무발화 · 매출 기준선 부재 · optimizer 분모 9 vs 캠페인 46 · 페이싱 143건/일이 「실행 대상 아님」).
+- [ ] ⑦**`entity_type='ad'` grain 오귀속**(직전 인계 §5-3) — 기존 결함, 소관 미정
+- [ ] ⑧**`CLAUDE.md` 미커밋 11줄** + `.claude/settings.local.json.bak-20260821` — **Jino 판단(8세션째)**
+- [ ] ⑨**워크트리 `m3b-scorer-correction` 정리**(병합 완료) + 직전 인계 §6 ⑨의 승계분(디스크 496MB 처분 · 크론 정리 2차 · `match_type` NULL 39.8% · 워크트리 24개 등)
+
+## 7. 세션 최종 상태
+- 메인 체크아웃: **main**(`c2ef9a31`, push 완료) · PR #323 **MERGED**
+- 이 세션 커밋: 워크트리 1개(`42ae3d62`) + main 1개(`c2ef9a31`) — **미푸시 0**
+- **prod 쓰기**: 배포 1회(마이그 + 코드 4파일 + 재시작). 그 외 조회는 전건 `-readonly`
+- 워킹트리 잔존: `CLAUDE.md` 미커밋 11줄 · `.claude/settings.local.json.bak-20260821` · 병행 세션 HANDOFF 2건(**미접촉**) · 체인 등록부 2개
+- 앵커: `.claude/anchors/6d619137-e577-45fc-8fcd-cbc025ca80e4.md`
+
+## 8. 새 세션 시작 프롬프트
+```
+.claude/memory/HANDOFF_m3b-deployed-and-merged_20260822.md 읽고 이어서 작업해줘
+```
+(체인 이어받기: `/session-relay PAO 논의` — 이번이 **35**번이었다)

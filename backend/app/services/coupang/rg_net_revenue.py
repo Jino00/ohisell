@@ -14,8 +14,12 @@
 #      → **소계용**. 커버리지가 길다(WING1 06-07~).
 #   ② 옵션축 `CoupangVendorItemSalesDaily`(grain: account×date×vendor_item_id)
 #      → **원가 계산·옵션 귀속용**. 옵션ID가 있어야 원가에 닿는데 요약축엔 옵션ID가 없다.
-#      커버리지가 짧다(WING1 08-05~ · WING2 07-27~ — 페처 `vi_days` 7일 롤링 탓).
-#   두 축의 등가는 실측됐다: WING1 08-05~08-20 **16일 전건 불일치 0**(금액·수량 둘 다).
+#      커버리지는 페처 `vi_days`(기본 7일) 롤링이라 **창 앞쪽이 빌 수 있다**.
+#      ★2026-08-22 일회성 백필로 WING1 06-07~ · WING2 06-12~ 까지 채워졌다(구 주석의
+#        「WING1 08-05~ · WING2 07-27~」는 백필 전 상태였다). 롤링은 7일로 원복돼 있으므로
+#        그 이전 구간은 다시 안 들어온다 — 「지금 비어 있지 않다」를 「영원히 안 빈다」로 읽지 말 것.
+#   두 축의 등가는 실측됐다: 초판 16일 → **147 계정-일 전건**(WING1 76일·WING2 71일,
+#     2026-08-22 15:47 KST prod 읽기 전용): 금액 불일치 0 · 수량 불일치 0 · 한쪽에만 있는 날 0.
 #   그래서 소계를 요약축으로 읽고 원가를 옵션축으로 계산해도 두 숫자가 안 갈라진다.
 #
 # ★이 모듈이 하지 않는 것:
@@ -170,6 +174,26 @@ def net_revenue_by_option(
         }
         for vid, gmv, units, orders, name in rows
     }
+
+
+def accounts_in_window(db: Session, date_from: date, date_to: date) -> list[str]:
+    """창 안에 **콘솔 축이 존재하는** 계정 키 목록 — 커버리지 판정의 «분모»다.
+
+    ★`registration_type`을 안 건다. 묻는 것은 「이 계정의 콘솔 수집이 이 창에 돌았나」이지
+      「RG를 팔았나」가 아니다. RFM만 세면 RG 매출이 0인 계정이 목록에서 빠지고, 그 계정의
+      «수집 안 됨»이 «판매 0»으로 읽힌다 — 이 모듈이 통째로 막으려는 그 오독이다.
+    ★두 축의 **합집합**이다. 요약축만 보면 「옵션축이 통째로 없는 계정」이 안 잡히고,
+      옵션축만 보면 그 계정이 스스로를 완전하다고 말한다. 둘 다 봐야 한다.
+    """
+    rows_o = db.query(CoupangVendorItemSalesDaily.account_key).filter(
+        CoupangVendorItemSalesDaily.sale_date >= date_from,
+        CoupangVendorItemSalesDaily.sale_date <= date_to,
+    ).distinct().all()
+    rows_s = db.query(CoupangVendorSummaryDaily.account_key).filter(
+        CoupangVendorSummaryDaily.summary_date >= date_from,
+        CoupangVendorSummaryDaily.summary_date <= date_to,
+    ).distinct().all()
+    return sorted({str(a) for (a,) in rows_o} | {str(a) for (a,) in rows_s})
 
 
 def option_axis_coverage(
