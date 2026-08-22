@@ -109,8 +109,47 @@ describe("runStreamRefresh — 판정 규칙", () => {
       S({ requested: false }),
       S({ requested: true }), // 영원히 진행 중(데몬 무응답)
     ]);
-    expect(await runStreamRefresh(spec, { ...fakeClock(), timeoutMs: 30000, pollMs: 3000 }))
-      .toEqual({ state: "no_response" });
+    const out = await runStreamRefresh(spec, { ...fakeClock(), timeoutMs: 30000, pollMs: 3000 });
+    expect(out.state).toBe("no_response");
+  });
+
+  // ★ 타임아웃 결과가 **진단값을 싣고 나오는지** (2026-08-22 적대 리뷰 1R P2-3 / 생존 변이 #12)
+  //   리뷰가 attemptCount·inFlight·kind를 전부 undefined로 죽여도 47개 테스트가 초록인 것을
+  //   실증했다. 그런데 그 셋이 없으면 describeOutcome이 **정확히 2026-08-22 10:47 오보**
+  //   (「Mac이 켜져 있는지 확인하세요」 — Mac은 켜져 있었다)로 되돌아간다.
+  //   describeOutcome만 테스트하는 것으로는 이 회귀를 못 잡는다: 문구 함수는 옳고,
+  //   옳은 함수에 빈 값이 들어가는 형태이기 때문이다(P1-1과 같은 계열).
+  it("★타임아웃 결과는 마지막으로 본 상태를 싣고 나온다 — 안 실으면 10:47 오보로 회귀", async () => {
+    const { spec } = mkSpec([
+      S({ requested: false }),
+      S({ requested: true, attempt_count: 2, in_flight: true, last_error_kind: null }),
+    ]);
+    const out = await runStreamRefresh(spec, { ...fakeClock(), timeoutMs: 30000, pollMs: 3000 });
+    expect(out).toMatchObject({ state: "no_response", attemptCount: 2, inFlight: true });
+    // 그리고 그 값이 실제로 문구를 가른다 — 배선과 소비를 한 테스트에서 잇는다.
+    expect(describeOutcome(spec, out)).toContain("백그라운드에서 계속");
+    expect(describeOutcome(spec, out)).not.toContain("Mac이 켜져 있는지");
+  });
+
+  it("★타임아웃인데 kind=login_required면 그 kind도 실려 나온다", async () => {
+    const { spec } = mkSpec([
+      S({ requested: false }),
+      S({ requested: true, attempt_count: 1, last_error_kind: "login_required" }),
+    ]);
+    const out = await runStreamRefresh(spec, { ...fakeClock(), timeoutMs: 30000, pollMs: 3000 });
+    expect(out).toMatchObject({ state: "no_response", kind: "login_required" });
+    expect(describeOutcome(spec, out)).toContain("로그인 필요");
+  });
+
+  it("★failed 결과도 kind를 싣는다 — 문구 매칭 폴백에 기대지 않는다", async () => {
+    const { spec } = mkSpec([
+      S({ last_error_at: "E0" }),
+      S({ last_error_at: "E1", last_error: "사유 미상", last_error_kind: "login_required",
+          requested: false }),
+    ]);
+    const out = await runStreamRefresh(spec, fakeClock());
+    expect(out).toMatchObject({ state: "failed", kind: "login_required" });
+    expect(describeOutcome(spec, out)).toContain("로그인 필요");
   });
 
   it("★RG(settleBeforeSuccess): 첫 엑셀로 성공이 올라도 요청이 살아있으면 아직 완료 아님", async () => {

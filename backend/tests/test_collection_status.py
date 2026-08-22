@@ -196,3 +196,59 @@ def test_one_stream_failure_does_not_kill_the_endpoint(client, monkeypatch):
     assert len(body["streams"]) == len(cs._STREAMS)
     for k in ("ofix_sales", "ofix_ad", "ohitech_ad", "rg_wing1", "rg_wing2"):
         assert by_key[k]["state"] != "unknown"
+
+
+# ── 조립층 가드 (2026-08-22 적대 리뷰 1R P2-1·P2-2 / 생존 변이 #3·#4) ─────────────
+# ★존재 이유: 위 순수함수(compute_stream_state) 테스트는 촘촘한데 **collection_status()가
+#   그 함수에 무엇을 넘기는가**는 아무도 안 봤다. 리뷰가 `last_error_kind=None`으로 배선을
+#   끊고 `_STREAM_THRESHOLDS` 조회를 없애도 17개 테스트가 전부 초록인 것을 실증했다.
+#   그리고 이번 P1-1(성공 후 needs_login 영구 고착)이 정확히 이 사각에서 나왔다 —
+#   순수함수는 옳았고, 옳은 함수에 틀린 값이 들어갔다.
+
+def _fake_stream(cs_mod, monkeypatch, key: str, status: dict):
+    """_STREAMS를 한 스트림짜리로 갈아끼운다(3-튜플 형태 계약 유지)."""
+    monkeypatch.setattr(cs_mod, "_STREAMS", [(key, "테스트", lambda _db: status)])
+
+
+def test_assembly_passes_kind_through_to_the_verdict(client, monkeypatch):
+    """kind 배선이 끊기면 needs_login은 **어떤 실제 스트림에서도** 안 나온다."""
+    from app.services.coupang import collection_status as cs
+    _fake_stream(cs, monkeypatch, "rg_wing1", {
+        "last_success_at": "2026-07-19T06:00:00", "last_error_at": "2026-07-19T10:00:00",
+        "requested": False, "last_error": "로그인 필요", "last_error_kind": "login_required",
+    })
+    body = client.get("/api/coupang/ops/collection-status").json()
+    st = body["streams"][0]
+    assert st["state"] == "needs_login", "조립층이 kind를 안 넘기면 배너가 통째로 안 뜬다"
+    assert st["last_error_kind"] == "login_required", "kind는 응답에도 실려야 한다(처방 선택용)"
+
+
+def test_assembly_applies_per_stream_thresholds(client, monkeypatch):
+    """RG 임계 배선이 끊기면 주 단위 스트림이 상시 빨강이 된다(무증상 회귀)."""
+    from app.services.coupang import collection_status as cs
+    from app.utils.kst import kst_now
+    from datetime import timedelta
+    # 78시간 전 성공 = 기본 임계(48h)로는 critical, RG 임계(16일)로는 fresh.
+    old = (kst_now() - timedelta(hours=78)).isoformat()
+    payload = {"last_success_at": old, "last_error_at": None, "requested": False,
+               "last_error": None, "last_error_kind": None}
+
+    _fake_stream(cs, monkeypatch, "rg_wing1", payload)
+    assert client.get("/api/coupang/ops/collection-status").json()["streams"][0]["state"] == "fresh"
+
+    _fake_stream(cs, monkeypatch, "ofix_ad", payload)   # 임계 미등재 = 기본값
+    assert client.get("/api/coupang/ops/collection-status").json()["streams"][0]["state"] == "critical"
+
+
+def test_assembly_does_not_resurrect_kind_after_a_later_success(client, monkeypatch):
+    """★P1-1의 판정층 절반: 실패 흔적이 지워졌으면 kind는 죽은 값이다."""
+    from app.services.coupang import collection_status as cs
+    _fake_stream(cs, monkeypatch, "ofix_sales", {
+        # prod 성공 경로가 만드는 모양: last_error_at은 지워졌는데 kind만 남은 상태.
+        "last_success_at": "2026-07-19T10:00:00", "last_error_at": None,
+        "requested": False, "last_error": None, "last_error_kind": "login_required",
+    })
+    st = client.get("/api/coupang/ops/collection-status").json()["streams"][0]
+    assert st["state"] != "needs_login", (
+        "실패 시각이 없는데 kind만으로 needs_login을 내면 정상 레인에 배너가 영구 고착된다"
+    )

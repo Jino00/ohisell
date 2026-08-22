@@ -93,8 +93,15 @@ def compute_stream_state(
     age_hours = None if suc is None else (now_kst - suc).total_seconds() / 3600.0
 
     # 「성공이 실패보다 나중」이면 이미 회복된 것 — 낡은 kind가 배너를 붙들지 않게 한다.
-    kind_live = last_error_kind is not None and (
-        suc is None or err is None or err >= suc
+    # ★`err is None`은 «살아있음»이 아니라 «실패 흔적이 없음»이다 (2026-08-22 적대 리뷰 1R P1-1).
+    #   초판은 이걸 or 항으로 넣어 「실패 시각이 지워졌는데 kind만 남은」 상태를 needs_login으로
+    #   읽었다 — 그리고 prod 성공 경로들이 정확히 그 상태를 만든다(last_error_at은 지우고
+    #   kind는 못 지운다). 두 결함이 겹쳐야 사고가 나므로 양쪽 다 막는다(refresh_contract의
+    #   _settle_values가 근본 수리, 여기는 판정층 방어).
+    kind_live = (
+        last_error_kind is not None
+        and err is not None
+        and (suc is None or err >= suc)
     )
     if kind_live and last_error_kind == "login_required":
         state = "needs_login"

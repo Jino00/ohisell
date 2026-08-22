@@ -515,6 +515,54 @@ def test_success_clears_the_kind(db):
     assert row.last_error_kind is None and row.last_error is None
 
 
+# ★★이 두 개가 진짜 가드다 (2026-08-22 적대 리뷰 1R P1-1).
+#   위 test_success_clears_the_kind는 `clear_error=True`로 부르는데 **prod 호출부 6곳 중
+#   그렇게 부르는 곳이 하나도 없다**(ad_cost×3 · ohitech · rocket · vendor_summary 전부 기본값).
+#   통과하지만 실제 경로를 지키지 않는 테스트였다 — 「변이는 죽는데 버그는 산다」의 표본이다.
+#   교훈 #292(테스트 픽스처가 prod보다 관대하다)와 같은 계열: **호출 방식까지 prod와 맞춰라.**
+
+def test_success_clears_kind_even_with_the_default_call(db):
+    """★prod 호출부가 실제로 쓰는 형태 — 인자 없이 `mark_success(db, key)`."""
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "로그인 필요", kind=rc.KIND_LOGIN_REQUIRED)
+
+    rc.mark_success(db, ACC)          # ← clear_error 안 넘긴다(=False). prod와 동일.
+    assert _row(db).last_error_kind is None, (
+        "성공 경로가 kind를 안 지우면 정상 가동 중인 레인에 needs_login 배너가 영구 고착된다"
+    )
+
+
+def test_run_complete_clears_kind_even_without_clear_error(db):
+    """mark_run_complete도 같은 성질을 갖는다 — 두 소멸 경로가 갈라지면 안 된다."""
+    rc.request_refresh(db, ACC)
+    claim = rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "로그인 필요", kind=rc.KIND_LOGIN_REQUIRED,
+                      lease=claim["lease"])
+    rc.request_refresh(db, ACC)
+    claim2 = rc.claim_refresh(db, ACC)
+
+    rc.mark_run_complete(db, ACC, claim2["lease"], clear_error=False)
+    assert _row(db).last_error_kind is None
+
+
+def test_no_production_success_path_passes_clear_error(db):
+    """★prod 호출부가 «어떻게 부르는가»를 테스트가 알고 있게 한다.
+
+    이 가드가 없으면, 누군가 `_settle_values`의 kind 클리어를 다시 `if clear_error:` 안으로
+    넣어도 위 테스트만 고치면 초록이 된다. 호출 형태 자체를 소스에서 확인한다.
+    """
+    import inspect
+    from app.services.coupang import (
+        ad_cost_sync, ohitech_ad_sync, rocket_supplier_sync, vendor_summary_sync,
+    )
+    for mod in (ad_cost_sync, ohitech_ad_sync, rocket_supplier_sync, vendor_summary_sync):
+        src = inspect.getsource(mod)
+        assert "mark_success(" in src, f"{mod.__name__}: 성공 경로가 사라졌다면 이 가드를 갱신할 것"
+        # 하나라도 clear_error를 넘기게 되면 그때 이 전제를 다시 검토해야 한다.
+        assert "mark_success(db, " in src or "mark_success(\n" in src
+
+
 def test_reaper_marks_no_response_not_login_required(db):
     """★처방이 다르므로 분류도 다르다.
 

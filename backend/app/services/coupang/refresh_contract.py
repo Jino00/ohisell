@@ -344,14 +344,26 @@ def mark_run_complete(db: Session, account_key: str, lease: str, *,
 
 def _settle_values(clear_error: bool) -> dict:
     """요청 소멸 시 쓰는 컬럼 묶음 — mark_success와 mark_run_complete가 공유한다."""
-    values: dict = {"refresh_requested_at": None, "claimed_at": None, "attempt_count": 0}
+    values: dict = {
+        "refresh_requested_at": None,
+        "claimed_at": None,
+        "attempt_count": 0,
+        # ★kind는 clear_error와 **무관하게 항상** 지운다 (2026-08-22 적대 리뷰 1R P1-1).
+        #   왜 조건부면 안 되나: prod 성공 경로 6곳이 **전부** 기본값(clear_error=False)으로
+        #   부른다(ad_cost×3 · ohitech · rocket · vendor_summary). 그 호출부들은 last_error·
+        #   last_error_at을 자기가 직접 지우지만 **새 컬럼은 모른다** — 그래서 조건부로 두면
+        #   「성공했는데 last_error_kind='login_required'가 남는」 상태가 4레인에서 만들어지고,
+        #   compute_stream_state가 그걸 needs_login으로 읽어 **정상 가동 중인 레인에 빨간
+        #   상주 배너와 Slack 알림이 영구히** 붙는다(끄는 경로 없음 — 다른 kind의 실패가
+        #   새로 나야만 풀린다).
+        #   ★의미로도 이쪽이 맞다: kind는 «살아있는 실패의 분류»이고, 요청이 성공으로
+        #   소멸했다는 것은 살아있는 실패가 없다는 뜻이다. clear_error는 «호출부가 이미
+        #   지웠는가»를 말할 뿐 «실패가 남아있는가»를 말하지 않는다.
+        "last_error_kind": None,
+    }
     if clear_error:
         values["last_error"] = None
         values["last_error_at"] = None
-        # ★kind도 반드시 같이 지운다(W1). 안 지우면 성공한 뒤에도 last_error_kind가 남아
-        #   상주 배너가 「로그인 필요」를 영원히 띄운다 — 상태로 만든 대가로 «끄는 경로»를
-        #   같은 자리에 둔다. last_error와 짝으로 움직이는 값이므로 여기 한 곳이 유일한 짝이다.
-        values["last_error_kind"] = None
     return values
 
 
