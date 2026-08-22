@@ -423,6 +423,34 @@ function Card({ label, value, sub }: { label: string; value: React.ReactNode; su
 //   `react-hooks/static-components`가 **사용처마다** 경고를 냈다(8건). 렌더마다 새 컴포넌트
 //   타입이 만들어져 React가 subtree를 통째로 재마운트하는 것도 실제 비용이다.
 //   행을 하나 더 붙일 때마다 lint 부채가 늘어나는 구조라, 이번에 행을 늘리면서 같이 없앤다.
+// ★RG 매출의 «자기 신뢰도»를 문장으로 옮기는 두 함수 (적대 리뷰 1R P1-1 / P2-1).
+//   렌더 안에 인라인으로 두면 테스트가 화면을 통째로 띄워야만 검사할 수 있어서 밖으로 뺐다 —
+//   생존 변이 3종이 전부 「이 자리를 지워도 초록」이었다.
+export type RgAxisFields = {
+  rg_option_axis_days?: string | null;
+  rg_option_axis_complete?: boolean | null;
+  rg_open_days?: number | null;
+};
+
+export function rgAxisHint(s: RgAxisFields): string {
+  const base = "판매분석 · 로켓그로스 (콘솔 net)";
+  const days = s.rg_option_axis_days ? ` · 옵션축 ${s.rg_option_axis_days}일` : "";
+  const open = s.rg_open_days ? ` · 미확정 ${s.rg_open_days}일` : "";
+  return base + days + open;
+}
+
+// ★`=== false`가 아니라 `!== true`다. 백엔드가 필드를 못 실어 보내는 경우(구버전 응답·직렬화
+//   누락)에 «경고 없음»으로 떨어지면, 이 카드가 막으려는 바로 그 단정이 되살아난다.
+//   「모른다」의 안전한 기본값은 침묵이 아니라 경고다.
+export function rgAxisWarn(s: RgAxisFields): string | undefined {
+  if (s.rg_option_axis_complete === true) return undefined;
+  if (s.rg_option_axis_days === "0/0" && (s.rg_open_days ?? 0) > 0) {
+    // 창 전체가 아직 안 닫힌 경우(예: 「어제」 버튼 = 오늘~오늘). 결함이 아니라 D+1의 결과다.
+    return "이 기간은 아직 쿠팡 콘솔이 닫지 않았다(D+1) — RG 매출 0은 «판매 0»이 아니라 «아직 없음»이다.";
+  }
+  return "옵션축이 이 기간을 다 덮지 못했다 — RG 매출은 부분치다(빈 날은 0원이 아니라 «미상»).";
+}
+
 function ReconRow({ label, value, hint, warn }: {
   label: string; value: string | null; hint: string; warn?: string;
 }) {
@@ -463,13 +491,8 @@ export function ReconciliationCard({ data }: { data: OverviewResponse }) {
           <Row
             label="ㄴ 로켓그로스 RG"
             value={s.revenue_rg ?? "0"}
-            hint={
-              "판매분석 · 로켓그로스 (콘솔 net)" +
-              (s.rg_option_axis_days ? ` · 옵션축 ${s.rg_option_axis_days}일` : "")
-            }
-            warn={s.rg_option_axis_complete === false
-              ? "옵션축이 이 기간을 다 덮지 못했다 — RG 매출은 부분치다(빈 날은 0원이 아니라 «미상»)."
-              : undefined}
+            hint={rgAxisHint(s)}
+            warn={rgAxisWarn(s)}
           />
         </div>
         <div>
@@ -524,7 +547,9 @@ export function ReconciliationCard({ data }: { data: OverviewResponse }) {
 // S3(Wing 세션 자동화 트랙): 쿠팡 공식 GMV(판매분석 vendor-summary) 자동 대조 — 드리프트%.
 // 우리 매출(revenue_3p/rg) vs 쿠팡 공식 GMV를 닫힌 과거일 기준으로 비교(D-3). 사실·지표만(D-2) —
 // 일치/불일치 판정·전략 추천 없음. 임계 색상은 사실의 크기 강조일 뿐. 권위값은 계정 지정+완전 적재일 때만(D-7).
-function RevenueDriftCard({
+// export: 이 카드의 «gross 원장 줄»과 «같은 축» 문구가 테스트로 지켜져야 한다 —
+// 적대 리뷰 1R에서 이 줄을 지우는 변이(FE-4)가 살아남았다.
+export function RevenueDriftCard({
   reconcile,
   onRefresh,
   refreshing,
@@ -652,9 +677,16 @@ function RevenueDriftCard({
               <b> ⚠ 참고치 — 권위 판정은 계정 지정(오픽스/오하이테크) + 완전 적재일 때만(D-7).</b>
             )}
             <span className="block mt-0.5 text-violet-500">
-              알려진 잔차: 3P 잔여 stale 취소(D-5). ★RG 「net」 줄은 <b>우리도 콘솔 net</b>이라(D-CPP-49)
-              차이 0이 정상이고, 그 0은 「정합」이 아니라 <b>같은 숫자를 두 번 읽었다</b>는 뜻이다 —
-              수집 간극은 바로 아래 <b>「ㄴ RG gross 원장」</b> 줄이 잰다(구 D-11 신호).
+              알려진 잔차: 3P 잔여 stale 취소(D-5).
+              {/* ★백엔드가 «값으로» 알려 주는 것을 화면이 산문으로 하드코딩하면, 백엔드가
+                  플래그를 뒤집어도 화면은 계속 같은 말을 한다(적대 리뷰 1R P2-2). 읽는다. */}
+              {reconcile.rg_same_axis ? (
+                <> ★RG 「net」 줄은 <b>우리도 콘솔 net</b>이라(D-CPP-49) 차이 0이 정상이고,
+                그 0은 「정합」이 아니라 <b>같은 숫자를 두 번 읽었다</b>는 뜻이다 —
+                수집 간극은 <b>「ㄴ RG gross 원장」</b> 줄이 잰다(구 D-11 신호).</>
+              ) : (
+                <> RG 잔차는 우리 gross 원장과 쿠팡 net의 기준 차이다(구 D-11) — 계산 오류 아님.</>
+              )}
             </span>
           </p>
         </>

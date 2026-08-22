@@ -881,6 +881,7 @@ export interface OverviewResponse {
       revenue_rg_gross?: string;      // 우리 gross 주문 원장 — **매출이 아니다**(수집 대조 진단값)
       rg_option_axis_days?: string | null;      // "16/16" — 옵션축이 창을 덮은 날짜 수
       rg_option_axis_complete?: boolean | null; // false면 revenue_rg는 부분치(빈 날은 0원 아닌 «미상»)
+      rg_open_days?: number | null;             // 아직 콘솔이 안 닫은 날 수(오늘 등) — 경고가 아니라 사실
       net_profit_basis?: string;      // 순이익 날짜축 설명(D-9 투명화)
       // S7(D-14/D-16): RG 정산 비용 net_profit 플립 브리지 필드(계정 단위, 전액 차감)
       net_profit_pre_rg?: string;     // 플립 전 순이익

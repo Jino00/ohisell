@@ -31,12 +31,13 @@ from app.models import (
     ProductMaster,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.utils.kst import kst_today
 from app.services.coupang.ad_sell_type import (
     AD_SELL_TYPE_2P,
     ORDER_BASED_SELL_TYPES,
 )
 from app.services.coupang.rg_net_revenue import (
-    net_revenue_by_account,
+    accounts_in_window,
     net_revenue_by_option,
     option_axis_coverage,
 )
@@ -242,21 +243,43 @@ def _merge_rg_orders(orders: dict[str, dict], rg_orders: dict[str, dict]) -> Dec
 
 
 def _rg_axis_coverage(db: Session, dfrom: date, dto: date,
-                      account_key: str | None) -> dict | None:
-    """창 안에서 RG 옵션축이 며칠을 덮었나 — 전체합산(account=None) 뷰도 답할 수 있게 한다.
+                      account_key: str | None) -> dict:
+    """창 안에서 RG 옵션축이 며칠을 덮었나 — **절대 None을 반환하지 않는다.**
 
-    ★account=None이면 커버리지를 «모른다»고 두지 않는다. 종합조망의 기본 뷰가 전체합산이라
-      거기서 침묵하면 자백 장치가 정작 가장 많이 보는 화면에서만 꺼진다.
-      대신 **가장 나쁜 계정 기준**으로 답한다 — 한 계정이라도 창을 못 덮으면 합계는 부분치다.
-    ★분모가 되는 계정 목록은 **요약축**(`net_revenue_by_account`)에서 온다. 옵션축에서 뽑으면
-      「옵션축이 통째로 없는 계정」이 목록에서 빠져 스스로를 완전하다고 말하게 된다.
+    ★None 금지가 규칙인 이유(적대 리뷰 1R P1): 프론트는 「complete === false」일 때만 경고를
+      그린다. None이 나가면 경고도 「N/M일」 힌트도 통째로 사라져 화면이 「RG 0원」이라고
+      **단정**한다 — 이 변경이 막겠다고 선언한 바로 그 실패 모양이다(교훈 #123).
+      초판은 요약축에 RFM 행이 하나도 없는 창(예: 「어제」 버튼 = 오늘~오늘)에서 None을 냈고,
+      같은 사실인데 계정 지정 뷰는 실토하고 전체합산 뷰는 침묵했다.
+      ⇒ 「모른다」를 표현하는 방법은 필드를 지우는 것이 아니라 **complete=False**다.
+
+    ★«닫힌 날»만 분모로 센다(적대 리뷰 1R P2-5): 콘솔은 D+1이라 오늘은 원리적으로 못 덮는다.
+      오늘을 분모에 넣으면 **오늘이 포함된 모든 창**(기본 7일 창 포함)이 영원히 미완이 되어
+      경고가 상시 켜지고 무뎌진다 — 「백필 구멍」과 「오늘이라 당연히 빈 것」이 구분이 안 된다.
+      아직 안 닫힌 날은 경고가 아니라 **사실**(`open_days`)로 따로 낸다.
+      ⚠️`option_axis_coverage` 자체의 뜻은 안 바꾼다 — 대시보드(`rg_channel_pnl`)가 그걸로
+      원가·순이익을 게이트하는 배포된 경로라, 여기 사정으로 그 의미를 흔들면 안 된다.
+
+    ★account=None이면 **가장 나쁜 계정 기준**으로 답한다(한 계정이라도 못 덮으면 합계는 부분치).
+      분모 계정 목록은 `accounts_in_window`(두 축 합집합·등록유형 무필터)에서 온다.
     """
-    if account_key is not None:
-        return option_axis_coverage(db, dfrom, dto, account_key)
-    keys = sorted(net_revenue_by_account(db, dfrom, dto).keys())
+    yesterday = kst_today() - timedelta(days=1)
+    closed_end = min(dto, yesterday)
+    open_days = (dto - closed_end).days if dto > closed_end else 0
+
+    if closed_end < dfrom:
+        # 창 전체가 아직 안 닫혔다(오늘만 보는 창 등). 「0일 덮었다」가 아니라 「닫힌 날이 없다」다.
+        return {"days_total": 0, "days_covered": 0, "first_date": None, "last_date": None,
+                "complete": False, "open_days": open_days, "accounts": []}
+
+    days_total = (closed_end - dfrom).days + 1
+    keys = [account_key] if account_key is not None else accounts_in_window(db, dfrom, closed_end)
     if not keys:
-        return None
-    covs = [option_axis_coverage(db, dfrom, dto, k) for k in keys]
+        # 어느 계정의 콘솔 축도 이 창에 없다 → 「RG 0원」이 아니라 「미상」이다.
+        return {"days_total": days_total, "days_covered": 0, "first_date": None,
+                "last_date": None, "complete": False, "open_days": open_days, "accounts": []}
+
+    covs = [option_axis_coverage(db, dfrom, closed_end, k) for k in keys]
     worst = min(covs, key=lambda c: c["days_covered"])
     return {
         "days_total": worst["days_total"],
@@ -264,7 +287,8 @@ def _rg_axis_coverage(db: Session, dfrom: date, dto: date,
         "first_date": worst["first_date"],
         "last_date": worst["last_date"],
         "complete": all(c["complete"] for c in covs),
-        "accounts": keys,
+        "open_days": open_days,
+        "accounts": list(keys),
     }
 
 
@@ -1058,10 +1082,12 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     account_sum["revenue_rg_basis"] = "console_net"   # 대시보드 RG 행과 같은 축(계약 ⓑ)
     account_sum["revenue_rg_gross"] = rg_gross_revenue  # 우리 주문 원장(진단용 — 매출 아님)
     # 옵션축이 창을 덮은 날짜 수. complete=False면 revenue_rg는 **부분치**다.
-    account_sum["rg_option_axis_days"] = (
-        f"{rg_axis['days_covered']}/{rg_axis['days_total']}" if rg_axis else None
-    )
-    account_sum["rg_option_axis_complete"] = bool(rg_axis["complete"]) if rg_axis else None
+    #   ★셋 다 **항상 값이 있다** — 「모른다」는 필드를 지워서가 아니라 complete=False로 말한다.
+    account_sum["rg_option_axis_days"] = f"{rg_axis['days_covered']}/{rg_axis['days_total']}"
+    account_sum["rg_option_axis_complete"] = bool(rg_axis["complete"])
+    # 아직 콘솔이 닫지 않은 날 수(오늘 등). 경고가 아니라 **사실**이다 — RG 매출이 그날 없는 것은
+    # 결함이 아니라 D+1의 결과고, 이걸 분모에서 빼야 「백필 구멍」 경고가 무뎌지지 않는다.
+    account_sum["rg_open_days"] = rg_axis["open_days"]
     # S4(D-9, Codex S3 P1#2): net_profit 날짜축 명시 — 오인 방지(투명화). 매출은 주문일 기준이라
     # 쿠팡 판매분석과 일치하나, RG 정산차감(rg_total)은 정산인식일 기준(판매보다 지연)이라 단기
     # 윈도우 RG 순이익은 낙관적(매출 전액 인식·정산 일부만 차감), 장기·정산완료 구간에서 수렴.

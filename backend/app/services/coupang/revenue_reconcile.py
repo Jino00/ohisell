@@ -84,7 +84,10 @@ def reconcile_revenue(db: Session, dfrom: date, dto: date,
     #   바로 그 함정이다(교훈 #123).
     #   ⇒ 신호를 버리지 않고 **이름이 다른 칸**으로 옮긴다. 같은 라벨의 두 값을 한 화면에 두지
     #     않으면서(교훈 #235) 수집 건전성 감시를 살려 두는 유일한 방법이다.
-    ours_rg_gross = csum.get("revenue_rg_gross", _Z)
+    #   ★`.get(..., 0)` 폴백을 쓰지 않는다(적대 리뷰 1R P2-6): 키가 사라지면 조용히 0이 되고
+    #     `abs_rg_gross = 0 − off_rg`가 «큰 음수 드리프트»로 그려진다 — 감시 장치가 거짓 경보를
+    #     내는 것이 KeyError로 죽는 것보다 나쁘다. 이 파일의 다른 값들도 전부 직접 읽는다.
+    ours_rg_gross = csum["revenue_rg_gross"]
 
     # 쿠팡 공식 GMV — 같은 닫힌 윈도우.
     official = vendor_summary_sync.get_vendor_summary_totals(db, account, dfrom, closed_end)
