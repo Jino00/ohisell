@@ -9,8 +9,15 @@
 #     순이익 = 매출 − 원가 − 수수료 − 광고비 − payable_vat(...)   ← `calculate_channel_summary`와 동일
 #     하한 판정(net=None인데 광고비가 있으면 −광고비)               ← 집계층 `net_contribution`(D-22)
 #     원가 다리                                                     ← `intelligence._cost_master`
-#     정산 수수료                                                   ← `profit_calculator.get_rg_total_by_account`
+#     정산 수수료                                                   ← `rg_sales_date_fees.sales_date_fees`
 #   여기서 새로 만드는 것은 **행의 모양**뿐이다.
+#
+# ★2026-08-22 계약 CONTRACT_rg_sales_date_axis: 정산 수수료의 출처를
+#   `profit_calculator.get_rg_total_by_account`(정산 인식일 축, 주간 통짜)에서
+#   `rg_sales_date_fees.sales_date_fees`(판매일 축)로 **교체**했다. 종전엔 한 주기를 덮는
+#   어느 하루를 물어도 같은 값이 나와서(08-17~21 다섯 날 전부 153,058원) 그날 매출의 81.8%가
+#   빠졌고 순이익 부호가 뒤집혔다. 그 함수는 폐기가 아니라 **원장 권위값**으로 남아 있고,
+#   보존식 대조(`sales_date_fees(...)["reconciliation"]`)가 그것과 계속 맞춰 본다.
 from __future__ import annotations
 
 import logging
@@ -27,6 +34,7 @@ from app.services.coupang.rg_net_revenue import (
     rg_channel_for_account,
     split_wing_ad_spend,
 )
+from app.services.coupang.rg_sales_date_fees import FEE_COVERAGE_MIN, sales_date_fees
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +62,9 @@ def compute_rg_summary_row(
       오픽스 30일 기준 +11.8% 과대다(ref 89).
     원가 = 옵션축 net 수량 × 옵션 원가. 커버리지가 임계 미만이면 **순이익을 내지 않는다**
       (원가를 모르는 매출로 이익률을 내면 뜻 없는 비율이 나온다 — D-22와 같은 판단).
-    수수료 = 정산 실측 `rg_total − ad_sales`(D-CPP-43). 금액표 되계산이 아니다.
+    수수료 = **판매일 축**(`rg_sales_date_fees`). 그날 판 수량×단가 + 그날 매출×실측 요율
+      + 계정 기간비용(보관비·반품비) 일할. 요율을 못 재거나 단가 커버리지가 얇으면
+      **원장 축(정산 인식일)으로 물러서고 행이 그 사실을 말한다**(`commission_axis`).
     광고비 = 실판매 경로로 «측정 귀속»된 몫만(라벨 아님). 미배분은 이 행에 안 실린다.
 
     매출·광고비가 둘 다 0이면 None — 빈 행을 화면에 만들지 않는다(로켓1P와 같은 규율).
@@ -83,7 +93,12 @@ def compute_rg_summary_row(
         payable_vat,
     )
 
-    commission = get_rg_total_by_account(db, date_from, date_to).get(account_key, ZERO)
+    # ★정산공제는 «그 창에 판 것»에 붙는다(계약 CONTRACT_rg_sales_date_axis).
+    #   종전 `get_rg_total_by_account`는 정산 인식일 창 겹침이라 한 주기를 덮는 어느 하루를
+    #   물어도 같은 값을 줬다 — 그 함수는 폐기가 아니라 **원장 권위값**으로 남아 있고
+    #   아래 `reconciliation`이 그것과 계속 맞춰 본다(§4 ⓒ).
+    fees = sales_date_fees(db, account_key, date_from, date_to)
+    fee_coverage = fees["coverage"]
 
     cost_info = net_cost(db, date_from, date_to, account_key, cost_master)
     coverage = cost_info["coverage"]
@@ -101,6 +116,32 @@ def compute_rg_summary_row(
         and cov_days["complete"]
     )
 
+    # ★판매일 축을 «낼 수 있는가»(계약 §4 ⓓⓔ).
+    #   ① 판매수수료 «요율»을 못 재면(완결 주기가 없거나 그 주기 매출이 0) 그 항이 통째로 빠진다.
+    #      3P처럼 기본 요율로 폴백하지 않는 이유는 RG엔 그런 근거값이 없기 때문이다(계약 §8-4).
+    #   ② 물류비 «단가»를 아는 매출 비율이 임계 미만이면 물류비가 과소다 — 순이익이 위로 부푼다.
+    #   ⇒ 둘 중 하나라도 안 되면 **판매일 축을 내지 않고 원장 축으로 물러선다.**
+    #
+    # ★왜 「순이익을 안 낸다」가 아니라 「축을 물린다」인가 (2026-08-22 라이브 실측이 정했다):
+    #   `billed_quantity`는 07-27 이후 주기에만 채워져 있다. 그래서 **08-21 하루는 커버리지
+    #   100%인데 30일 창은 91.9%**다(단가 미상 매출 420,250원). 앞의 규칙대로면 대시보드
+    #   기본 창에서 RG 순이익이 통째로 「—」가 되는데, 그건 종전보다 **덜 아는 화면**이다 —
+    #   원장 축은 «모름»이 아니라 창이 넓을수록 정확해지는 다른 축의 실측값이기 때문이다.
+    #   대신 **어느 축인지 행이 말한다**(`commission_axis` → 화면에 ⚠️「정산 인식일 축」).
+    #   ★종합조망(`intelligence`)도 **같은 규칙**이다 — 규칙이 갈리면 두 화면이 같은 계정을
+    #     다른 금액으로 뺀다(D-CPP-47이 고쳤던 바로 그 병).
+    #   ★이 결손은 과도기적이다: 옛 주기가 창에서 빠져나가면 커버리지가 저절로 100%로 간다.
+    fee_trustworthy = (
+        fees["rate"] is not None
+        and fee_coverage is not None
+        and fee_coverage >= FEE_COVERAGE_MIN
+    )
+    commission = (
+        fees["total"]
+        if fee_trustworthy
+        else get_rg_total_by_account(db, date_from, date_to).get(account_key, ZERO)
+    )
+
     if cost_trustworthy:
         cost = cost_info["cost"]
         net = revenue - cost - commission - ad_spend - payable_vat(
@@ -114,7 +155,7 @@ def compute_rg_summary_row(
         )
     else:
         # 원가를 못 믿는다 → 순이익 없음. 단 **광고비는 확정 비용**이라 하한을 낸다(D-22).
-        #   여기서 하한을 «만들지 않고» 집계층에 맡기는 것이 원칙이지만(net_contribution),
+        #   여기서 하한을 «만들지 않고» 집계층에 맡기는 것이 원칙이지만(`net_contribution`),
         #   `cost`를 0으로 실어 보내면 화면이 「원가 0」으로 읽으므로 0이 아니라 미상을 싣는다.
         cost = ZERO
         net = None
@@ -180,4 +221,60 @@ def compute_rg_summary_row(
         #   ⇒ 이 값이 0이 아니면 = 카탈로그에도 판매 원장에도 없는 옵션에 돈이 쓰였다는 뜻이다.
         "ad_unallocated": str(ad["unallocated"]),
         "ad_unallocated_options": ad["opt_unknown"],
+        # ── 정산공제가 «어느 축이고 무엇을 근거로 하는가» (계약 §4 ⓒⓓⓔ) ──
+        # ★이 칸들이 없으면 실측 요율과 「못 잼」이 화면에서 **같은 얼굴**을 한다.
+        #   3P가 이미 `basis="default_rate"`로 같은 일을 한다(`option_fee_rate.py:97`).
+        "commission_axis": "sales_date" if fee_trustworthy else "recognition_date",
+        "commission_basis": fees["rate_basis"],
+        "commission_rate": None if fees["rate"] is None else str(
+            (fees["rate"] * Decimal("100")).quantize(Decimal("0.0001"))
+        ),
+        "commission_rate_cycles": _cycles_label(fees["rate_cycles"]),
+        # 세 항의 축이 서로 다르다 — 물류비=수량×단가, 수수료=매출×요율, 기간비용=일할(판매일 아님)
+        # ★원장 축으로 물러선 창에선 **분해를 싣지 않는다**(None) — 합이 `commission`과 안 맞는
+        #   분해는 화면에서 「이 값이 저 셋으로 이뤄졌다」는 거짓말이 된다.
+        "commission_logistics": str(fees["logistics"]) if fee_trustworthy else None,
+        "commission_sale_fee": str(fees["sale_fee"]) if fee_trustworthy else None,
+        "commission_period": str(fees["period"]) if fee_trustworthy else None,
+        # 단가를 아는 매출의 비율 · 모르는 몫(0으로 안 채운 자백)
+        "fee_coverage": None if fee_coverage is None else str(
+            fee_coverage.quantize(Decimal("0.0001"))
+        ),
+        "fee_unmapped_revenue": str(fees["unmapped_revenue"]),
+        # ★장부 총액 보존 — 최근 완결 주기에서 이 방식의 합 vs 원장 실청구액.
+        #   **차이를 숨겨 0으로 만들지 않는다**(계약 §4 ⓒ 원문).
+        **_reconcile_fields(fees["reconciliation"]),
+    }
+
+
+def _cycles_label(cycles: list) -> str | None:
+    """요율을 잰 완결 주기 범위 — "2026-08-03~2026-08-16" 꼴. 없으면 None."""
+    if not cycles:
+        return None
+    starts = [c[0] for c in cycles]
+    ends = [c[1] for c in cycles]
+    return f"{min(starts)}~{max(ends)}"
+
+
+def _reconcile_fields(rec: dict | None) -> dict:
+    """보존식 대조를 «평평한 문자열 칸»으로 — 화면 스키마(`GroupedSummaryRow`)가 평면이다.
+
+    못 쟀으면(완결 주기가 아예 없으면) 전부 None이다 — 0이 아니다. 0은 「맞았다」로 읽힌다.
+    """
+    if rec is None:
+        return {
+            "settlement_reconcile_cycle": None,
+            "settlement_reconcile_computed": None,
+            "settlement_reconcile_actual": None,
+            "settlement_reconcile_diff": None,
+            "settlement_reconcile_pct": None,
+        }
+    return {
+        "settlement_reconcile_cycle": f"{rec['cycle_from']}~{rec['cycle_to']}",
+        "settlement_reconcile_computed": str(rec["computed"]),
+        "settlement_reconcile_actual": str(rec["actual"]),
+        "settlement_reconcile_diff": str(rec["diff"]),
+        "settlement_reconcile_pct": None if rec["diff_pct"] is None else str(
+            rec["diff_pct"].quantize(Decimal("0.01"))
+        ),
     }

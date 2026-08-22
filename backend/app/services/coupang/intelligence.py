@@ -1203,11 +1203,46 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     account_sum["net_profit_pre_rg"] = account_sum["net_profit"]
     # ★D-CPP-43: 차감액은 **광고 제외분**이다. 정산 ad_sales는 광고센터 PA 광고비의 «공제»이고
     #   PA는 이미 ad_spend로 차감됐으므로 여기서 또 빼면 이중계상이다(1차 출처: 윙 「광고비 내역」).
-    rg_deducted = rg_total - rg_ad_settlement
+    rg_ledger_deducted = rg_total - rg_ad_settlement
+    # ★2026-08-22 계약 CONTRACT_rg_sales_date_axis: 차감액의 **축**을 바꾼다.
+    #   `rg_ledger_deducted`(위)는 정산 «인식일» 창 겹침이라 한 주기를 덮는 어느 하루를 물어도
+    #   같은 값이 나온다 — 08-17·18·19·20·21 다섯 날이 전부 153,058원이었고, 08-21은 그날
+    #   매출의 81.8%라 순이익 부호가 뒤집혔다. 그날 판 것에 그날 붙는 비용을 붙인다.
+    #   ★대시보드(`rg_channel_pnl`)와 **같은 함수**를 쓴다 — 두 구현이 갈라지면 두 화면이
+    #     같은 계정을 다른 금액으로 뺀다(D-CPP-47이 고쳤던 바로 그 병이다).
+    #   ★못 재면(요율 미상·단가 커버리지 얇음) **원장 축으로 물러선다** — 여기는 종합조망의
+    #     계정 순이익이라 값을 안 낼 자리가 없다. 그 사실을 `rg_settlement_axis`가 자백한다.
+    from app.services.coupang.rg_sales_date_fees import (  # noqa: PLC0415
+        FEE_COVERAGE_MIN,
+        sales_date_fees,
+    )
+
+    #   ★계정을 안 고른 전체 합산 뷰(`account=None`)에선 판매일 축을 «내지 않는다** — 요율은
+    #     계정마다 다르고(WING1·WING2가 다른 믹스다) 계정별로 재서 더해야 뜻이 있다.
+    #     그 뷰는 원장 축으로 남고, 축 필드가 그렇게 말한다.
+    _sd = (
+        sales_date_fees(db, acc["account_key"], dfrom, dto)
+        if acc["account_key"]
+        else {"total": _Z, "rate": None, "rate_basis": "rate_unknown", "coverage": None,
+              "unmapped_revenue": _Z, "reconciliation": None}
+    )
+    _sd_ok = (
+        _sd["rate"] is not None
+        and _sd["coverage"] is not None
+        and _sd["coverage"] >= FEE_COVERAGE_MIN
+    )
+    rg_deducted = _sd["total"] if _sd_ok else rg_ledger_deducted
     account_sum["rg_settlement_total"] = rg_total                 # 정산 총액(광고 포함) — 표시·검산용
     account_sum["rg_ad_settlement"] = rg_ad_settlement            # 표시 전용: PA 공제분(**차감 안 함**)
-    account_sum["rg_non_ad_deducted"] = rg_deducted               # 광고 제외분(= 실제 차감액)
+    account_sum["rg_non_ad_deducted"] = rg_ledger_deducted        # 원장 축 광고 제외분(대조용)
     account_sum["rg_settlement_deducted"] = rg_deducted           # ★순이익에서 실제로 뺀 값(명시 필드)
+    # ── 이 차감액이 «어느 축이고 무엇을 근거로 하는가» (계약 §4 ⓑⓒⓓⓔ) ──
+    account_sum["rg_settlement_axis"] = "sales_date" if _sd_ok else "recognition_date"
+    account_sum["rg_fee_basis"] = _sd["rate_basis"]
+    account_sum["rg_fee_rate"] = _sd["rate"]
+    account_sum["rg_fee_coverage"] = _sd["coverage"]
+    account_sum["rg_fee_unmapped_revenue"] = _sd["unmapped_revenue"]
+    account_sum["rg_fee_reconcile"] = _sd["reconciliation"]
     account_sum["net_profit"] = apply_rg_net_profit_flip(
         account_sum["net_profit"], rg_deducted
     )

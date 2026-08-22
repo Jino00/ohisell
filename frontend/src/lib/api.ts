@@ -891,6 +891,17 @@ export interface OverviewResponse {
       rg_non_ad_deducted?: string;    // 표시: 전액 중 광고 제외 브레이크다운
       rg_flip_status?: 'applied_ex_ad' | 'applied_full' | 'not_applied_no_data';  // D-CPP-43: ex_ad가 현재값
       ad_nonpa_deducted?: string;     // S5a/D-15: 비-PA(전체−집행) net_profit 추가 차감분
+      // ── 정산공제의 축·근거 (CONTRACT_rg_sales_date_axis §4 ⓑⓒⓓⓔ, 2026-08-22) ──
+      // sales_date = 그 창에 «판 것»에 붙는 공제 / recognition_date = 정산 주기 통짜(못 잰 경우)
+      rg_settlement_axis?: 'sales_date' | 'recognition_date';
+      rg_fee_basis?: 'settled_rate' | 'rate_unknown';
+      rg_fee_rate?: string | number | null;      // 판매수수료 요율(비율 0~1, VAT 포함)
+      rg_fee_coverage?: string | number | null;  // 0~1. 물류비 «단가»를 아는 매출의 비율
+      rg_fee_unmapped_revenue?: string | number | null;  // 단가를 몰라 0으로 «안 채운» 매출
+      rg_fee_reconcile?: {                       // 완결 주기에서 이 방식 vs 원장 실청구액
+        cycle_from: string; cycle_to: string;
+        computed: string; actual: string; diff: string; diff_pct: string | null;
+      } | null;
     };
     by_option: OverviewAccountRow[];
   };

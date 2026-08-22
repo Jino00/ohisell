@@ -27,6 +27,7 @@ import {
   type RocketBasis,
 } from "../lib/api";
 import { netScopeNote, unmappedNote } from "../lib/netScope";
+import { rgFeeFactsFromRow, rgFeeNote } from "../lib/rgSettlementAxis";
 import { RocketBasisToggle } from "../components/RocketBasisToggle";
 import {
   ALL_REFRESH_SPECS,
@@ -787,6 +788,9 @@ export default function Dashboard() {
                 // 판정은 `lib/netScope`에 있다 — 순수 함수라 테스트가 붙는다(적대 리뷰 1R P2).
                 const scopeNote = netScopeNote(c);
                 const costNote = unmappedNote(c);
+                // RG 행만 채워져 온다 — 정산공제가 어느 축이고 무엇을 근거로 하는지
+                // (계약 CONTRACT_rg_sales_date_axis §4 ⓑⓒⓓⓔ). 다른 행은 null이라 안 뜬다.
+                const feeNote = rgFeeNote(rgFeeFactsFromRow(c));
                 return (
                   <tr key={`${c.kind}-${c.label}-${i}`} className={`border-t ${rowCls}`}>
                     <td className={nameCls}>
@@ -812,6 +816,11 @@ export default function Dashboard() {
                       {scopeNote && (
                         <div className="text-xs text-amber-600" title={scopeNote.title}>
                           {scopeNote.text}
+                        </div>
+                      )}
+                      {feeNote && (
+                        <div className="text-xs text-gray-500" title={feeNote.title}>
+                          {feeNote.text}
                         </div>
                       )}
                     </td>

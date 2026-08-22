@@ -351,6 +351,23 @@ class GroupedSummaryRow(BaseModel):
     ad_unallocated: Optional[str] = None         # 카탈로그에 없는 옵션에 쓰인 광고비(행에 안 실린 돈)
     ad_unallocated_options: Optional[int] = None
     units_sold: Optional[int] = None             # 판매수량 — `order_count`(주문 건수)와 뜻이 다르다
+    # ── RG 정산공제가 «어느 축이고 무엇을 근거로 하는가» (CONTRACT_rg_sales_date_axis §4 ⓒⓓⓔ) ──
+    # ★바로 위 경고가 여기에도 그대로다. 이 칸들이 빠지면 서비스층이 실측 요율·커버리지·보존식
+    #   차이를 정직하게 계산해도 **화면엔 실측과 「못 잼」이 같은 얼굴로 뜬다.**
+    commission_axis: Optional[str] = None            # sales_date(판매일) — 종전은 정산 인식일 통짜
+    commission_basis: Optional[str] = None           # settled_rate(실측) | rate_unknown(못 잼)
+    commission_rate: Optional[str] = None            # 판매수수료 요율 %(VAT 포함)
+    commission_rate_cycles: Optional[str] = None     # 그 요율을 잰 완결 정산주기 범위
+    commission_logistics: Optional[str] = None       # 수량×단가(입출고)
+    commission_sale_fee: Optional[str] = None        # 매출×요율(판매수수료)
+    commission_period: Optional[str] = None          # 보관비·반품비 — 판매일에 안 붙는 기간비용
+    fee_coverage: Optional[str] = None               # 0~1. 물류비 «단가»를 아는 매출의 비율
+    fee_unmapped_revenue: Optional[str] = None       # 단가를 몰라 물류비를 0으로 «안 채운» 매출
+    settlement_reconcile_cycle: Optional[str] = None    # 보존식을 잰 완결 주기
+    settlement_reconcile_computed: Optional[str] = None
+    settlement_reconcile_actual: Optional[str] = None   # 같은 주기의 원장 실청구액
+    settlement_reconcile_diff: Optional[str] = None     # ★숨겨 0으로 만들지 않는다
+    settlement_reconcile_pct: Optional[str] = None
 
 
 class GroupedTrendPoint(BaseModel):

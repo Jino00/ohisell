@@ -108,6 +108,33 @@ def _seed_fee(db, fee_type, amount, *, acc=ACC,
                                   vendor_item_id="", amount=Decimal(str(amount))))
 
 
+def _seed_fee_option(db, fee_type, vid, amount, qty, *, acc=ACC,
+                     dfrom=date(2026, 7, 27), dto=date(2026, 8, 3)):
+    """옵션 단위 정산 row — 여기서 **건당 단가**가 나온다(`amount / billed_quantity`, VAT前).
+
+    ★계정 row(`_seed_fee`)와 공존하는 다른 그레인이다. 판매일 축은 이 row가 있어야 물류비를
+      낼 수 있고, 없으면 그 옵션의 매출은 `fee_unmapped_revenue`로 «자백»된다(0으로 안 채운다).
+    """
+    db.add(CoupangRgSettlementFee(account_key=acc, recognition_date_from=dfrom,
+                                  recognition_date_to=dto, fee_type=fee_type,
+                                  vendor_item_id=vid, amount=Decimal(str(amount)),
+                                  billed_quantity=qty))
+
+
+def _seed_sales_date_inputs(db, *, vid="RG1", unit_amount=2_000, unit_qty=10,
+                            cycle_sale_fee=10_000, cycle_gmv=100_000):
+    """판매일 축 정산공제의 입력 두 벌 (CONTRACT_rg_sales_date_axis, 2026-08-22).
+
+    ① **요율** — 완결 주기(07-27~08-03)의 계정 `sale_fee` ÷ 그 주기 매출. 여기선 10%.
+       완결의 정의가 `recognition_date_to < asof`라 **과거 고정 날짜면 영원히 완결**이다
+       (오늘 날짜에 기대는 테스트는 창이 굴러가면 썩는다 — main에 그런 빨간불이 이미 있다).
+    ② **단가** — 같은 주기 옵션 row의 `amount / billed_quantity`. 여기선 2,000/10 = 200원(VAT前).
+    """
+    _seed_summary(db, date(2026, 7, 30), cycle_gmv, 10)
+    _seed_fee(db, "sale_fee", cycle_sale_fee, dfrom=date(2026, 7, 27), dto=date(2026, 8, 3))
+    _seed_fee_option(db, "delivery", vid, unit_amount, unit_qty)
+
+
 def _seed_cost(db, vid, cost, pid=1):
     db.add(ProductMaster(id=pid, internal_sku=f"SKU{pid}", product_name=f"P{pid}",
                          cost_price=Decimal(str(cost))))
@@ -246,12 +273,21 @@ def test_option_axis_coverage_separates_missing_from_zero(db):
 # 4. RG 행 — 순이익 공식과 커버리지 게이트
 # ════════════════════════════════════════════════
 def test_rg_row_full_net_when_cost_trustworthy(db):
+    """순이익 공식 — ★2026-08-22부터 정산공제가 «판매일 축»이다(CONTRACT_rg_sales_date_axis).
+
+    종전 이 테스트는 정산 인식일 창에 겹치는 계정 row 8,000원을 그대로 공제로 썼다. 그 축은
+    한 주기를 덮는 **어느 하루를 물어도 같은 값**이라 08-21 라이브에서 그날 매출의 81.8%를
+    빼고 순이익 부호를 뒤집었다. 이제 그 자리에 **그 창에 판 것**의 공제가 들어간다:
+      물류비 = 단가 200원(VAT前) × 10개 × 1.1 = 2,200원
+      수수료 = 매출 100,000 × 실측 요율 10% = 10,000원
+      기간비용 = 0(보관비·반품비 없음 — 판매일에 안 붙는다)
+    """
     for d in (date(2026, 8, 5), date(2026, 8, 6)):
         _seed_summary(db, d, 50_000, 5)
         _seed_option(db, d, "RG1", 50_000, 5)
     _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
     _seed_cost(db, "RG1", 2_000)
-    _seed_fee(db, "sale_fee", 8_000)
+    _seed_sales_date_inputs(db)
     _seed_ad(db, "RG1", 1_000)
     db.commit()
 
@@ -261,13 +297,19 @@ def test_rg_row_full_net_when_cost_trustworthy(db):
     assert row["channel_id"] == 3
     assert Decimal(row["revenue"]) == Decimal("100000")
     assert Decimal(row["cost"]) == Decimal("20000")          # 10개 × 2,000
-    assert Decimal(row["commission"]) == Decimal("8000")
+    commission = Decimal("2200") + Decimal("10000")
+    assert Decimal(row["commission"]) == commission
+    assert Decimal(row["commission_logistics"]) == Decimal("2200")
+    assert Decimal(row["commission_sale_fee"]) == Decimal("10000")
+    assert row["commission_axis"] == "sales_date"
+    assert row["commission_basis"] == "settled_rate"
     assert Decimal(row["ad_spend"]) == Decimal("1000")
     assert row["net_scope"] == "full"
-    # 100,000 − 20,000 − 8,000 − 1,000 − payable_vat(=(100,000−29,000)/11)
-    expected = Decimal("100000") - Decimal("29000") - (
+    # 100,000 − 20,000 − 12,200 − 1,000 − payable_vat(=(100,000−33,200)/11)
+    charged = Decimal("20000") + commission + Decimal("1000")
+    expected = Decimal("100000") - charged - (
         Decimal("100000") * Decimal("10") / Decimal("110")
-        - Decimal("29000") * Decimal("10") / Decimal("110")
+        - charged * Decimal("10") / Decimal("110")
     )
     assert Decimal(row["net_profit"]) == expected
     assert row["revenue_basis"] == "console_net"
