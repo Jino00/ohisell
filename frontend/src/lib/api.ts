@@ -3572,7 +3572,8 @@ export interface NaverWisdomScorecardRow {
   profit_after_sum: number | null;
   profit_delta_sum: number | null;   // 총이익 «금액» 합(원) — 계약 §4-A① "ad_profit 합"
   profit_pairs: number;
-  profit_unavailable: number;        // 렌즈 미기록으로 금액 산출불가인 행수
+  profit_unavailable: number;        // 판정은 됐으나 렌즈 미기록으로 금액 산출불가인 행수
+  profit_unjudged: number;           // 채점기가 표본 미달로 판정을 거부한 행 중 금액은 있는 것
   changes_executed: number;
   details: NaverWisdomScorecardChange[];
 }

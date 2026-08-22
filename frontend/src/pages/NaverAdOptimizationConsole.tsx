@@ -1327,6 +1327,13 @@ export default function NaverAdOptimizationConsole() {
                         금액 산출불가 {w.profit_unavailable}건(렌즈 미기록)
                       </span>
                     )}
+                    {w.profit_unjudged > 0 && (
+                      /* ★합에서 뺀 행이 조용히 사라지면 분모가 어디로 갔는지 아무도 모른다
+                          (적대 리뷰 2R P1). 채점기가 표본 미달로 판정을 거부한 행이다. */
+                      <span className="text-amber-700">
+                        판정 보류 {w.profit_unjudged}건(표본 미달 — 합계 제외)
+                      </span>
+                    )}
                     {w.gave_delta_sum != null && (
                       /* GAVE는 «크기 보조»로만 남긴다(§8-Q5 각주 — 부호 비교라 작은 델타도 판정이 된다). */
                       <span className="text-gray-400">

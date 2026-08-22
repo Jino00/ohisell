@@ -95,6 +95,7 @@ const ROW_BASE = {
   profit_delta_sum: null,
   profit_pairs: 0,
   profit_unavailable: 0,
+  profit_unjudged: 0,
   details: [],
 };
 
@@ -169,6 +170,19 @@ describe("지혜 성적표 패널 — 사람 눈에 닿는가", () => {
     });
     renderPage();
     expect(await screen.findByText(/금액 산출불가 2건/)).toBeTruthy();
+  });
+
+  it("★적대 리뷰 2R P1: 합계에서 빠진 «판정 보류» 건수가 화면에 남는다", async () => {
+    h.wisdom = card({
+      ...ROW_BASE, has_evidence: true, changes_total: 4, changes_executed: 4,
+      changes_scored_profit: 1, verdicts: { improved: 1 },
+      profit_delta_sum: 100000, profit_pairs: 1, profit_unjudged: 3,
+      evidence_gap: null,
+    });
+    renderPage();
+    expect(await screen.findByText(/총이익 델타 \+100,000원/)).toBeTruthy();
+    // 합에서 빠진 3건이 조용히 사라지면 「4건 중 1건만 쟀다」는 사실이 화면에서 증발한다
+    expect(screen.getByText(/판정 보류 3건/)).toBeTruthy();
   });
 
   it("BEP 커버리지 산출이 실패해도 그 사실이 화면에 남는다", async () => {

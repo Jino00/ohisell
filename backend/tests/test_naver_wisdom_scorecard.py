@@ -489,3 +489,61 @@ def test_maturity_state_does_not_claim_disabled_when_flag_is_gone(db, monkeypatc
     delay = ws.build(db)["value_definition"]["conversion_delay"]
     assert delay["correction_applied"] is None
     assert "판정불능" in delay["note"]
+
+
+# ── ★적대 리뷰 2R P1 회귀: 금액 합의 «집합»이 판정 집합과 같아야 한다 ────────
+def test_profit_sum_excludes_rows_the_scorer_refused_to_judge(db):
+    """★`run_daily`는 모수 미달(양쪽 창 clk<10) 행에 대해 **판정은 보류하면서 actual_json은
+    무조건 쓴다**(proposal_scoreboard.py:290-294 + :339). 그 행을 금액 합에 섞으면
+    「채점 1/4건 · 총이익 개선 1건 · 총이익 델타 -2,000,000원(4건)」이 한 줄에 뜬다 —
+    판정과 크기가 서로 반대를 가리키는, P1-1이 고치려던 바로 그 증상이다.
+    """
+    judged = _actual_json(before={"clk": 50, "conv_amt": 400_000, "cost": 100_000},
+                          after={"clk": 50, "conv_amt": 600_000, "cost": 100_000},
+                          bep=2.0, cf=1.0)  # +100,000 개선
+    thin = _actual_json(before={"clk": 2, "conv_amt": 2_000_000, "cost": 0},
+                        after={"clk": 1, "conv_amt": 600_000, "cost": 0},
+                        bep=2.0, cf=1.0)    # -700,000 (판정 보류 행)
+    _change(db, cid=80, proposal_id=800, outcome_profit="improved", actual_json=judged)
+    for i, cid in enumerate((81, 82, 83)):
+        _change(db, cid=cid, proposal_id=800, outcome_profit=None, actual_json=thin)
+    _proposal(db, pid=800, change_log_id=80)
+    _wisdom(db, wid=1, proposal_id=800)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["changes_total"] == 4
+    assert row["changes_scored_profit"] == 1
+    # 합은 «판정된 1건»만 — 보류 3건이 부호를 뒤집으면 안 된다
+    assert row["profit_pairs"] == 1
+    assert row["profit_delta_sum"] == pytest.approx(100_000.0)
+    # 보류 행은 버리지 않고 따로 센다(조용히 빠지면 분모가 어디로 갔는지 모른다)
+    assert row["profit_unjudged"] == 3
+
+
+def test_unjudged_rows_still_show_their_own_amount_in_details(db):
+    """행 단위로는 금액을 보여 준다 — 합에서 뺀 것이지 «없는 것»으로 만든 게 아니다."""
+    thin = _actual_json(before={"clk": 2, "conv_amt": 200_000, "cost": 0},
+                        after={"clk": 1, "conv_amt": 100_000, "cost": 0}, bep=2.0, cf=1.0)
+    _change(db, cid=84, proposal_id=801, outcome_profit=None, actual_json=thin)
+    _proposal(db, pid=801, change_log_id=84)
+    _wisdom(db, wid=1, proposal_id=801)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["profit_delta_sum"] is None
+    assert row["profit_unjudged"] == 1
+    assert row["details"][0]["profit_delta"] == pytest.approx(-50_000.0)
+
+
+def test_negative_bep_is_refused_like_the_canonical_verdict_function(db):
+    """정본 `_profit_verdict`가 bep<=0을 거부하므로 여기도 거부해야 한다 —
+    두 자가 다르면 부호가 뒤집힌 금액이 그대로 화면에 나간다(적대 리뷰 2R P2)."""
+    aj = _actual_json(before={"clk": 50, "conv_amt": 1000, "cost": 100},
+                      after={"clk": 50, "conv_amt": 2000, "cost": 100}, bep=-2.0, cf=1.0)
+    _change(db, cid=85, proposal_id=802, outcome_profit="improved", actual_json=aj)
+    _proposal(db, pid=802, change_log_id=85)
+    _wisdom(db, wid=1, proposal_id=802)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["profit_pairs"] == 0
+    assert row["profit_unavailable"] == 1
+    assert row["details"][0]["profit_delta"] is None

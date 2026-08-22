@@ -90,7 +90,14 @@ def _profit_amounts(change: NaverChangeLog) -> tuple[Optional[float], Optional[f
         return (None, None, None)
     lens = payload.get("lens") or {}
     bep, cf = lens.get("bep"), lens.get("cf")
-    if bep in (None, 0) or cf is None:
+    # ★정본(`proposal_scoreboard._profit_verdict`)은 bep <= 0을 거부한다 — 가드를 맞춘다
+    #   (적대 리뷰 2R P2. 현재 원장엔 음수 bep이 안 생기지만 두 자가 다르면 언젠가 갈린다).
+    if bep is None or cf is None:
+        return (None, None, None)
+    try:
+        if float(bep) <= 0:
+            return (None, None, None)
+    except (TypeError, ValueError):
         return (None, None, None)
     out: list[Optional[float]] = []
     for side in ("before", "after"):
@@ -211,6 +218,7 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
     profit_after_sum = 0.0
     profit_pairs = 0
     profit_unavailable = 0
+    profit_unjudged = 0
     executed = 0
     details = []
     for r in rows:
@@ -226,12 +234,22 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
             gave_after_sum += ga
             gave_pairs += 1
         pb, pa, pd = _profit_amounts(r)
-        if pb is not None and pa is not None:
-            profit_before_sum += pb
-            profit_after_sum += pa
-            profit_pairs += 1
-        else:
-            profit_unavailable += 1
+        # ★적대 리뷰 2R P1: 금액 합의 «집합»을 판정 집합에 맞춘다.
+        #   `run_daily`는 모수 미달(양쪽 창 clk<10) 행에 대해 **판정은 보류하면서 actual_json은
+        #   무조건 쓴다**(`proposal_scoreboard.py:290-294` + `:339`). 그래서 렌즈는 있고 판정은
+        #   없는 행이 원장에 쌓이는데, 그걸 합에 섞으면 「채점 1/4건 · 총이익 개선 1건 ·
+        #   총이익 델타 −2,000,000원(4건)」처럼 **판정과 크기가 서로 반대를 가리킨다** —
+        #   P1-1이 고치려던 바로 그 증상이 «지표 불일치»가 아니라 «행 집합 불일치»로 재현된다.
+        #   ⇒ 합은 판정된 행만. 보류 행은 버리지 않고 profit_unjudged로 «따로» 센다.
+        if r.outcome_profit is not None:
+            if pb is not None and pa is not None:
+                profit_before_sum += pb
+                profit_after_sum += pa
+                profit_pairs += 1
+            else:
+                profit_unavailable += 1
+        elif pb is not None:
+            profit_unjudged += 1
         if not r.dry_run:
             executed += 1
         details.append({
@@ -267,7 +285,10 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
         "profit_after_sum": round(profit_after_sum, 2) if profit_pairs else None,
         "profit_delta_sum": round(profit_after_sum - profit_before_sum, 2) if profit_pairs else None,
         "profit_pairs": profit_pairs,
-        "profit_unavailable": profit_unavailable,  # 렌즈 부재로 «금액 산출불가»인 행수
+        "profit_unavailable": profit_unavailable,  # 판정은 됐으나 렌즈 부재로 «금액 산출불가»인 행수
+        # ★채점기가 표본 미달로 «판정을 거부한» 행 중 금액은 계산되는 것들. 합에는 안 들어가고
+        #   화면에 별도 표시된다 — 조용히 빠지면 분모가 어디로 갔는지 아무도 모른다.
+        "profit_unjudged": profit_unjudged,
         "details": details,
     }
 
