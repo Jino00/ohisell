@@ -257,7 +257,11 @@ def _build_workbook() -> bytes:
     ci = wb.active
     ci.title = "CI"
     ci["B8"] = "COMMERCIAL  INVOICE"
+    # ★라벨을 실물과 똑같이 넣는다. 초판 픽스처는 값만 넣어 «실물보다 관대»했고,
+    #   파서가 열 위치 대신 라벨로 찾도록 고치자 그 관대함이 드러났다(교훈 #292).
+    ci["F9"] = "Invoice Date:"
     ci["G9"] = 46245.0            # Invoice Date (엑셀 시리얼)
+    ci["F10"] = "Invoice No.:"
     ci["G10"] = "SO-WSOH-116-115-114"
     ci["B14"], ci["D14"] = "Order No.", "Item "
     ci["E14"], ci["F14"], ci["G14"] = "Quantity   (pcs)", "Unit Price     (CNY)", "Total(CNY)"
@@ -383,6 +387,134 @@ def test_parse_saves_nothing(client):
 
 def test_parse_requires_at_least_one_document(client):
     assert client.post("/api/import-cost/parse").status_code == 400
+
+
+# ──────────────────────────────────────────────
+# 열 밀림 — 같은 공급사인데 양식마다 열이 한 칸 다르다 (2026-08-22 SO-WSOH-114 실측)
+# ──────────────────────────────────────────────
+def _build_shifted_workbook() -> bytes:
+    """`SO-WSOH-114` 양식 — CI·PL이 **각각 별도 파일**이고 열이 한 칸씩 왼쪽이다.
+
+    초판 파서는 열을 D·E·F로 하드코딩해서 이 양식을 **예외 없이** 잘못 읽었다:
+    품명 자리에 `100.0`(수량), 수량 자리에 `12.2`(단가)가 실렸다.
+    """
+    wb = Workbook()
+    ci = wb.active
+    ci.title = "CI"
+    ci["B8"] = "COMMERCIAL  INVOICE"
+    ci["E9"], ci["F9"] = "Invoice Date:", 46218.0
+    ci["E10"], ci["F10"] = "Invoice No.:", "SO-WSOH-114"
+    ci["B14"], ci["C14"] = "Order No.", "Item "
+    ci["D14"], ci["E14"], ci["F14"] = "Quantity   (pcs)", "Unit Price     (CNY)", "Total(CNY)"
+    rows = [("114\n（20260528-1）", "Glass_Ip16", 100, 12.2), (None, "cleaning kits", 12000, 0.8)]
+    r = 15
+    for order, item, qty, price in rows:
+        if order:
+            ci.cell(row=r, column=2, value=order)
+        ci.cell(row=r, column=3, value=item)
+        ci.cell(row=r, column=4, value=qty)
+        ci.cell(row=r, column=5, value=price)
+        ci.cell(row=r, column=6, value=round(qty * price, 2))
+        r += 1
+    ci.cell(row=r, column=2, value="Total QTY:")
+    ci.cell(row=r, column=4, value=12100)
+    ci.cell(row=r, column=5, value="Total(RMB):")
+    ci.cell(row=r, column=6, value=10820.0)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_shifted_pl() -> bytes:
+    """같은 건의 PL — **별도 파일**이고 역시 열이 한 칸 왼쪽이다."""
+    wb = Workbook()
+    pl = wb.active
+    pl.title = "PL"
+    pl["H11"], pl["J11"] = "Invoice No.:", "SO-WSOH-114"
+    pl["A13"], pl["B13"], pl["C13"] = "Ctn No.:/箱号", "Description of Goods", " Shipment Qty"
+    pl["D13"], pl["E13"], pl["F13"] = "Quantity", "CTN QTY", "G.W"
+    pl["G13"], pl["H13"], pl["I13"] = "Total\nG.W", "Measure", "Total volume"
+    data = [("1", "Glass_Ip16", 100, 100, 1, 14.8, 14.8, "50.5*44*24", 0.053328),
+            ("2-11", "cleaning kits", 12000, 1200, 10, 16.5, 165.0, "50.5*44*24", 0.53328)]
+    r = 14
+    for ctn, item, qty, per, cnt, gw1, gw, meas, cbm in data:
+        for c, v in enumerate([ctn, item, qty, per, cnt, gw1, gw, meas, cbm], start=1):
+            pl.cell(row=r, column=c, value=v)
+        r += 1
+    pl.cell(row=r, column=2, value="TOTAL:       ")
+    pl.cell(row=r, column=3, value=12100)
+    pl.cell(row=r, column=5, value=11)
+    pl.cell(row=r, column=7, value=179.8)
+    pl.cell(row=r, column=9, value=0.586608)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_column_shifted_format_is_read_correctly(client):
+    """★열이 밀린 양식을 «정확히» 읽는다 — 조용한 오독이 이 파일의 존재 이유다."""
+    body = _parse(client, xlsx=_build_shifted_workbook())
+    assert body["errors"] == [], body["errors"]
+    # PL 시트가 없는 것은 «실패»가 아니라 «안 준 것» — 경고로 나오고 오류로는 안 센다
+    assert any("PL 시트가 없다" in w for w in body["warnings"]), body["warnings"]
+    lines = body["invoice_lines"]
+    assert len(lines) == 2
+    assert [l["item_name"] for l in lines] == ["Glass_Ip16", "cleaning kits"]
+    assert [D(l["quantity"]) for l in lines] == [D("100"), D("12000")]
+    assert [D(l["unit_price_foreign"]) for l in lines] == [D("12.2"), D("0.8")]
+    assert body["header"]["invoice_no"] == "SO-WSOH-114"
+    # 품명 자리에 숫자가 실리면 그게 초판의 결함이다
+    assert not any(l["item_name"].replace(".", "").isdigit() for l in lines)
+
+
+def test_separate_pl_file_is_accepted(client):
+    """CI와 PL이 **별도 파일**로 와도 둘 다 읽는다."""
+    r = client.post(
+        "/api/import-cost/parse",
+        files={
+            "ci_pl_file": ("ci.xlsx", _build_shifted_workbook(), "application/vnd.ms-excel"),
+            "pl_file": ("pl.xlsx", _build_shifted_pl(), "application/vnd.ms-excel"),
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["errors"] == [], body["errors"]
+    assert len(body["invoice_lines"]) == 2
+    assert len(body["packing_lines"]) == 2
+    assert body["header"]["carton_count"] == 11
+    # PL 중량이 CI 라인에 배분돼 실렸다
+    weights = [D(l["gross_weight_kg"]) for l in body["invoice_lines"] if l["gross_weight_kg"]]
+    assert len(weights) == 2
+    assert abs(sum(weights) - D("179.8")) <= D("0.01")
+
+
+def test_ci_self_check_catches_column_map_drift(client):
+    """총계 행과 안 맞으면 **예외로 막는다** — 초판엔 이 검산이 CI에 없었다."""
+    from app.services.import_cost.parser import CustomsDocParseError, parse_commercial_invoice
+
+    wb = _build_shifted_workbook()
+    # 총계만 틀리게 바꾼 워크북을 만든다(라인은 그대로)
+    from openpyxl import load_workbook as _lw
+
+    book = _lw(io.BytesIO(wb))
+    book["CI"].cell(row=17, column=6, value=99999.0)
+    buf = io.BytesIO()
+    book.save(buf)
+    with pytest.raises(CustomsDocParseError, match="자기검산"):
+        parse_commercial_invoice(buf.getvalue())
+
+
+def test_numeric_item_name_is_rejected(client):
+    """품명 자리에 숫자가 오면 거부한다 — 열 지도가 어긋났다는 뜻이다."""
+    from app.services.import_cost.parser import CustomsDocParseError, parse_commercial_invoice
+    from openpyxl import load_workbook as _lw
+
+    book = _lw(io.BytesIO(_build_shifted_workbook()))
+    book["CI"].cell(row=15, column=3, value=100.0)  # 품명 자리에 숫자
+    buf = io.BytesIO()
+    book.save(buf)
+    with pytest.raises(CustomsDocParseError, match="열 지도"):
+        parse_commercial_invoice(buf.getvalue())
 
 
 def test_xls_without_xlrd_says_what_to_do(client, monkeypatch):

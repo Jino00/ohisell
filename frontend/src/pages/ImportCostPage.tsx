@@ -996,6 +996,7 @@ const inputCls = "w-full border rounded px-2 py-1.5 text-sm";
 function DocumentUploadPanel({ onApply }: { onApply: (result: ImportParseResult) => void }) {
   const [open, setOpen] = useState(true);
   const [ciPlFile, setCiPlFile] = useState<File | null>(null);
+  const [plFile, setPlFile] = useState<File | null>(null);
   const [expenseFile, setExpenseFile] = useState<File | null>(null);
   const [textOpen, setTextOpen] = useState(false);
   const [expenseText, setExpenseText] = useState("");
@@ -1003,7 +1004,7 @@ function DocumentUploadPanel({ onApply }: { onApply: (result: ImportParseResult)
   const [err, setErr] = useState("");
   const [result, setResult] = useState<ImportParseResult | null>(null);
 
-  const canSubmit = !!(ciPlFile || expenseFile || expenseText.trim());
+  const canSubmit = !!(ciPlFile || plFile || expenseFile || expenseText.trim());
 
   async function handleLoad() {
     setLoading(true);
@@ -1011,6 +1012,7 @@ function DocumentUploadPanel({ onApply }: { onApply: (result: ImportParseResult)
     try {
       const res = await parseImportDocuments({
         ciPlFile,
+        plFile,
         expenseFile,
         expenseText: expenseText.trim() ? expenseText : undefined,
       });
@@ -1035,12 +1037,20 @@ function DocumentUploadPanel({ onApply }: { onApply: (result: ImportParseResult)
       </button>
       {open && (
         <div className="border-t px-4 py-4 space-y-3">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <Field label="CI·PL 엑셀 (.xls, .xlsx)">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <Field label="① 인보이스(CI) 엑셀 — PL이 같은 파일이면 이것만 (.xls, .xlsx)">
               <input
                 type="file"
                 accept=".xls,.xlsx"
                 onChange={(e) => setCiPlFile(e.target.files?.[0] ?? null)}
+                className="w-full text-xs"
+              />
+            </Field>
+            <Field label="② 포장명세서(PL) — 별도 파일일 때만 (.xls, .xlsx)">
+              <input
+                type="file"
+                accept=".xls,.xlsx"
+                onChange={(e) => setPlFile(e.target.files?.[0] ?? null)}
                 className="w-full text-xs"
               />
             </Field>

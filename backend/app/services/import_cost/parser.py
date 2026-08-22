@@ -231,6 +231,52 @@ def _load_sheet(data: bytes, sheet_name: str):
     return wb[sheet_name]
 
 
+def _header_text(ws, row: int, col: int) -> str:
+    v = ws.cell(row=row, column=col).value
+    return " ".join(str(v).split()).casefold() if v is not None else ""
+
+
+def _find_header_row(ws, keyword: str, max_row: int = 30, max_col: int = 20) -> tuple[int, int]:
+    """헤더 셀을 **행·열 둘 다** 찾는다. 열을 고정하지 않는다.
+
+    ★초판은 헤더를 «2열 고정»으로 찾고 데이터 열도 D·E·F로 하드코딩했다. 그런데 같은 공급사가
+    보내는 서류인데도 양식마다 **열이 한 칸씩 밀린다**(실측 2026-08-22: 8/18 건은 D=품명·E=수량,
+    `SO-WSOH-114` 건은 C=품명·D=수량). 그 결과 파서가 **예외 없이** 수량을 품명으로, 단가를 수량으로
+    읽었다 — 값이 «있는데 틀린» 최악의 실패다. 그래서 위치가 아니라 **글자**로 찾는다.
+    """
+    key = keyword.casefold()
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            if key in _header_text(ws, r, c):
+                return r, c
+    raise CustomsDocParseError(
+        f"헤더 '{keyword}'를 {max_row}행 × {max_col}열 안에서 못 찾음 — 양식이 예상과 다르다."
+    )
+
+
+def _map_columns(ws, header_row: int, spec: dict[str, list[str]], max_col: int = 24) -> dict[str, int]:
+    """헤더 행을 훑어 «논리 이름 → 열 번호» 지도를 만든다.
+
+    `spec`의 각 항목은 후보 키워드 목록이고 **먼저 오는 것이 우선**이다(구체적인 것부터).
+    한 열이 두 논리 이름에 걸리지 않게 이미 배정된 열은 건너뛴다.
+    못 찾은 이름은 지도에 안 담긴다 — 호출부가 필수/선택을 판단한다.
+    """
+    texts = {c: _header_text(ws, header_row, c) for c in range(1, max_col + 1)}
+    out: dict[str, int] = {}
+    taken: set[int] = set()
+    for name, keywords in spec.items():
+        for kw in keywords:
+            hit = next(
+                (c for c, t in sorted(texts.items()) if c not in taken and kw.casefold() in t),
+                None,
+            )
+            if hit is not None:
+                out[name] = hit
+                taken.add(hit)
+                break
+    return out
+
+
 def extract_pdf_text(data: bytes) -> str:
     """통관경비서 PDF에서 텍스트를 뽑는다. 실패하면 «수기 경로»를 안내한다.
 
@@ -269,17 +315,39 @@ def parse_commercial_invoice(data: bytes) -> InvoiceParseResult:
     """
     ws = _load_sheet(data, "CI")
 
-    header_row = None
-    for r in range(1, 21):
-        v = ws.cell(row=r, column=2).value
-        if isinstance(v, str) and "order no" in v.strip().lower():
-            header_row = r
-            break
-    if header_row is None:
-        raise CustomsDocParseError("CI 시트: 헤더 행('Order No.')을 20행 안에서 못 찾음")
+    header_row, order_col = _find_header_row(ws, "order no")
+    cols = _map_columns(
+        ws,
+        header_row,
+        {
+            # 구체적인 것부터 — 'total'이 'total(cny)'와 'total qty'에 둘 다 걸리기 때문이다.
+            "order": ["order no"],
+            "item": ["item", "description", "goods"],
+            "qty": ["quantity", "qty", "pcs"],
+            "price": ["unit price", "price"],
+            "total": ["total"],
+        },
+    )
+    cols.setdefault("order", order_col)
+    missing = [k for k in ("item", "qty", "price") if k not in cols]
+    if missing:
+        raise CustomsDocParseError(
+            f"CI 헤더에서 필수 열을 못 찾음: {missing} "
+            f"(찾은 것: { {k: v for k, v in cols.items()} }). 양식이 예상과 다르다."
+        )
 
-    invoice_no = _to_str(ws.cell(row=10, column=7).value)  # G10
-    invoice_date = _excel_date(ws.cell(row=9, column=7).value)  # G9
+    # 인보이스 번호·날짜도 라벨로 찾는다(열 고정 금지 — 위 헤더와 같은 이유).
+    invoice_no = invoice_date = None
+    try:
+        r_no, c_no = _find_header_row(ws, "invoice no", max_row=header_row)
+        invoice_no = _to_str(ws.cell(row=r_no, column=c_no + 1).value)
+    except CustomsDocParseError:
+        pass
+    try:
+        r_dt, c_dt = _find_header_row(ws, "invoice date", max_row=header_row)
+        invoice_date = _excel_date(ws.cell(row=r_dt, column=c_dt + 1).value)
+    except CustomsDocParseError:
+        pass
 
     lines: list[InvoiceLine] = []
     order_nos: list[str | None] = []
@@ -292,26 +360,43 @@ def parse_commercial_invoice(data: bytes) -> InvoiceParseResult:
     max_row = header_row + 500
     row = header_row + 1
     while row <= max_row:
-        raw_b = ws.cell(row=row, column=2).value
-        if isinstance(raw_b, str) and "total" in raw_b.strip().lower():
-            declared_qty = _to_decimal(ws.cell(row=row, column=5).value)
-            declared_total = _to_decimal(ws.cell(row=row, column=7).value)
+        raw_order = ws.cell(row=row, column=cols["order"]).value
+        if isinstance(raw_order, str) and "total" in raw_order.strip().lower():
+            declared_qty = _to_decimal(ws.cell(row=row, column=cols["qty"]).value)
+            if "total" in cols:
+                declared_total = _to_decimal(ws.cell(row=row, column=cols["total"]).value)
+            # 총계 행은 「Total QTY: | 수량 | Total(RMB): | 금액」 꼴이라 금액이 total열이 아니라
+            # 그 오른쪽에 올 수 있다. 못 읽었으면 헤더 행 오른쪽까지 훑어 숫자를 찾는다.
+            if declared_total is None:
+                for c in range(cols["qty"] + 1, cols["qty"] + 6):
+                    cand = _to_decimal(ws.cell(row=row, column=c).value)
+                    if cand is not None and (declared_qty is None or cand != declared_qty):
+                        declared_total = cand
+                        break
             break
-        item_name = _to_str(ws.cell(row=row, column=4).value)
-        qty_raw = ws.cell(row=row, column=5).value
+        item_name = _to_str(ws.cell(row=row, column=cols["item"]).value)
+        qty_raw = ws.cell(row=row, column=cols["qty"]).value
         if item_name is None and qty_raw is None:
             row += 1
             continue  # 완전 공백 행 — 총계 행을 아직 못 만났으니 계속 본다
         if item_name is None:
-            raise CustomsDocParseError(f"CI {row}행: 품명(D열)이 비었는데 수량은 있다.")
-        if isinstance(raw_b, str) and raw_b.strip():
-            current_order = raw_b.strip()
+            raise CustomsDocParseError(f"CI {row}행: 품명이 비었는데 수량은 있다.")
+        # ★품명이 숫자면 열 지도가 틀린 것이다 — 그 상태로 진행하면 수량을 품명으로 싣는다.
+        if _NUMERIC_ONLY_RE.match(item_name.replace(",", "")):
+            raise CustomsDocParseError(
+                f"CI {row}행: 품명 자리에 숫자('{item_name}')가 있다 — 열 지도가 어긋났다. "
+                f"현재 지도: {cols}. 수기 입력으로 진행해야 한다."
+            )
+        if isinstance(raw_order, str) and raw_order.strip():
+            current_order = raw_order.strip()
         seq += 1
-        qty = _require_decimal(qty_raw, f"CI {row}행 수량(E열)")
-        price = _require_decimal(ws.cell(row=row, column=6).value, f"CI {row}행 단가(F열)")
+        qty = _require_decimal(qty_raw, f"CI {row}행 수량")
+        price = _require_decimal(ws.cell(row=row, column=cols["price"]).value, f"CI {row}행 단가")
         lines.append(InvoiceLine(seq=seq, item_name=item_name, quantity=qty, unit_price_foreign=price))
         order_nos.append(current_order)
-        declared_line_total = _to_decimal(ws.cell(row=row, column=7).value)
+        declared_line_total = (
+            _to_decimal(ws.cell(row=row, column=cols["total"]).value) if "total" in cols else None
+        )
         if declared_line_total is not None:
             computed = qty * price
             if abs(computed - declared_line_total) > Decimal("0.01"):
@@ -321,6 +406,24 @@ def parse_commercial_invoice(data: bytes) -> InvoiceParseResult:
         row += 1
     else:
         raise CustomsDocParseError(f"CI 시트: {header_row + 1}~{max_row}행 안에서 총계 행('Total')을 못 찾음")
+
+    # ★자기검산 — 뽑은 라인의 합이 서류의 총계와 같아야 한다.
+    #   통관경비서에 넣은 것과 같은 장치다(그쪽은 이게 실제로 잘못된 파싱을 잡았다).
+    #   CI엔 없어서 열이 밀린 서류를 **예외 없이 잘못 읽었다**(2026-08-22 SO-WSOH-114 실측).
+    if declared_qty is not None:
+        got_qty = sum((ln.quantity for ln in lines), _ZERO)
+        if got_qty != declared_qty:
+            raise CustomsDocParseError(
+                f"CI 자기검산 불일치 — 라인 수량 합 {got_qty} ≠ 총계 행 {declared_qty}. "
+                "라인을 빠뜨렸거나 열 지도가 어긋났다. 수기로 확인해야 한다."
+            )
+    if declared_total is not None:
+        got_total = sum((ln.quantity * ln.unit_price_foreign for ln in lines), _ZERO)
+        if abs(got_total - declared_total) > Decimal("0.01"):
+            raise CustomsDocParseError(
+                f"CI 자기검산 불일치 — 라인 금액 합 {got_total} ≠ 총계 행 {declared_total}. "
+                "단가·수량 열이 어긋났을 수 있다. 수기로 확인해야 한다."
+            )
 
     return InvoiceParseResult(
         lines=lines,
@@ -344,14 +447,34 @@ def parse_packing_list(data: bytes) -> PackingParseResult:
     """
     ws = _load_sheet(data, "PL")
 
-    header_row = None
-    for r in range(1, 21):
-        v = ws.cell(row=r, column=1).value
-        if isinstance(v, str) and "ctn no" in v.strip().lower():
-            header_row = r
-            break
-    if header_row is None:
-        raise CustomsDocParseError("PL 시트: 헤더 행('Ctn No.')을 20행 안에서 못 찾음")
+    header_row, ctn_col = _find_header_row(ws, "ctn no")
+    cols = _map_columns(
+        ws,
+        header_row,
+        {
+            # 순서가 중요하다 — 'total g.w'가 'g.w'보다, 'ctn qty'가 'quantity'보다 먼저다.
+            "ctn": ["ctn no"],
+            "item": ["description", "goods", "item"],
+            "ship_qty": ["shipment qty", "shipment"],
+            "per_carton": ["quantity", "每箱数量", "sets"],
+            "cartons": ["ctn qty", "箱数"],
+            "total_gw": ["total\ng.w", "total g.w", "毛重"],
+            "gw": ["g.w"],
+            "measure": ["measure", "箱规"],
+            "cbm": ["total volume", "volume", "cbm"],
+            "remark": ["remark", "备注"],
+        },
+    )
+    cols.setdefault("ctn", ctn_col)
+    missing = [k for k in ("item", "ship_qty") if k not in cols]
+    if missing:
+        raise CustomsDocParseError(
+            f"PL 헤더에서 필수 열을 못 찾음: {missing} (찾은 것: {cols}). 양식이 예상과 다르다."
+        )
+
+    def _c(name: str, row: int):
+        col = cols.get(name)
+        return ws.cell(row=row, column=col).value if col else None
 
     lines: list[PackingLine] = []
     total_qty = total_gw = total_cbm = total_cartons = None
@@ -360,39 +483,53 @@ def parse_packing_list(data: bytes) -> PackingParseResult:
     max_row = header_row + 500
     row = header_row + 1
     while row <= max_row:
-        raw_c = ws.cell(row=row, column=3).value  # C열 = 품명, 총계 행엔 'TOTAL:'
-        if isinstance(raw_c, str) and "total" in raw_c.strip().lower():
-            total_qty = _to_decimal(ws.cell(row=row, column=4).value)
-            total_cartons = _to_decimal(ws.cell(row=row, column=6).value)
-            total_gw = _to_decimal(ws.cell(row=row, column=8).value)
-            total_cbm = _to_decimal(ws.cell(row=row, column=10).value)
+        raw_item = _c("item", row)
+        if isinstance(raw_item, str) and "total" in raw_item.strip().lower():
+            total_qty = _to_decimal(_c("ship_qty", row))
+            total_cartons = _to_decimal(_c("cartons", row))
+            total_gw = _to_decimal(_c("total_gw", row))
+            total_cbm = _to_decimal(_c("cbm", row))
             break
-        item_name = _to_str(raw_c)
-        qty_raw = ws.cell(row=row, column=4).value
+        item_name = _to_str(raw_item)
+        qty_raw = _c("ship_qty", row)
         if item_name is None and qty_raw is None:
             row += 1
             continue
         if item_name is None:
-            raise CustomsDocParseError(f"PL {row}행: 품명(C열)이 비었는데 수량은 있다.")
+            raise CustomsDocParseError(f"PL {row}행: 품명이 비었는데 수량은 있다.")
+        if _NUMERIC_ONLY_RE.match(item_name.replace(",", "")):
+            raise CustomsDocParseError(
+                f"PL {row}행: 품명 자리에 숫자('{item_name}')가 있다 — 열 지도가 어긋났다. "
+                f"현재 지도: {cols}."
+            )
         seq += 1
-        qty = _require_decimal(qty_raw, f"PL {row}행 Shipment Qty(D열)")
+        qty = _require_decimal(qty_raw, f"PL {row}행 Shipment Qty")
         lines.append(
             PackingLine(
                 seq=seq,
-                carton_range=_to_str(ws.cell(row=row, column=1).value),
+                carton_range=_to_str(_c("ctn", row)),
                 item_name=item_name,
                 quantity=qty,
-                qty_per_carton=_to_decimal(ws.cell(row=row, column=5).value),
-                carton_count=_to_decimal(ws.cell(row=row, column=6).value),
-                gross_weight_kg=_to_decimal(ws.cell(row=row, column=8).value),  # Total G.W(박스)
-                measure=_to_str(ws.cell(row=row, column=9).value),
-                cbm=_to_decimal(ws.cell(row=row, column=10).value),  # Total volume(박스)
-                remark=_to_str(ws.cell(row=row, column=11).value),
+                qty_per_carton=_to_decimal(_c("per_carton", row)),
+                carton_count=_to_decimal(_c("cartons", row)),
+                gross_weight_kg=_to_decimal(_c("total_gw", row)),  # 박스 총중량
+                measure=_to_str(_c("measure", row)),
+                cbm=_to_decimal(_c("cbm", row)),  # 박스 총부피
+                remark=_to_str(_c("remark", row)),
             )
         )
         row += 1
     else:
         raise CustomsDocParseError(f"PL 시트: {header_row + 1}~{max_row}행 안에서 총계 행('TOTAL')을 못 찾음")
+
+    # ★자기검산 — CI와 같은 장치.
+    if total_qty is not None:
+        got = sum((ln.quantity for ln in lines), _ZERO)
+        if got != total_qty:
+            raise CustomsDocParseError(
+                f"PL 자기검산 불일치 — 라인 수량 합 {got} ≠ 총계 행 {total_qty}. "
+                "라인을 빠뜨렸거나 열 지도가 어긋났다."
+            )
 
     return PackingParseResult(
         lines=lines,
@@ -461,6 +598,8 @@ def _grab_decimal(text: str, pattern: str) -> Decimal | None:
 
 
 _NUM_RE = re.compile(r"^-?[\d,]+(?:\.\d+)?$")
+# 품명 자리에 이게 걸리면 열 지도가 어긋난 것이다(글자가 하나도 없는 순수 숫자).
+_NUMERIC_ONLY_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 _SUBTOTAL_RE = re.compile(r"subtotal|소계|합계", re.IGNORECASE)
 
 

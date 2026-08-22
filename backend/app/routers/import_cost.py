@@ -324,7 +324,10 @@ def download_document(shipment_id: int, document_id: int, db: Session = Depends(
 
 # ── 서류 파싱 (계약 §2-4: 파싱은 «채워주기 편의», 정본은 사람이 확인한 폼) ──
 def _parse_payload_from_files(
-    ci_pl: bytes | None, expense_pdf: bytes | None, expense_text: str | None
+    ci_pl: bytes | None,
+    expense_pdf: bytes | None,
+    expense_text: str | None,
+    pl_only: bytes | None = None,
 ) -> dict:
     """서류 → 폼 초안. **저장하지 않는다.**
 
@@ -371,8 +374,12 @@ def _parse_payload_from_files(
         except Exception as exc:
             out["errors"].append(f"Commercial Invoice: {exc}")
 
+    # PL은 **같은 파일의 다른 시트**일 수도 있고 **별도 파일**일 수도 있다.
+    # (실측 2026-08-22: 8/18 건은 한 파일 2시트, `SO-WSOH-114` 건은 CI·PL이 각각 다른 파일)
+    pl_source = pl_only if pl_only is not None else ci_pl
+    if pl_source is not None:
         try:
-            pl = P.parse_packing_list(ci_pl)
+            pl = P.parse_packing_list(pl_source)
             spread = P.distribute_box_metrics(pl.lines)
             out["packing_lines"] = [
                 {
@@ -411,7 +418,16 @@ def _parse_payload_from_files(
                     row["gross_weight_kg"] = str(hit["w"])
                     row["cbm"] = str(hit["c"])
         except Exception as exc:
-            out["errors"].append(f"Packing List: {exc}")
+            # ★「PL 시트가 없다」는 실패가 아니라 **안 준 것**이다 — CI만 올린 정상 경로가 있다
+            #   (실측: `SO-WSOH-114`는 CI 파일에 PL 시트가 없고 PL이 별도 파일이다).
+            #   별도 PL 파일을 «주고» 실패한 경우만 오류로 센다. 구분을 안 하면 정상 업로드가
+            #   빨간 박스를 띄워 사람이 진짜 오류를 무시하게 된다.
+            absent = pl_only is None and "시트 'PL'이 없다" in str(exc)
+            (out["warnings"] if absent else out["errors"]).append(
+                f"Packing List: {exc}"
+                if not absent
+                else "Packing List: 이 파일엔 PL 시트가 없다 — PL을 별도 파일로 올리거나 수기로 입력하면 된다."
+            )
 
     text = expense_text
     if text is None and expense_pdf is not None:
@@ -460,12 +476,15 @@ def _parse_payload_from_files(
 @router.post("/parse")
 async def parse_documents(
     ci_pl_file: UploadFile | None = File(None),
+    pl_file: UploadFile | None = File(None),
     expense_file: UploadFile | None = File(None),
     expense_text: str | None = Form(None),
 ):
     """서류를 올리면 **폼 초안**을 돌려준다. 저장은 하지 않는다.
 
-    - `ci_pl_file` — CI·PL 시트가 든 엑셀(.xls 또는 .xlsx)
+    - `ci_pl_file` — CI가 든 엑셀(.xls/.xlsx). PL 시트가 같은 파일에 있으면 그것도 함께 읽는다.
+    - `pl_file` — PL이 **별도 파일**로 올 때. 주면 이쪽이 PL의 출처가 된다.
+      (실측 2026-08-22: 8/18 건은 한 파일 2시트, `SO-WSOH-114` 건은 CI·PL이 각각 다른 파일이었다)
     - `expense_file` — 통관경비서 PDF (텍스트 레이어가 있어야 한다)
     - `expense_text` — PDF 대신 붙여넣은 텍스트(서버에 pypdf가 없을 때의 우회로)
 
@@ -473,7 +492,7 @@ async def parse_documents(
     깨진 것은 `errors[]`에 남고 화면이 그대로 보여준다 — 조용히 빈 폼을 주지 않는다.
     ★HTTP 상태는 파싱 실패에도 200이다. 「무엇이 왜 안 읽혔나」는 오류가 아니라 이 API의 산출물이다.
     """
-    if ci_pl_file is None and expense_file is None and not expense_text:
+    if ci_pl_file is None and pl_file is None and expense_file is None and not expense_text:
         raise HTTPException(status_code=400, detail="올린 서류가 없다.")
 
     async def _read(f: UploadFile | None) -> bytes | None:
@@ -485,7 +504,7 @@ async def parse_documents(
         return data or None
 
     return _parse_payload_from_files(
-        await _read(ci_pl_file), await _read(expense_file), expense_text
+        await _read(ci_pl_file), await _read(expense_file), expense_text, await _read(pl_file)
     )
 
 
