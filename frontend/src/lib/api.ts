@@ -5035,3 +5035,157 @@ export function deleteImportDocument(
     method: "DELETE",
   });
 }
+
+// ══════════════════════════════════════════════════════════════════
+// 원가 메뉴 — D-CPP-53 / 계약 `docs/PLAN_cost-menu-standard-cost.md` (S1: 부자재 층)
+//
+// ★단가는 **`string | null`**이다 — 숫자로 좁히면 `null`(미입력)이 `0`으로 접힌다.
+//   0=미입력 혼동이 기존 `cost_price` 스키마의 결함이고, 새 층에서 재생산하면 이 층을
+//   만들 이유가 없다(계약 §2-7). 화면은 `null`을 「—」로 그린다.
+// ══════════════════════════════════════════════════════════════════
+export interface CostPriceShipmentRef {
+  id: number;
+  hbl_no: string;
+  declaration_date: string | null;
+  item_name: string;
+  quantity: string | null;
+}
+
+export interface CostMaterialPrice {
+  id: number;
+  material_id: number;
+  source: "ledger" | "manual";
+  import_invoice_line_id: number | null;
+  supplier: string | null;
+  unit_price_ex_vat: string | null;
+  unit_price_inc_vat: string | null;
+  effective_date: string | null;
+  note: string | null;
+  shipment: CostPriceShipmentRef | null;
+}
+
+export interface CostMaterial {
+  id: number;
+  name: string;
+  unit: string | null;
+  category: string | null;
+  status: "unconfirmed" | "approved";
+  excel_label: string | null;
+  match_rule: string | null;
+  form_factor: string | null;
+  part: string | null;
+  note: string | null;
+  lot_count: number;
+  price_count: number;
+  latest_price_ex_vat: string | null;
+  latest_price_inc_vat: string | null;
+  latest_price_source: "ledger" | "manual" | null;
+  prices: CostMaterialPrice[];
+}
+
+export interface CostLedgerSuggestion {
+  line_id: number;
+  item_name: string;
+  material_id: number | null;
+  reason: string;
+  candidates: number[];
+  ambiguous: boolean;
+  unmatched: boolean;
+}
+
+export interface CostLedgerMaterialLine {
+  line_id: number;
+  shipment_id: number;
+  hbl_no: string;
+  declaration_date: string | null;
+  item_name: string;
+  quantity: string | null;
+  unit_cost_ex_vat: string | null;
+  unit_cost_inc_vat: string | null;
+  allocated_cost_krw: string | null;
+  linked_material_id: number | null;
+  linked_material_name: string | null;
+  linked_price_id: number | null;
+  suggestion: CostLedgerSuggestion;
+}
+
+export interface CostSetting {
+  key: string;
+  value: string;
+  confirmed: boolean;
+  note: string | null;
+  updated_at: string | null;
+}
+
+export function fetchCostMaterials(): Promise<{ items: CostMaterial[] }> {
+  return fetchApi("/api/cost/materials");
+}
+
+export function fetchCostLedgerMaterialLines(): Promise<{
+  items: CostLedgerMaterialLine[];
+}> {
+  return fetchApi("/api/cost/ledger-material-lines");
+}
+
+export function fetchCostSettings(): Promise<{ items: CostSetting[] }> {
+  return fetchApi("/api/cost/settings");
+}
+
+/** 원장 라인 → 부자재 종 **사람이 하는 확정**(계약 §5-2). 제안은 스스로 링크하지 않는다. */
+export function linkCostLedgerPrice(
+  materialId: number,
+  importInvoiceLineId: number,
+): Promise<{ linked_price_id: number; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices/link`, {
+    method: "POST",
+    body: JSON.stringify({ import_invoice_line_id: importInvoiceLineId }),
+  });
+}
+
+export function deleteCostMaterialPrice(
+  materialId: number,
+  priceId: number,
+): Promise<{ deleted: boolean; id: number; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices/${priceId}`, {
+    method: "DELETE",
+  });
+}
+
+export function createCostMaterial(body: {
+  name: string;
+  unit?: string | null;
+  category?: string | null;
+  match_rule?: string | null;
+}): Promise<CostMaterial> {
+  return fetchApi("/api/cost/materials", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function patchCostMaterial(
+  materialId: number,
+  body: Partial<Pick<CostMaterial, "name" | "unit" | "category" | "status" | "match_rule" | "excel_label" | "note">>,
+): Promise<CostMaterial> {
+  return fetchApi(`/api/cost/materials/${materialId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 국내 구매 부자재 등 원장 파생이 불가한 종의 단가(계약 §4 하이브리드 ②). */
+export function addCostManualPrice(
+  materialId: number,
+  body: {
+    unit_price_ex_vat?: string | null;
+    unit_price_inc_vat?: string | null;
+    supplier?: string | null;
+    effective_date?: string | null;
+    note?: string | null;
+  },
+): Promise<{ price_id: number; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
