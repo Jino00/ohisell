@@ -34,9 +34,11 @@ from app.models import (
     ProductChannelMapping,
     ProductMaster,
 )
+from app.services.coupang.intelligence import compute_command_center
 from app.services.coupang.rg_channel_pnl import compute_rg_summary_row
 from app.services.coupang.rg_sales_date_fees import (
     daily_fees,
+    ledger_total,
     period_fees,
     sale_fee_rate,
     sales_date_fees,
@@ -478,3 +480,187 @@ def test_confession_fields_are_populated_when_computable(db):
     assert row["fee_unmapped_revenue"] is not None
     assert row["settlement_reconcile_diff"] is not None, \
         "완결 주기가 있으면 보존식 대조 diff가 나와야 한다(숨겨서 0/None으로 만들지 않는다)"
+
+
+# ════════════════════════════════════════════════
+# 12. 변이 주입 8종 보강 — PR #337 적대 리뷰가 살려 둔 것들 (2026-08-23)
+#
+# 위 테스트들이 값을 낸다는 것만 보고 «그 값이 옳은가»·«보존식이 정직한가»를 안 지켜서
+# 8종 변이가 살아남았다. 각 테스트는 정확한 기대값을 단언한다(공허한 >=0류 금지).
+# ════════════════════════════════════════════════
+
+def test_sale_fee_uses_full_revenue_not_only_priced_portion(db):
+    """M6 — 수수료 분모가 `revenue_total` → `revenue_priced`로 바뀌면 빨개진다.
+
+    판매수수료는 정산 원장이 계정 매출 «전체»에 매기는 것이라 물류비 단가 커버리지와 무관하다.
+    단가 미상 옵션을 임계(5%) 안으로 섞어도 수수료는 줄면 안 된다 — 줄면 그건 옵션축 커버리지가
+    수수료 계산에 잘못 새어 들어온 것이다.
+    """
+    asof = date(2026, 8, 20)
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_summary(db, date(2026, 8, 3), 100_000, 10)   # 완결 주기 요율 8%
+
+    _seed_option_fee(db, "RG1", "delivery", 500, 5,
+                     dfrom=date(2026, 8, 8), dto=date(2026, 8, 14))  # 단가 100원/개(참고용, 안 씀)
+    _seed_option(db, date(2026, 8, 15), "RG1", 96_000, 8)   # 단가 앎 — 매출의 96%
+    _seed_option(db, date(2026, 8, 15), "UNK", 4_000, 1)    # 단가 모름 — 매출의 4%(임계 5% 안)
+    db.commit()
+
+    fees = sales_date_fees(db, ACC, date(2026, 8, 15), date(2026, 8, 15), asof=asof, reconcile=False)
+    assert fees["revenue_total"] == Decimal("100000")
+    assert fees["revenue_priced"] == Decimal("96000")
+    assert fees["sale_fee"] == Decimal("8000"), \
+        "수수료 = revenue_total(100,000) × 요율(8%) = 8,000이어야 한다"
+    assert fees["sale_fee"] != Decimal("96000") * Decimal("0.08"), \
+        "revenue_priced(96,000)만으로 계산한 7,680원이 나오면 안 된다"
+
+
+def test_unmapped_revenue_confesses_exact_amount(db):
+    """M7 — `unmapped_revenue` 자백이 삭제되면(항상 0) 빨개진다.
+
+    기존 `>= 0` 단언은 그 변이를 못 잡는 공허한 단언이었다 — 여기선 정확한 합계를 요구한다.
+    """
+    _seed_option(db, date(2026, 8, 15), "UNK1", 3_000, 3)   # 단가 모름
+    _seed_option(db, date(2026, 8, 15), "UNK2", 700, 1)     # 단가 모름 — 합쳐서 자백돼야 한다
+    db.commit()
+
+    fees = sales_date_fees(db, ACC, date(2026, 8, 15), date(2026, 8, 15), reconcile=False)
+    assert fees["unmapped_revenue"] == Decimal("3700"), \
+        "단가 모르는 두 옵션의 매출 합이 정확히 자백돼야 한다(0으로 삭제되면 안 된다)"
+
+
+def test_ledger_total_excludes_ad_sales(db):
+    """M9 — `ledger_total`에서 `ad_sales` 제외를 빼면(전부 합산) 빨개진다.
+
+    `ledger_total`은 보존식 대조의 «실청구액» 기준이다 — 여기에 ad_sales가 섞이면 대조
+    자체가 이중계상 여부를 가리는 게 아니라 이중계상을 만들게 된다.
+    """
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_account_fee(db, "ad_sales", 5_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    db.commit()
+
+    total = ledger_total(db, ACC, date(2026, 8, 1), date(2026, 8, 7))
+    assert total == Decimal("8000"), "ad_sales는 원장 대조 총액에서도 빠져야 한다(D-CPP-43)"
+
+
+def test_reconciliation_diff_is_exact_not_hidden_as_zero(db):
+    """M10 — 보존식 `diff`가 0으로 숨겨지면 빨개진다.
+
+    완결 두 주기의 요율이 다르면(8,000/100,000=8% vs 9,000/100,000=9%) 최근 주기에서
+    실측하는 요율은 두 주기를 섞은 8.5%가 되고, 그 주기 자체의 실청구액(9,000)과는
+    정확히 −500원(=8,500−9,000) 어긋나야 한다 — 그 어긋남이 살아 있어야 한다.
+    """
+    asof = date(2026, 8, 20)
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_summary(db, date(2026, 8, 3), 100_000, 10)
+    _seed_account_fee(db, "sale_fee", 9_000, dfrom=date(2026, 8, 8), dto=date(2026, 8, 14))
+    _seed_summary(db, date(2026, 8, 10), 100_000, 10)
+    _seed_option(db, date(2026, 8, 10), "RG1", 100_000, 10)   # 최근 완결 주기의 옵션축 매출
+    db.commit()
+
+    # 조회 창은 아무 날이나 상관없다 — reconciliation은 «최근 완결 주기»를 독립적으로 재계산한다.
+    fees = sales_date_fees(db, ACC, date(2026, 8, 20), date(2026, 8, 20), asof=asof)
+    rec = fees["reconciliation"]
+    assert rec is not None
+    assert rec["diff"] == Decimal("-500"), \
+        "8.5% 혼합요율×100,000=8,500 − 실청구 9,000 = −500이어야 한다"
+    assert rec["diff"] != Decimal("0")
+
+
+def test_reconciliation_field_is_none_without_completed_cycle(db):
+    """M16(모듈층) — 완결 주기가 없을 때 `reconciliation` 자체를 "0"류 값으로 채우면 빨개진다."""
+    _seed_summary(db, date(2026, 8, 15), 50_000, 5)
+    _seed_option(db, date(2026, 8, 15), "RG1", 50_000, 5)
+    db.commit()
+
+    fees = sales_date_fees(db, ACC, date(2026, 8, 15), date(2026, 8, 15))
+    assert fees["reconciliation"] is None, "완결 주기가 없으면 reconciliation은 None이어야 한다"
+
+
+def test_total_includes_period_fee_exactly(db):
+    """M12 — `total`에서 기간비용(`period`)이 누락되면 빨개진다."""
+    asof = date(2026, 8, 20)
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_summary(db, date(2026, 8, 3), 100_000, 10)   # 완결 주기 요율 8%
+
+    _seed_option_fee(db, "RG1", "delivery", 1_000, 10,
+                     dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))   # 단가 100원/개
+    _seed_account_fee(db, "storage", 700, dfrom=date(2026, 8, 15), dto=date(2026, 8, 21))  # 7일 주기
+
+    _seed_summary(db, date(2026, 8, 15), 50_000, 5)
+    _seed_option(db, date(2026, 8, 15), "RG1", 50_000, 5)
+    db.commit()
+
+    fees = sales_date_fees(db, ACC, date(2026, 8, 15), date(2026, 8, 15), asof=asof, reconcile=False)
+    assert fees["period"] == Decimal("100"), "700/7(겹친 1일)이어야 한다"
+    assert fees["logistics"] == Decimal("550"), "100원×5개×1.1이어야 한다"
+    assert fees["sale_fee"] == Decimal("4000"), "50,000×8%여야 한다"
+    assert fees["total"] == Decimal("4650")
+    assert fees["total"] == fees["logistics"] + fees["sale_fee"] + fees["period"], \
+        "total은 세 항의 합이어야 한다(기간비용을 빼면 안 된다)"
+
+
+def test_commission_axis_requires_known_rate_even_with_full_fee_coverage(db):
+    """M14 — `compute_rg_summary_row` 게이트에서 `rate is not None`을 빼면 빨개진다.
+
+    ★단가는 다 알아서(물류비 커버리지 100%) 그 게이트는 통과하는데 요율만 못 잰(완결 주기
+    없음) 시드다. 기존 폴백 테스트는 커버리지도 같이 실패하는 시드라 이 조각 하나만 빠져도
+    안 잡혔다 — 여기서는 커버리지를 100%로 고정해 `rate is not None` 단독의 효과를 가른다.
+    """
+    for d in (date(2026, 8, 5), date(2026, 8, 6)):
+        _seed_summary(db, d, 50_000, 5)
+        _seed_option(db, d, "RG1", 50_000, 5)
+    _seed_option_fee(db, "RG1", "delivery", 1_000, 10, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
+    _seed_cost(db, "RG1", 2_000)
+    # 진행 중 주기(아직 안 끝남, to=08-31) → 완결 주기 0개 → rate=None. 단가는 이미 100% 안다.
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 31))
+    db.commit()
+
+    row = compute_rg_summary_row(db, ACC, date(2026, 8, 5), date(2026, 8, 6), _cost_master(db), VENDOR)
+    assert row["commission_basis"] == "rate_unknown"
+    assert row["commission_axis"] == "recognition_date", \
+        "요율을 못 재면 물류비 커버리지가 100%여도 판매일 축을 내면 안 된다"
+
+
+def test_settlement_reconcile_diff_stays_none_without_completed_cycle(db):
+    """M16 — `reconciliation`이 없을 때(None) 화면 자백 칸을 "0"으로 채우면 빨개진다.
+
+    완결 주기가 아예 없으면 `settlement_reconcile_diff`는 **None**이어야 한다 — 0은
+    「맞았다」로 읽히는데 여긴 애초에 잰 것이 없다.
+    """
+    for d in (date(2026, 8, 5), date(2026, 8, 6)):
+        _seed_summary(db, d, 50_000, 5)
+        _seed_option(db, d, "RG1", 50_000, 5)
+    _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
+    _seed_cost(db, "RG1", 2_000)
+    # RG 정산 원장 row가 아예 없다 → 완결 주기 0개 → reconciliation 자체가 None.
+    db.commit()
+
+    row = compute_rg_summary_row(db, ACC, date(2026, 8, 5), date(2026, 8, 6), _cost_master(db), VENDOR)
+    assert row is not None
+    assert row["settlement_reconcile_diff"] is None, \
+        "완결 주기가 없으면 diff는 None이어야 한다 — '0' 문자열로 채우면 안 된다"
+    assert row["settlement_reconcile_cycle"] is None
+    assert row["settlement_reconcile_pct"] is None
+
+
+def test_rg_settlement_axis_falls_back_when_rate_unknown_in_command_center(db):
+    """M18 — `intelligence`의 `rg_settlement_axis`를 항상 "sales_date"로 바꾸면 빨개진다.
+
+    단가는 다 알아 물류비 커버리지가 100%인데(RG1 단가 기재) 요율을 잴 완결 주기가 아예
+    없는 창이다 — `compute_command_center`도 대시보드(`rg_channel_pnl`)와 **같은 규칙**으로
+    원장 축("recognition_date")으로 물러서야 한다(D-CPP-47이 고쳤던, 두 화면이 같은 계정을
+    다른 금액으로 빼는 병의 재발 방지).
+    """
+    _seed_summary(db, date(2026, 8, 15), 50_000, 5)
+    _seed_option(db, date(2026, 8, 15), "RG1", 50_000, 5)
+    _seed_option_fee(db, "RG1", "delivery", 500, 5, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
+    # sale_fee 원장 row가 아예 없다 → 완결 주기 0개 → rate=None.
+    db.commit()
+
+    cc = compute_command_center(db, date(2026, 8, 15), date(2026, 8, 15), account=ACC)
+    s = cc["account"]["summary"]
+    assert s["rg_fee_basis"] == "rate_unknown"
+    assert s["rg_settlement_axis"] == "recognition_date", \
+        "요율을 못 재면 판매일 축을 내면 안 된다 — 항상 sales_date이면 안 된다"

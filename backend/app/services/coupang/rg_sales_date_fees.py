@@ -277,6 +277,7 @@ def sales_date_fees(
     date_to: date,
     asof: date | None = None,
     reconcile: bool = True,
+    revenue_reference: Decimal | None = None,
 ) -> dict:
     """[from, to]에 **판매된 것**에 붙는 정산공제 — 이 모듈의 본체.
 
@@ -284,8 +285,16 @@ def sales_date_fees(
       total               판매일 축 정산공제 합계(VAT後) — 순이익에서 뺄 값
       logistics/sale_fee/period  세 항의 내역
       rate/rate_basis/rate_cycles 요율과 그 근거
-      coverage            단가를 아는 매출의 비율(0~1) — None이면 그 창에 옵션축 매출이 없다
-      unmapped_revenue    단가를 모르는 옵션의 매출 — **0으로 안 채운 몫**
+      coverage            단가를 아는 매출의 비율(0~1) — None이면 잴 매출이 아예 없다
+      unmapped_revenue    이 방식이 «비용을 못 붙인» 매출 — **0으로 안 채운 몫**
+
+    ★`revenue_reference` = 호출부가 화면에 싣는 매출(= 요약축). 주면 **커버리지의 분모가 그것**이 된다.
+      왜 필요한가(적대 리뷰 1R P1-1): 이 함수의 비용은 전부 **옵션축**에서 나오는데 행이 표시하는
+      매출은 **요약축**이다. 두 축이 어긋난 창에서는 — 옵션축 페처가 `vi_days` 롤링이라 창 앞쪽이
+      비는 것이 실제 조건이다 — 그 차액의 수수료·물류비가 **0으로 채워지는데**, 옵션축 «안에서의»
+      비율만 보면 커버리지는 100%가 나온다. 결손을 원리적으로 못 보는 자다.
+      ⇒ 분모를 «화면이 말하는 매출»로 세우면 그 결손이 곧바로 커버리지 하락으로 나타나고,
+        §4 ⓔ 게이트가 발동한다. 안 주면 종전대로 옵션축 안에서만 잰다(하위호환).
       by_option           {vid: 판매일 축 귀속액(VAT後)} — 상품손익 귀속용
       reconciliation      최근 완결 주기에서 Σ(이 방식) vs 실청구 (계약 §4 ⓒ). 못 재면 None
 
@@ -342,7 +351,16 @@ def sales_date_fees(
 
     fee = (revenue_total * rate) if rate is not None else ZERO
     period = period_fees(db, account_key, date_from, date_to)
-    coverage = (revenue_priced / revenue_total) if revenue_total > 0 else None
+
+    # ★커버리지의 분모 — 호출부가 화면에 싣는 매출이 있으면 **그것**으로 잰다(위 docstring ★).
+    #   두 축이 어긋난 만큼이 그대로 「비용을 못 붙인 매출」이 되어 게이트에 걸린다.
+    denom = revenue_reference if revenue_reference is not None else revenue_total
+    coverage = (revenue_priced / denom) if denom > 0 else None
+    if revenue_reference is not None:
+        # 요약축이 옵션축보다 크면 그 차액도 «못 붙인 매출»이다 — 그 매출의 비용은 0으로 갔다.
+        # 반대(옵션축이 더 큼)는 여기서 음수로 만들지 않는다: 자백 칸은 「못 붙인 몫」이지
+        # 두 축의 부호 있는 차이가 아니고, 그 진단은 `revenue_reconcile`의 몫이다.
+        unmapped_revenue = max(ZERO, denom - revenue_priced)
 
     out = {
         "total": logistics + fee + period,

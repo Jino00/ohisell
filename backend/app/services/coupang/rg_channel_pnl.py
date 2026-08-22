@@ -97,7 +97,10 @@ def compute_rg_summary_row(
     #   종전 `get_rg_total_by_account`는 정산 인식일 창 겹침이라 한 주기를 덮는 어느 하루를
     #   물어도 같은 값을 줬다 — 그 함수는 폐기가 아니라 **원장 권위값**으로 남아 있고
     #   아래 `reconciliation`이 그것과 계속 맞춰 본다(§4 ⓒ).
-    fees = sales_date_fees(db, account_key, date_from, date_to)
+    #   ★분모는 **이 행이 화면에 싣는 매출**을 준다(적대 리뷰 1R P1-1). 비용은 옵션축에서 오고
+    #     매출은 요약축에서 오므로, 두 축이 어긋난 창에서는 그 차액의 비용이 0으로 채워지는데
+    #     옵션축 안에서만 재면 커버리지가 100%로 나와 게이트가 침묵한다.
+    fees = sales_date_fees(db, account_key, date_from, date_to, revenue_reference=revenue)
     fee_coverage = fees["coverage"]
 
     cost_info = net_cost(db, date_from, date_to, account_key, cost_master)

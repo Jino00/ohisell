@@ -1220,8 +1220,20 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     #   ★계정을 안 고른 전체 합산 뷰(`account=None`)에선 판매일 축을 «내지 않는다** — 요율은
     #     계정마다 다르고(WING1·WING2가 다른 믹스다) 계정별로 재서 더해야 뜻이 있다.
     #     그 뷰는 원장 축으로 남고, 축 필드가 그렇게 말한다.
+    #   ★커버리지 분모는 **요약축 RG 매출**을 준다(적대 리뷰 1R P1-1) — 비용은 옵션축에서 오고
+    #     매출은 요약축이라, 두 축이 어긋난 창에선 그 차액의 비용이 0으로 채워지는데 옵션축
+    #     안에서만 재면 커버리지가 100%로 나와 게이트가 침묵한다. 대시보드와 **같은 분모**다.
+    from app.services.coupang.rg_net_revenue import (  # noqa: PLC0415
+        net_revenue_by_account as _net_rev_by_acc,
+    )
+
+    _rg_rev_ref = (
+        (_net_rev_by_acc(db, dfrom, dto).get(acc["account_key"]) or {}).get("revenue")
+        if acc["account_key"]
+        else None
+    )
     _sd = (
-        sales_date_fees(db, acc["account_key"], dfrom, dto)
+        sales_date_fees(db, acc["account_key"], dfrom, dto, revenue_reference=_rg_rev_ref)
         if acc["account_key"]
         else {"total": _Z, "rate": None, "rate_basis": "rate_unknown", "coverage": None,
               "unmapped_revenue": _Z, "reconciliation": None}
@@ -1247,7 +1259,17 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         account_sum["net_profit"], rg_deducted
     )
     # status enum(Codex #6): money basis 명시. 불리언 안 씀.
-    account_sum["rg_flip_status"] = "applied_ex_ad" if len(rg_fees) > 0 else "not_applied_no_data"
+    # ★적대 리뷰 1R P1-2: 종전엔 이 값이 **정산 원장 row의 유무**(`len(rg_fees)`)로 정해졌다.
+    #   차감액이 판매일 축으로 바뀌면서 둘이 디커플됐다 — 그 창에 겹치는 원장 row가 없어도
+    #   (주기 롤오버 직후·정산 수집 지연: 신선도 허용이 14일이다) 판매일 축은 요율·단가를 옛
+    #   주기에서 가져와 **차감을 계속한다.** 그런데 화면(`CommandCenter.tsx`)은 이 칸으로
+    #   분기하므로 **차감이 일어난 창에 「RG 정산 데이터 없음」을 렌더하고 금액을 지웠다.**
+    #   자백이 아니라 반대 진술이다(§2 판단기준 7 「판정은 화면에서 한다」).
+    #   ⇒ **실제로 뺐는지**로 정한다. 뺀 게 0인데 원장 row는 있는 창(전액 광고분 등)도
+    #     「데이터 없음」이 아니므로 같이 applied로 둔다.
+    account_sum["rg_flip_status"] = (
+        "applied_ex_ad" if (rg_deducted != _Z or len(rg_fees) > 0) else "not_applied_no_data"
+    )
 
     # ─── 3P 배송 손익(한진 1,900 비용 − 고객이 낸 배송비 수입) — 계정 단위 최종 반영 ───
     # 구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15).
