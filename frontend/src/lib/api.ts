@@ -3524,6 +3524,87 @@ export function fetchNaverExpertScorecard(): Promise<NaverExpertScorecard> {
   return fetchApi<NaverExpertScorecard>("/api/naver/ad/expert-scorecard");
 }
 
+// ── 지혜 성적표(M3-a, 계약 PLAN_naver-m3-wisdom-scorecard.md §4-A① · §4-B⑥) ──
+// ★표본 0을 «좋은 성적»으로 렌더하지 말 것 — has_evidence=false면 evidence_gap을 보여준다.
+//   빈 성적표를 무해하게 그리면 qi_grade=4 죽은 신호(2026-08-12)의 재발이다.
+export interface NaverWisdomScorecardChange {
+  change_log_id: number;
+  changed_at: string | null;
+  action: string;
+  campaign_id: string;
+  dry_run: boolean;
+  outcome_legacy: string | null;   // 옛 자(효율 배율) — 불변 증거(§8-Q1)
+  outcome_profit: string | null;   // 새 자(총이익 델타 부호)
+  gave_before: number | null;
+  gave_after: number | null;
+  gave_delta: number | null;
+  profit_before: number | null;
+  profit_after: number | null;
+  profit_delta: number | null;
+  bep_source: string | null;       // product_bep / account_default / unavailable
+}
+
+export interface NaverWisdomScorecardRow {
+  wisdom_id: number;
+  wisdom_text: string;
+  status: string;
+  promoted_at: string | null;
+  source_candidate_id: number;
+  linked_proposals: {
+    proposal_id: number;
+    proposal_type: string;
+    status: string;
+    campaign_id: string;
+    executed_change_log_id: number | null;
+  }[];
+  linked_proposal_count: number;
+  has_evidence: boolean;
+  evidence_gap: string | null;
+  changes_total: number;
+  changes_scored_profit: number;
+  verdicts: Record<string, number>;
+  bep_sources: Record<string, number>;
+  gave_before_sum: number | null;
+  gave_after_sum: number | null;
+  gave_delta_sum: number | null;
+  gave_pairs: number;
+  profit_before_sum: number | null;
+  profit_after_sum: number | null;
+  profit_delta_sum: number | null;   // 총이익 «금액» 합(원) — 계약 §4-A① "ad_profit 합"
+  profit_pairs: number;
+  profit_unavailable: number;        // 판정은 됐으나 렌즈 미기록으로 금액 산출불가인 행수
+  profit_unjudged: number;           // 채점기가 표본 미달로 판정을 거부한 행 중 금액은 있는 것
+  changes_executed: number;
+  details: NaverWisdomScorecardChange[];
+}
+
+export interface NaverWisdomScorecard {
+  generated_at_kst: string;
+  wisdom_total: number;
+  wisdom_active: number;
+  wisdom_with_evidence: number;
+  value_definition: {
+    metric: string;
+    formula: string;
+    grain: string;
+    verdict_rule: string;
+    conversion_delay: { window: string; correction_applied: boolean | null; note: string };
+    bep_coverage: {
+      groups_total: number | null;
+      groups_with_product_bep: number | null;
+      ratio: number | null;
+      note: string;
+    };
+    legacy_note: string;
+  };
+  attribution: { path: string; limitation: string };
+  wisdom: NaverWisdomScorecardRow[];
+}
+
+export function fetchNaverWisdomScorecard(): Promise<NaverWisdomScorecard> {
+  return fetchApi<NaverWisdomScorecard>("/api/naver/ad/wisdom-scorecard");
+}
+
 export type NaverAdOptimizer = "none" | "ours" | "mop";
 export type NaverAdCampaignMode = "growth" | "recovery" | "launch" | "defense";
 // D-NAO-65 UI2 — 캠페인별 loss 대응 정책. leash=고삐(전역 기본값) / stoploss_pause=하드 정지 회귀.
