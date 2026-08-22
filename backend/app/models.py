@@ -875,6 +875,13 @@ class CoupangWingCookie(Base):
         String(12), nullable=False, server_default="unknown"
     )  # green/red/unknown
     last_error: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    # 마지막 실패의 **분류**(refresh_contract.KIND_*). last_error 문자열과 달리 기계가 읽는다.
+    # ★왜 컬럼인가(2026-08-22, 계약 CONTRACT_collection_stability_s1 W1): 종전엔 「로그인 필요」의
+    #   유일한 흔적이 last_error 안의 "[로그인 필요 …]" 문구였고 프론트가 그걸 문자열 매칭으로
+    #   읽었다 — 문구를 바꾸면 화면이 조용히 깨지고, 무엇보다 «상태»가 아니라 «이벤트»라
+    #   버튼을 눌러 실패해 봐야만 로그인 필요를 알 수 있었다(2026-08-22 각 계정 9회 재발견).
+    #   None = 아직 분류된 실패가 없음(성공했거나 한 번도 실패 안 함).
+    last_error_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     last_saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 쿠키 저장 시각
     last_success_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True

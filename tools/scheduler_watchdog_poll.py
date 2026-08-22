@@ -67,27 +67,44 @@ def _notify_mac(title: str, message: str, sound: str = "Glass") -> None:
         log.warning("macOS 알림 실패(무시): %s", str(e)[:80])
 
 
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(인증 켜기 전까지 기존 동작 유지).
+
+    ★설정에 키가 없으면 None을 돌려준다. 그래야 이 커밋을 먼저 배포해 두고
+      나중에 nginx를 켜는 «순서»가 성립한다(둘을 동시에 바꾸면 되돌릴 곳이 두 곳이 된다).
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
+
+
 def _load_cfg() -> dict:
     """폴 파라미터·prod_base_url 로드. 워치독 설정의 폴/디바운스 오버라이드는 prod_base_url
-    유무와 무관하게 채택하고(codex S5 [P2]), prod_base_url은 워치독→ad 페처→기본값 순 폴백."""
+    유무와 무관하게 채택하고(codex S5 [P2]), prod_base_url은 워치독→ad 페처→기본값 순 폴백.
+    basic_auth_user/basic_auth_pass도 같은 폴백 순서(워치독 전용→ad 페처)로 읽는다."""
     cfg: dict = {}
     # 1) 워치독 전용 설정: 오버라이드 키는 prod_base_url 없어도 채택. prod_base_url 있으면 함께.
     if WATCHDOG_CONFIG.is_file():
         try:
             data = json.loads(WATCHDOG_CONFIG.read_text(encoding="utf-8"))
-            for k in ("poll_interval_s", "debounce_s", "max_consecutive_net_fails"):
+            for k in ("poll_interval_s", "debounce_s", "max_consecutive_net_fails",
+                      "basic_auth_user", "basic_auth_pass"):
                 if k in data:
                     cfg[k] = data[k]
             if data.get("prod_base_url"):
                 cfg["prod_base_url"] = data["prod_base_url"]
         except Exception as e:  # noqa: BLE001
             log.warning("워치독 설정 읽기 실패(%s): %s", WATCHDOG_CONFIG, str(e)[:80])
-    # 2) prod_base_url 미정 시 ad 페처 설정에서 폴백(이미 Mac에 존재).
-    if "prod_base_url" not in cfg and AD_CONFIG.is_file():
+    # 2) prod_base_url·basic_auth_* 미정 시 ad 페처 설정에서 폴백(이미 Mac에 존재).
+    if AD_CONFIG.is_file() and ("prod_base_url" not in cfg or "basic_auth_user" not in cfg):
         try:
             data = json.loads(AD_CONFIG.read_text(encoding="utf-8"))
-            if data.get("prod_base_url"):
+            if "prod_base_url" not in cfg and data.get("prod_base_url"):
                 cfg["prod_base_url"] = data["prod_base_url"]
+            if "basic_auth_user" not in cfg and data.get("basic_auth_user"):
+                cfg["basic_auth_user"] = data["basic_auth_user"]
+            if "basic_auth_pass" not in cfg and data.get("basic_auth_pass"):
+                cfg["basic_auth_pass"] = data["basic_auth_pass"]
         except Exception as e:  # noqa: BLE001
             log.warning("ad 설정 읽기 실패(%s): %s", AD_CONFIG, str(e)[:80])
     cfg.setdefault("prod_base_url", DEFAULT_PROD_URL)
@@ -181,7 +198,7 @@ def _poll_once(cfg: dict, state: dict) -> bool:
     """1회 폴. 성공 시 True(네트워크 OK), 실패 시 False. 알림은 내부에서 처리."""
     url = cfg["prod_base_url"].rstrip("/") + "/api/scheduler/health"
     now = time.time()
-    r = requests.get(url, timeout=HTTP_TIMEOUT_S)
+    r = requests.get(url, auth=_basic_auth(cfg), timeout=HTTP_TIMEOUT_S)
     r.raise_for_status()
     health = r.json()
     keys = _problem_keys(health)

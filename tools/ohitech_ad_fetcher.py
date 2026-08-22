@@ -337,8 +337,16 @@ def _try_lock():
 
 
 @contextlib.contextmanager
-def _cdp_page(cfg: dict):
-    """CDP로 실제 Chrome에 attach → (page, browser). 종료 시 page만 닫고 Chrome은 유지(disconnect)."""
+def _cdp_page(cfg: dict, owner=None):
+    """CDP로 실제 Chrome에 attach → (page, browser). 종료 시 page만 닫고 Chrome은 유지(disconnect).
+
+    ★owner를 주면 owner.keep_open일 때 **탭도** 남긴다(2026-08-22, 계약
+      CONTRACT_collection_stability_s1 W3 — wing_browser_fetcher._chrome과 같은 수리).
+      종전엔 `_owned_chrome`이 «프로세스»만 지키고 여기가 «탭»을 무조건 닫아서,
+      「Chrome 창 유지 — 로그인하세요」라고 로그에 쓰고도 로그인할 탭이 없었다
+      (2026-08-22 12:55 실측: CDP 9222·9223 page 타겟 0개).
+      약속을 한 층에서만 지키고 다른 층에서 깨면 사람이 뒤늦게 와도 회복 경로가 없다.
+    """
     port = int(cfg["cdp_port"])
     if not _cdp_alive(port):
         # 정상 경로에선 _owned_chrome이 먼저 기동을 보장한다 — 여기 걸리면 그 밖의 호출.
@@ -351,8 +359,11 @@ def _cdp_page(cfg: dict):
         try:
             yield page, browser
         finally:
-            with contextlib.suppress(Exception):
-                page.close()
+            if owner is not None and getattr(owner, "keep_open", False):
+                log.info("로그인용 탭 유지(닫지 않음) — 이 탭에서 재로그인하세요.")
+            else:
+                with contextlib.suppress(Exception):
+                    page.close()
             with contextlib.suppress(Exception):
                 browser.close()  # disconnect only — Chrome 자체는 유지
 
@@ -656,7 +667,10 @@ def cmd_capture(cfg: dict, wait_secs: int = 90) -> int:
                     captured["response"] = res.text()[:6000]  # 응답 키 구조 확인용 샘플
 
     try:
-        with _owned_chrome(cfg) as owner, _cdp_page(cfg) as (page, _browser):
+        # ★owner를 넘긴다(W3): 이 경로는 keep_open=True인 수동 캡처라, 탭까지 남겨야
+        #   사람이 그 창에서 조회를 이어갈 수 있다. (with는 왼쪽부터 평가되므로 owner는
+        #   _cdp_page 호출 시점에 이미 바인딩돼 있다.)
+        with _owned_chrome(cfg) as owner, _cdp_page(cfg, owner) as (page, _browser):
             owner.keep_open = True   # 캡처는 사람이 창에서 조회해야 하는 수동 명령 — 창 유지
             page.on("request", _on_request)
             page.on("response", _on_response)
@@ -763,6 +777,7 @@ def _push_days(cfg: dict, days: list[dict]) -> int:
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/ad-cost/ingest",
             json={"vendor_id": vendor_id, "days": days},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=30,
         )
     except requests.RequestException as e:
@@ -780,13 +795,27 @@ def _push_days(cfg: dict, days: list[dict]) -> int:
     return 0
 
 
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(키가 없으면 기존과 동일 동작).
+
+    ★2026-08-13: 이 페처는 전날 Basic Auth 배선 대상 목록에서 빠져 있었고, 09:02에
+      nginx 예외 목록에서 ad-cost/refresh-status가 제거되자 401 크래시 루프에 빠졌다.
+      rocket_supplier_fetcher._basic_auth와 같은 계약이다.
+      ★토큰 경로(ingest 등)에도 붙인다 — 예외 목록은 또 바뀔 수 있고, 필요 없는 곳에
+        Basic Auth를 보내는 것은 무해하지만 빠뜨리면 그 경로만 조용히 죽는다.
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
+
+
 def _prod_base(cfg: dict) -> str:
     return cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/ad-cost"
 
 
 def _prod_refresh_status(cfg: dict) -> dict:
     """prod 갱신 요청/완료 상태(GET, 토큰 불필요). poll이 요청·last_success_at 확인."""
-    r = requests.get(_prod_base(cfg) + "/refresh-status", timeout=15)
+    r = requests.get(_prod_base(cfg) + "/refresh-status", auth=_basic_auth(cfg), timeout=15)
     r.raise_for_status()
     return r.json()
 
@@ -796,6 +825,7 @@ def _prod_claim(cfg: dict) -> dict:
     r = requests.post(
         _prod_base(cfg) + "/refresh-claim",
         headers={"X-Ingest-Token": cfg["ingest_token"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -824,6 +854,7 @@ def _report_fetch_failure(cfg: dict, error: str, kind: str | None = None,
             _prod_base(cfg) + "/fetch-error",
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=15,
         )
         if r.status_code != 200:
@@ -844,6 +875,7 @@ def _mark_fetch_success(cfg: dict) -> None:
             r = requests.post(
                 _prod_base(cfg) + "/fetch-success",
                 headers={"X-Ingest-Token": cfg["ingest_token"]},
+                auth=_basic_auth(cfg),
                 timeout=15,
             )
             if r.status_code == 200:
@@ -867,7 +899,7 @@ def cmd_run(cfg: dict) -> int:
     days: list[dict] | None = None
     option_payload = None   # (filename, bytes) — Billboard 옵션×일별 보고서(일 1회, D-13)
     try:
-        with _owned_chrome(cfg, owner), _cdp_page(cfg) as (page, _browser):
+        with _owned_chrome(cfg, owner), _cdp_page(cfg, owner) as (page, _browser):
             try:
                 page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
             except Exception as e:  # noqa: BLE001
@@ -1007,6 +1039,7 @@ def _push_option_xlsx(cfg: dict, filename: str, content: bytes) -> bool:
                 "X-Report-Filename": filename,
                 "Content-Type": "application/octet-stream",
             },
+            auth=_basic_auth(cfg),
             timeout=120,
         )
         pr.raise_for_status()
@@ -1104,9 +1137,13 @@ def cmd_poll(cfg: dict) -> int:
             net_fails += 1
             _status = getattr(getattr(e, "response", None), "status_code", None)
             if _status == 401 and not auth_alerted:
-                log.error("[poll] 인증 실패(401) — ingest_token이 prod와 불일치.")
+                # ★401은 nginx Basic Auth일 수도 있다(2026-08-13 실사고: 이 메시지가
+                #   ingest_token을 단정해 진단을 3시간 늦췄다). 둘 다 지목한다.
+                log.error("[poll] 인증 실패(401) — nginx Basic Auth 자격증명(basic_auth_user/pass) "
+                          "또는 ingest_token이 prod와 불일치. 설정: %s", CONFIG_PATH)
                 _notify_mac("오하이테크 광고 인증 실패",
-                            "ingest_token 불일치 — ~/.ohisell_ohitech_ad.json 토큰 확인.")
+                            "Basic Auth 또는 ingest_token 불일치 — "
+                            "~/.ohisell_ohitech_ad.json 확인.")
                 auth_alerted = True
             log.warning("[poll] refresh-status 실패(네트워크) %d/%d: %s",
                         net_fails, _MAX_FAILS, str(e)[:80])
