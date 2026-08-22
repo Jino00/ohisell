@@ -440,3 +440,91 @@ def test_profit_axis_and_gave_disagree_on_real_row_761(db, bep_lens):
 
     assert result["outcome_profit"] == "improved"        # 총이익 −64,129 → −13,151
     assert result["gave_after"] < result["gave_before"]  # 그런데 GAVE는 줄었다 = 판정에 쓸 수 없다
+
+
+# ── 적대 리뷰 1R 지적 반영 (P1-1 렌즈 동결 · P2 경계·가드) ──
+
+def test_lens_is_frozen_across_retries(db, bep_lens, monkeypatch):
+    """★적대 리뷰 1R **P1-1** — 레거시 `outcome`이 영영 None인 행은 매일 재시도되는데,
+    렌즈를 매번 라이브로 다시 뽑으면 **같은 광고 실적에 대해 판정이 뒤집힌다**.
+
+    `naver_product_bep`는 매일 재산출되는 스냅샷이라 BEP는 실제로 날마다 바뀐다.
+    자매 채점기 `retro_scorer`가 `cf_asof`/`bep_asof`를 얼려 두는 것과 같은 이유로,
+    이 축도 첫 회차의 렌즈를 `actual_json.lens`에 얼리고 이후엔 그걸 되살린다.
+    """
+    # before 창 매출 0 → 레거시 rpc<=0이라 outcome은 영영 None(= 매일 재시도 대상)
+    for r in _ad_rows("nkw-1", EXECUTED - timedelta(days=14), EXECUTED - timedelta(days=1),
+                      daily_clk=1, daily_conv_amt=0, daily_cost=1000):
+        db.add(r)
+    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=1, daily_conv_amt=500, daily_cost=1500):
+        db.add(r)
+    db.add(_change(dry_run=False))
+    db.commit()
+
+    bep_lens("0.5")                       # 1일차 렌즈
+    first = sb.run_daily(db, today=TODAY)
+    row = db.query(NaverChangeLog).first()
+    day1 = row.outcome_profit
+    assert row.outcome is None            # 레거시는 보류 → 다음 회차 재시도 대상
+    assert day1 is not None
+    assert first["verified_profit"] == 1
+
+    bep_lens("3")                         # 2일차엔 BEP 스냅샷이 바뀌었다
+    second = sb.run_daily(db, today=TODAY)
+    db.refresh(row)
+
+    assert row.outcome_profit == day1     # ★판정이 흔들리지 않는다(렌즈가 얼어 있다)
+    assert second["verified_profit"] == 0  # ★같은 행을 두 번 세지 않는다(P2)
+
+
+def test_frozen_lens_is_not_reused_when_it_was_unavailable(db, bep_lens):
+    """해석 실패로 «비어 있던» 렌즈는 얼리지 않는다 — 일시적 실패가 unavailable을 영구화하면
+    그 행은 영영 새 축으로 판정되지 않는다."""
+    for r in _ad_rows("nkw-1", EXECUTED - timedelta(days=14), EXECUTED - timedelta(days=1),
+                      daily_clk=1, daily_conv_amt=0, daily_cost=1000):
+        db.add(r)
+    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=1, daily_conv_amt=500, daily_cost=1500):
+        db.add(r)
+    db.add(_change(dry_run=False))
+    db.commit()
+
+    sb.run_daily(db, today=TODAY)          # 1일차: BEP 미확보(패치 없음) → lens.bep = None
+    row = db.query(NaverChangeLog).first()
+    assert row.outcome_profit is None and row.bep_source == "unavailable"
+
+    bep_lens(3)                            # 2일차: BEP가 확보됐다
+    sb.run_daily(db, today=TODAY)
+    db.refresh(row)
+    assert row.outcome_profit is not None   # ★다시 시도해서 이제 찍힌다
+    assert row.bep_source == "product_bep"
+
+
+def test_profit_verdict_neutral_on_exact_tie(db, bep_lens):
+    """세 갈래 중 `neutral`(정확한 동률) 갈래 — 변이 `>` → `>=`가 이 테스트로 죽는다."""
+    bep_lens(3)
+    for r in _ad_rows("nkw-1", EXECUTED - timedelta(days=14), EXECUTED - timedelta(days=1),
+                      daily_clk=1, daily_conv_amt=7143, daily_cost=1000):
+        db.add(r)
+    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=1, daily_conv_amt=7143, daily_cost=1000):
+        db.add(r)
+    db.commit()
+
+    result = sb.evaluate_change(db, _change(), today=TODAY)
+    assert result["outcome_profit"] == "neutral"   # 전·후가 완전히 같다
+
+
+def test_profit_verdict_holds_when_bep_is_not_positive(db, bep_lens):
+    """BEP가 0 이하면 판정하지 않는다 — 이 가드가 없으면 `_gross_profit`의 나눗셈이
+    ZeroDivisionError로 터지고, `run_daily`엔 행별 try/except가 없어 **그날 배치 전체**
+    (레거시 outcome 포함)가 죽는다(적대 리뷰 1R P2)."""
+    bep_lens(0)
+    for r in _ad_rows("nkw-1", EXECUTED - timedelta(days=14), EXECUTED - timedelta(days=1),
+                      daily_clk=1, daily_conv_amt=1000):
+        db.add(r)
+    for r in _ad_rows("nkw-1", EXECUTED, VERIFY, daily_clk=1, daily_conv_amt=1500):
+        db.add(r)
+    db.commit()
+
+    result = sb.evaluate_change(db, _change(), today=TODAY)   # 예외 없이 돌아야 한다
+    assert result["outcome_profit"] is None
+    assert result["gave_before"] is None and result["gave_after"] is None

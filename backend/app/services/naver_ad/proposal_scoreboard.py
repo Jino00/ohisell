@@ -201,6 +201,34 @@ def _profit_verdict(before: dict, after: dict, *, bep, gamma: Decimal, cf: Decim
     }
 
 
+def _frozen_lens(change: NaverChangeLog):
+    """이 행에 이미 적힌 렌즈를 되살린다. 없거나 불완전하면 None(새로 해석하라는 뜻).
+
+    반환 (bep, bep_source, gamma, cf) — 전부 Decimal/str.
+    `actual_json.lens`는 이전 회차가 적어 둔 채점 렌즈다(§8-Q3 각주). 이걸 되살려야
+    재시도 회차에서 판정이 흔들리지 않는다(적대 리뷰 1R P1-1).
+    """
+    raw = getattr(change, "actual_json", None)
+    if not raw:
+        return None
+    try:
+        lens = (json.loads(raw) or {}).get("lens") or {}
+    except (ValueError, TypeError):  # 손상된 JSON은 없는 것으로 친다(다음 회차가 다시 적는다)
+        return None
+    bep = lens.get("bep")
+    if bep is None:  # 해석 실패로 비어 있던 렌즈는 얼리지 않는다 — 다시 시도한다
+        return None
+    try:
+        return (
+            Decimal(str(bep)),
+            lens.get("bep_source") or "unavailable",
+            Decimal(str(lens.get("gamma", gave_score.DEFAULT_GAMMA))),
+            Decimal(str(lens.get("cf", 1))),
+        )
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+
+
 def evaluate_change(
     db: Session, change: NaverChangeLog, *, today: date | None = None,
     caches: dict | None = None,
@@ -239,10 +267,24 @@ def evaluate_change(
     bep_cache = caches.setdefault("bep", {})
     cf_cache = caches.setdefault("cf", {})
 
-    # ★렌즈는 «후» 창의 끝 날짜 기준으로 한 번만 뽑아 전·후에 같이 쓴다(§_profit_verdict).
-    bep, bep_source = _bep_for(db, change.campaign_id, bep_cache)
-    gamma = _gamma_for(db, change.campaign_id, gamma_cache)
-    cf = _cf_for(db, after_to, cf_cache)
+    # ★★렌즈는 «한 번 정해지면 얼린다»(적대 리뷰 1R P1-1).
+    #   왜: `run_daily`의 대상 필터가 `outcome IS NULL`이라, 레거시 판정이 영영 보류되는 행
+    #   (예: before 창 conv_amt=0)은 **매일 재시도**된다. 렌즈를 매번 라이브로 다시 뽑으면
+    #   `naver_product_bep`가 매일 재산출되는 스냅샷이라 **같은 광고 실적에 대해 판정이
+    #   improved↔declined로 뒤집힌다**(재현: bep 0.5 → 3으로 바뀌자 같은 행이 뒤집혔다).
+    #   그러면 이 축이 세운 목적("옛 자와 새 자가 나란히 «영구 보존»된다")이 깨진다.
+    #   자매 채점기 `retro_scorer`가 `cf_asof`/`bep_asof`를 스냅샷 시점에 얼려 두는 것과 같은
+    #   이유이고 같은 처방이다 — 다만 change_log엔 렌즈 «컬럼»이 없으므로 `actual_json.lens`를
+    #   그 자리로 쓴다(§8-Q3 각주가 렌즈를 거기 적기로 한 이유가 여기서 값을 한다).
+    #   ★단 «해석 실패로 비어 있는» 렌즈는 얼리지 않는다 — 일시적 실패가 unavailable을 영구화
+    #   하면 안 되므로, bep이 None인 렌즈는 다음 회차에 다시 시도한다.
+    frozen = _frozen_lens(change)
+    if frozen is not None:
+        bep, bep_source, gamma, cf = frozen
+    else:
+        bep, bep_source = _bep_for(db, change.campaign_id, bep_cache)
+        gamma = _gamma_for(db, change.campaign_id, gamma_cache)
+        cf = _cf_for(db, after_to, cf_cache)
 
     # 모수게이트는 두 자가 «같은» 문턱을 쓴다 — 새 문턱을 만들지 않는다(계약 §3).
     thin = before["clk"] < LOW_CLICK_THRESHOLD or after["clk"] < LOW_CLICK_THRESHOLD
@@ -305,8 +347,11 @@ def run_daily(db: Session, *, today: date | None = None) -> dict:
         change.gave_after = result["gave_after"]
         change.bep_source = result["bep_source"]
         if result["outcome_profit"] is not None:
+            # ★«처음» 찍힐 때만 센다 — 레거시 outcome이 영영 None인 행은 매일 재시도되므로
+            #   무조건 세면 같은 물리적 행이 날마다 중복 계상된다(적대 리뷰 1R P2).
+            if change.outcome_profit is None:
+                verified_profit += 1
             change.outcome_profit = result["outcome_profit"]
-            verified_profit += 1
         if result["outcome"] is not None:
             change.outcome = result["outcome"]
             verified += 1
