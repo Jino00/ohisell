@@ -4895,11 +4895,13 @@ export interface ImportParseResult {
 // ★expenseText가 있으면(사람이 직접 붙여넣은 것) expenseFile과 함께 보내도 서버가 텍스트를 우선한다.
 export function parseImportDocuments(args: {
   ciPlFile?: File | null;
+  plFile?: File | null;
   expenseFile?: File | null;
   expenseText?: string;
 }): Promise<ImportParseResult> {
   const form = new FormData();
   if (args.ciPlFile) form.append("ci_pl_file", args.ciPlFile);
+  if (args.plFile) form.append("pl_file", args.plFile);
   if (args.expenseFile) form.append("expense_file", args.expenseFile);
   if (args.expenseText) form.append("expense_text", args.expenseText);
   return fetch(`${API_BASE}/api/import-cost/parse`, { method: "POST", body: form }).then(
