@@ -46,6 +46,7 @@ def compute_rg_summary_row(
     date_to: date,
     cost_master: dict[str, dict],
     vendor_id: str,
+    ad: dict | None = None,
 ) -> dict | None:
     """RG 채널 요약 행 — `calculate_channel_summary` 출력과 **같은 모양**.
 
@@ -67,7 +68,10 @@ def compute_rg_summary_row(
     revenue = rev_by_acc["revenue"] if rev_by_acc else ZERO
     units = rev_by_acc["units"] if rev_by_acc else 0
 
-    ad = split_wing_ad_spend(db, date_from, date_to, account_key, vendor_id)
+    # ★호출부가 이미 구했으면 주입받는다 — `option_sell_route`가 쿼리 5종을 도는데, 호출부가
+    #   3P 행 갱신용으로 한 번 부르고 여기서 또 부르면 계정마다 그게 2배가 된다(적대 리뷰 P2).
+    if ad is None:
+        ad = split_wing_ad_spend(db, date_from, date_to, account_key, vendor_id)
     ad_spend = ad["rg"]
 
     if revenue == ZERO and ad_spend == ZERO:
@@ -133,7 +137,16 @@ def compute_rg_summary_row(
         "net_basis_revenue": str(net_basis),
         "unmapped_revenue": str(cost_info["unmapped_revenue"]),
         "profit_rate": rate,
-        "order_count": units,
+        # ★「주문 건수」다 — **판매수량이 아니다**(적대 리뷰 P1-1).
+        #   초판은 여기 요약축 `units_sold`를 넣었는데, 이 칸을 소비하는 두 집계층이
+        #   (`_kpi_totals`·`group_summary_by_company`) 전 채널 값을 그냥 더하므로 「주문 건수」
+        #   카드와 회사 소계가 부풀었다. 로켓1P가 **정확히 같은 이유로** `_kpi_totals`에서
+        #   제외돼 있는데(그 칸이 판매수량이라서), RG를 세 번째 예외로 추가하는 대신
+        #   **칸의 뜻을 지키는 쪽**으로 고쳤다 — 옵션축이 실제 net 주문 수를 준다.
+        #   옵션축이 창을 못 덮으면 주문 수를 모른다 → 0(추측하지 않는다).
+        "order_count": cost_info["net_orders"],
+        # 판매수량은 뜻이 다른 별도 칸으로 낸다(요약축 기준 — 창 전체를 덮는다).
+        "units_sold": units,
         # ── 이 행이 «자기 신뢰도»를 스스로 말하는 칸 (로켓1P의 revenue_basis/cost_coverage와 같은 계열) ──
         "revenue_basis": "console_net",
         "cost_coverage": None if coverage is None else str(coverage.quantize(Decimal("0.0001"))),

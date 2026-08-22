@@ -238,10 +238,14 @@ def net_cost(
     revenue_costed = ZERO
     unmapped_revenue = ZERO
     options_costed = 0
+    net_orders = 0
 
     for vid, o in by_option.items():
         rev = o["revenue"]
         revenue_total += rev
+        # ★실제 net «주문 수». 요약축엔 이 값이 없다(수량만 있다) — 그래서 옵션축에서 가져온다.
+        #   행의 `order_count`가 「주문 건수」라는 뜻을 지키려면 이 숫자여야 한다(아래 반환 참조).
+        net_orders += o["order_count"]
         pm = cost_master.get(vid)
         unit_cost = pm.get("cost_price") if pm else None
         if unit_cost is None or unit_cost <= 0:
@@ -261,6 +265,9 @@ def net_cost(
         "options_total": len(by_option),
         "options_costed": options_costed,
         "unmapped_revenue": unmapped_revenue,
+        # ★옵션축이 준 **실제 net 주문 수**. 「판매수량」이 아니다.
+        #   같은 조회를 두 번 돌지 않으려고 여기서 같이 낸다(이 함수가 이미 by_option을 훑는다).
+        "net_orders": net_orders,
     }
 
 

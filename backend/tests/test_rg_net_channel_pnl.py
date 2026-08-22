@@ -326,6 +326,88 @@ def test_channel_leaf_splits_three_ways(db, code, expected):
     assert _classify_channel(ch)[1] == expected
 
 
+# ════════════════════════════════════════════════
+# 6. ★통합 이음매 — 단위 테스트가 «원리적으로» 못 보던 자리 (적대 리뷰 P1 2건)
+# ════════════════════════════════════════════════
+# 변이 6종이 전부 KILLED였는데도 아래 두 결함을 못 잡았다. 이유는 하나다 —
+# 위 테스트들이 `compute_rg_summary_row`의 **반환 dict까지만** 보고 집계층으로 안 넘어갔다.
+# 그래서 여기서는 «행을 만들고 → 집계층에 넣고 → 나온 것을 본다».
+
+def _rg_row_with(db, *, units, orders):
+    """RG 행 하나를 실제 경로로 만든다(수량과 주문 수를 다르게 줘서 둘을 가를 수 있게)."""
+    for d in (date(2026, 8, 5), date(2026, 8, 6)):
+        _seed_summary(db, d, 50_000, units // 2)
+        _seed_option(db, d, "RG1", 50_000, units // 2, orders=orders // 2)
+    _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
+    _seed_cost(db, "RG1", 2_000)
+    db.commit()
+    return compute_rg_summary_row(db, ACC, *WIN, _cost_master(db), VENDOR)
+
+
+def test_order_count_is_orders_not_units(db):
+    """★P1-1: `order_count`에 판매수량을 넣으면 「주문 건수」 KPI와 회사 소계가 부푼다.
+
+    로켓1P가 **정확히 같은 이유로** `_kpi_totals`에서 제외돼 있다(그 칸이 판매수량이라서).
+    RG를 세 번째 예외로 추가하는 대신 **칸의 뜻을 지킨다** — 옵션축이 실제 net 주문 수를 준다.
+    """
+    row = _rg_row_with(db, units=1000, orders=100)
+    assert row["order_count"] == 100, "「주문 건수」 칸에는 주문 수가 들어가야 한다"
+    assert row["units_sold"] == 1000, "판매수량은 뜻이 다른 별도 칸으로 나온다"
+
+
+def test_order_count_survives_company_aggregation(db):
+    """집계층이 `order_count`를 그냥 더하므로, 행이 틀리면 회사·전체 소계가 통째로 틀린다."""
+    from app.services.profit_calculator import (
+        get_channel_company_map,
+        group_summary_by_company,
+    )
+    row = _rg_row_with(db, units=1000, orders=100)
+    rows = group_summary_by_company([row], get_channel_company_map(db))
+    total = next(r for r in rows if r["kind"] == "total")
+    assert total["order_count"] == 100, "판매수량 1000이 「주문 건수」로 새면 안 된다"
+
+
+def test_self_report_fields_cross_the_aggregation_boundary(db):
+    """★P1-2: 자백하라고 만든 칸이 집계층에서 조용히 사라지던 것 (교훈 #321의 재발).
+
+    `_LEAF_PASSTHROUGH`에 없으면 서비스층이 아무리 정직하게 계산해도 화면엔 안 뜬다.
+    """
+    from app.services.profit_calculator import (
+        get_channel_company_map,
+        group_summary_by_company,
+    )
+    _seed_ad(db, "GHOST", 500)   # 카탈로그에 없는 옵션 → 미배분
+    row = _rg_row_with(db, units=10, orders=2)
+    leaf = next(
+        r for r in group_summary_by_company([row], get_channel_company_map(db))
+        if r["kind"] == "leaf"
+    )
+    for field in ("option_axis_days", "ad_unallocated", "ad_unallocated_options", "units_sold"):
+        assert field in leaf, f"{field}가 집계층에서 사라졌다 — 자백 칸이 화면에 못 간다"
+    assert leaf["option_axis_days"] == "2/2"
+    assert Decimal(leaf["ad_unallocated"]) == Decimal("500")
+
+
+def test_self_report_fields_survive_the_http_boundary():
+    """★그리고 **HTTP 경계**까지 넘는지 본다 — `response_model`이 키를 지우는 자리가 거기다.
+
+    교훈 #321의 처방 그대로: 서비스층 dict 테스트는 이 결함을 **원리적으로 못 잡는다**.
+    스키마에 필드가 없으면 body에서 사라지는데 서비스층 테스트는 계속 초록이다.
+    """
+    from app.schemas import GroupedSummaryRow
+
+    payload = {
+        "kind": "leaf", "company": "개인회사 오픽스", "label": "개인회사 오픽스 · 쿠팡 로켓그로스",
+        "revenue": "100000", "ad_spend": "1000", "net_profit": "50000",
+        "profit_rate": "50.00", "order_count": 2,
+        "option_axis_days": "2/2", "ad_unallocated": "500",
+        "ad_unallocated_options": 1, "units_sold": 10,
+    }
+    body = GroupedSummaryRow(**payload).model_dump()
+    for field in ("option_axis_days", "ad_unallocated", "ad_unallocated_options", "units_sold"):
+        assert body.get(field) == payload[field], f"{field}가 HTTP 응답에서 지워진다"
+
+
 def test_unclassified_coupang_channel_is_not_guessed(db):
     """sell_type이 비고 위탁도 아니면 **추측하지 않는다** — 분류 안 됨이 화면에 드러나야 한다."""
     ch = Channel(id=9, name="쿠팡 신규채널", code="COUPANG_NEW", platform="coupang",

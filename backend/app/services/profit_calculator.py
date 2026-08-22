@@ -1733,7 +1733,21 @@ def _add_net(block: dict, row: dict, revenue: Decimal) -> None:
 
 # 로켓1P leaf에만 있는 부가 필드(축·원가 커버리지·분담금). 회사/전체로는 **올리지 않는다** —
 # 축이 다른 채널을 섞어 놓고 "이 회사의 매출 축"이라고 말할 수 없기 때문이다.
-_LEAF_PASSTHROUGH = ("revenue_basis", "cost_coverage", "promo_burden")
+#
+# ★여기에 없으면 그 필드는 **집계층에서 조용히 사라진다.** 서비스층에서 아무리 정직하게 계산해도
+#   화면엔 안 뜬다 — 교훈 #321(서비스층 테스트는 초록인데 HTTP body엔 키가 없어 배너가 통째로
+#   숨었다)과 같은 결함 모양이다. 실제로 D-CPP-47 초판이 `ad_unallocated`·`option_axis_days`를
+#   여기 안 넣어 적대 리뷰 P1으로 잡혔다 — **자백하라고 만든 칸을 자백 못 하게 만드는 자리가 여기다.**
+#   ⇒ 새 자백 칸을 만들면 여기와 `schemas.GroupedSummaryRow` **둘 다** 손대야 하고,
+#     HTTP 경계를 넘는지 테스트로 확인해야 한다(서비스층 dict 테스트는 원리적으로 못 잡는다).
+_LEAF_PASSTHROUGH = (
+    "revenue_basis", "cost_coverage", "promo_burden",
+    # RG leaf(D-CPP-47) — 매출·원가의 축이 갈려 있어 행이 자기 신뢰도를 스스로 말해야 한다.
+    "option_axis_days",         # 옵션축이 창을 얼마나 덮었나 ("16/16")
+    "ad_unallocated",           # 카탈로그에 없는 옵션에 쓰인 광고비(= 이 행에 안 실린 돈)
+    "ad_unallocated_options",
+    "units_sold",               # 판매수량 — `order_count`(주문 건수)와 뜻이 다르다
+)
 
 
 def _finalize(kind: str, company: str | None, label: str, b: dict) -> dict:

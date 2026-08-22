@@ -439,7 +439,11 @@ def _merge_rg_summary(db: Session, rows: list[dict], df, dt) -> list[dict]:
             else:
                 out.append(_ad_only_row(ch_3p, ad["p3"]))
 
-        rg_row = compute_rg_summary_row(db, account_key, df, dt, cost_master, vendor_id)
+        # `ad`를 주입한다 — 안 주면 `compute_rg_summary_row`가 `option_sell_route`(쿼리 5종)를
+        # 계정마다 한 번 더 돈다(적대 리뷰 P2 채택).
+        rg_row = compute_rg_summary_row(
+            db, account_key, df, dt, cost_master, vendor_id, ad=ad
+        )
         if rg_row is not None:
             out = [r for r in out if r["channel_id"] != rg_row["channel_id"]]
             out.append(rg_row)
