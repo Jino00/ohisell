@@ -13,6 +13,7 @@ from app.routers import dashboard, scheduler, settlements, manual_revenue
 from app.routers import coupang_report, overview, coupons, p6_meta, coupang_ops, naver_ops
 from app.routers import naver_ad, monthly_fixed_cost
 from app.routers import rocket_1p_pnl_audit
+from app.routers import import_cost
 
 # ── 앱 로깅 구성(D-NAO-85 관측 갭①) ──────────────────────────────────────────────
 # 그동안 이 앱은 로깅 레벨/핸들러를 전혀 구성하지 않아, root logger가 기본 WARNING인 채로 남았다.
@@ -89,6 +90,7 @@ app.include_router(naver_ops.router)
 app.include_router(naver_ad.router)
 app.include_router(monthly_fixed_cost.router)
 app.include_router(rocket_1p_pnl_audit.router)
+app.include_router(import_cost.router)  # 수입건 원장(landed cost) — D-CPP-48
 
 
 # ★두 경로에 같은 핸들러를 단다:

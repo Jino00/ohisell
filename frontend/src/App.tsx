@@ -5,6 +5,7 @@ import Dashboard from "./pages/Dashboard";
 import Orders from "./pages/Orders";
 import Products from "./pages/Products";
 import InventoryPage from "./pages/InventoryPage";
+import ImportCostPage from "./pages/ImportCostPage";
 import Settlements from "./pages/Settlements";
 import Settings from "./pages/Settings";
 import AdReport from "./pages/AdReport";
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="products" element={<Products />} />
           <Route path="product-connection-map" element={<ProductConnectionMap />} />
           <Route path="inventory" element={<InventoryPage />} />
+          <Route path="import-cost" element={<ImportCostPage />} />
           <Route path="settlements" element={<Settlements />} />
           <Route path="settings" element={<Settings />} />
           <Route path="ad-report" element={<AdReport />} />
