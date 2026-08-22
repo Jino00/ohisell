@@ -1149,6 +1149,7 @@ def _push_po_items(cfg: dict, po_seq: int, rows: list[list]) -> int:
             cfg["prod_base_url"].rstrip("/") + PO_DETAIL_INGEST_PATH,
             json={"purchase_order_seq": po_seq, "vendor_id": cfg["vendor_id"], "rows": rows},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
@@ -1336,6 +1337,7 @@ def _push_shipments(cfg: dict, entries: list[dict]) -> int:
             cfg["prod_base_url"].rstrip("/") + SHIPMENT_INGEST_PATH,
             json={"vendor_id": cfg["vendor_id"], "shipments": entries},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=120,
         )
     except requests.RequestException as e:
@@ -1361,6 +1363,7 @@ def _push_po(cfg: dict, pages: list[dict]) -> int:
             cfg["prod_base_url"].rstrip("/") + PO_INGEST_PATH,
             json={"pages": pages},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
@@ -1383,6 +1386,7 @@ def _push_settlement(cfg: dict, rows: list[list]) -> int:
             cfg["prod_base_url"].rstrip("/") + SETTLEMENT_INGEST_PATH,
             json={"vendor_id": cfg["vendor_id"], "rows": rows},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
@@ -2159,6 +2163,7 @@ def _push_sales(cfg: dict, rows: list[dict], stats: dict | None = None) -> int:
                 json={"vendor_id": cfg["vendor_id"], "source": "sales_analysis", "rows": chunk,
                       "collection_stats": stats or {}},
                 headers={"X-Ingest-Token": cfg["ingest_token"]},
+                auth=_basic_auth(cfg),
                 timeout=60,
             )
         except requests.RequestException as e:
@@ -2185,6 +2190,7 @@ def _push_promotions(cfg: dict, rows: list[dict]) -> int:
             cfg["prod_base_url"].rstrip("/") + PROMOTION_INGEST_PATH,
             json={"vendor_id": cfg["vendor_id"], "rows": rows},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
@@ -2375,6 +2381,7 @@ def _do_run(cfg: dict) -> int:
                 r = requests.post(
                     cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-success",
                     headers={"X-Ingest-Token": cfg["ingest_token"]},
+                    auth=_basic_auth(cfg),
                     timeout=10,
                 )
                 if r.status_code == 200:
@@ -2419,10 +2426,22 @@ def _prod_report_failure(cfg: dict, error: str, kind: str | None = None,
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-error",
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=10,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
+
+
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(인증 켜기 전까지 기존 동작 유지).
+
+    ★설정에 키가 없으면 None을 돌려준다. 그래야 이 커밋을 먼저 배포해 두고
+      나중에 nginx를 켜는 «순서»가 성립한다(둘을 동시에 바꾸면 되돌릴 곳이 두 곳이 된다).
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
 
 
 def _prod_rocket_refresh_status(cfg: dict) -> dict:
@@ -2430,6 +2449,7 @@ def _prod_rocket_refresh_status(cfg: dict) -> dict:
     try:
         r = requests.get(
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/refresh-status",
+            auth=_basic_auth(cfg),
             timeout=10,
         )
         return r.json() if r.status_code == 200 else {}
@@ -2443,6 +2463,7 @@ def _prod_rocket_claim(cfg: dict) -> dict:
         r = requests.post(
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/refresh-claim",
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=10,
         )
         return r.json() if r.status_code == 200 else {}

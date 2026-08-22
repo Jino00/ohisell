@@ -763,6 +763,7 @@ def _push_days(cfg: dict, days: list[dict]) -> int:
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/ad-cost/ingest",
             json={"vendor_id": vendor_id, "days": days},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=30,
         )
     except requests.RequestException as e:
@@ -780,13 +781,27 @@ def _push_days(cfg: dict, days: list[dict]) -> int:
     return 0
 
 
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(키가 없으면 기존과 동일 동작).
+
+    ★2026-08-13: 이 페처는 전날 Basic Auth 배선 대상 목록에서 빠져 있었고, 09:02에
+      nginx 예외 목록에서 ad-cost/refresh-status가 제거되자 401 크래시 루프에 빠졌다.
+      rocket_supplier_fetcher._basic_auth와 같은 계약이다.
+      ★토큰 경로(ingest 등)에도 붙인다 — 예외 목록은 또 바뀔 수 있고, 필요 없는 곳에
+        Basic Auth를 보내는 것은 무해하지만 빠뜨리면 그 경로만 조용히 죽는다.
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
+
+
 def _prod_base(cfg: dict) -> str:
     return cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/ad-cost"
 
 
 def _prod_refresh_status(cfg: dict) -> dict:
     """prod 갱신 요청/완료 상태(GET, 토큰 불필요). poll이 요청·last_success_at 확인."""
-    r = requests.get(_prod_base(cfg) + "/refresh-status", timeout=15)
+    r = requests.get(_prod_base(cfg) + "/refresh-status", auth=_basic_auth(cfg), timeout=15)
     r.raise_for_status()
     return r.json()
 
@@ -796,6 +811,7 @@ def _prod_claim(cfg: dict) -> dict:
     r = requests.post(
         _prod_base(cfg) + "/refresh-claim",
         headers={"X-Ingest-Token": cfg["ingest_token"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -824,6 +840,7 @@ def _report_fetch_failure(cfg: dict, error: str, kind: str | None = None,
             _prod_base(cfg) + "/fetch-error",
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=15,
         )
         if r.status_code != 200:
@@ -844,6 +861,7 @@ def _mark_fetch_success(cfg: dict) -> None:
             r = requests.post(
                 _prod_base(cfg) + "/fetch-success",
                 headers={"X-Ingest-Token": cfg["ingest_token"]},
+                auth=_basic_auth(cfg),
                 timeout=15,
             )
             if r.status_code == 200:
@@ -1007,6 +1025,7 @@ def _push_option_xlsx(cfg: dict, filename: str, content: bytes) -> bool:
                 "X-Report-Filename": filename,
                 "Content-Type": "application/octet-stream",
             },
+            auth=_basic_auth(cfg),
             timeout=120,
         )
         pr.raise_for_status()
@@ -1104,9 +1123,13 @@ def cmd_poll(cfg: dict) -> int:
             net_fails += 1
             _status = getattr(getattr(e, "response", None), "status_code", None)
             if _status == 401 and not auth_alerted:
-                log.error("[poll] 인증 실패(401) — ingest_token이 prod와 불일치.")
+                # ★401은 nginx Basic Auth일 수도 있다(2026-08-13 실사고: 이 메시지가
+                #   ingest_token을 단정해 진단을 3시간 늦췄다). 둘 다 지목한다.
+                log.error("[poll] 인증 실패(401) — nginx Basic Auth 자격증명(basic_auth_user/pass) "
+                          "또는 ingest_token이 prod와 불일치. 설정: %s", CONFIG_PATH)
                 _notify_mac("오하이테크 광고 인증 실패",
-                            "ingest_token 불일치 — ~/.ohisell_ohitech_ad.json 토큰 확인.")
+                            "Basic Auth 또는 ingest_token 불일치 — "
+                            "~/.ohisell_ohitech_ad.json 확인.")
                 auth_alerted = True
             log.warning("[poll] refresh-status 실패(네트워크) %d/%d: %s",
                         net_fails, _MAX_FAILS, str(e)[:80])
