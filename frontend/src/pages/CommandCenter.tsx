@@ -656,7 +656,12 @@ export function RevenueDriftCard({
                 ["로켓그로스 RG (net)", reconcile.ours.revenue_rg, reconcile.official.gmv_rg, reconcile.drift.abs_rg, reconcile.drift.pct_rg],
                 // ★매출이 아니라 «수집 대조» 줄이다. 라벨을 달리해 한 화면에 같은 이름의 두 값이
                 //   생기지 않게 한다(교훈 #235: 위쪽 단정이 아래쪽 사실을 덮는 사고).
-                ["ㄴ RG gross 원장 (수집 대조)", reconcile.ours.revenue_rg_gross ?? "0", reconcile.official.gmv_rg, reconcile.drift.abs_rg_gross ?? "0", reconcile.drift.pct_rg_gross ?? null],
+                // ★값이 없으면 **줄을 안 그린다**(적대 리뷰 2R P2-5). `?? "0"`로 채우면
+                //   `0 − 콘솔net`이 「−178만원 드리프트」로 그려져 감시 장치가 거짓 경보를 낸다.
+                //   백엔드도 같은 이유로 조용한 0 폴백을 뺐다 — 두 층의 정책을 같은 방향으로 둔다.
+                ...(reconcile.ours.revenue_rg_gross != null
+                  ? [["ㄴ RG gross 원장 (수집 대조)", reconcile.ours.revenue_rg_gross, reconcile.official.gmv_rg, reconcile.drift.abs_rg_gross ?? "0", reconcile.drift.pct_rg_gross ?? null]]
+                  : []),
                 ["합계", reconcile.ours.revenue_total, reconcile.official.gmv_total, reconcile.drift.abs_total, reconcile.drift.pct_total],
               ] as [string, string, number, string, string | null][]).map(([label, ours, official, abs, pct], i, arr) => (
                 <tr key={label} className={`border-b border-violet-100 ${i === arr.length - 1 ? "font-semibold" : ""}`}>

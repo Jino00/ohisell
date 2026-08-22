@@ -418,3 +418,21 @@ def test_axes_diverge_when_option_axis_is_shorter_and_both_confess(db):
     assert cc["rg_option_axis_complete"] is False
     assert cc["rg_option_axis_days"] == "1/2"
     assert row["option_axis_days"] == "1/2"
+
+
+def test_open_days_counts_only_days_inside_the_window(db):
+    """미확정 일수는 **창 안**의 안 닫힌 날만 센다 (적대 리뷰 2R P2-2).
+
+    `dto - closed_end`로 세면 `dfrom`이 미래일 때 창 밖까지 세어 「5일 창에 미확정 6일」이 된다.
+    숫자가 창보다 크면 읽는 사람이 그 칸 전체를 안 믿는다.
+    """
+    from datetime import timedelta as _td
+    t0 = kst_today()
+    _ch(db, 1, "COUPANG_WING1", "오픽스")
+    db.commit()
+    s = _cc(db, None, (t0 + _td(days=1), t0 + _td(days=5)))   # 전부 미래 = 5일 창
+    assert s["rg_open_days"] == 5
+    s2 = _cc(db, None, (t0, t0))                              # 오늘만
+    assert s2["rg_open_days"] == 1
+    s3 = _cc(db, None, (t0 - _td(days=3), t0 - _td(days=1)))  # 전부 닫힘
+    assert s3["rg_open_days"] == 0

@@ -265,7 +265,10 @@ def _rg_axis_coverage(db: Session, dfrom: date, dto: date,
     """
     yesterday = kst_today() - timedelta(days=1)
     closed_end = min(dto, yesterday)
-    open_days = (dto - closed_end).days if dto > closed_end else 0
+    # ★`dto - closed_end`로 세면 안 된다(적대 리뷰 2R P2-2): `dfrom`이 미래면 창 밖의 날까지
+    #   세어 「5일 창에 미확정 6일」 같은 값이 나온다. 창 «안»의 안 닫힌 날만 센다.
+    open_start = max(dfrom, yesterday + timedelta(days=1))
+    open_days = (dto - open_start).days + 1 if dto >= open_start else 0
 
     if closed_end < dfrom:
         # 창 전체가 아직 안 닫혔다(오늘만 보는 창 등). 「0일 덮었다」가 아니라 「닫힌 날이 없다」다.
