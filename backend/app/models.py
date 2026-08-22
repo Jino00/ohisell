@@ -2565,6 +2565,23 @@ class NaverChangeLog(Base):
     verify_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # D+7/14 검증 예정일
     actual_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 실측 결과
     outcome: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # improved/declined/neutral/executed
+    # ★D-NAO-223(M3-b) — 목적함수 정합 채점축. `outcome`(전/후 RPC 배율)과 **나란히** 둔다.
+    #   왜 별도 컬럼인가: `outcome`의 분모가 클릭이라 「클릭·매출이 함께 줄어도 매출이 덜
+    #   줄었으면 개선」이 된다(ref 90 §2 — improved 전건 4/4가 매출 감소, id 761은 매출
+    #   −48.3%인데 「개선」). 트랙 목표(D-NAO-59)는 총이익 «절대액»이라 자를 바꿔야 하는데,
+    #   기존 값을 덮으면 「교정 전 채점기가 무엇을 찍었나」라는 증거가 사라진다(교훈 #274) →
+    #   §8-Q1 확정 = 소급 UPDATE 없이 «별도 컬럼»에만 새 식을 적는다. 옛 자와 새 자가 같은
+    #   행에 나란히 남아 대조가 영구 보존된다.
+    #   식: GAVE S = min{(roas_c/bep)^γ, 1} × (cf 보정 매출) — `gave_score.compute_gave_score`
+    #   그대로 재사용(§8-Q5). 판정 문턱도 기존 IMPROVED_RATIO/DECLINED_RATIO 재사용(§3 새
+    #   문턱 발명 금지) — 바뀌는 건 «문턱»이 아니라 «재는 양»이다(RPC 배율 → GAVE 배율).
+    outcome_profit: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # improved/declined/neutral
+    gave_before: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 조치 «전» 창 GAVE
+    gave_after: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 조치 «후» 창 GAVE
+    # §4-B ⑥ 값 정확도 라벨의 «원료»: product_bep(상품BEP 확보) / account_default(계정 블렌디드
+    #   근사) / unavailable. ⚠️이 컬럼 존재만으로 ⑥이 달성되는 게 아니다 — ⑥의 판정면은
+    #   성적표 «산출물»이고 그건 M3-a 소관이다. 여기서는 원료를 버리지 않는 데까지만 한다.
+    bep_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     proposal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # P5: 실제 API쓰기 없이 기록만
     executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # P5: 실행 시도 시각(dry-run 포함)
