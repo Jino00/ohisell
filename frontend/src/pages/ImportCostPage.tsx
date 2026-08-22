@@ -28,6 +28,7 @@ import {
   type ImportConfirmResult,
   type ImportBasisComparison,
   type ImportAllocationBasis,
+  type ImportAllocation,
   type ImportDocType,
   type ImportLineType,
   type ImportParseResult,
@@ -39,6 +40,60 @@ const won = (s: string | null | undefined) =>
   s == null ? "—" : `${fmt(Math.round(Number(s)))}원`;
 const numStr = (s: string | null | undefined, digits = 0) =>
   s == null || s === "" ? "—" : Number(s).toLocaleString("ko-KR", { maximumFractionDigits: digits });
+
+// ── 관세율 퍼센트⇄소수 변환 (D-CPP-50) ──
+//   사람은 "5.6"(%)을 입력하고 API엔 "0.056"(소수)이 가야 한다. Number 왕복만 쓰면 부동소수 잡음이
+//   낀다(예: 5.6/100 → 0.05600000000000001) — toFixed(10)로 자리를 넉넉히 잡고 끝 0을 잘라낸다.
+function pctToRateStr(pct: string): string | null {
+  const t = pct.trim();
+  if (t === "") return null;
+  const n = Number(t);
+  if (!Number.isFinite(n)) return null;
+  let s = (n / 100).toFixed(10).replace(/0+$/, "").replace(/\.$/, "");
+  if (s === "" || s === "-") s = "0";
+  return s;
+}
+function rateToPctStr(rate: string | null | undefined): string {
+  if (rate == null || rate === "") return "";
+  const n = Number(rate);
+  if (!Number.isFinite(n)) return "";
+  return (n * 100).toFixed(10).replace(/0+$/, "").replace(/\.$/, "");
+}
+// 관세율(%) 입력 칸 — 커밋된 소수(rate)로부터 매 타이핑마다 재포맷하면 "5." 같은 중간 입력이
+// 지워진다. lastEmitted로 "내가 방금 낸 변경"과 "외부에서 바뀐 값"을 구분해 전자는 재포맷하지 않는다.
+function PercentInput({
+  rate,
+  onChange,
+}: {
+  rate: string | null | undefined;
+  onChange: (rate: string | null) => void;
+}) {
+  const [text, setText] = useState<string>(() => rateToPctStr(rate));
+  const lastEmitted = useRef<string | null | undefined>(rate);
+
+  useEffect(() => {
+    if (rate === lastEmitted.current) return;
+    lastEmitted.current = rate;
+    setText(rateToPctStr(rate));
+  }, [rate]);
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => {
+        const v = e.target.value;
+        setText(v);
+        const next = pctToRateStr(v);
+        lastEmitted.current = next;
+        onChange(next);
+      }}
+      placeholder="예: 5.6"
+      className="w-full border rounded px-1.5 py-1 text-xs text-right"
+    />
+  );
+}
 
 const BASIS_LABEL: Record<ImportAllocationBasis, string> = {
   amount: "금액",
@@ -428,7 +483,8 @@ function ShipmentDetailView({
 
       <ReconcilePanel reconcile={reconcile} />
       <UnallocatedPanel unallocated={unallocated} allocationError={ship.allocation_error} />
-      <InvoiceLinesTable lines={ship.invoice_lines} />
+      <DutyCheckPanel allocation={ship.allocation} />
+      <InvoiceLinesTable lines={ship.invoice_lines} allocation={ship.allocation} />
       <CostLinesTable lines={ship.cost_lines} actualVat={ship.actual_vat_krw} />
       <BasisComparisonPanel
         open={basisOpen}
@@ -555,7 +611,15 @@ function UnallocatedPanel({
 }
 
 // ── 인보이스 라인 표 ──
-function InvoiceLinesTable({ lines }: { lines: ImportInvoiceLine[] }) {
+// 배부액(공통/관세) 내역은 invoice_lines가 아니라 allocation.lines에 실린다(D-CPP-50) — seq로 매칭한다.
+function InvoiceLinesTable({
+  lines,
+  allocation,
+}: {
+  lines: ImportInvoiceLine[];
+  allocation: ImportAllocation | null;
+}) {
+  const allocBySeq = new Map((allocation?.lines ?? []).map((a) => [a.seq, a]));
   return (
     <div className="bg-white rounded-lg border mb-4">
       <h3 className="px-4 py-3 border-b text-sm font-semibold text-gray-700">인보이스 라인 (CI)</h3>
@@ -569,37 +633,52 @@ function InvoiceLinesTable({ lines }: { lines: ImportInvoiceLine[] }) {
               <th className="text-right px-3 py-2 font-medium">수량</th>
               <th className="text-right px-3 py-2 font-medium">외화단가</th>
               <th className="text-right px-3 py-2 font-medium">물품대(원)</th>
-              <th className="text-right px-3 py-2 font-medium">배부액</th>
+              <th className="text-right px-3 py-2 font-medium">관세율</th>
+              <th className="text-right px-3 py-2 font-medium">배부액(공통)</th>
+              <th className="text-right px-3 py-2 font-medium">배부액(관세)</th>
+              <th className="text-right px-3 py-2 font-medium">배부액 합계</th>
               <th className="text-right px-3 py-2 font-medium">개당원가(VAT제외)</th>
               <th className="text-right px-3 py-2 font-medium">개당원가(VAT포함)</th>
             </tr>
           </thead>
           <tbody>
-            {lines.map((l) => (
-              <tr key={l.seq} className="border-b">
-                <td className="px-3 py-2 text-gray-500">{l.seq}</td>
-                <td className="px-3 py-2">
-                  {l.item_name}
-                  {l.internal_sku && (
-                    <span className="ml-1 text-xs text-gray-400 font-mono">({l.internal_sku})</span>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-center">
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${LINE_TYPE_CLASS[l.line_type]}`}>
-                    {LINE_TYPE_LABEL[l.line_type]}
-                  </span>
-                </td>
-                <td className="px-3 py-2 text-right">{numStr(l.quantity, 2)}</td>
-                <td className="px-3 py-2 text-right">{numStr(l.unit_price_foreign, 4)}</td>
-                <td className="px-3 py-2 text-right">{won(l.goods_amount_krw)}</td>
-                <td className="px-3 py-2 text-right">{won(l.allocated_cost_krw)}</td>
-                <td className="px-3 py-2 text-right">{won(l.unit_cost_ex_vat)}</td>
-                <td className="px-3 py-2 text-right font-medium">{won(l.unit_cost_inc_vat)}</td>
-              </tr>
-            ))}
+            {lines.map((l) => {
+              const a = allocBySeq.get(l.seq);
+              return (
+                <tr key={l.seq} className="border-b">
+                  <td className="px-3 py-2 text-gray-500">{l.seq}</td>
+                  <td className="px-3 py-2">
+                    {l.item_name}
+                    {l.internal_sku && (
+                      <span className="ml-1 text-xs text-gray-400 font-mono">({l.internal_sku})</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${LINE_TYPE_CLASS[l.line_type]}`}>
+                      {LINE_TYPE_LABEL[l.line_type]}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-right">{numStr(l.quantity, 2)}</td>
+                  <td className="px-3 py-2 text-right">{numStr(l.unit_price_foreign, 4)}</td>
+                  <td className="px-3 py-2 text-right">{won(l.goods_amount_krw)}</td>
+                  <td className="px-3 py-2 text-right">
+                    {l.duty_rate == null ? (
+                      <span className="text-gray-400">모름</span>
+                    ) : (
+                      `${rateToPctStr(l.duty_rate)}%`
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right">{won(a?.allocated_common_krw ?? null)}</td>
+                  <td className="px-3 py-2 text-right">{won(a?.allocated_duty_krw ?? null)}</td>
+                  <td className="px-3 py-2 text-right font-medium">{won(l.allocated_cost_krw)}</td>
+                  <td className="px-3 py-2 text-right">{won(l.unit_cost_ex_vat)}</td>
+                  <td className="px-3 py-2 text-right font-medium">{won(l.unit_cost_inc_vat)}</td>
+                </tr>
+              );
+            })}
             {lines.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-gray-400">
+                <td colSpan={12} className="px-3 py-6 text-center text-gray-400">
                   인보이스 라인이 없습니다.
                 </td>
               </tr>
@@ -607,6 +686,55 @@ function InvoiceLinesTable({ lines }: { lines: ImportInvoiceLine[] }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// ── 관세 검산 (D-CPP-50) — 이 기능의 검증 장치. 세율을 맞게 넣었는지 확인하는 유일한 방법 ──
+function DutyCheckPanel({ allocation }: { allocation: ImportAllocation | null }) {
+  if (!allocation || !allocation.duty_mode) return null;
+
+  if (allocation.duty_mode === "blended") {
+    return (
+      <div className="bg-yellow-50 border border-yellow-200 rounded-lg mb-4 px-4 py-4">
+        <div className="text-sm font-semibold text-yellow-800">⚠ 관세 검산</div>
+        <p className="text-sm text-yellow-800 mt-1">
+          관세가 공통비에 섞여 배부되고 있습니다. 품목별 관세율을 입력하면 정확해집니다.
+        </p>
+      </div>
+    );
+  }
+
+  const dutyPool = allocation.duty_pool_krw != null ? Number(allocation.duty_pool_krw) : null;
+  const diff = allocation.duty_check_diff != null ? Number(allocation.duty_check_diff) : null;
+
+  let diffCls = "text-gray-400";
+  if (dutyPool != null && dutyPool !== 0 && diff != null) {
+    diffCls = Math.abs(diff) <= Math.abs(dutyPool) * 0.01 ? "text-green-600" : "text-red-600";
+  }
+
+  return (
+    <div className="bg-white rounded-lg border mb-4">
+      <div className="px-4 py-3 border-b">
+        <h3 className="text-sm font-semibold text-gray-700">관세 검산</h3>
+      </div>
+      <div className="px-4 py-4 grid grid-cols-3 gap-4 text-center">
+        <div>
+          <div className="text-xs text-gray-500">서류 관세</div>
+          <div className="text-lg font-bold text-gray-800">{won(allocation.duty_pool_krw ?? null)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-gray-500">계산 관세(세율 기준)</div>
+          <div className="text-lg font-bold text-gray-800">{won(allocation.duty_computed_krw ?? null)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-gray-500">차이</div>
+          <div className={`text-lg font-bold ${diffCls}`}>{won(allocation.duty_check_diff ?? null)}</div>
+        </div>
+      </div>
+      <p className="px-4 py-3 border-t text-xs text-gray-500">
+        차이가 작다는 것은 입력한 세율이 서류의 관세를 재현한다는 뜻입니다.
+      </p>
     </div>
   );
 }
@@ -625,6 +753,7 @@ function CostLinesTable({ lines, actualVat }: { lines: ImportCostLine[]; actualV
               <th className="text-right px-3 py-2 font-medium">공급가액</th>
               <th className="text-right px-3 py-2 font-medium">세액</th>
               <th className="text-center px-3 py-2 font-medium">원가성</th>
+              <th className="text-center px-3 py-2 font-medium">관세</th>
             </tr>
           </thead>
           <tbody>
@@ -646,11 +775,23 @@ function CostLinesTable({ lines, actualVat }: { lines: ImportCostLine[]; actualV
                     {l.is_costing ? "원가성" : "원가성 아님(제외)"}
                   </span>
                 </td>
+                <td className="px-3 py-2 text-center">
+                  {l.is_duty ? (
+                    <span
+                      className="text-xs px-1.5 py-0.5 rounded bg-orange-100 text-orange-700"
+                      title="이 줄은 배부하지 않고 품목별로 귀속합니다"
+                    >
+                      관세
+                    </span>
+                  ) : (
+                    <span className="text-gray-300">—</span>
+                  )}
+                </td>
               </tr>
             ))}
             {lines.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-3 py-6 text-center text-gray-400">
+                <td colSpan={6} className="px-3 py-6 text-center text-gray-400">
                   비용 라인이 없습니다.
                 </td>
               </tr>
@@ -821,6 +962,8 @@ interface ColDef<T> {
   type?: "text" | "number" | "checkbox" | "select";
   options?: { value: string; label: string }[];
   align?: "left" | "right" | "center";
+  // 제네릭 셀 렌더로 표현 안 되는 칸(예: 퍼센트↔소수 변환)은 이걸로 직접 그린다 — type을 무시한다.
+  render?: (row: T, onChange: (value: unknown) => void) => React.ReactNode;
 }
 const ALIGN_CLASS: Record<string, string> = {
   left: "text-left",
@@ -886,7 +1029,9 @@ function EditableLineTable<T>({
                   const cell: any = (row as any)[c.key];
                   return (
                     <td key={String(c.key)} className="px-2 py-1">
-                      {c.type === "checkbox" ? (
+                      {c.render ? (
+                        c.render(row, (value) => update(i, c.key, value))
+                      ) : c.type === "checkbox" ? (
                         <input
                           type="checkbox"
                           checked={!!cell}
@@ -944,6 +1089,20 @@ const COST_COLUMNS: ColDef<ImportCostLine>[] = [
   { key: "supply_amount", label: "공급가액", type: "number", align: "right" },
   { key: "tax_amount", label: "세액", type: "number", align: "right" },
   { key: "is_costing", label: "원가성", type: "checkbox", align: "center" },
+  {
+    key: "is_duty",
+    label: "관세",
+    type: "checkbox",
+    align: "center",
+    render: (row, onChange) => (
+      <input
+        type="checkbox"
+        checked={!!row.is_duty}
+        onChange={(e) => onChange(e.target.checked)}
+        title="이 줄은 배부하지 않고 품목별로 귀속합니다"
+      />
+    ),
+  },
   { key: "note", label: "비고" },
 ];
 
@@ -964,6 +1123,14 @@ const INVOICE_COLUMNS: ColDef<ImportInvoiceLine>[] = [
   { key: "order_no", label: "발주번호" },
   { key: "quantity", label: "수량", type: "number", align: "right" },
   { key: "unit_price_foreign", label: "외화단가", type: "number", align: "right" },
+  {
+    key: "duty_rate",
+    label: "관세율(%)",
+    align: "right",
+    render: (row, onChange) => (
+      <PercentInput rate={row.duty_rate} onChange={(r) => onChange(r)} />
+    ),
+  },
   { key: "gross_weight_kg", label: "중량(kg)", type: "number", align: "right" },
   { key: "cbm", label: "CBM", type: "number", align: "right" },
 ];
@@ -1270,6 +1437,8 @@ function ShipmentFormView({
           internal_sku: l.internal_sku ?? "",
           gross_weight_kg: l.gross_weight_kg ?? "",
           cbm: l.cbm ?? "",
+          // 파싱은 관세율을 추론하지 않는다 — 사람이 채운다(모름=null, 0%로 짐작해 넣지 않는다).
+          duty_rate: null,
         })),
       );
     }
@@ -1297,6 +1466,8 @@ function ShipmentFormView({
           supply_amount: l.supply_amount,
           tax_amount: l.tax_amount,
           is_costing: l.is_costing,
+          // 파싱은 관세 라인을 추론하지 않는다 — 사람이 체크한다.
+          is_duty: false,
           note: l.note ?? "",
         })),
       );
@@ -1399,7 +1570,7 @@ function ShipmentFormView({
         rows={costLines}
         setRows={setCostLines}
         columns={COST_COLUMNS}
-        newRow={(): ImportCostLine => ({ seq: 0, item_name: "", supply_amount: "0", tax_amount: "0", is_costing: false, note: "" })}
+        newRow={(): ImportCostLine => ({ seq: 0, item_name: "", supply_amount: "0", tax_amount: "0", is_costing: false, is_duty: false, note: "" })}
       />
 
       <EditableLineTable
@@ -1417,6 +1588,8 @@ function ShipmentFormView({
           internal_sku: "",
           gross_weight_kg: "",
           cbm: "",
+          // ★부자재라고 자동으로 0을 넣지 않는다 — 사람이 정한다. null="모름"(0%가 아니다).
+          duty_rate: null,
         })}
       />
 
