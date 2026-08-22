@@ -4,6 +4,12 @@ sqlalchemy==2.0.48
 alembic==1.15.2
 python-dotenv==1.1.0
 openpyxl==3.1.5
+# 수입건 원장(D-CPP-48) 서류 파싱 — **선택 의존성**이다.
+# 없어도 앱은 정상 부팅하고 수기 입력 경로가 살아 있다(services/import_cost/parser.py가
+# 함수 안에서 임포트하고 «무엇을 하면 되는지»를 말하는 예외를 던진다).
+# ⚠️ safe_deploy.sh에 pip 단계가 없으므로 prod 반영은 수동 설치가 필요하다.
+xlrd==2.0.1   # .xls(BIFF8) 전용 리더 — 통관서류 CI/PL이 구형 .xls로 온다
+pypdf==6.16.1  # 통관경비서 PDF 텍스트 추출(OCR 아님 — 스캔본은 수기 경로로 보낸다)
 python-multipart==0.0.20
 requests>=2.31.0
 bcrypt>=4.1.0

@@ -339,9 +339,18 @@ class GroupedSummaryRow(BaseModel):
     net_basis_revenue: str = "0"           # 이익률의 분모(= 손익을 실제로 잰 매출)
     unmapped_revenue: str = "0"            # 원가를 못 붙인 제품매출 — 이익률을 위로 부풀린다
     # ── 로켓배송 1P leaf에만 붙는다(다른 채널은 축이 하나뿐이라 None) ──
-    revenue_basis: Optional[str] = None   # settlement(계산서) | sales(판매분석)
+    revenue_basis: Optional[str] = None   # settlement(계산서) | sales(판매분석) | console_net(RG)
     cost_coverage: Optional[str] = None   # 0~1. 판매 축에서 원가가 붙은 매출의 비율
     promo_burden: Optional[str] = None    # 프로모션 분담금(판매 축에서만)
+    # ── 로켓그로스(RG) leaf에만 붙는다 (D-CPP-47) ──
+    # ★위 경고(교훈 #321)가 여기에도 그대로다. 이 네 필드는 RG 행이 **자기 신뢰도를 스스로 말하는**
+    #   칸이라, 여기서 빠지면 서비스층이 정직하게 계산해도 화면엔 안 뜬다.
+    #   실제로 D-CPP-47 초판이 이걸 빠뜨려 적대 리뷰 P1으로 잡혔다.
+    #   `profit_calculator._LEAF_PASSTHROUGH`와 **짝**이다 — 한쪽만 고치면 여전히 안 나온다.
+    option_axis_days: Optional[str] = None       # 옵션축이 창을 덮은 일수 "16/16"
+    ad_unallocated: Optional[str] = None         # 카탈로그에 없는 옵션에 쓰인 광고비(행에 안 실린 돈)
+    ad_unallocated_options: Optional[int] = None
+    units_sold: Optional[int] = None             # 판매수량 — `order_count`(주문 건수)와 뜻이 다르다
 
 
 class GroupedTrendPoint(BaseModel):

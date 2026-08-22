@@ -27,6 +27,35 @@ def s(key: str, state: str, age_days: float | None, **over) -> dict:
     }
 
 
+class TestNeedsLogin:
+    """needs_login (2026-08-22 W1) — 새 판정을 만들면 **모든 소비 경로**를 같은 턴에 훑는다.
+
+    ★교훈 #321의 형태: 판정을 새로 만들었는데 소비처 하나가 그 값을 모르면, 서비스층은
+      초록인데 실제 표면에서는 통째로 사라진다. needs_login은 «갓 성공한 직후에도» 나타날
+      수 있어(오전 수집 성공 → 오후 세션 만료) age_days가 작다 — 기존 notify 조건
+      (failed / stale / never / unknown) 어디에도 안 걸려 조용히 흘러갔을 자리였다.
+    """
+
+    def test_나이가_어려도_즉시_알린다(self):
+        r = decide([s("rg_wing1", "needs_login", 0.1)])
+        assert [n["key"] for n in r["notify"]] == ["rg_wing1"]
+
+    def test_처방을_말한다_로그인하라(self):
+        r = decide([s("rg_wing1", "needs_login", 0.1)])
+        assert "로그인" in r["notify"][0]["reason"]
+
+    def test_계정을_밝힌다_어느_창에_로그인할지(self):
+        r = decide([s("rg_wing2", "needs_login", 0.1)])
+        assert r["notify"][0]["account"] == "오하이테크(A01029796)"
+        assert decide([s("rg_wing1", "needs_login", 0.1)])["notify"][0]["account"] \
+            == "오픽스(A01564720)"
+
+    def test_RG는_자동구조_대상이_아니다(self):
+        """★금지선: 자동 구조는 창을 띄운다. RG는 「창은 버튼 클릭 직후에만」(2026-07-27)."""
+        r = decide([s("rg_wing1", "needs_login", 99.0), s("rg_wing2", "critical", 99.0)])
+        assert r["rescue"] == []
+
+
 class TestNotify:
     def test_전부_신선하면_아무것도_안_한다(self):
         r = decide([s("ofix_ad", "fresh", 0.5), s("supplier_hub", "fresh", 0.1)])

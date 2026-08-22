@@ -71,6 +71,11 @@ _ACCOUNT_BY_KEY = {
     "ofix_ad": "오픽스(A01564720)",
     "ohitech_ad": "오하이테크(A01029796)",
     "supplier_hub": "오하이테크(A01029796)",
+    # RG 정산 2큐(2026-08-22 W1로 collection_status에 편입). ★rescue_streams에는 넣지 않는다 —
+    #   자동 구조는 창을 띄우는데, RG는 「창은 버튼 클릭 직후에만」(2026-07-27)이 걸려 있다.
+    #   여기 등재는 «알림»에만 쓰인다.
+    "rg_wing1": "오픽스(A01564720)",
+    "rg_wing2": "오하이테크(A01029796)",
 }
 
 
@@ -155,17 +160,25 @@ def decide(
         #   여기서 명시하지 않으면 **판정 불가가 조용히 버려진다**. 배너는 붉게 띄우는데
         #   Slack만 침묵하면, 화면을 안 보는 시간대(밤·주말)가 통째로 사각이 된다.
         is_unknown = state == "unknown"
+        # ★needs_login도 나이 무관 즉시 알림 (2026-08-22 W1). 이 상태는 «갓 성공한 직후에도»
+        #   나타날 수 있어서(오전에 수집 성공 → 오후에 세션 만료) age_days가 작다 — 위 조건
+        #   어디에도 안 걸린다. 명시하지 않으면 이번에 «상태»로 만든 바로 그 사실이 Slack에서만
+        #   조용히 사라진다(교훈 #321과 같은 형태: 판정을 새로 만들면 모든 소비 경로를 같은
+        #   턴에 훑어라).
+        is_needs_login = state == "needs_login"
 
-        if is_failed or is_stale or never or is_unknown:
+        if is_failed or is_stale or never or is_unknown or is_needs_login:
             notify.append({
                 "key": key,
                 "label": st.get("label") or key,
                 "account": _ACCOUNT_BY_KEY.get(key, "계정 미상"),
                 "state": state,
                 "age_days": None if age_days is None else round(age_days, 1),
-                "reason": "상태 조회 실패 — 낡음 여부 판정 불가" if is_unknown
-                          else ("갱신 실패(로그인 필요 가능)" if is_failed
-                                else ("수집 기록 없음" if never else f"{age_days:.0f}일 낡음")),
+                "reason": "🔑 로그인 필요 — Mac Chrome 창에서 로그인하세요(그 뒤 자동으로 이어받습니다)"
+                          if is_needs_login
+                          else ("상태 조회 실패 — 낡음 여부 판정 불가" if is_unknown
+                                else ("갱신 실패(로그인 필요 가능)" if is_failed
+                                      else ("수집 기록 없음" if never else f"{age_days:.0f}일 낡음"))),
                 "last_error": st.get("last_error"),
             })
 

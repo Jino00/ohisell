@@ -128,6 +128,17 @@ def collect(folder: Path) -> list[dict]:
     return files
 
 
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(키가 없으면 종전과 동일 동작).
+
+    ★2026-08-13: nginx 예외 목록에서 경로 하나가 빠지자 그 경로를 쓰던 페처가 401로
+      3.5일간 죽어 있었다. 예외 목록은 계약이 아니므로 prod 호출엔 전부 붙인다.
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
+
+
 def push(cfg: dict, files: list[dict]) -> int:
     base = str(cfg.get("prod_base_url") or "").rstrip("/")
     token = cfg.get("ingest_token")
@@ -140,6 +151,7 @@ def push(cfg: dict, files: list[dict]) -> int:
             base + INGEST_PATH,
             json={"vendor_id": vendor, "files": files},
             headers={"X-Ingest-Token": str(token)},
+            auth=_basic_auth(cfg),
             timeout=60,
         )
     except requests.RequestException as e:
