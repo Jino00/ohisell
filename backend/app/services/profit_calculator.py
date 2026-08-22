@@ -817,12 +817,39 @@ def _calc_line(
 # ──────────────────────────────────────────────
 
 
-def get_rg_total_by_account(db: Session, date_from: date, date_to: date) -> dict[str, Decimal]:
-    """RG 정산 총액을 account_key별로 반환 (KPI·channel-breakdown 차감용).
+#: 순이익에서 **차감하지 않는** 정산 fee_type (D-CPP-43, 2026-08-12 · PR #287).
+#:
+#: 정산서의 `ad_sales`는 별개 비용이 아니라 **광고센터 PA 광고비를 정산에서 «공제»**하는 것이다.
+#: 1차 출처(윙 > 정산 > 로켓그로스 정산현황 > 「광고비 내역」): *"로켓그로스 상품의 광고비는 해당
+#: 월 말에 계산되어 **매입세금계산서 1건이 발행**되며"* — 즉 같은 돈이고, 우리는 그 돈을 이미
+#: PA 광고 원장(`ad_spend`)으로 한 번 세고 있다. 여기서 또 빼면 **이중계상**이다.
+#:
+#: ★D-16(「전액 차감」)은 `sell_type=2P` 0행을 근거로 「겹침 없음」이라 판정했는데, **그 라벨이
+#:   판매경로를 뜻하지 않는다**(오픽스 PA 광고비의 97.28%가 RG로 팔리는 옵션에 쓰인다 — ref 56 §3).
+#:   그래서 D-16이 걸어 둔 감시 장치(`ad_xlsx_rg_overlap>0`)는 이 형태를 **원리적으로 못 잡았다**
+#:   (교훈 #261·#268). D-CPP-43이 D-16을 폐기하고 「광고 제외 차감」으로 되돌렸다.
+_RG_FEE_TYPES_NOT_DEDUCTED: frozenset[str] = frozenset({"ad_sales"})
+
+
+def get_rg_total_by_account(
+    db: Session, date_from: date, date_to: date
+) -> dict[str, Decimal]:
+    """RG 정산 «차감 대상» 총액을 account_key별로 반환 (KPI·channel-breakdown 차감용).
+
+    = 판매수수료(`sale_fee`) + 풀필먼트(`delivery`+`warehousing`+`storage`) + 반품
+      (`return_shipping`+`return_handling`) — 즉 `rg_total − ad_sales`(D-CPP-43).
+    풀필먼트 3컴포넌트는 **서로 독립**이라 합산해도 이중계상이 아니다(ref 17 §8 라이브 확정 —
+      `totalFulfillmentFeeDeductionAmount`는 「배송비」뿐이지 풀필먼트 합계가 아니다).
 
     intelligence._agg_rg_settlement_fees와 같은 overlap 필터·vendor_item_id="" 가드 적용.
     반환: {"COUPANG_WING1": Decimal, "COUPANG_WING2": Decimal, ...}
     데이터 없으면 빈 dict → 차감 no-op.
+
+    ★2026-08-22(D-CPP-47)에 `ad_sales` 제외를 여기 넣었다. 종전엔 이 함수만 **폐기된 D-16
+      규칙**(전액 차감)으로 남아 있었다 — 종합조망(`intelligence.py`)과 상품손익(`product_pnl.py`)은
+      이미 D-CPP-43으로 옮겨 갔는데 대시보드만 안 옮겨져서, **같은 계정의 RG 수수료를 두 화면이
+      서로 다른 금액으로 빼고 있었다.** 이 저장소가 반복해 앓은 「같은 숫자를 두 엔진이 따로 낸다」의
+      또 한 사례다.
     """
     rows = (
         db.query(
@@ -833,6 +860,33 @@ def get_rg_total_by_account(db: Session, date_from: date, date_to: date) -> dict
             CoupangRgSettlementFee.recognition_date_from <= date_to,
             CoupangRgSettlementFee.recognition_date_to >= date_from,
             CoupangRgSettlementFee.vendor_item_id == "",
+            CoupangRgSettlementFee.fee_type.notin_(_RG_FEE_TYPES_NOT_DEDUCTED),
+        )
+        .group_by(CoupangRgSettlementFee.account_key)
+        .all()
+    )
+    return {ak: Decimal(str(amt or 0)) for ak, amt in rows}
+
+
+def get_rg_ad_settlement_by_account(
+    db: Session, date_from: date, date_to: date
+) -> dict[str, Decimal]:
+    """정산서에 실린 RG 광고 «공제»액 — **차감하지 않는다. 표시·검산용이다**(D-CPP-43).
+
+    화면이 「정산 총액」과 「순이익 차감액」을 분리해 보여줄 수 있게 하고(취소선 + "차감 안 함"),
+    PA 원장과의 규모 대조에도 쓴다. 여기 값이 PA 광고비와 크게 어긋나면 그건 우리가 알아야 할
+    사실이다 — 그 감시는 `scheduler_health`가 맡는다(D-CPP-43이 차감을 뺀 자리에 남긴 안전망).
+    """
+    rows = (
+        db.query(
+            CoupangRgSettlementFee.account_key,
+            func.sum(CoupangRgSettlementFee.amount),
+        )
+        .filter(
+            CoupangRgSettlementFee.recognition_date_from <= date_to,
+            CoupangRgSettlementFee.recognition_date_to >= date_from,
+            CoupangRgSettlementFee.vendor_item_id == "",
+            CoupangRgSettlementFee.fee_type.in_(_RG_FEE_TYPES_NOT_DEDUCTED),
         )
         .group_by(CoupangRgSettlementFee.account_key)
         .all()
@@ -1577,15 +1631,33 @@ def calculate_channel_daily_trend(
 # ──────────────────────────────────────────────
 
 
+#: 쿠팡 채널의 판매경로별 leaf 라벨 (D-CPP-47). 축은 `Channel.sell_type`이다 —
+#: seed.py가 3P/RG/1P를 채널마다 못 박아 두었고, 이게 「윙이냐 로켓그로스냐」를 가르는 유일한
+#: 결정적 축이다(`channel_type`의 consignment는 1P만 가르고 3P·RG를 못 가른다).
+#: ★종전엔 3P와 RG가 «쿠팡 로켓그로스·윙» 한 줄로 뭉쳐 있었다. 두 판매경로는 **수수료 구조가
+#:   다르고**(3P=판매수수료만 / RG=판매수수료+풀필먼트+반품, ref 17 §1의 9종 체계) 매출 원장도
+#:   다르다(3P=`orders` / RG=콘솔 net 축). 한 줄로 뭉치면 어느 쪽이 적자인지 화면이 말할 수 없다.
+_COUPANG_SEGMENT_BY_SELL_TYPE: dict[str, tuple[str, bool]] = {
+    "3P": ("쿠팡 3P(판매자배송)", True),
+    "RG": ("쿠팡 로켓그로스", True),
+    "1P": ("쿠팡 로켓배송(1P)", False),
+}
+
+
 def _classify_channel(ch: Channel) -> tuple[str, str, bool]:
     """채널 → (회사, leaf 라벨, 순이익 산정가능 여부)"""
     company = ch.company or "미지정"
     code = ch.code or ""
     if code.startswith("COUPANG"):
-        if ch.channel_type == "consignment":  # 로켓배송 (위탁/수동)
-            seg, has_profit = "쿠팡 로켓배송", False
-        else:  # 윙 / 로켓그로스
-            seg, has_profit = "쿠팡 로켓그로스·윙", True
+        seg_has = _COUPANG_SEGMENT_BY_SELL_TYPE.get(ch.sell_type or "")
+        if seg_has is not None:
+            seg, has_profit = seg_has
+        elif ch.channel_type == "consignment":  # sell_type 미지정 폴백 — 위탁이면 1P다
+            seg, has_profit = "쿠팡 로켓배송(1P)", False
+        else:
+            # sell_type이 비었고 위탁도 아니다 — 추측하지 않는다(D-3: 사실만, 판단은 Jino).
+            # 채널 이름을 그대로 써서 «분류 안 됨»이 화면에 드러나게 한다.
+            seg, has_profit = ch.name or "쿠팡 (분류 안 됨)", True
     elif code == "CAFE24":
         seg, has_profit = "자사몰(cafe24)", True
     elif code == "NAVER":

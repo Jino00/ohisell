@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_ad_db, get_db
-from app.models import Channel
+from app.models import Channel, CoupangProductItem
 from app.routers.ad_costs import _extract_meta_keyword, _extract_naver_sa_keyword, _upsert_ad_cost
 
 log = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ from app.schemas import (
     ProductProfitRow,
     TrendPoint,
 )
+from app.services.coupang.rg_channel_pnl import compute_rg_summary_row
+from app.services.coupang.rg_net_revenue import split_wing_ad_spend
 from app.services.coupang.rocket_1p_channel_pnl import (
     BASIS_SETTLEMENT,
     compute_rocket_1p_daily_points,
@@ -41,7 +43,6 @@ from app.services.profit_calculator import (
     calculate_daily_trend,
     calculate_product_profit,
     get_channel_company_map,
-    get_rg_total_by_account,
     group_summary_by_company,
     group_trend_by_company,
     net_contribution,
@@ -371,8 +372,112 @@ def _merge_rocket_1p_trend(db: Session, points: list[dict], df, dt, basis: str) 
     return out
 
 
+#: RG·3P 손익을 낼 계정(법인 단위 Wing 로그인 키). 채널 code와 같은 문자열이다.
+_WING_ACCOUNTS: tuple[str, ...] = ("COUPANG_WING1", "COUPANG_WING2")
+
+
+def _merge_rg_summary(db: Session, rows: list[dict], df, dt) -> list[dict]:
+    """RG 채널 행을 «콘솔 net 축»으로 만들어 얹고, 쿠팡 PA 광고비를 판매경로별로 싣는다 (D-CPP-47).
+
+    ★종전에 여기 있던 것(그리고 이 함수가 대체하는 것):
+        rg_by_account = get_rg_total_by_account(...)
+        for row in rows:
+            if ch.code in rg_by_account: row["net_profit"] -= rg_by_account[ch.code]
+      이 코드에 **결함이 둘** 있었다 —
+      ① **귀속이 틀렸다**: 반환 키는 `account_key`(`COUPANG_WING1/2`)인데 RG 채널 code는
+         `COUPANG_RG1/2`라 안 맞는다. 그래서 RG 정산 수수료가 RG 행이 아니라 **3P 행**에서
+         빠지고 있었다(RG 행은 `orders`에 행이 없어 애초에 만들어지지도 않았다).
+      ② **폐기된 규칙이었다**: 합산에 `ad_sales`가 섞여 있어 D-16(전액 차감)을 그대로 쓰고
+         있었다. 종합조망·상품손익은 이미 D-CPP-43(광고 제외 차감)으로 옮겨 갔는데 대시보드만
+         안 옮겨져서, **같은 계정의 RG 수수료를 두 화면이 다른 금액으로 빼고 있었다.**
+      ⇒ 이제 수수료는 RG 행의 `commission`으로 들어간다. 그래서 `payable_vat`가 그 매입세액을
+        제대로 잡는다 — 사후 차감 방식에선 그게 통째로 빠져 있었다.
+
+    ★광고비: `calculate_channel_summary`에는 **쿠팡 광고 경로가 아예 없다**(cafe24·네이버만 있다).
+      그래서 오픽스 광고비가 전체 합계에서 통째로 새고 있었다(실측: 화면 전체 광고비 =
+      네이버 + 로켓1P로 원 단위 일치 = 쿠팡 몫 0). 여기서 판매경로별로 실어 그 구멍을 막는다.
+      가르는 축은 **옵션ID의 정체**다 — `sell_type` 라벨은 판매경로를 뜻하지 않는다(D-CPP-43).
+    """
+    ch_by_code = {
+        ch.code: ch
+        for ch in db.query(Channel).filter(Channel.platform == "coupang").all()
+    }
+    # 원가 다리는 계정 무관 전역 1회 — 계정마다 다시 만들면 같은 쿼리를 두 번 돈다.
+    from app.services.coupang.intelligence import _cost_master  # noqa: PLC0415
+
+    cost_master = _cost_master(db)
+
+    out = list(rows)
+    for account_key in _WING_ACCOUNTS:
+        ch_3p = ch_by_code.get(account_key)
+        if ch_3p is None:
+            continue
+        vendor_id = (
+            os.getenv(f"{account_key}_VENDOR_ID")
+            or _vendor_id_for_account(db, account_key)
+        )
+        if not vendor_id:
+            log.warning("account %s의 vendor_id를 못 찾았다 — 광고비를 싣지 않는다", account_key)
+            continue
+
+        ad = split_wing_ad_spend(db, df, dt, account_key, vendor_id)
+
+        # 3P 몫 — 기존 3P 행에 얹는다. 행이 없으면(그 창에 3P 주문 0) 광고비만 있는 행을 만들지
+        # 않는다: 매출 0·원가 0인데 광고비만 있는 채널 행은 `net_contribution`이 −광고비 하한으로
+        # 처리하므로 회사 소계엔 실리지만, 여기선 **행이 없으면 그 돈이 샌다.** 그래서 만든다.
+        if ad["p3"] > Decimal("0"):
+            row_3p = next((r for r in out if r["channel_id"] == ch_3p.id), None)
+            if row_3p is not None:
+                row_3p["ad_spend"] = str(Decimal(row_3p["ad_spend"]) + ad["p3"])
+                if row_3p.get("net_profit") is not None:
+                    # 광고비가 늘면 순이익이 그만큼 줄고, 매입세액도 그만큼 는다.
+                    row_3p["net_profit"] = str(
+                        Decimal(row_3p["net_profit"])
+                        - ad["p3"]
+                        + ad["p3"] * Decimal("10") / Decimal("110")
+                    )
+            else:
+                out.append(_ad_only_row(ch_3p, ad["p3"]))
+
+        rg_row = compute_rg_summary_row(db, account_key, df, dt, cost_master, vendor_id)
+        if rg_row is not None:
+            out = [r for r in out if r["channel_id"] != rg_row["channel_id"]]
+            out.append(rg_row)
+
+    return out
+
+
+def _ad_only_row(ch: Channel, ad_spend: Decimal) -> dict:
+    """매출은 없는데 광고비는 나간 채널 행 — 「행이 없어서 돈이 샌다」를 막는다.
+
+    ★이 모양이 필요한 이유: 오픽스 3P는 8월 들어 주문이 거의 끊겼는데(08-20은 0건) 광고는
+      돌고 있다. 버킷이 안 생기면 그 광고비는 **어떤 합계에도 안 들어간다** — D-22가 막은 것은
+      「행은 있는데 net=None」이고 이건 **행 자체가 안 생겨** 한 칸 앞에서 새는 경우다.
+    순이익을 None으로 두면 집계층(`net_contribution`)이 −광고비 하한을 만든다(D-22).
+    """
+    return {
+        "channel_id": ch.id,
+        "channel_name": ch.name or "",
+        "revenue": "0", "product_revenue": "0", "shipping_revenue": "0",
+        "cost": "0", "commission": "0", "shipping": "0", "fixed_cost": "0",
+        "ad_spend": str(ad_spend),
+        "unmapped_revenue": "0",
+        "net_profit": None, "profit_rate": None, "order_count": 0,
+    }
+
+
+def _vendor_id_for_account(db: Session, account_key: str) -> str:
+    """계정의 vendor_id — env 미설정 시 상품 스냅샷에서 도출(`intelligence._resolve_account`와 동일 규율)."""
+    row = (
+        db.query(CoupangProductItem.vendor_id)
+        .filter(CoupangProductItem.account_key == account_key)
+        .first()
+    )
+    return str(row[0]) if row and row[0] else ""
+
+
 def _channel_rows(db: Session, ad_db, df, dt, basis: str) -> list[dict]:
-    """채널 단위 요약 행 1벌 — RG 정산 수수료 차감 + 로켓1P 병합까지 끝난 상태.
+    """채널 단위 요약 행 1벌 — RG 편입 + 쿠팡 광고비 + 로켓1P 병합까지 끝난 상태.
 
     ★KPI 카드와 요약표가 **이 함수 하나만** 쓰게 한 이유(D-22, 2026-08-19): 종전엔 카드가
       `calculate_daily_trend`(=`orders` 축)를 따로 돌아서 로켓1P를 통째로 못 태웠다. 표만
@@ -380,16 +485,7 @@ def _channel_rows(db: Session, ad_db, df, dt, basis: str) -> list[dict]:
       경로가 둘이면 언젠가 반드시 갈라지므로, 갈라질 수 없게 경로를 하나로 만든다.
     """
     rows = calculate_channel_summary(db, ad_db, df, dt)
-
-    # RG 정산 수수료 차감 (B안: account_key=채널code로 매핑)
-    rg_by_account = get_rg_total_by_account(db, df, dt)
-    if rg_by_account:
-        ch_map = {ch.id: ch for ch in db.query(Channel).all()}
-        for row in rows:
-            ch = ch_map.get(row["channel_id"])
-            if ch and ch.code in rg_by_account and row["net_profit"] is not None:
-                row["net_profit"] = str(Decimal(row["net_profit"]) - rg_by_account[ch.code])
-
+    rows = _merge_rg_summary(db, rows, df, dt)
     return _merge_rocket_1p_summary(db, rows, df, dt, basis)
 
 
