@@ -97,6 +97,7 @@ from app.services.naver_ad import campaign_roster
 from app.services.naver_ad import guardrail_params
 from app.services.naver_ad import change_actor
 from app.services.naver_ad import creative_scorecard
+from app.services.naver_ad import wisdom_scorecard
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import exclusion_survival
@@ -635,6 +636,26 @@ def expert_scorecard(db: Session = Depends(get_db)):
     accuracy = _num(row.current_value)
     label = "표본 축적 중(참고용)" if sample_n < _SCOREBOARD_HONEST_THRESHOLD else None
     return {"sample_n": sample_n, "accuracy": accuracy, "label": label}
+
+
+@router.get("/wisdom-scorecard")
+def wisdom_scorecard_get(
+    wisdom_id: int | None = Query(None, description="특정 지혜 1건만 조회(미지정=전건)"),
+    db: Session = Depends(get_db),
+):
+    """지혜 성적표(M3-a, 계약 PLAN_naver-m3-wisdom-scorecard.md §4-A① · §4-B⑥) —
+    승격 지혜 id마다 «그 지혜가 낳은 제안 → 조치»를 잇고 총이익(outcome_profit)·GAVE·
+    BEP 렌즈(bep_source)를 롤업한다. 쓰기 없음.
+
+    **정직 경계**: 귀속 경로는 `param_proposal_id` 1:1 링크뿐이다 — 지혜를 자유 텍스트로
+    브리핑에 주입하는 경로(`wisdom_apply.active_wisdom_prefix`)는 id를 남기지 않으므로
+    이 롤업은 지혜 기여의 «하한»이다. 응답의 `attribution.limitation`이 그 사실을 실어 나른다.
+    **표본 0을 «좋은 성적»으로 읽지 말 것** — 행마다 `has_evidence`·`evidence_gap`이 붙는다.
+
+    ★`response_model`을 두지 않는다: 스키마가 키를 지워 판정면이 통째로 사라지는 사고가
+    이 저장소에 반복됐다(교훈 #321 — schemas.py에 같은 경고 주석 4개). 관측은 HTTP body로.
+    """
+    return wisdom_scorecard.build(db, wisdom_id=wisdom_id)
 
 
 _VALID_OPTIMIZERS = {"none", "ours", "mop"}

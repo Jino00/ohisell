@@ -17,6 +17,7 @@ import {
   fetchNaverAdDiagnosis,
   fetchNaverExpertReviews,
   fetchNaverExpertScorecard,
+  fetchNaverWisdomScorecard,
   updateNaverProposalStatus,
   executeNaverProposal,
   getNaverExpertDelegation,
@@ -30,6 +31,7 @@ import {
   type NaverAdCampaignMode,
   type NaverExpertVerdict,
   type NaverExpertScorecard,
+  type NaverWisdomScorecard,
   type NaverExpertDelegationSettings,
   type NaverDashboardOverview,
   type NaverGuardrailParamsResponse,
@@ -338,6 +340,8 @@ export default function NaverAdOptimizationConsole() {
 
   const [avaCommentary, setAvaCommentary] = useState<string | null>(null);
   const [avaScorecard, setAvaScorecard] = useState<NaverExpertScorecard | null>(null);
+  const [wisdomCard, setWisdomCard] = useState<NaverWisdomScorecard | null>(null);
+  const [wisdomError, setWisdomError] = useState<string | null>(null);
   const [avaLoading, setAvaLoading] = useState(false);
   const [avaError, setAvaError] = useState<string | null>(null);
 
@@ -493,10 +497,17 @@ export default function NaverAdOptimizationConsole() {
     setAvaLoading(true);
     setAvaError(null);
     try {
-      const [reviews, scorecard] = await Promise.all([
+      const [reviews, scorecard, wisdom] = await Promise.all([
         fetchNaverExpertReviews({ asOf: daysAgo(0) }),
         fetchNaverExpertScorecard(),
+        // ★지혜 성적표는 실패해도 Ava 패널을 죽이지 않는다 — 새 표면 하나가
+        //   기존 화면을 통째로 빈 화면으로 만드는 사고를 막는다.
+        fetchNaverWisdomScorecard().catch((e: any) => {
+          setWisdomError(e?.message ?? "지혜 성적표를 불러오지 못했습니다");
+          return null;
+        }),
       ]);
+      setWisdomCard(wisdom);
       const commentaryRow = reviews.rows.find((r) => r.proposal_id === null && r.verdict === "commentary");
       setAvaCommentary(commentaryRow?.reasoning ?? null);
       setAvaScorecard(scorecard);
@@ -1247,6 +1258,107 @@ export default function NaverAdOptimizationConsole() {
           )}
           {avaScorecard && avaScorecard.sample_n === 0 && (
             <p className="text-xs text-gray-400 mt-2">{avaScorecard.label}</p>
+          )}
+        </div>
+      </div>
+
+      {/* 섹션 4: 지혜 성적표(M3-a · 계약 PLAN_naver-m3-wisdom-scorecard.md §4-A① · §4-B⑥)
+          ★이 패널의 존재 이유는 «지혜가 돈을 벌었나»를 사람이 볼 수 있게 하는 것이다.
+            표본이 0일 때 아무것도 안 그리면 「문제없음」으로 읽힌다 — 그래서 0이면
+            «왜 잴 것이 없나»(evidence_gap)를 대신 크게 쓴다. */}
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
+          <h3 className="text-sm font-medium text-gray-700">지혜 성적표</h3>
+          {wisdomCard && (
+            <span className="text-xs text-gray-400">
+              승격 지혜 {wisdomCard.wisdom_total}건 · 총이익 증거 있는 지혜{" "}
+              {wisdomCard.wisdom_with_evidence}건
+            </span>
+          )}
+        </div>
+        {wisdomError && <div className="p-3 text-sm text-red-600 bg-red-50">{wisdomError}</div>}
+        <div className="p-4 space-y-3">
+          {avaLoading && !wisdomCard ? (
+            <div className="text-center text-gray-400 text-sm py-4">불러오는 중...</div>
+          ) : !wisdomCard ? null : wisdomCard.wisdom.length === 0 ? (
+            <p className="text-sm text-gray-400">아직 승격된 지혜가 없습니다.</p>
+          ) : (
+            wisdomCard.wisdom.map((w) => (
+              <div key={w.wisdom_id} className="border border-gray-100 rounded p-3">
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <p className="text-sm text-gray-800 flex-1 min-w-[16rem]">{w.wisdom_text}</p>
+                  <span className="text-xs text-gray-400 whitespace-nowrap">
+                    #{w.wisdom_id} · {w.status}
+                    {w.promoted_at ? ` · 승격 ${w.promoted_at.slice(0, 10)}` : ""}
+                  </span>
+                </div>
+
+                {w.has_evidence ? (
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+                    <span>
+                      채점 {w.changes_scored_profit}/{w.changes_total}건
+                    </span>
+                    {Object.entries(w.verdicts).map(([k, n]) => (
+                      <span key={k} className={k === "improved" ? "text-green-700" : k === "declined" ? "text-red-700" : ""}>
+                        {k === "improved" ? "총이익 개선" : k === "declined" ? "총이익 악화" : k} {n}건
+                      </span>
+                    ))}
+                    {w.gave_delta_sum != null && (
+                      /* ★부호만 보면 «아주 작은 개선»도 개선이 된다 — 크기를 같이 낸다(§8-Q5 각주). */
+                      <span>GAVE 델타 합 {w.gave_delta_sum.toFixed(2)}({w.gave_pairs}쌍)</span>
+                    )}
+                    {Object.entries(w.bep_sources).map(([k, n]) => (
+                      <span key={k} className={k === "product_bep" ? "text-gray-600" : "text-amber-700"}>
+                        {k === "product_bep"
+                          ? "상품BEP(확정)"
+                          : k === "account_default"
+                            ? "계정 블렌디드(근사)"
+                            : k === "unavailable"
+                              ? "BEP 미해석"
+                              : "미측정"}{" "}
+                        {n}건
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">
+                    아직 잴 것이 없습니다 — {w.evidence_gap}
+                    {w.linked_proposal_count > 0
+                      ? ` (연결된 제안 ${w.linked_proposal_count}건)`
+                      : ""}
+                  </p>
+                )}
+              </div>
+            ))
+          )}
+
+          {wisdomCard && (
+            /* ★값의 «정의»를 산출물 옆에 붙여 둔다(계약 §4-B⑥) — grain·지연·커버리지를
+                안 적으면 근사값이 확정값처럼 읽힌다. */
+            <div className="text-[11px] text-gray-400 leading-relaxed border-t border-gray-100 pt-2 space-y-0.5">
+              <p>
+                총이익 = {wisdomCard.value_definition.formula} · 단위: {wisdomCard.value_definition.grain} ·{" "}
+                {wisdomCard.value_definition.verdict_rule}
+              </p>
+              <p>
+                전환 정착 {wisdomCard.value_definition.conversion_delay.window} —{" "}
+                {wisdomCard.value_definition.conversion_delay.correction_applied === false
+                  ? "정착 보정 미적용(곡선 비활성)"
+                  : wisdomCard.value_definition.conversion_delay.correction_applied === true
+                    ? "정착 보정 적용됨"
+                    : "정착 보정 상태 확인 불가"}
+              </p>
+              {wisdomCard.value_definition.bep_coverage.ratio != null && (
+                <p>
+                  상품BEP 커버리지{" "}
+                  {wisdomCard.value_definition.bep_coverage.groups_with_product_bep}/
+                  {wisdomCard.value_definition.bep_coverage.groups_total} 그룹(
+                  {(wisdomCard.value_definition.bep_coverage.ratio * 100).toFixed(1)}%) — 나머지는 계정
+                  블렌디드 근사
+                </p>
+              )}
+              <p>귀속: {wisdomCard.attribution.limitation}</p>
+            </div>
           )}
         </div>
       </div>
