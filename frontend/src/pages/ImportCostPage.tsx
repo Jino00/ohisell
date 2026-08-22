@@ -16,6 +16,7 @@ import {
   uploadImportDocument,
   importDocumentDownloadUrl,
   deleteImportDocument,
+  parseImportDocuments,
   type ImportShipmentListItem,
   type ImportShipmentDetail,
   type ImportShipmentInput,
@@ -29,6 +30,7 @@ import {
   type ImportAllocationBasis,
   type ImportDocType,
   type ImportLineType,
+  type ImportParseResult,
 } from "../lib/api";
 
 // ── 공용 포맷터 (ProductConnectionMap.tsx `won()` 규약과 동일 — 없는 값은 "—") ──
@@ -989,6 +991,144 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 const inputCls = "w-full border rounded px-2 py-1.5 text-sm";
 
+// ── 서류 올려서 자동 채우기 (POST /api/import-cost/parse, 저장하지 않는다) ──
+// ★파싱은 «채워주기 편의»다 — 정본은 사람이 확인한 폼(백엔드 주석과 동일 원칙).
+function DocumentUploadPanel({ onApply }: { onApply: (result: ImportParseResult) => void }) {
+  const [open, setOpen] = useState(true);
+  const [ciPlFile, setCiPlFile] = useState<File | null>(null);
+  const [expenseFile, setExpenseFile] = useState<File | null>(null);
+  const [textOpen, setTextOpen] = useState(false);
+  const [expenseText, setExpenseText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [result, setResult] = useState<ImportParseResult | null>(null);
+
+  const canSubmit = !!(ciPlFile || expenseFile || expenseText.trim());
+
+  async function handleLoad() {
+    setLoading(true);
+    setErr("");
+    try {
+      const res = await parseImportDocuments({
+        ciPlFile,
+        expenseFile,
+        expenseText: expenseText.trim() ? expenseText : undefined,
+      });
+      setResult(res);
+      onApply(res);
+    } catch (e) {
+      setErr(`불러오기 실패: ${e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-lg border mb-4">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+      >
+        <span>📄 서류 올려서 자동 채우기</span>
+        <span className="text-gray-400">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="border-t px-4 py-4 space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="CI·PL 엑셀 (.xls, .xlsx)">
+              <input
+                type="file"
+                accept=".xls,.xlsx"
+                onChange={(e) => setCiPlFile(e.target.files?.[0] ?? null)}
+                className="w-full text-xs"
+              />
+            </Field>
+            <Field label="통관경비서 PDF">
+              <input
+                type="file"
+                accept=".pdf"
+                onChange={(e) => setExpenseFile(e.target.files?.[0] ?? null)}
+                className="w-full text-xs"
+              />
+            </Field>
+          </div>
+
+          <div>
+            <button
+              type="button"
+              onClick={() => setTextOpen((o) => !o)}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              PDF가 안 읽히면 내용을 붙여넣으세요 {textOpen ? "접기" : "펼치기"}
+            </button>
+            {textOpen && (
+              <textarea
+                value={expenseText}
+                onChange={(e) => setExpenseText(e.target.value)}
+                rows={6}
+                placeholder="통관경비서 내용을 그대로 붙여넣으세요"
+                className={`${inputCls} mt-2`}
+              />
+            )}
+          </div>
+
+          <p className="text-xs text-gray-500">
+            ※ 통관경비서 PDF와 붙여넣은 텍스트를 둘 다 넣으면 붙여넣은 텍스트를 우선합니다.
+          </p>
+
+          <button
+            type="button"
+            onClick={handleLoad}
+            disabled={!canSubmit || loading}
+            className="px-3 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+          >
+            {loading && (
+              <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            )}
+            {loading ? "불러오는 중…" : "불러오기"}
+          </button>
+
+          {err && <div className="p-3 bg-red-50 text-red-700 rounded-md text-sm">{err}</div>}
+
+          {result && (
+            <div className="space-y-2">
+              <div className="text-sm text-gray-700 bg-blue-50 border border-blue-200 rounded-md px-3 py-2">
+                인보이스 {result.invoice_lines.length}건 · 패킹 {result.packing_lines.length}건 ·
+                비용 {result.cost_lines.length}건을 불러왔습니다.
+              </div>
+              {result.errors.length > 0 && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-md text-sm">
+                  <p className="font-medium mb-1">오류</p>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    {result.errors.map((m, i) => (
+                      <li key={i}>{m}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {result.warnings.length > 0 && (
+                <div className="p-3 bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-md text-sm">
+                  <p className="font-medium mb-1">경고</p>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    {result.warnings.map((m, i) => (
+                      <li key={i}>{m}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                ⚠ 구분(판매 SKU/부자재)은 자동으로 정하지 않습니다 — 아래 인보이스 라인 표에서
+                직접 지정하세요.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ShipmentFormView({
   id,
   onDone,
@@ -1089,6 +1229,70 @@ function ShipmentFormView({
     }
   }
 
+  // ★키가 있는 것만 채운다 — 없는 키는 기존 값을 지우지 않는다(파싱이 못 읽은 필드는 그대로 둔다).
+  // ★라인 3종은 응답이 비어 있지 않을 때만 통째로 교체한다(파싱 실패 시 기존 입력을 지우지 않는다).
+  function applyParseResult(result: ImportParseResult) {
+    const h = result.header;
+    if (h.hbl_no !== undefined) setHblNo(h.hbl_no);
+    if (h.currency !== undefined) setCurrency(h.currency);
+    if (h.fx_rate !== undefined) setFxRate(h.fx_rate);
+    if (h.declaration_no !== undefined) setDeclarationNo(h.declaration_no);
+    if (h.declaration_date !== undefined) setDeclarationDate(h.declaration_date);
+    if (h.eta !== undefined) setEta(h.eta);
+    if (h.shipper_name !== undefined) setShipperName(h.shipper_name);
+    if (h.invoice_no !== undefined) setInvoiceNo(h.invoice_no);
+    if (h.vessel !== undefined) setVessel(h.vessel);
+    if (h.declared_inv_value !== undefined) setDeclaredInvValue(h.declared_inv_value);
+    if (h.customs_value_krw !== undefined) setCustomsValueKrw(h.customs_value_krw);
+    if (h.carton_count !== undefined) setCartonCount(String(h.carton_count));
+    if (h.gross_weight_kg !== undefined) setGrossWeightKg(h.gross_weight_kg);
+    if (h.cbm !== undefined) setCbm(h.cbm);
+
+    if (result.invoice_lines.length > 0) {
+      setInvoiceLines(
+        result.invoice_lines.map((l): ImportInvoiceLine => ({
+          seq: l.seq,
+          item_name: l.item_name,
+          quantity: l.quantity,
+          unit_price_foreign: l.unit_price_foreign,
+          line_type: l.line_type,
+          order_no: l.order_no ?? "",
+          internal_sku: l.internal_sku ?? "",
+          gross_weight_kg: l.gross_weight_kg ?? "",
+          cbm: l.cbm ?? "",
+        })),
+      );
+    }
+    if (result.packing_lines.length > 0) {
+      setPackingLines(
+        result.packing_lines.map((l): ImportPackingLine => ({
+          seq: l.seq,
+          item_name: l.item_name,
+          quantity: l.quantity,
+          carton_range: l.carton_range ?? "",
+          qty_per_carton: l.qty_per_carton ?? "",
+          carton_count: l.carton_count ?? "",
+          gross_weight_kg: l.gross_weight_kg ?? "",
+          measure: l.measure ?? "",
+          cbm: l.cbm ?? "",
+          remark: l.remark ?? "",
+        })),
+      );
+    }
+    if (result.cost_lines.length > 0) {
+      setCostLines(
+        result.cost_lines.map((l): ImportCostLine => ({
+          seq: l.seq,
+          item_name: l.item_name,
+          supply_amount: l.supply_amount,
+          tax_amount: l.tax_amount,
+          is_costing: l.is_costing,
+          note: l.note ?? "",
+        })),
+      );
+    }
+  }
+
   if (loading) return <div className="text-center text-gray-400 py-12">로딩 중…</div>;
 
   return (
@@ -1114,6 +1318,8 @@ function ShipmentFormView({
       </div>
 
       {err && <div className="mb-3 p-3 bg-red-50 text-red-700 rounded-md text-sm">{err}</div>}
+
+      <DocumentUploadPanel onApply={applyParseResult} />
 
       <div className="bg-white rounded-lg border mb-4 p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
         <Field label="HBL No *">

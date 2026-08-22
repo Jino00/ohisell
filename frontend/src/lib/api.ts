@@ -4821,6 +4821,91 @@ export function importDocumentDownloadUrl(shipmentId: number, docId: number): st
   return downloadUrl(`/api/import-cost/shipments/${shipmentId}/documents/${docId}`);
 }
 
+// ── 서류 파싱(POST /api/import-cost/parse) — 폼 초안 생성용, 저장하지 않는다 ──
+// ★header는 전부 optional — 못 읽은 키는 응답에 아예 없다(0으로 채우지 않는다).
+// ★금액·수량은 전부 문자열(Decimal 정밀도) — carton_count만 number.
+export interface ImportParseHeader {
+  hbl_no?: string;
+  declaration_no?: string;
+  declaration_date?: string;
+  eta?: string;
+  shipper_name?: string;
+  vessel?: string;
+  invoice_no?: string;
+  currency?: string;
+  fx_rate?: string;
+  declared_inv_value?: string;
+  customs_value_krw?: string;
+  carton_count?: number;
+  gross_weight_kg?: string;
+  cbm?: string;
+}
+
+export interface ImportParseInvoiceLine {
+  seq: number;
+  item_name: string;
+  quantity: string;
+  unit_price_foreign: string;
+  order_no: string | null;
+  line_type: "unknown";
+  internal_sku: null;
+  gross_weight_kg: string | null;
+  cbm: string | null;
+}
+
+export interface ImportParsePackingLine {
+  seq: number;
+  carton_range: string | null;
+  item_name: string;
+  quantity: string;
+  qty_per_carton: string | null;
+  carton_count: string | null;
+  gross_weight_kg: string | null;
+  measure: string | null;
+  cbm: string | null;
+  remark: string | null;
+}
+
+export interface ImportParseCostLine {
+  seq: number;
+  item_name: string;
+  supply_amount: string;
+  tax_amount: string;
+  is_costing: boolean;
+  note: string | null;
+}
+
+export interface ImportParseResult {
+  header: ImportParseHeader;
+  invoice_lines: ImportParseInvoiceLine[];
+  packing_lines: ImportParsePackingLine[];
+  cost_lines: ImportParseCostLine[];
+  errors: string[];
+  warnings: string[];
+}
+
+// 셋 중 최소 하나는 있어야 한다(없으면 백엔드가 400) — 버튼 비활성화는 호출부 책임.
+// ★expenseText가 있으면(사람이 직접 붙여넣은 것) expenseFile과 함께 보내도 서버가 텍스트를 우선한다.
+export function parseImportDocuments(args: {
+  ciPlFile?: File | null;
+  expenseFile?: File | null;
+  expenseText?: string;
+}): Promise<ImportParseResult> {
+  const form = new FormData();
+  if (args.ciPlFile) form.append("ci_pl_file", args.ciPlFile);
+  if (args.expenseFile) form.append("expense_file", args.expenseFile);
+  if (args.expenseText) form.append("expense_text", args.expenseText);
+  return fetch(`${API_BASE}/api/import-cost/parse`, { method: "POST", body: form }).then(
+    async (res) => {
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`파싱 실패 ${res.status}: ${detail}`);
+      }
+      return res.json();
+    },
+  );
+}
+
 export function deleteImportDocument(
   shipmentId: number,
   docId: number,

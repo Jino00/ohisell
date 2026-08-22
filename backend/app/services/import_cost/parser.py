@@ -3,25 +3,22 @@
 이 모듈은 **DB도 IO도 FastAPI도 모른다.** 입력은 bytes/str, 출력은 값 객체다.
 정본은 사람이 확인한 폼 데이터고 파싱은 채워주기 편의일 뿐이다.
 
-⚠️ **이 모듈은 아직 «미배선»이다 — 어떤 라우터·프론트·테스트도 임포트하지 않는다**
-(적대 리뷰 P2-2, 2026-08-22 실측: `grep -rn "import_cost.parser\|from .parser" ` 0건).
-초판 docstring은 *"라우터가 `CustomsDocParseError`를 잡아 빈 폼을 연다"*고 적었는데
-**그런 라우터 코드는 없다** — 사실이 아닌 배선을 주장하는 문서였다.
-현재 계약 B(`docs/PLAN_import-cost-ledger.md`)의 화면은 **수기 폼만** 지원하고, 업로드는
-원본 보관용이다. 이 파서를 붙이는 것은 다음 슬라이스이며, 그때 배선과 함께 테스트를 붙인다.
-그전까지 이 파일은 «검증된 로직이 대기 중»이지 «도는 코드»가 아니다.
+배선: `POST /api/import-cost/parse`(`routers/import_cost.py`)가 이 모듈을 부른다.
+파싱 결과는 **저장되지 않는다** — 화면의 폼을 채워줄 뿐이고, 사람이 확인해 저장한다.
 
-## .xls(BIFF8)가 아니라 .xlsx만 읽는 이유 (§3 판단)
-이 환경엔 `xlrd`가 없고(설치 금지 — 실측: `python3 -c "import xlrd"` → ModuleNotFoundError),
-`openpyxl`은 .xls를 못 읽는다. BIFF8을 직접 파싱하려면 ①OLE2 복합문서(CFB) 컨테이너에서
-`Workbook` 스트림을 꺼내는 층(FAT/미니FAT 체인 추적)과 ②BIFF 레코드 스트림에서 SST(공유
-문자열, CONTINUE 레코드로 8,224바이트 넘게 이어지는 경우 포함)·RK·MULRK·NUMBER·FORMULA
-캐시값을 복원하는 층이 각각 따로 필요하다 — 이 둘을 최소로 짜도 250~350줄 규모가 되어
-계약이 정한 200줄 상한을 넘긴다(150줄 넘으면 xlsx 전용으로 강등하라는 지시에 해당).
-그래서 **업로드 경로를 xlsx로 강제**한다 — 사람이 엑셀에서 "다른 이름으로 저장 → xlsx"
-한 번이면 되고, 파일을 안 읽는 것보다 훨씬 싸다. 시트명(`CI`/`PL`)은 원본과 동일하다고
-가정한다(엑셀이 .xls→.xlsx 변환 시 시트명을 보존하는 것은 실측으로 확인했다 — 2026-08-22,
-`Microsoft Excel.app`로 8/17 선적분 실파일 변환).
+## .xls와 PDF는 «선택 의존성»으로 읽는다
+- `.xlsx` → `openpyxl` (이미 requirements에 있다)
+- `.xls`(BIFF8) → **`xlrd`**  · `.pdf` → **`pypdf`** — 둘 다 `requirements.txt`에 넣었지만
+  **prod에 아직 설치돼 있지 않을 수 있다**(`scripts/safe_deploy.sh`에 pip 단계가 없다).
+  그래서 함수 안에서 임포트하고, 없으면 «무엇을 하면 되는지»를 말하는 예외를 던진다.
+  **앱이 부팅에 실패하거나 다른 기능이 죽지 않는다** — 이 모듈이 선택 경로인 이유다.
+
+★BIFF8을 직접 구현하지 않은 이유: OLE2(CFB) 컨테이너 층 + BIFF 레코드(SST·RK·MULRK·NUMBER·
+FORMULA) 복원 층을 최소로 짜도 250~350줄이다. 검증된 오픈소스(`xlrd` 2.0.1, BSD, .xls 전용)가
+있으면 직접 구현보다 먼저 쓴다는 것이 우리 금지선이다.
+
+★**OCR은 하지 않는다.** 스캔 PDF는 「글자가 없다」고 말하고 수기 경로로 보낸다 —
+읽을 수 없는 것에서 숫자를 지어내는 것이 이 도메인에서 가장 나쁜 실패다.
 """
 
 from __future__ import annotations
@@ -162,17 +159,103 @@ def _excel_date(value: Any) -> date | None:
     return (_EXCEL_EPOCH + timedelta(days=serial)).date()
 
 
+class _Cell:
+    """openpyxl 셀의 `.value` 하나만 흉내낸다."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+class _XlsSheet:
+    """xlrd 시트를 openpyxl의 `ws.cell(row=, column=).value`처럼 보이게 하는 어댑터.
+
+    파서 본문이 쓰는 워크시트 API가 **그 하나뿐**이라(실측: `grep "ws\\."` 전건) 어댑터가
+    이 정도면 충분하다. 파싱 로직을 포맷별로 두 벌 만들지 않는 것이 목적이다 —
+    사본 두 벌은 한쪽만 고쳐지는 형태다.
+
+    ★행·열은 openpyxl과 같은 **1-기반**이고 xlrd는 0-기반이라 여기서 흡수한다.
+    ★범위를 벗어난 셀은 예외가 아니라 `None`이다 — openpyxl이 그렇게 동작하고,
+      파서가 「빈 행이면 계속」으로 총계 행을 찾아가므로 예외를 던지면 그 탐색이 깨진다.
+    """
+
+    def __init__(self, sheet: Any) -> None:
+        self._s = sheet
+
+    def cell(self, row: int, column: int) -> _Cell:
+        if row < 1 or column < 1 or row > self._s.nrows or column > self._s.ncols:
+            return _Cell(None)
+        v = self._s.cell_value(row - 1, column - 1)
+        # xlrd는 빈 셀을 ''로 준다. openpyxl은 None이라 그쪽에 맞춘다 —
+        # 파서가 `is None`으로 빈 행을 판정하기 때문이다.
+        return _Cell(None if v == "" else v)
+
+
 def _load_sheet(data: bytes, sheet_name: str):
+    """.xlsx면 openpyxl, .xls(BIFF8)면 xlrd로 연다.
+
+    ★`xlrd`는 **선택 의존성**이다(`requirements.txt`에 있지만 prod에 아직 설치 안 됐을 수 있다 —
+    `safe_deploy.sh`에 pip 단계가 없다). 없으면 «조용히 실패»하지 않고 **무엇을 하면 되는지**를
+    말한다: 이 앱의 정본은 사람이 확인한 폼 데이터라, 파서가 못 읽어도 수기 입력 경로가 살아 있다.
+    """
+    head = data[:8]
+    is_xls = head.startswith(b"\xd0\xcf\x11\xe0")  # OLE2 복합문서 매직
+
+    if is_xls:
+        try:
+            import xlrd  # noqa: PLC0415 — 선택 의존성이라 함수 안에서 임포트한다
+        except ImportError as exc:
+            raise CustomsDocParseError(
+                ".xls(구형 엑셀) 파일인데 서버에 `xlrd`가 설치돼 있지 않다. "
+                "엑셀에서 '다른 이름으로 저장 → .xlsx'로 변환해 올리거나, 수기로 입력하면 된다."
+            ) from exc
+        try:
+            wb = xlrd.open_workbook(file_contents=data)
+        except Exception as exc:
+            raise CustomsDocParseError(f".xls를 열지 못했다({exc}).") from exc
+        if sheet_name not in wb.sheet_names():
+            raise CustomsDocParseError(
+                f"시트 '{sheet_name}'이 없다 — 워크북 시트: {wb.sheet_names()}"
+            )
+        return _XlsSheet(wb.sheet_by_name(sheet_name))
+
     try:
         wb = load_workbook(BytesIO(data), data_only=True)
     except Exception as exc:  # openpyxl이 던지는 예외 종류가 다양해 포괄한다
         raise CustomsDocParseError(
-            f"유효한 .xlsx가 아니다({exc}). .xls(BIFF8)는 이 파서가 못 읽는다 — "
-            "업로드 전 엑셀에서 '다른 이름으로 저장 → xlsx(Excel 통합 문서)'로 변환해야 한다."
+            f"유효한 엑셀 파일이 아니다({exc}). .xlsx 또는 .xls를 올려야 한다."
         ) from exc
     if sheet_name not in wb.sheetnames:
         raise CustomsDocParseError(f"시트 '{sheet_name}'이 없다 — 워크북 시트: {wb.sheetnames}")
     return wb[sheet_name]
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """통관경비서 PDF에서 텍스트를 뽑는다. 실패하면 «수기 경로»를 안내한다.
+
+    ★`pypdf`도 선택 의존성이다(위 `xlrd`와 같은 이유).
+    ★**스캔 PDF는 못 읽는다** — 텍스트 레이어가 없으면 빈 문자열이 나오고, 그때는
+      「글자가 없다」고 말한다. OCR을 붙이지 않는다(계약 범위 밖이고, 틀린 숫자를 지어낼 위험이 크다).
+    """
+    try:
+        import pypdf  # noqa: PLC0415 — 선택 의존성
+    except ImportError as exc:
+        raise CustomsDocParseError(
+            "서버에 `pypdf`가 설치돼 있지 않아 PDF를 읽을 수 없다. "
+            "경비서 내용을 수기로 입력하거나 텍스트를 붙여넣으면 된다."
+        ) from exc
+    try:
+        reader = pypdf.PdfReader(BytesIO(data))
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    except Exception as exc:
+        raise CustomsDocParseError(f"PDF를 읽지 못했다({exc}).") from exc
+    if not text.strip():
+        raise CustomsDocParseError(
+            "PDF에서 글자를 찾지 못했다 — 스캔 이미지 PDF로 보인다. "
+            "이 경우 수기 입력이나 텍스트 붙여넣기를 써야 한다(OCR은 지원하지 않는다)."
+        )
+    return text
 
 
 # ──────────────────────────────────────────────
@@ -377,6 +460,116 @@ def _grab_decimal(text: str, pattern: str) -> Decimal | None:
     return _to_decimal(s) if s is not None else None
 
 
+_NUM_RE = re.compile(r"^-?[\d,]+(?:\.\d+)?$")
+_SUBTOTAL_RE = re.compile(r"subtotal|소계|합계", re.IGNORECASE)
+
+
+def _compact(s: str) -> str:
+    return re.sub(r"\s+", "", s)
+
+
+def _near(tokens: list[str], label: str, offset: int, join_back: int = 1) -> str | None:
+    """라벨 줄을 찾아 그 **앞/뒤 offset**번째 토큰을 준다.
+
+    PDF 표는 추출기가 셀 단위로 뱉어서 「값 → 라벨」 순서가 되는 경우가 흔하다
+    (실측: pypdf가 이 서류를 `209.88 / 환율` 순으로 낸다). 정규식 한 벌로는 두 순서를 다 못 잡아
+    라벨 기준 상대 위치로 집는다.
+    `join_back>1`이면 여러 줄로 쪼개진 값(예: 회사명 2줄)을 공백으로 이어 붙인다.
+    """
+    key = _compact(label)
+    for i, t in enumerate(tokens):
+        if _compact(t).startswith(key):
+            parts = []
+            for k in range(join_back):
+                j = i + offset - (k if offset < 0 else -k)
+                if 0 <= j < len(tokens):
+                    parts.append(tokens[j])
+            parts.reverse() if offset < 0 else None
+            val = " ".join(p for p in parts if p).strip()
+            return val or None
+    return None
+
+
+def _as_date(s: str | None) -> date | None:
+    if not s:
+        return None
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
+    return date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def _extract_cost_rows(
+    tokens: list[str], text: str
+) -> tuple[list[CostLine], tuple[Decimal, Decimal] | None]:
+    """비용 표를 뽑는다. **행마다 «이름 1 + 숫자 2»**라는 성질만 쓴다.
+
+    왜 순서를 안 믿는가: 같은 PDF 안에서도 추출 순서가 뒤섞인다 — 실측(2026-08-22, pypdf 6.16.1)에서
+    앞 7행은 `금액 → 이름 → 세액`이고 관세·부가세·통관수수료 3행은 `이름 → 금액 → 세액`이었다.
+    그래서 「1 TEXT + 2 NUM이 모이면 한 행」으로만 묶고, 숫자는 **나온 순서대로** (공급가액, 세액)로 읽는다.
+
+    소계·합계 행은 데이터가 아니라 **검산 기준**으로 따로 뽑아 돌려준다.
+    """
+    # 시작 지점: 신고번호 값 뒤부터가 비용 표다. 앞쪽엔 환율·과세금액 같은 헤더 숫자가 섞여 있어
+    # 그대로 묶으면 가짜 행이 생긴다. 앵커를 못 찾으면 전체를 훑되 헤더 라벨은 이름 후보에서 뺀다.
+    start = 0
+    for i, t in enumerate(tokens):
+        if _compact(t).startswith("신고번호"):
+            start = i + 1
+            break
+
+    _HEADER_LABELS = (
+        "환율", "신고금액", "과세금액", "면허일자", "신고일자", "신고번호", "비고", "예상세액",
+        "예상공급가액", "내역", "송금계좌번호", "예금주", "처리일자", "가입금액", "잔액",
+    )
+
+    rows: list[CostLine] = []
+    subtotal: tuple[Decimal, Decimal] | None = None
+    name: str | None = None
+    nums: list[Decimal] = []
+
+    def _flush() -> None:
+        nonlocal name, nums, subtotal
+        if name is None or len(nums) < 2:
+            name, nums = None, []
+            return
+        supply, tax = nums[0], nums[1]
+        if _SUBTOTAL_RE.search(_compact(name)):
+            # 「소 계」가 전체 소계다. 「B/L Sub Total」은 부분 소계라 검산 기준이 아니다.
+            if "소계" in _compact(name):
+                subtotal = (supply, tax)
+        else:
+            rows.append(
+                CostLine(
+                    item_name=name,
+                    supply_amount=supply,
+                    tax_amount=tax,
+                    # ★이름 매칭 하나에 의존한다(docstring 참조). 「부가세」로 시작하면 배부 제외.
+                    is_costing=not _compact(name).startswith("부가세"),
+                )
+            )
+        name, nums = None, []
+
+    for t in tokens[start:]:
+        c = _compact(t)
+        if _NUM_RE.match(c):
+            nums.append(_to_decimal(t) or _ZERO)
+        else:
+            if any(c.startswith(h) for h in _HEADER_LABELS):
+                continue  # 헤더 라벨은 비용 항목이 아니다
+            if name is not None:
+                _flush()  # 이름이 연달아 나오면 앞 행은 숫자가 모자란 것 — 버린다
+            name = t
+        if name is not None and len(nums) >= 2:
+            _flush()
+            if subtotal is not None:
+                # ★「소 계」를 만나면 표는 끝이다. 그 뒤는 송금계좌·잔액 구역인데, 거기에도
+                #   「이름 + 숫자 2」 꼴이 있어(실측: `기업은행 : 476-… / -1,184,350 / 1,184,350`)
+                #   계속 읽으면 가짜 비용 행이 생긴다.
+                break
+    _flush()
+
+    return rows, subtotal
+
+
 def parse_customs_expense(text: str) -> ExpenseParseResult:
     """통관경비서에서 **이미 추출된 텍스트**를 파싱한다. PDF 추출 자체는 라우터가 한다.
 
@@ -386,43 +579,109 @@ def parse_customs_expense(text: str) -> ExpenseParseResult:
     ★소계/합계(`Sub Total`·`소계`·`합계`, 공백이 끼워진 'B/L Sub Total' 류 포함)는 반드시
     제외한다 — 넣으면 통관비가 이중 계상된다.
     """
-    hbl_no = _grab(text, r"HBL\s*NO\s+(\S+)")
-    declaration_no = _grab(text, r"신고번호\s+(\S+)")
-    declaration_date = _grab_date(text, r"신고일자\s+(\d{4}-\d{2}-\d{2})")
-    eta = _grab_date(text, r"ETA\s+(\d{4}-\d{2}-\d{2})")
-    shipper_name = _grab(text, r"Shipper\s*NM\s+(.+?)\s*(?:·|\n|$)")
-    vessel = _grab(text, r"선명\s*/\s*항차\s+(.+?)\s*(?:·|\n|$)")
-    fx_rate = _grab_decimal(text, r"환율\s+([\d.]+)")
-    customs_value_krw = _grab_decimal(text, r"과세금액\s*\(\s*₩\s*\)\s*([\d,]+)")
-    gross_weight_kg = _grab_decimal(text, r"Gross\s+W\s*/\s*T\s+([\d.]+)")
+    tokens = [t.strip() for t in text.splitlines() if t.strip()]
 
-    carton_m = re.search(r"수량\s+(\d+)\s*CARTONS\s*/\s*([\d.]+)", text, re.IGNORECASE)
+    # ★후보를 여러 경로로 만들고 **모양이 맞는 것**을 고른다.
+    #   정규식 하나만 믿으면 안 되는 이유(실측): 이 PDF는 라벨과 값이 줄바꿈으로 갈리고 순서도
+    #   뒤섞여서, `환율\s+([\d.]+)`가 「환율\n3,434」에 걸려 **3**을 잡았다. 값이 «있는데 틀린 것»이
+    #   «없는 것»보다 나쁘다 — 그래서 형태 검증을 통과한 후보만 채택한다.
+    def _pick(validator, *candidates):
+        for c in candidates:
+            if c is None:
+                continue
+            v = validator(c)
+            if v is not None:
+                return v
+        return None
+
+    def _v_code(s: str) -> str | None:
+        s = s.strip()
+        return s if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{5,}", s) else None
+
+    def _v_decl_no(s: str) -> str | None:
+        s = s.strip()
+        return s if re.fullmatch(r"\d{3,}-\d{2}-\w+", s) else None
+
+    def _v_pos_dec(s: str):
+        d = _to_decimal(s)
+        return d if d is not None and d > _ZERO else None
+
+    def _v_text(s: str) -> str | None:
+        s = " ".join(s.split())
+        if not s or _NUM_RE.match(_compact(s)) or re.search(r"\d{4}-\d{2}-\d{2}", s):
+            return None
+        if len(_compact(s)) < 4 or not re.search(r"[A-Za-z가-힣]", s):
+            return None
+        # 라벨이 값 자리로 새어 들어온 경우를 거른다
+        if any(_compact(s).startswith(h) for h in ("비고", "예상", "내역", "담당자", "수신")):
+            return None
+        return s
+
+    hbl_no = _pick(_v_code, _near(tokens, "HBL NO", -1), _grab(text, r"HBL\s*NO\s*:?\s*(\S+)"))
+    declaration_no = _pick(
+        _v_decl_no, _near(tokens, "신고번호", -1), _grab(text, r"신고번호\s+(\S+)")
+    )
+    declaration_date = _as_date(
+        _near(tokens, "신고일자", -1) or _grab(text, r"신고일자\s+(\d{4}-\d{2}-\d{2})")
+    )
+    eta = _as_date(_near(tokens, "ETA", -1) or _grab(text, r"ETA\s+(\d{4}-\d{2}-\d{2})"))
+    shipper_name = _pick(
+        _v_text,
+        _near(tokens, "Shipper NM", -1, join_back=2),
+        _grab(text, r"Shipper\s*NM\s+(.+?)\s*(?:·|\n|$)"),
+    )
+    vessel = _pick(
+        _v_text,
+        _near(tokens, "선명/항차", -1, join_back=2),
+        _grab(text, r"선명\s*/\s*항차\s+(.+?)\s*(?:·|\n|$)"),
+    )
+    fx_rate = _pick(_v_pos_dec, _near(tokens, "환율", -1), _grab(text, r"환율\s+([\d,.]+)"))
+    customs_value_krw = _pick(
+        _v_pos_dec,
+        _near(tokens, "과세금액", -1),
+        _grab(text, r"과세금액\s*\(\s*₩\s*\)\s*([\d,]+)"),
+    )
+    gross_weight_kg = _pick(
+        _v_pos_dec, _near(tokens, "Gross W/T", -1), _grab(text, r"Gross\s+W\s*/\s*T\s+([\d.]+)")
+    )
+
+    carton_m = re.search(r"(\d+)\s*CARTONS\s*/\s*([\d.]+)", text, re.IGNORECASE)
     carton_count = int(carton_m.group(1)) if carton_m else None
     cbm = _to_decimal(carton_m.group(2)) if carton_m else None
 
     inv_m = re.search(r"INV\s*Value\s+([A-Z]{3})\s+([\d,.]+)", text)
-    currency = inv_m.group(1) if inv_m else None
-    declared_inv_value = _to_decimal(inv_m.group(2)) if inv_m else None
+    if inv_m:
+        currency = inv_m.group(1)
+        declared_inv_value = _to_decimal(inv_m.group(2))
+    else:
+        # pypdf가 표를 셀 단위로 뱉으면 순서가 「23,100.00 / CNY / INV Value」로 뒤집힌다.
+        currency = _near(tokens, "INV Value", -1)
+        declared_inv_value = _to_decimal(_near(tokens, "INV Value", -2))
+        if currency and not re.fullmatch(r"[A-Z]{3}", currency):
+            currency = None
 
-    cost_lines: list[CostLine] = []
-    for raw_line in text.splitlines():
-        m = _COST_LINE_RE.match(raw_line.strip())
-        if not m:
-            continue
-        name = m.group(1).strip()
-        compact = re.sub(r"\s+", "", name)
-        if "subtotal" in compact.lower() or "소계" in compact or "합계" in compact:
-            continue  # 소계·합계 행 — 데이터가 아니다
-        supply = _to_decimal(m.group(2)) or _ZERO
-        tax = _to_decimal(m.group(3)) or _ZERO
-        is_costing = not compact.startswith("부가세")
-        cost_lines.append(CostLine(item_name=name, supply_amount=supply, tax_amount=tax, is_costing=is_costing))
+    cost_lines, subtotal = _extract_cost_rows(tokens, text)
 
     if not cost_lines:
         raise CustomsDocParseError(
             "통관경비서 텍스트에서 비용 라인을 하나도 못 찾음 — "
             "'항목 금액 / 세액' 꼴의 줄이 있는지, 소계·합계만 있던 건 아닌지 확인해야 한다."
         )
+
+    # ★자기검산 — 뽑은 라인의 합이 서류의 «소계»와 같아야 한다.
+    #   이게 없으면 표 순서가 조금만 달라져도 **틀린 금액이 조용히** 폼에 채워진다.
+    #   맞으면 「행을 빠뜨리지도 중복하지도 않았다」가 증명되고, 틀리면 사람에게 넘긴다.
+    if subtotal is not None:
+        got_supply = sum((c.supply_amount for c in cost_lines), _ZERO)
+        got_tax = sum((c.tax_amount for c in cost_lines), _ZERO)
+        want_supply, want_tax = subtotal
+        if got_supply != want_supply or got_tax != want_tax:
+            raise CustomsDocParseError(
+                "통관경비서 자기검산 불일치 — 뽑은 비용 라인의 합이 서류의 소계와 다르다. "
+                f"공급가액 {got_supply} vs 소계 {want_supply} · "
+                f"세액 {got_tax} vs 소계 {want_tax}. "
+                "표 구조가 예상과 달라 라인을 빠뜨렸거나 중복했을 수 있다 — 수기로 확인해야 한다."
+            )
 
     return ExpenseParseResult(
         cost_lines=cost_lines,

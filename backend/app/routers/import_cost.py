@@ -18,7 +18,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, selectinload
@@ -319,6 +319,173 @@ def download_document(shipment_id: int, document_id: int, db: Session = Depends(
         io.BytesIO(doc.content),
         media_type=doc.content_type or "application/octet-stream",
         headers={"Content-Disposition": disposition},
+    )
+
+
+# ── 서류 파싱 (계약 §2-4: 파싱은 «채워주기 편의», 정본은 사람이 확인한 폼) ──
+def _parse_payload_from_files(
+    ci_pl: bytes | None, expense_pdf: bytes | None, expense_text: str | None
+) -> dict:
+    """서류 → 폼 초안. **저장하지 않는다.**
+
+    각 서류는 **독립적으로** 처리한다 — 하나가 깨져도 나머지가 채워져야 한다.
+    실패는 삼키지 않고 `errors[]`에 «어느 서류에서 무엇을 못 읽었는지»로 남긴다
+    (조용한 실패가 이 저장소의 반복 사고다 — 교훈 #319·#321).
+    """
+    from app.services.import_cost import parser as P
+
+    out: dict = {
+        "header": {},
+        "invoice_lines": [],
+        "packing_lines": [],
+        "cost_lines": [],
+        "errors": [],
+        "warnings": [],
+    }
+
+    if ci_pl is not None:
+        try:
+            ci = P.parse_commercial_invoice(ci_pl)
+            out["invoice_lines"] = [
+                {
+                    "seq": ln.seq,
+                    "item_name": ln.item_name,
+                    "quantity": str(ln.quantity),
+                    "unit_price_foreign": str(ln.unit_price_foreign),
+                    "order_no": ci.order_nos[i] if i < len(ci.order_nos) else None,
+                    # ★분류는 «미분류»로 둔다 — 판매 SKU인지 부자재인지는 사람이 정한다.
+                    #   자동으로 product를 찍으면 cleaning kits 같은 부자재가 조용히 상품이 된다.
+                    "line_type": "unknown",
+                    "internal_sku": None,
+                    "gross_weight_kg": None,
+                    "cbm": None,
+                }
+                for i, ln in enumerate(ci.lines)
+            ]
+            if ci.invoice_no:
+                out["header"]["invoice_no"] = ci.invoice_no
+            if ci.declared_total is not None:
+                out["header"]["declared_inv_value"] = str(ci.declared_total)
+            for m in ci.line_total_mismatches:
+                out["warnings"].append(f"CI 라인 검산 불일치: {m}")
+        except Exception as exc:
+            out["errors"].append(f"Commercial Invoice: {exc}")
+
+        try:
+            pl = P.parse_packing_list(ci_pl)
+            spread = P.distribute_box_metrics(pl.lines)
+            out["packing_lines"] = [
+                {
+                    "seq": ln.seq,
+                    "carton_range": ln.carton_range,
+                    "item_name": ln.item_name,
+                    "quantity": str(ln.quantity),
+                    "qty_per_carton": None if ln.qty_per_carton is None else str(ln.qty_per_carton),
+                    "carton_count": None if ln.carton_count is None else str(ln.carton_count),
+                    "gross_weight_kg": (
+                        None if ln.gross_weight_kg is None else str(ln.gross_weight_kg)
+                    ),
+                    "measure": ln.measure,
+                    "cbm": None if ln.cbm is None else str(ln.cbm),
+                    "remark": ln.remark,
+                }
+                for ln in pl.lines
+            ]
+            if pl.total_cartons is not None:
+                out["header"]["carton_count"] = int(pl.total_cartons)
+            if pl.total_gross_weight_kg is not None:
+                out["header"]["gross_weight_kg"] = str(pl.total_gross_weight_kg)
+            if pl.total_cbm is not None:
+                out["header"]["cbm"] = str(pl.total_cbm)
+            # PL의 배분된 중량·부피를 인보이스 라인에 품목명으로 얹는다 — weight/volume
+            # 배부기준의 원료다. 이름이 안 맞으면 **채우지 않는다**(억지 매칭 금지).
+            by_item: dict[str, dict] = {}
+            for ln in spread:
+                key = " ".join(ln.item_name.split()).casefold()
+                acc = by_item.setdefault(key, {"w": Decimal("0"), "c": Decimal("0")})
+                acc["w"] += ln.gross_weight_kg or Decimal("0")
+                acc["c"] += ln.cbm or Decimal("0")
+            for row in out["invoice_lines"]:
+                hit = by_item.get(" ".join(row["item_name"].split()).casefold())
+                if hit:
+                    row["gross_weight_kg"] = str(hit["w"])
+                    row["cbm"] = str(hit["c"])
+        except Exception as exc:
+            out["errors"].append(f"Packing List: {exc}")
+
+    text = expense_text
+    if text is None and expense_pdf is not None:
+        try:
+            text = P.extract_pdf_text(expense_pdf)
+        except Exception as exc:
+            out["errors"].append(f"통관경비서 PDF: {exc}")
+    if text:
+        try:
+            ex = P.parse_customs_expense(text)
+            out["cost_lines"] = [
+                {
+                    "seq": i + 1,
+                    "item_name": c.item_name,
+                    "supply_amount": str(c.supply_amount),
+                    "tax_amount": str(c.tax_amount),
+                    "is_costing": c.is_costing,
+                    "note": None,
+                }
+                for i, c in enumerate(ex.cost_lines)
+            ]
+            for field_name in (
+                "hbl_no", "declaration_no", "shipper_name", "vessel", "currency",
+            ):
+                v = getattr(ex, field_name, None)
+                if v:
+                    out["header"][field_name] = v
+            for field_name in ("declaration_date", "eta"):
+                v = getattr(ex, field_name, None)
+                if v:
+                    out["header"][field_name] = v.isoformat()
+            for field_name in (
+                "fx_rate", "declared_inv_value", "customs_value_krw", "gross_weight_kg", "cbm",
+            ):
+                v = getattr(ex, field_name, None)
+                if v is not None:
+                    out["header"][field_name] = str(v)
+            if ex.carton_count is not None:
+                out["header"]["carton_count"] = ex.carton_count
+        except Exception as exc:
+            out["errors"].append(f"통관경비서: {exc}")
+
+    return out
+
+
+@router.post("/parse")
+async def parse_documents(
+    ci_pl_file: UploadFile | None = File(None),
+    expense_file: UploadFile | None = File(None),
+    expense_text: str | None = Form(None),
+):
+    """서류를 올리면 **폼 초안**을 돌려준다. 저장은 하지 않는다.
+
+    - `ci_pl_file` — CI·PL 시트가 든 엑셀(.xls 또는 .xlsx)
+    - `expense_file` — 통관경비서 PDF (텍스트 레이어가 있어야 한다)
+    - `expense_text` — PDF 대신 붙여넣은 텍스트(서버에 pypdf가 없을 때의 우회로)
+
+    ★**부분 성공이 정상이다.** 셋 중 하나만 올려도 되고, 하나가 깨져도 나머지는 채워진다.
+    깨진 것은 `errors[]`에 남고 화면이 그대로 보여준다 — 조용히 빈 폼을 주지 않는다.
+    ★HTTP 상태는 파싱 실패에도 200이다. 「무엇이 왜 안 읽혔나」는 오류가 아니라 이 API의 산출물이다.
+    """
+    if ci_pl_file is None and expense_file is None and not expense_text:
+        raise HTTPException(status_code=400, detail="올린 서류가 없다.")
+
+    async def _read(f: UploadFile | None) -> bytes | None:
+        if f is None:
+            return None
+        data = await f.read()
+        if len(data) > MAX_DOC_BYTES:
+            raise HTTPException(status_code=413, detail=f"파일이 상한을 넘는다: {len(data)} bytes")
+        return data or None
+
+    return _parse_payload_from_files(
+        await _read(ci_pl_file), await _read(expense_file), expense_text
     )
 
 
