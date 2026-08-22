@@ -547,3 +547,38 @@ def test_negative_bep_is_refused_like_the_canonical_verdict_function(db):
     assert row["profit_pairs"] == 0
     assert row["profit_unavailable"] == 1
     assert row["details"][0]["profit_delta"] is None
+
+
+# ── ★적대 리뷰 3R P2 회귀 ───────────────────────────────────────────────────
+def test_profit_buckets_cover_every_row_exactly_once(db):
+    """★3R P2-1: 「판정X·금액X」 행이 어느 버킷에도 안 들어가 조용히 사라졌다.
+    세 버킷의 합이 changes_total과 같아야 «분모가 어디로 갔는지»를 화면이 설명할 수 있다."""
+    ok = _actual_json(before={"clk": 50, "conv_amt": 400_000, "cost": 100_000},
+                      after={"clk": 50, "conv_amt": 600_000, "cost": 100_000}, bep=2.0, cf=1.0)
+    _change(db, cid=90, proposal_id=900, outcome_profit="improved", actual_json=ok)   # 판정O·금액O
+    _change(db, cid=91, proposal_id=900, outcome_profit="declined", actual_json=None) # 판정O·금액X
+    _change(db, cid=92, proposal_id=900, outcome_profit=None, actual_json=ok)         # 판정X·금액O
+    _change(db, cid=93, proposal_id=900, outcome_profit=None, actual_json=None)       # 판정X·금액X
+    _proposal(db, pid=900, change_log_id=90)
+    _wisdom(db, wid=1, proposal_id=900)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["changes_total"] == 4
+    assert row["profit_pairs"] + row["profit_unavailable"] + row["profit_unjudged"] == 4
+    assert row["profit_pairs"] == 1
+    assert row["profit_unavailable"] == 2
+    assert row["profit_unjudged"] == 1
+
+
+def test_unjudged_count_reaches_the_gap_text_when_no_verdict_row_exists(db):
+    """★3R P2-2: 판정 행이 0이면 배지 줄이 안 뜬다 — 그때 보류 «건수»가 사라지면 안 된다."""
+    thin = _actual_json(before={"clk": 2, "conv_amt": 200_000, "cost": 0},
+                        after={"clk": 1, "conv_amt": 100_000, "cost": 0}, bep=2.0, cf=1.0)
+    _change(db, cid=94, proposal_id=901, outcome_profit=None, actual_json=thin)
+    _change(db, cid=95, proposal_id=901, outcome_profit=None, actual_json=thin)
+    _proposal(db, pid=901, change_log_id=94)
+    _wisdom(db, wid=1, proposal_id=901)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["has_evidence"] is False
+    assert "2건은 표본 미달로 판정 보류" in row["evidence_gap"]

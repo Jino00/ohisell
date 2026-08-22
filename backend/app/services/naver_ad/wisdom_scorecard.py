@@ -241,14 +241,17 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
         #   총이익 델타 −2,000,000원(4건)」처럼 **판정과 크기가 서로 반대를 가리킨다** —
         #   P1-1이 고치려던 바로 그 증상이 «지표 불일치»가 아니라 «행 집합 불일치»로 재현된다.
         #   ⇒ 합은 판정된 행만. 보류 행은 버리지 않고 profit_unjudged로 «따로» 센다.
-        if r.outcome_profit is not None:
-            if pb is not None and pa is not None:
-                profit_before_sum += pb
-                profit_after_sum += pa
-                profit_pairs += 1
-            else:
-                profit_unavailable += 1
-        elif pb is not None:
+        # ★버킷 3종은 서로 겹치지 않고 «모든 행»을 덮는다:
+        #   pairs(판정O·금액O) + unavailable(금액X) + unjudged(판정X·금액O) == changes_total.
+        #   3R P2-1이 잡은 것: 초판은 「판정X·금액X」 행이 어느 버킷에도 안 들어가 조용히
+        #   사라졌다. 분모가 어디로 갔는지 화면이 설명하지 못하면 그게 침묵이다.
+        if pb is None or pa is None:
+            profit_unavailable += 1
+        elif r.outcome_profit is not None:
+            profit_before_sum += pb
+            profit_after_sum += pa
+            profit_pairs += 1
+        else:
             profit_unjudged += 1
         if not r.dry_run:
             executed += 1
@@ -285,7 +288,7 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
         "profit_after_sum": round(profit_after_sum, 2) if profit_pairs else None,
         "profit_delta_sum": round(profit_after_sum - profit_before_sum, 2) if profit_pairs else None,
         "profit_pairs": profit_pairs,
-        "profit_unavailable": profit_unavailable,  # 판정은 됐으나 렌즈 부재로 «금액 산출불가»인 행수
+        "profit_unavailable": profit_unavailable,  # 렌즈 부재 등으로 «금액 산출불가»인 행수(판정 여부 무관)
         # ★채점기가 표본 미달로 «판정을 거부한» 행 중 금액은 계산되는 것들. 합에는 안 들어가고
         #   화면에 별도 표시된다 — 조용히 빠지면 분모가 어디로 갔는지 아무도 모른다.
         "profit_unjudged": profit_unjudged,
@@ -323,6 +326,10 @@ def _score_entry(db: Session, entry: OpsWisdomEntry) -> dict:
             gap = f"조치 {rollup['changes_total']}건이 전부 모의(dry_run)라 채점 대상이 아니다."
         else:
             gap = "조치는 있으나 새 식으로 채점된 행이 0건이다(채점 대기 또는 모수 미달)."
+            # ★3R P2-2: 판정 행이 0이면 배지 줄이 통째로 안 뜬다 — 사유는 위 문구가 나르지만
+            #   «몇 건»인지는 사라진다. 건수를 문구에 실어 보낸다.
+            if rollup["profit_unjudged"]:
+                gap += f" 그중 {rollup['profit_unjudged']}건은 표본 미달로 판정 보류다."
 
     return {
         "wisdom_id": entry.id,
