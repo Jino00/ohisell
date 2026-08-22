@@ -99,13 +99,28 @@ const ROW_BASE = {
   details: [],
 };
 
-const card = (row: Record<string, unknown>) => ({
+// 반성 루프 상태(D-NAO-228) — 기본은 «결번이 전부 재료없음»(= L3 정지 중의 정상 상태).
+const REFLECTION_HEALTH = {
+  window: { start: "2026-07-18", end: "2026-08-22", days: 36 },
+  last_success_kst: "2026-08-19",
+  gap_days_since_success: 3,
+  missing_days: 19,
+  counts: { ok: 17, skipped_no_material: 19, failed: 0, unresolved: 0, pending: 0 },
+  headline:
+    "반성 최근 성공 2026-08-19(3일 전) · 창 2026-07-18~2026-08-22 36일 중 결번 19일 = 재료없음 19 / 실패 0 / 미상 0",
+  days: [],
+  evidence_gap: "배선 이전 구간은 DB만으로 실패·미상을 못 가른다.",
+  material_note: "재료 = 실집행 일기의 D-1·D-2·D-8. L3 정지 중에는 반성이 안 도는 것이 정상이다.",
+};
+
+const card = (row: Record<string, unknown>, reflectionHealth: unknown = REFLECTION_HEALTH) => ({
   generated_at_kst: "2026-08-22 18:00:00",
   wisdom_total: 1,
   wisdom_active: 1,
   wisdom_with_evidence: row.has_evidence ? 1 : 0,
   value_definition: VALUE_DEF,
   attribution: ATTRIBUTION,
+  reflection_health: reflectionHealth,
   wisdom: [row],
 });
 
@@ -123,6 +138,65 @@ describe("지혜 성적표 패널 — 사람 눈에 닿는가", () => {
     renderPage();
     expect(await screen.findByText(/아직 잴 것이 없습니다/)).toBeTruthy();
     expect(screen.getByText(/실집행 조치가 0건/)).toBeTruthy();
+  });
+
+  // ── 반성 루프 상태(D-NAO-228 · 계약 PLAN_naver-m5-reflection-visibility.md §5 ⓐ) ──
+  // ★2026-07-18~08-22 결번 19일 동안 스케줄러 로그는 성공·재료없음·LLM 실패를 전부 'ok'로
+  //   적었고 아무도 몰랐다. 여기서 재는 것은 「그 사실이 Jino 눈에 닿는가」다.
+  it("반성 결번 내역이 성적표 위에 한 줄로 뜬다 (침묵이 화면에 보여야 한다)", async () => {
+    h.wisdom = card(ROW_BASE);
+    renderPage();
+    expect(await screen.findByText(/반성 최근 성공 2026-08-19/)).toBeTruthy();
+    expect(screen.getByText(/결번 19일/)).toBeTruthy();
+  });
+
+  it("결번이 전부 «재료 없음»이면 고장으로 그리지 않는다 (L3 정지 중엔 정상이다)", async () => {
+    h.wisdom = card(ROW_BASE);
+    renderPage();
+    expect(await screen.findByText(/결번은 전부 «재료 없음»이다/)).toBeTruthy();
+  });
+
+  it("실패·미상이 있으면 그 숫자를 «그날의 학습이 없다»와 함께 낸다", async () => {
+    h.wisdom = card(ROW_BASE, {
+      ...REFLECTION_HEALTH,
+      counts: { ok: 17, skipped_no_material: 12, failed: 6, unresolved: 1, pending: 0 },
+      headline: "반성 최근 성공 2026-08-19(3일 전) · 결번 19일 = 재료없음 12 / 실패 6 / 미상 1",
+    });
+    renderPage();
+    expect(await screen.findByText(/실패 6일 · 원인미상 1일/)).toBeTruthy();
+    expect(screen.getByText(/그날의 학습이 없다/)).toBeTruthy();
+  });
+
+  it("결번 0일이면 «전부 재료 없음»이라 쓰지 않는다 (거짓 문구 방지)", async () => {
+    h.wisdom = card(ROW_BASE, {
+      ...REFLECTION_HEALTH,
+      missing_days: 0,
+      counts: { ok: 36, skipped_no_material: 0, failed: 0, unresolved: 0, pending: 0 },
+      headline: "반성 최근 성공 2026-08-22(오늘) · 창 36일 중 결번 0일 = 재료없음 0 / 실패 0 / 미상 0",
+    });
+    renderPage();
+    expect(await screen.findByText(/결번 없음/)).toBeTruthy();
+  });
+
+  it("오늘 08:35 미도래(pending)는 경고색으로 뜨지 않는다 (적대 리뷰 1R P1-2)", async () => {
+    h.wisdom = card(ROW_BASE, {
+      ...REFLECTION_HEALTH,
+      missing_days: 0,
+      counts: { ok: 35, skipped_no_material: 0, failed: 0, unresolved: 0, pending: 1 },
+      headline: "반성 최근 성공 2026-08-22(오늘) · 창 36일 중 결번 0일 = 재료없음 0 / 실패 0 / 미상 0 (오늘은 08:35 미도래)",
+    });
+    renderPage();
+    const line = await screen.findByText(/결번 없음/);
+    // «그날의 학습이 없다»(경고 문구)가 뜨면 미도래를 고장으로 그린 것이다.
+    expect(screen.queryByText(/그날의 학습이 없다/)).toBeNull();
+    expect(line).toBeTruthy();
+  });
+
+  it("승격 지혜가 0건이어도 반성 상태는 뜬다 (빈 성적표의 원인을 구분하는 자리다)", async () => {
+    h.wisdom = { ...card(ROW_BASE), wisdom: [], wisdom_total: 0, wisdom_active: 0 };
+    renderPage();
+    expect(await screen.findByText(/아직 승격된 지혜가 없습니다/)).toBeTruthy();
+    expect(screen.getByText(/반성 최근 성공 2026-08-19/)).toBeTruthy();
   });
 
   it("귀속의 «한계»가 화면에 남는다 (롤업이 하한이라는 사실이 숫자 옆에 있어야 한다)", async () => {

@@ -32,6 +32,7 @@ from app.models import (
     NaverProposal,
     OpsWisdomEntry,
 )
+from app.services.naver_ad import reflection_health
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -377,5 +378,9 @@ def build(db: Session, *, wisdom_id: int | None = None) -> dict:
             ),
         },
         "attribution": {"path": _ATTRIBUTION_PATH, "limitation": _ATTRIBUTION_LIMIT},
+        # ★D-NAO-228: 성적표의 재료는 «반성»이 만든다. 반성이 도는지 안 도는지가 화면에 없으면
+        #   성적표가 비어 있을 때 「지혜가 없어서」인지 「반성이 죽어서」인지 구분이 안 된다.
+        #   실제로 2026-07-18~08-22 결번 19일이 로그에서도 전부 'ok'로 보였다(계약 §3).
+        "reflection_health": reflection_health.build_reflection_health(db),
         "wisdom": rows,
     }
