@@ -280,11 +280,55 @@ class TestWatchNeverNavigates:
 
 # ── W3: keep_open이 탭 층까지 지켜지는가 ────────────────────────────────────
 class TestKeepOpenReachesTheTabLayer:
-    def test_소스가_keep_open을_보고_page_close를_건너뛴다(self):
-        """★생존 변이 #15. 진짜 라이브 검증은 계약 합격기준 ③(CDP page 타겟 ≥1)이지만,
-        구현이 조건 자체를 잃는 회귀는 여기서 잡는다."""
-        import inspect
-        src = inspect.getsource(w._chrome)
-        assert "owner.keep_open" in src, "탭 층에서 keep_open을 안 보면 유령 Chrome이 남는다"
-        idx = src.index("owner.keep_open")
-        assert "page.close()" in src[idx:], "조건 아래에 close가 있어야 분기가 성립한다"
+    """★생존 변이 #15. 초판 가드는 소스에 "owner.keep_open" 문자열이 있는지만 봤는데,
+    조건을 `if True:`로 바꿔도 **바로 위 주석**에 그 문자열이 남아 통과했다 — 소스 검사가
+    주석까지 세는 순간 그 가드는 아무것도 안 지킨다. 행동으로 본다.
+    """
+
+    @staticmethod
+    def _drive(monkeypatch, keep_open: bool):
+        """_chrome(CDP 분기)을 스텁 위에서 한 번 돌리고, 탭이 닫혔는지 돌려준다."""
+        import contextlib as _c
+        page = _StubPage("https://wing.coupang.com/x")
+        ctx = _StubCtx([])
+
+        class _Browser:
+            contexts = [ctx]
+
+            def close(self):
+                pass
+
+        class _Chromium:
+            @staticmethod
+            def connect_over_cdp(_url):
+                return _Browser()
+
+        class _PW:
+            chromium = _Chromium()
+
+        # ctx.new_page()가 우리 스텁 page를 주도록.
+        monkeypatch.setattr(ctx, "new_page", lambda: page)
+
+        owner = w._ChromeOwner()
+        owner.keep_open = keep_open
+
+        @_c.contextmanager
+        def _fake_owned(_cfg, _owner=None):
+            yield owner
+
+        monkeypatch.setattr(w, "_owned_chrome", _fake_owned)
+        monkeypatch.setattr(w, "_cdp_mode", lambda _cfg: True)
+        monkeypatch.setattr(w, "_prune_stale_tabs", lambda *a, **k: None)
+
+        with w._chrome(_PW(), {"cdp_port": 9222}, "/tmp/none", owner=owner):
+            pass
+        return page.closed
+
+    def test_keep_open이면_탭을_남긴다(self, monkeypatch):
+        """★2026-08-22 12:55 실측의 코드 원인: _owned_chrome은 «프로세스»만 지키고
+        _chrome이 «탭»을 무조건 닫아, 「창은 열어 둠」이라 써 놓고 로그인할 곳이 없었다."""
+        assert self._drive(monkeypatch, keep_open=True) is False
+
+    def test_평소에는_탭을_닫는다(self, monkeypatch):
+        """반대 방향도 고정한다 — 항상 남기면 탭이 무한히 쌓인다."""
+        assert self._drive(monkeypatch, keep_open=False) is True
