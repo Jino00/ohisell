@@ -4566,3 +4566,358 @@ export function fetchCoupangAdChanges(params: {
     `/api/coupang/ops/ad-changes${qs ? `?${qs}` : ""}`,
   );
 }
+
+// ── 수입건 원장(landed cost, D-CPP-48) ──
+// ★금액·수량은 Decimal 정밀도 보존을 위해 전부 **문자열**로 오간다. 숫자로 파싱해 표시하되
+//   전송은 문자열 그대로 보낸다(파싱→재직렬화 왕복으로 정밀도를 잃지 않는다).
+export type ImportShipmentStatus = "draft" | "confirmed";
+export type ImportAllocationBasis = "amount" | "weight" | "volume" | "quantity";
+export type ImportLineType = "product" | "material" | "unknown";
+export type ImportDocType = "ci" | "pl" | "expense" | "etc";
+
+export interface ImportShipmentListItem {
+  id: number;
+  hbl_no: string;
+  declaration_no: string | null;
+  declaration_date: string | null;
+  eta: string | null;
+  shipper_name: string | null;
+  invoice_no: string | null;
+  vessel: string | null;
+  currency: string;
+  fx_rate: string;
+  declared_inv_value: string | null;
+  customs_value_krw: string | null;
+  carton_count: number | null;
+  gross_weight_kg: string | null;
+  cbm: string | null;
+  allocation_basis: ImportAllocationBasis;
+  status: ImportShipmentStatus;
+  memo: string | null;
+  confirmed_at: string | null;
+  line_count: number;
+  document_count: number;
+}
+
+export interface ImportCostLine {
+  id?: number;
+  seq: number;
+  item_name: string;
+  supply_amount: string;
+  tax_amount: string;
+  // ★기본값이 없다 — 매 줄 명시해야 한다(부가세 라인이 배부에 실수로 섞이면 원가가 부푼다).
+  is_costing: boolean;
+  note?: string | null;
+}
+
+export interface ImportInvoiceLine {
+  id?: number;
+  seq: number;
+  order_no?: string | null;
+  item_name: string;
+  quantity: string;
+  unit_price_foreign: string;
+  line_type: ImportLineType;
+  internal_sku?: string | null;
+  gross_weight_kg?: string | null;
+  cbm?: string | null;
+  // 확정 전엔 null이다 — 0으로 그리지 않는다(0=미계산 혼동 금지).
+  goods_amount_krw?: string | null;
+  allocated_cost_krw?: string | null;
+  unit_cost_ex_vat?: string | null;
+  unit_cost_inc_vat?: string | null;
+}
+
+export interface ImportPackingLine {
+  id?: number;
+  seq: number;
+  item_name: string;
+  quantity: string;
+  carton_range?: string | null;
+  qty_per_carton?: string | null;
+  carton_count?: string | null;
+  gross_weight_kg?: string | null;
+  measure?: string | null;
+  cbm?: string | null;
+  remark?: string | null;
+}
+
+export interface ImportDocument {
+  id: number;
+  doc_type: ImportDocType;
+  filename: string;
+  content_type: string | null;
+  size_bytes: number;
+  uploaded_at: string | null;
+}
+
+export interface ImportReconcileCheckRow {
+  item: string;
+  ci: string | null;
+  pl: string | null;
+  diff: string | null;
+}
+
+export interface ImportReconcileCheck {
+  key: "quantity" | "invoice_total" | "allocation";
+  label: string;
+  status: "ok" | "mismatch" | "missing";
+  passed: boolean;
+  expected: string | null;
+  actual: string | null;
+  detail: string;
+  rows: ImportReconcileCheckRow[];
+}
+
+export interface ImportReconcile {
+  passed: boolean;
+  checks: ImportReconcileCheck[];
+}
+
+export interface ImportAllocationLine {
+  seq: number;
+  item_name: string;
+  quantity: string;
+  goods_amount_krw: string;
+  allocated_cost_krw: string;
+  unit_cost_ex_vat: string;
+  unit_cost_inc_vat: string;
+}
+
+export interface ImportAllocation {
+  basis: ImportAllocationBasis;
+  pool_krw: string;
+  allocated_total_krw: string;
+  unallocated_krw: string;
+  lines: ImportAllocationLine[];
+}
+
+export interface ImportShipmentDetail extends ImportShipmentListItem {
+  cost_lines: ImportCostLine[];
+  invoice_lines: ImportInvoiceLine[];
+  packing_lines: ImportPackingLine[];
+  documents: ImportDocument[];
+  reconcile: ImportReconcile;
+  allocation: ImportAllocation | null;
+  allocation_error: string;
+  // ★참고값 — 배부에 쓰이지 않는다. ×1.1 규약과 실제 세액의 차이를 보여줄 뿐이다.
+  actual_vat_krw: string | null;
+}
+
+export interface ImportConfirmResult {
+  confirmed: boolean;
+  reason: string;
+  reconcile: ImportReconcile;
+}
+
+// ★확정 시 검산 미통과여도 200이다 — confirm_result.confirmed로 판단한다(4xx가 아니다).
+export interface ImportShipmentConfirmResponse extends ImportShipmentDetail {
+  confirm_result: ImportConfirmResult;
+}
+
+export interface ImportBasisComparisonLine {
+  seq: number;
+  item_name: string;
+  allocated_cost_krw: string;
+  unit_cost_ex_vat: string;
+}
+
+export interface ImportBasisComparisonEntry {
+  basis: ImportAllocationBasis;
+  available: boolean;
+  reason: string;
+  unallocated_krw?: string;
+  lines: ImportBasisComparisonLine[];
+}
+
+export interface ImportBasisComparison {
+  bases: ImportAllocationBasis[];
+  comparison: ImportBasisComparisonEntry[];
+}
+
+export interface ImportShipmentInput {
+  hbl_no: string;
+  fx_rate: string;
+  currency: string;
+  declaration_no?: string | null;
+  declaration_date?: string | null;
+  eta?: string | null;
+  shipper_name?: string | null;
+  invoice_no?: string | null;
+  vessel?: string | null;
+  declared_inv_value?: string | null;
+  customs_value_krw?: string | null;
+  carton_count?: number | null;
+  gross_weight_kg?: string | null;
+  cbm?: string | null;
+  allocation_basis: ImportAllocationBasis;
+  memo?: string | null;
+  cost_lines: ImportCostLine[];
+  invoice_lines: ImportInvoiceLine[];
+  packing_lines: ImportPackingLine[];
+}
+
+export function fetchImportShipments(params: {
+  limit?: number;
+  status?: ImportShipmentStatus;
+} = {}): Promise<{ items: ImportShipmentListItem[]; count: number }> {
+  const q = new URLSearchParams();
+  if (params.limit) q.set("limit", String(params.limit));
+  if (params.status) q.set("status", params.status);
+  const qs = q.toString();
+  return fetchApi(`/api/import-cost/shipments${qs ? `?${qs}` : ""}`);
+}
+
+export function fetchImportShipment(id: number): Promise<ImportShipmentDetail> {
+  return fetchApi(`/api/import-cost/shipments/${id}`);
+}
+
+export function createImportShipment(body: ImportShipmentInput): Promise<ImportShipmentDetail> {
+  return fetchApi("/api/import-cost/shipments", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateImportShipment(
+  id: number,
+  body: ImportShipmentInput,
+): Promise<ImportShipmentDetail> {
+  return fetchApi(`/api/import-cost/shipments/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteImportShipment(id: number): Promise<{ deleted: boolean; id: number }> {
+  return fetchApi(`/api/import-cost/shipments/${id}`, { method: "DELETE" });
+}
+
+export function confirmImportShipment(id: number): Promise<ImportShipmentConfirmResponse> {
+  return fetchApi(`/api/import-cost/shipments/${id}/confirm`, { method: "POST" });
+}
+
+export function reopenImportShipment(id: number): Promise<ImportShipmentDetail> {
+  return fetchApi(`/api/import-cost/shipments/${id}/reopen`, { method: "POST" });
+}
+
+export function fetchImportBasisComparison(id: number): Promise<ImportBasisComparison> {
+  return fetchApi(`/api/import-cost/shipments/${id}/basis-comparison`);
+}
+
+export function uploadImportDocument(
+  id: number,
+  docType: ImportDocType,
+  file: File,
+): Promise<ImportDocument> {
+  const form = new FormData();
+  form.append("file", file);
+  return fetch(
+    `${API_BASE}/api/import-cost/shipments/${id}/documents?doc_type=${docType}`,
+    { method: "POST", body: form },
+  ).then(async (res) => {
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`Upload error ${res.status}: ${detail}`);
+    }
+    return res.json();
+  });
+}
+
+export function importDocumentDownloadUrl(shipmentId: number, docId: number): string {
+  return downloadUrl(`/api/import-cost/shipments/${shipmentId}/documents/${docId}`);
+}
+
+// ── 서류 파싱(POST /api/import-cost/parse) — 폼 초안 생성용, 저장하지 않는다 ──
+// ★header는 전부 optional — 못 읽은 키는 응답에 아예 없다(0으로 채우지 않는다).
+// ★금액·수량은 전부 문자열(Decimal 정밀도) — carton_count만 number.
+export interface ImportParseHeader {
+  hbl_no?: string;
+  declaration_no?: string;
+  declaration_date?: string;
+  eta?: string;
+  shipper_name?: string;
+  vessel?: string;
+  invoice_no?: string;
+  currency?: string;
+  fx_rate?: string;
+  declared_inv_value?: string;
+  customs_value_krw?: string;
+  carton_count?: number;
+  gross_weight_kg?: string;
+  cbm?: string;
+}
+
+export interface ImportParseInvoiceLine {
+  seq: number;
+  item_name: string;
+  quantity: string;
+  unit_price_foreign: string;
+  order_no: string | null;
+  line_type: "unknown";
+  internal_sku: null;
+  gross_weight_kg: string | null;
+  cbm: string | null;
+}
+
+export interface ImportParsePackingLine {
+  seq: number;
+  carton_range: string | null;
+  item_name: string;
+  quantity: string;
+  qty_per_carton: string | null;
+  carton_count: string | null;
+  gross_weight_kg: string | null;
+  measure: string | null;
+  cbm: string | null;
+  remark: string | null;
+}
+
+export interface ImportParseCostLine {
+  seq: number;
+  item_name: string;
+  supply_amount: string;
+  tax_amount: string;
+  is_costing: boolean;
+  note: string | null;
+}
+
+export interface ImportParseResult {
+  header: ImportParseHeader;
+  invoice_lines: ImportParseInvoiceLine[];
+  packing_lines: ImportParsePackingLine[];
+  cost_lines: ImportParseCostLine[];
+  errors: string[];
+  warnings: string[];
+}
+
+// 셋 중 최소 하나는 있어야 한다(없으면 백엔드가 400) — 버튼 비활성화는 호출부 책임.
+// ★expenseText가 있으면(사람이 직접 붙여넣은 것) expenseFile과 함께 보내도 서버가 텍스트를 우선한다.
+export function parseImportDocuments(args: {
+  ciPlFile?: File | null;
+  expenseFile?: File | null;
+  expenseText?: string;
+}): Promise<ImportParseResult> {
+  const form = new FormData();
+  if (args.ciPlFile) form.append("ci_pl_file", args.ciPlFile);
+  if (args.expenseFile) form.append("expense_file", args.expenseFile);
+  if (args.expenseText) form.append("expense_text", args.expenseText);
+  return fetch(`${API_BASE}/api/import-cost/parse`, { method: "POST", body: form }).then(
+    async (res) => {
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`파싱 실패 ${res.status}: ${detail}`);
+      }
+      return res.json();
+    },
+  );
+}
+
+export function deleteImportDocument(
+  shipmentId: number,
+  docId: number,
+): Promise<{ deleted: boolean; id: number }> {
+  return fetchApi(`/api/import-cost/shipments/${shipmentId}/documents/${docId}`, {
+    method: "DELETE",
+  });
+}
