@@ -725,12 +725,47 @@ def _owned_chrome(cfg: dict, owner: "_ChromeOwner | None" = None):
                     log.info("상주 모드 — Chrome(PID %s) 유지(다음 회차가 adopt).",
                              getattr(owner.proc, "pid", "?"))
                 elif owner.keep_open:
-                    log.info("로그인 대기 위해 Chrome 창 유지 — 로그인 후 '갱신' 버튼을 다시 누르세요.")
+                    # ★문구 정정(2026-08-22 W3): 이제 폴 루프가 로그인 회복을 스스로 감지해
+                    #   소멸됐던 요청까지 자동으로 이어받는다 — 버튼을 다시 누를 필요가 없다.
+                    log.info("로그인 대기 위해 Chrome 창·탭 유지 — 그 탭에서 로그인만 하면 "
+                             "다음 폴이 감지해 자동으로 이어받습니다(버튼 재클릭 불필요).")
                 else:
                     _close_chrome(owner.proc)
         finally:
             with contextlib.suppress(ValueError):
                 _LIVE_OWNERS.remove(owner)
+
+
+_MAX_KEPT_TABS = 3   # keep_open이 남긴 탭이 이 수를 넘으면 오래된 것부터 닫는다
+
+
+def _prune_stale_tabs(ctx, keep: int = _MAX_KEPT_TABS) -> None:
+    """CDP 컨텍스트의 탭 수를 상한 이하로 줄인다(오래된 것부터). best-effort.
+
+    ★2026-08-22 W3이 `keep_open` 시 탭을 남기게 되면서 필요해졌다 — 남기지 않으면 사람이
+      로그인할 곳이 없고, 무제한으로 남기면 Chrome이 탭 무덤이 된다. 최신 탭을 남기는 이유는
+      그게 방금 로그인 화면이 뜬 탭이기 때문이다.
+    ★about:blank는 나이와 무관하게 먼저 버린다(내용이 없어 잃을 게 없다).
+    """
+    try:
+        pages = list(ctx.pages)
+    except Exception:  # noqa: BLE001
+        return
+    if len(pages) <= keep:
+        return
+    blanks = [pg for pg in pages if (pg.url or "about:blank") in ("about:blank", "")]
+    rest = [pg for pg in pages if pg not in blanks]
+    # ★blanks도 상한 밖에서 무제한으로 닫지 않는다(2026-08-22 적대 리뷰 1R P2-7):
+    #   모든 탭이 about:blank이면 초판은 **전부** 닫았고, 탭 0개가 되면 Chrome이 스스로
+    #   종료될 수 있다(그러면 프로필 락·다음 회차 기동까지 번진다). 남길 몫을 먼저 확보한다.
+    survivors_needed = max(0, keep - len(rest))
+    blank_victims = blanks[: max(0, len(blanks) - survivors_needed)]
+    victims = blank_victims + rest[: max(0, len(rest) - keep)]
+    for pg in victims:
+        with contextlib.suppress(Exception):
+            pg.close()
+    if victims:
+        log.info("오래된 탭 %d개 정리(상한 %d) — 최신 탭은 남긴다.", len(victims), keep)
 
 
 @contextlib.contextmanager
@@ -751,12 +786,26 @@ def _chrome(p, cfg: dict, state: str, *, load_state: bool = True, owner: "_Chrom
         with _owned_chrome(cfg, owner):
             browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
             ctx = browser.contexts[0] if browser.contexts else browser.new_context(user_agent=_UA)
+            # ★탭 상한(2026-08-22 W3의 부작용 방어): keep_open이 탭을 남기게 된 뒤로는
+            #   로그인 실패 에피소드마다 탭이 하나씩 쌓인다(회차마다는 아니다 — login_required는
+            #   재시도를 안 하므로). 상한을 안 두면 몇 주 뒤 탭 수십 개짜리 Chrome이 된다.
+            #   가장 **오래된** 것부터 닫는다 — 가장 최근 탭이 사람이 지금 로그인할 그 탭이다.
+            _prune_stale_tabs(ctx)
             page = ctx.new_page()
             try:
                 yield page, ctx, lambda: None  # Chrome이 세션 보관 → save no-op
             finally:
-                with contextlib.suppress(Exception):
-                    page.close()
+                # ★keep_open이면 **탭도** 남긴다(2026-08-22, 계약 CONTRACT_collection_stability_s1 W3).
+                #   종전엔 이 close()가 owner.keep_open을 보지 않아, 「창은 열어 둠 — 다음
+                #   재시도가 이어받는다」고 로그에 쓰고서 실제로는 로그인할 탭이 사라졌다.
+                #   _owned_chrome은 «프로세스»만 지켰으므로 남는 것은 **탭 0개인 유령 Chrome**이다
+                #   (2026-08-22 12:55 실측: CDP 9222·9223 모두 page 타겟 0개).
+                #   약속을 프로세스 층에서만 지키고 탭 층에서 깨면, 사람이 뒤늦게 와도 회복 경로가 없다.
+                if not (owner is not None and owner.keep_open):
+                    with contextlib.suppress(Exception):
+                        page.close()
+                else:
+                    log.info("로그인용 탭 유지(닫지 않음) — 이 탭에서 로그인하면 다음 폴이 이어받는다.")
                 with contextlib.suppress(Exception):
                     browser.close()  # disconnect only — Chrome 종료는 _owned_chrome이 판단
     else:
@@ -962,24 +1011,41 @@ def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: b
     실수). 저장 직후 실제로 파일이 생겼는지 확인하고, 안 생겼으면 성공으로 리턴하지 않고 남은
     시간 동안 재시도한다(로그인 자체는 이미 됐으니 다음 폴에서 같은 세션으로 저장만 재시도).
     """
+    # ★do-while이다 — 프로브를 **먼저 1회** 하고, 그 뒤에 남은 예산만큼 기다리며 반복한다
+    #   (2026-08-22 적대 리뷰 1R P1-3). 초판은 `while waited < wait_secs`라 **wait_secs=0이면
+    #   프로브를 0회** 했다. W2가 데몬 경로를 0으로 내리면서 「180초 블로킹을 없앤다」와
+    #   「확인을 아예 안 한다」를 구분하지 못한 것이다. 그 결과 Chrome 프로필이 완전히
+    #   로그인돼 있어도 상태 마커 파일이 없으면 cmd_login이 무조건 RC_LOGIN_REQUIRED를 냈고
+    #   (마커를 만드는 CDP 경로는 이 함수의 _save_state 하나뿐이다), 거기에 W3 자동 재요청이
+    #   맞물려 «거짓 로그인 필요 → 워치가 회복 감지 → 재요청 → 다시 거짓 로그인 필요»가
+    #   약 45초 주기로 무한 반복됐다(매 회 macOS 알림 2건 + 탭 1개).
+    #   ⇒ wait_secs=0의 올바른 뜻은 «기다리지 않는다»이지 «보지 않는다»가 아니다.
     waited = 0
-    while waited < wait_secs:
+    while True:
         try:
-            page.wait_for_timeout(5000)
-            waited += 5
             if _is_logged_out(page.url):
-                continue
-            res = page.evaluate(_POST_JSON_JS, [_vs_payload(cfg, window), VENDOR_SUMMARY_PATH])
+                res = None
+            else:
+                res = page.evaluate(_POST_JSON_JS, [_vs_payload(cfg, window), VENDOR_SUMMARY_PATH])
         except Exception as e:  # noqa: BLE001
             if "closed" in str(e).lower():
                 log.error("브라우저 창이 닫혔습니다 — 로그인 미완료(창을 닫지 말고 로그인만 하세요).")
                 return None
-            continue
-        if _is_success(res):
+            res = None
+        if res is not None and _is_success(res):
             _save_state(ctx, state, cdp=cdp)
             if os.path.exists(state):
                 return res
             log.error("로그인은 확인됐으나 세션 마커 저장 실패(%s) — 재시도 대기", state)
+        if waited >= wait_secs:
+            break
+        try:
+            page.wait_for_timeout(5000)
+        except Exception as e:  # noqa: BLE001
+            if "closed" in str(e).lower():
+                log.error("브라우저 창이 닫혔습니다 — 로그인 미완료(창을 닫지 말고 로그인만 하세요).")
+                return None
+        waited += 5
     return None
 
 
@@ -1242,14 +1308,201 @@ RC_RETRY_LATER = 4
 RC_RG_LOGIN_REQUIRED = 5
 _VS_ERROR_PATH = "/api/coupang/ops/wing/vendor-summary/fetch-error"
 _RG_ERROR_PATH = "/api/coupang/ops/wing/rg-settlement/fetch-error"
+# 로그인 회복 시 소멸됐던 요청을 되살리는 경로(2026-08-22 W3).
+_VS_REQUEST_PATH = "/api/coupang/ops/wing/vendor-summary/request-refresh"
+_RG_REQUEST_PATH = "/api/coupang/ops/wing/rg-settlement/request-refresh"
 _RG_COMPLETE_PATH = "/api/coupang/ops/wing/rg-settlement/refresh-complete"
 
 _POLL_INTERVAL_S = 15       # 갱신 요청 확인 간격(창 안 뜸, 가벼운 GET)
-_LOGIN_WAIT_S = 180         # 세션 만료 시 헤드풀 창 로그인 대기 한도
+# ★`_LOGIN_WAIT_S = 180`은 **삭제됐다**(2026-08-22 W2 + 적대 리뷰 1R P2-11).
+#   데몬 경로가 전부 login_wait_secs=0으로 바뀌어 읽는 곳이 하나도 남지 않았는데, 상수를
+#   남겨 두면 「데몬이 180초 기다린다」는 오독을 부른다. 사람이 그 자리에 있는 CLI 경로
+#   (`login` 커맨드)는 자기 기본값(cmd_login의 wait_secs=600)을 쓴다.
 _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 스팸 방지(광고 패턴)
 # 자가복구: 연속 네트워크 실패가 쌓이면 종료 → launchd가 fresh 재기동(광고 페처 패턴).
 # sleep/wake 후 소켓 고착(fresh Python은 성공해도 장기 프로세스만 'Max retries') 자동 해소.
 _MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
+
+# ★로그인 워치 간격(2026-08-22, 계약 CONTRACT_collection_stability_s1 W3). 폴 주기(15s)마다
+#   CDP에 붙는 것은 낭비라 이 간격으로 줄인다. 사람이 로그인하는 데 최소 수십 초가 걸리므로
+#   30초면 «로그인 직후»라 부를 만큼 촘촘하다.
+_LOGIN_WATCH_INTERVAL_S = 30
+
+
+def _notify_mac(title: str, message: str, sound: str = "Glass") -> None:
+    """macOS 네이티브 알림(+소리) — 자동 복구가 실패해 사람 개입이 필요할 때.
+
+    ★이 페처에는 없던 것을 2026-08-22(W5)에 ad_cost_browser_fetcher와 대등하게 넣는다.
+      «사람에게 도달하는 경로»가 ad_cost·ohitech에는 있고 wing/wing2에는 없어서, WING 세션이
+      끊긴 사실을 Jino가 **버튼을 눌러 실패를 봐야만** 알 수 있었다(2026-08-22 각 계정 9회
+      재발견). 로그인은 어차피 이 Mac에서 해야 하므로 알림도 같은 화면에 띄우는 게 가장 빠르다.
+    osascript는 로컬 전용·자격증명 불필요. 실패해도 데몬 흐름에 영향 주지 않는다(best-effort).
+    """
+    try:
+        safe_t = title.replace('"', "'")
+        safe_m = message.replace('"', "'")
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{safe_m}" with title "{safe_t}" sound name "{sound}"'],
+            timeout=10, check=False,
+        )
+    except Exception as e:  # noqa: BLE001 — 알림 실패가 데몬을 멈추면 안 됨
+        log.warning("macOS 알림 실패(무시): %s", str(e)[:80])
+
+
+def _page_host(pg) -> str:
+    """탭의 호스트(소문자). 못 읽으면 ''. — `_rg_off_origin`과 같은 파싱 규칙.
+
+    ★부분문자열 검사를 쓰지 않는 이유는 이 저장소가 이미 값을 치른 사고다
+      (`_rg_off_origin` docstring, 2026-08-03 WING2 라이브 실측): keycloak 로그인 URL이
+      돌아갈 주소를 쿼리에 싣기 때문에 `"wing.coupang.com" in url`은 **로그인 페이지 위에서도
+      참**이고, 게다가 `"m-wing.coupang.com"`도 `"wing.coupang.com"`을 포함한다.
+    """
+    try:
+        url = str(pg.url or "")
+    except Exception:  # noqa: BLE001 — 닫히는 중인 탭
+        return ""
+    if not url or url.startswith("about:"):
+        return ""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _login_watch_probe(cfg: dict, *, host: str, probe) -> bool | None:
+    """needs_login 상태에서 **이미 열려 있는 탭**으로 세션 회복을 확인한다.
+
+    ★새 창도 새 탭도 만들지 않는다 — 「창이 뜨는 유일한 순간은 버튼 클릭 직후」(2026-07-27
+      결정, 이 계약의 금지선)를 지켜야 하기 때문이다. 그래서 확인 못 하는 경우가 정상적으로
+      존재하고, 그때는 False가 아니라 **None(확인 불가)**을 돌려준다 — 확인 못 한 것을
+      「아직 로그아웃」이라고 부르면 배너가 근거 없이 유지된다.
+
+    ★탐색 대상 탭은 W3이 남긴 로그인 탭이다. 사람이 로그인하면 그 탭이 앱 오리진으로
+      리다이렉트되므로, 「오리진 위에 있고 프로브가 OK」 = 회복이다. 아직 xauth 로그인
+      페이지에 있으면 **호스트 정확 비교**에서 걸러진다(부분문자열 금지 — `_page_host` 참조).
+
+    ★탭을 **navigate 하지 않는다**. 사람이 로그인 폼을 채우는 중일 수 있고, 그 위로
+      goto를 쏘면 입력이 날아간다.
+
+    반환 True=회복 확증 / False=아직 로그아웃(오리진 위인데 프로브가 AUTH) / None=확인 불가.
+    """
+    if not _cdp_mode(cfg):
+        return None
+    port = int(cfg.get("cdp_port", 9222))
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
+            try:
+                ctx = browser.contexts[0] if browser.contexts else None
+                if ctx is None:
+                    return None
+                # ★호스트 **정확 비교**로 고른다(2026-08-22 적대 리뷰 1R P1-2).
+                #   초판은 `host_frag in url`이었고, 그러면 RG 워치(wing.coupang.com)가
+                #   VS가 남긴 **m-wing 탭**을 첫 매치로 집는다("m-wing.coupang.com"이
+                #   "wing.coupang.com"을 포함한다). 그 탭에 RG 프로브를 걸면 _rg_off_origin이
+                #   호스트 정확비교라 항상 AUTH → **사람이 wing 탭에서 로그인을 마쳐도 RG
+                #   자동 회복이 영원히 발화하지 않는다.** 폴 순서상 VS가 먼저라 m-wing 탭이
+                #   먼저 생기는 것이 통상 경로다. 게다가 keycloak 로그인 URL은 redirect_uri에
+                #   목적지 호스트를 실어서, 부분문자열은 **로그인 페이지 위에서도** 참이 된다.
+                # ★뒤에서부터 본다: 같은 호스트 탭이 여럿이면 **가장 최근에 생긴 것**이
+                #   방금 로그인 화면이 뜬 탭이다(_prune_stale_tabs가 최신을 남기는 것과 같은 결).
+                target = None
+                for pg in reversed(list(ctx.pages)):
+                    if _page_host(pg) == host:
+                        target = pg
+                        break
+                if target is None:
+                    return None      # 남긴 탭이 없다 = 확인 불가(만들지 않는다)
+                return probe(target)
+            finally:
+                with contextlib.suppress(Exception):
+                    browser.close()   # disconnect only
+    except Exception as e:  # noqa: BLE001 — CDP 미기동·연결 실패 등은 전부 '확인 불가'
+        log.debug("로그인 워치 확인 불가: %s", str(e)[:100])
+        return None
+
+
+def _rg_login_recovered(cfg: dict) -> bool | None:
+    """RG(정산, wing.coupang.com 데스크톱 세션)가 회복됐는가. _login_watch_probe 계약.
+
+    ★_rg_session_probe는 same-origin POST(evaluate)만 하고 **navigate 하지 않는다** —
+      워치의 「탭을 갈아엎지 않는다」 계약을 그대로 지킨다.
+    """
+    def _p(page) -> bool:
+        verdict, why = _rg_session_probe(page)
+        if verdict != _PROBE_OK:
+            log.debug("로그인 워치(RG) %s — %s", verdict, why)
+        return verdict == _PROBE_OK
+    return _login_watch_probe(cfg, host=_RG_ORIGIN_HOST, probe=_p)
+
+
+_VS_ORIGIN_HOST = "m-wing.coupang.com"
+
+
+def _vs_login_recovered(cfg: dict) -> bool | None:
+    """VS(판매분석, m-wing 모바일 세션)가 회복됐는가.
+
+    ★RG와 세션이 따로 논다(cmd_login rg_probe 주석) — 한쪽 회복이 다른 쪽 회복을 뜻하지
+      않으므로 레인마다 따로 본다.
+
+    ★수집 함수(첫 줄이 `page.goto(DASH_URL)`인 그것)를 **쓰지 않는다**
+      (2026-08-22 적대 리뷰 1R P1-4). 사람이 그 탭에서 로그인 폼을 채우는 중이면
+      **30초마다 페이지를 갈아엎어 입력을 날린다** — `_login_watch_probe` docstring이
+      명시적으로 금지한 바로 그 동작이다. 호출부가 이미 호스트 정확비교로 m-wing 탭을
+      골랐으므로 same-origin fetch만 쏘면 충분하고, 그게 navigate 없이 세션을 확증하는
+      유일한 방법이다.
+    """
+    def _p(page) -> bool:
+        # URL 이중 확인: 같은 호스트 안에서도 로그인 경로로 밀려나 있을 수 있다.
+        with contextlib.suppress(Exception):
+            if _is_logged_out(page.url):
+                return False
+        try:
+            res = page.evaluate(
+                _POST_JSON_JS,
+                [_vs_payload(cfg, _vs_windows(cfg)[0]), VENDOR_SUMMARY_PATH],
+            )
+        except Exception as e:  # noqa: BLE001 — 봇감지·탭 상태 이상은 '아직 아님'으로 접는다
+            log.debug("로그인 워치(VS) 프로브 실패: %s", str(e)[:80])
+            return False
+        return _is_success(res)
+    return _login_watch_probe(cfg, host=_VS_ORIGIN_HOST, probe=_p)
+
+
+# 로그인 회복 뒤 자동 재요청을 한 프로세스 수명 동안 몇 번까지 허용할 것인가(레인별).
+# ★상한을 두는 이유(2026-08-22 적대 리뷰 1R P1-3): 「회복 감지 → 재요청 → 그 회차가 다시
+#   login_required」가 닫힌 고리를 만들 수 있다. 리뷰가 재현한 형태(프로브 0회 버그)는
+#   근본 수리했지만, 그 고리를 만드는 방법이 그것 하나뿐이라고 단정할 근거가 없다 —
+#   자동 동작에 «멈추는 자리»를 두는 것은 그 자체로 값이 있다. 상한에 닿으면 자동만 끄고
+#   사람이 누르는 버튼은 종전대로 동작한다(기능을 잃지 않는다). 데몬 재기동 시 리셋된다.
+_MAX_AUTO_REVIVES = 3
+
+
+def _revive_lane(cfg: dict, label: str, path: str, revives_so_far: int) -> bool:
+    """로그인 회복 뒤 소멸된 요청을 되살린다. 반환 = 이 레인의 needs_login을 **유지할지**.
+
+    ★반환이 False라야 워치가 꺼진다. 상한을 넘겼으면 재요청하지 않고, needs_login도 끈다
+      — 켜 둔 채로 두면 워치가 30초마다 계속 돌며 아무것도 안 하기 때문이다.
+    ★재요청이 실패하면 「이어갑니다」라고 말하지 않는다(적대 리뷰 P2-10): 아무도 안 이어받는데
+      사람에게 이어받는다고 말하면, 그게 이 계약이 없애려는 «틀린 처방»이다.
+    """
+    if revives_so_far >= _MAX_AUTO_REVIVES:
+        log.warning("%s 로그인 회복 감지 — 그러나 자동 재개 상한(%d회) 소진. 자동 재개를 멈춘다"
+                    "(버튼은 정상 동작).", label, _MAX_AUTO_REVIVES)
+        _notify_mac(f"{label} 자동 재개 중단",
+                    f"로그인은 확인됐으나 자동 재개가 {_MAX_AUTO_REVIVES}회 반복됐습니다. "
+                    "대시보드에서 갱신을 눌러주세요.")
+        return False
+    if _prod_request_refresh(cfg, path):
+        log.info("%s 로그인 회복 감지 — 요청 자동 재개(%d/%d).",
+                 label, revives_so_far + 1, _MAX_AUTO_REVIVES)
+        _notify_mac(f"{label} 로그인 확인됨", "수집을 자동으로 이어갑니다.")
+    else:
+        log.warning("%s 로그인 회복 감지 — 그러나 자동 재요청 실패. 다음 버튼이 이어받는다.", label)
+        _notify_mac(f"{label} 로그인 확인됨",
+                    "자동 재개에 실패했습니다 — 대시보드에서 갱신을 눌러주세요.")
+    return False
 
 
 def _basic_auth(cfg: dict):
@@ -1310,6 +1563,36 @@ def _prod_rg_claim(cfg: dict) -> dict:
     )
     r.raise_for_status()
     return r.json()
+
+
+def _prod_request_refresh(cfg: dict, path: str) -> bool:
+    """로그인 회복 뒤 **소멸됐던 요청을 되살린다** (2026-08-22 W3, Jino 결정: 자동 재수집 «켬»).
+
+    ★왜 필요한가: login_required는 재시도 없이 요청을 소멸시킨다(lease 계약 §0 — 창만 반복해서
+      뜨는 것을 막는 정당한 설계다). 그 결과 사람이 로그인을 마쳐도 «되살릴 것»이 남아 있지
+      않아, 종전엔 버튼을 다시 눌러야 했다. 버튼 1회의 의도는 「이 데이터를 받아라」였고
+      로그인은 그 의도를 취소한 적이 없다 — 그래서 회복 시 의도를 이어 붙인다.
+    ★이미 pending이면 백엔드가 already_pending으로 흡수한다(request_refresh 계약) — 연타로
+      재시도 예산이 늘어나지 않는다.
+    ★best-effort: 실패해도 예외를 밖으로 내지 않는다(데몬은 어떤 오류에도 죽지 않는다).
+      대신 False를 돌려주므로 호출부가 「되살렸다」고 로그에 거짓을 쓰지 않는다.
+    """
+    if not _push_configured(cfg):
+        return False
+    try:
+        r = requests.post(
+            cfg["prod_base_url"].rstrip("/") + path,
+            params={"account_key": cfg["account_key"]},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return True
+        log.warning("자동 재요청 비200(%s) — %s", r.status_code, path)
+    except Exception as e:  # noqa: BLE001
+        log.warning("자동 재요청 실패(%s) — %s", str(e)[:80], path)
+    return False
 
 
 def _prod_notify_rg_complete(cfg: dict, lease: str | None = None) -> None:
@@ -1467,6 +1750,16 @@ def cmd_poll(cfg: dict) -> int:
     # 실패로 임대를 반납한 경우에 한해 쿨다운을 이 시각까지 면제한다(요청이 살아있는 동안만).
     rg_retry_at: float | None = None
     rg_retry_backoff = int(cfg.get("rg_retry_backoff_s", 30))
+    # ★로그인 워치 상태(2026-08-22 W3). 레인별로 따로 둔다 — VS(m-wing 모바일)와 RG
+    #   (wing 데스크톱 xauth)는 세션이 따로 놀아서 한쪽 회복이 다른 쪽 회복이 아니다.
+    #   True인 동안에만 워치가 돈다(평소 마찰 0). 창은 절대 새로 띄우지 않고, 버튼이 남겨 둔
+    #   기존 탭만 들여다본다.
+    vs_needs_login = False
+    rg_needs_login = False
+    login_watch_at: float | None = None
+    # 자동 재개 횟수(레인별, 프로세스 수명 기준) — _MAX_AUTO_REVIVES 상한의 카운터.
+    vs_revives = 0
+    rg_revives = 0
     # ★사람이 누른 요청은 쿨다운을 면제한다 (2026-08-20, Jino 결정).
     #   무엇이 잘못됐었나: 09:12~09:13에 RG 수집이 **성공**하자 `last_rg`가 찍혀 1시간 쿨다운이
     #   걸렸고, 09:14 이후 「전체 갱신」을 몇 번을 눌러도 아래 `if`가 False라 **로그 한 줄 없이**
@@ -1506,24 +1799,38 @@ def cmd_poll(cfg: dict) -> int:
                                 log.info("갱신 요청 감지 — fetch 시작")
                                 # _run_claimed: 예외도 rc=1로 정규화하고 사유(마지막 log.error)를
                                 # 함께 돌려준다 — 조용한 탈출로 임대가 20분 묶이는 것을 막는다(R1).
+                                # ★데몬 경로는 login_wait_secs=0이다(2026-08-22 W2). 180초
+                                #   블로킹 대기는 «사람이 Mac 앞에 있다»는 가정인데, 실제
+                                #   트리거는 폰이다. 그 대기 하나가 세 증상의 공통 원인이었다:
+                                #   ①재시도 3회와 곱해져 9분 소모 ②단일 폴 루프를 점유해 옆
+                                #   레인을 굶김 ③프론트 215초 타임아웃과 경쟁해 같은 사건이
+                                #   「실패」/「응답 없음」 두 이름으로 갈림.
+                                #   ⇒ 탭만 남기고 즉시 보고하고, 회복은 아래 로그인 워치가 본다.
+                                #   CLI 수동 경로(`login` 커맨드)의 대기는 그대로 둔다 — 그건
+                                #   사람이 그 자리에 있는 경로다.
                                 if not Path(state).is_file():
                                     # ★rg_probe=False: 이 레인에서 "성공"의 의미는 VS 수집 완료
                                     #   =버튼 요청 소비다. RG 데스크톱 세션 미확보(rc=5)까지
                                     #   여기서 실패로 접으면 멀쩡히 받은 판매분석이 fetch-error로
-                                    #   오보된다. RG 레인은 _do_rg_run(login_wait_secs=180)의
-                                    #   자가회복 경로를 따로 갖고 있다.
+                                    #   오보된다. RG 레인은 자기 진입 프로브에서 따로 잡는다.
                                     rc, reason = _run_claimed(
-                                        lambda: cmd_login(cfg, wait_secs=_LOGIN_WAIT_S,
-                                                          rg_probe=False))
+                                        lambda: cmd_login(cfg, wait_secs=0, rg_probe=False))
                                 else:
                                     rc, reason = _run_claimed(   # 락 보유 중
-                                        lambda: _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
+                                        lambda: _do_run(cfg, state, login_wait_secs=0))
                                 if rc != 0:
                                     _prod_report_failure(
                                         cfg, _VS_ERROR_PATH,
                                         reason or f"판매분석 수집 실패(rc={rc})",
                                         kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
                                         lease=lease)
+                                    if rc == RC_LOGIN_REQUIRED:
+                                        vs_needs_login = True
+                                        _notify_mac("판매분석 로그인 필요",
+                                                    f"{cfg.get('account_key', '')} — Mac Chrome "
+                                                    "탭에서 로그인하세요(그 뒤 자동으로 이어받습니다)")
+                                else:
+                                    vs_needs_login = False
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
@@ -1597,17 +1904,29 @@ def cmd_poll(cfg: dict) -> int:
                                 _prod_report_failure(cfg, _RG_ERROR_PATH,
                                                      "세션 파일 없음 — 로그인 필요",
                                                      kind="login_required", lease=rg_lease)
+                                # ★이 경로도 워치를 켠다(2026-08-22 적대 리뷰 1R P2-9).
+                                #   종전엔 kind=login_required를 보고하면서 rg_needs_login은
+                                #   안 켜서, 이 케이스만 자동 회복의 사각이었다 — 화면엔
+                                #   「로그인 필요」가 뜨는데 로그인해도 아무도 안 이어받는다.
+                                rg_needs_login = True
                             else:
                                 # _run_claimed: 예외도 rc=1·사유 동반으로 정규화(R1) — 조용한
                                 # 탈출로 임대가 TTL 20분 묶이면 UI가 'Mac 응답 없음'으로 오진.
+                                # ★login_wait_secs=0 (2026-08-22 W2) — VS 레인과 같은 이유.
+                                #   블로킹 대기 대신 탭을 남기고 즉시 보고한다.
                                 rc, reason = _run_claimed(
-                                    lambda: _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
+                                    lambda: _do_rg_run(cfg, state, login_wait_secs=0))
                                 if rc != 0:
                                     _prod_report_failure(
                                         cfg, _RG_ERROR_PATH,
                                         reason or f"RG 정산 수집 실패(rc={rc})",
                                         kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
                                         lease=rg_lease)
+                                    if rc == RC_LOGIN_REQUIRED:
+                                        rg_needs_login = True
+                                        _notify_mac("RG 정산 로그인 필요",
+                                                    f"{cfg.get('account_key', '')} — Mac Chrome "
+                                                    "탭에서 로그인하세요(그 뒤 자동으로 이어받습니다)")
                                     if rc != RC_LOGIN_REQUIRED:
                                         # 재시도 가능한 실패 → 1시간 쿨다운을 면제하고 곧 다시
                                         # 시도한다(요청이 살아있을 때만 실제로 claim된다).
@@ -1618,6 +1937,7 @@ def cmd_poll(cfg: dict) -> int:
                                     # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
                                     # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
                                     _prod_notify_rg_complete(cfg, lease=rg_lease)
+                                    rg_needs_login = False
                         else:
                             # 못 집었다(남이 임대 보유·이미 처리됨). 시도 시점부터 쿨다운이
                             # 켜졌으므로 여기서 짧은 백오프를 안 걸면 다음 기회가 1시간 뒤다.
@@ -1626,6 +1946,35 @@ def cmd_poll(cfg: dict) -> int:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
             log.error("RG 폴 루프 오류: %s", str(e)[:160])
+
+        # ── 로그인 워치(2026-08-22 W3) — 사람이 로그인을 마쳤는지 «기존 탭»으로 확인 ──
+        #   ★이게 이 계약의 핵심이다. login_required는 요청을 재시도 없이 소멸시키므로
+        #     (§0 금지선 — 창만 반복해서 뜨는 것을 막는 정당한 설계) 종전엔 사람이 로그인을
+        #     마쳐도 아무 일도 일어나지 않았고 버튼을 다시 눌러야 했다. 버튼 1회의 의도는
+        #     「이 데이터를 받아라」였고 로그인은 그 의도를 취소한 적이 없다.
+        #   ★새 창·새 탭을 만들지 않는다(금지선). 못 보면 «확인 불가»로 두고 넘어간다.
+        #   ★needs_login이 아닐 땐 CDP에 붙지도 않는다 — 평소 마찰 0.
+        try:
+            if (vs_needs_login or rg_needs_login) and (
+                login_watch_at is None
+                or time.monotonic() - login_watch_at >= _LOGIN_WATCH_INTERVAL_S
+            ):
+                login_watch_at = time.monotonic()
+                with _try_fetch_lock() as _wacq:
+                    if not _wacq:
+                        pass    # fetch가 도는 중이면 그쪽이 곧 진짜 판정을 낸다
+                    else:
+                        if rg_needs_login and _rg_login_recovered(cfg) is True:
+                            rg_needs_login = _revive_lane(
+                                cfg, "RG 정산", _RG_REQUEST_PATH, rg_revives)
+                            rg_revives += 1
+                        if vs_needs_login and _vs_login_recovered(cfg) is True:
+                            vs_needs_login = _revive_lane(
+                                cfg, "판매분석", _VS_REQUEST_PATH, vs_revives)
+                            vs_revives += 1
+        except Exception as e:  # noqa: BLE001 — 워치 실패가 데몬을 멈추면 안 된다
+            log.warning("로그인 워치 오류(무시): %s", str(e)[:120])
+
         time.sleep(interval)
 
 
@@ -2335,14 +2684,20 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     #   여기로 떨어져 멀쩡한 세션에 매 회차 '세션 만료 의심'을 오보했다
                     #   (08-03 12:12~13:07 전 회차). 창은 열어 두므로 사람이 늦게 로그인해도
                     #   다음 재시도가 자동으로 이어받는다.
-                    owner.keep_open = True    # 로그인할 창이 필요 → 닫지 않음
+                    owner.keep_open = True    # 로그인할 창·탭이 필요 → 닫지 않음(W3)
                     if login_wait_secs <= 0:
-                        log.error("RG: 로그인 필요(정산 세션 로그아웃 확증). 'login' 또는 데몬 로그인 필요.")
-                        return 1
+                        # ★RC_LOGIN_REQUIRED다, 1이 아니다(2026-08-22 W2). 종전엔 여기서 1을
+                        #   돌려 **재시도 대상**이 됐는데, 바로 아래 status/api 경로는 같은
+                        #   「로그아웃 확증」에 RC_LOGIN_REQUIRED(재시도 0)를 돌려주고 있었다.
+                        #   같은 병에 두 처분 → 화면에 두 이름. 그리고 재시도 3회 × 창 대기는
+                        #   9분을 태우며 옆 레인(판매분석)까지 굶겼다(2026-08-22 10:43 실측).
+                        log.error("RG: 로그인 필요(정산 세션 로그아웃 확증) — 탭을 열어 두고 "
+                                  "즉시 보고한다. 그 탭에서 로그인하면 다음 폴이 이어받는다.")
+                        return RC_LOGIN_REQUIRED
                     log.info("RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                     if not _rg_login_wait(page, ctx, state, login_wait_secs, cdp=cdp):
-                        log.error("RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).")
-                        return 1
+                        log.error("RG: 로그인 감지 실패(탭은 열어 둠 — 로그인하면 폴이 이어받는다).")
+                        return RC_LOGIN_REQUIRED
                     owner.keep_open = False   # 로그인 성공 → 평소대로 작업 후 창 닫음
                 elif entry_verdict == _PROBE_OK:
                     save()  # 세션 유효 → 회전 쿠키 보존 (CDP: no-op)

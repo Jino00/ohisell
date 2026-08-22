@@ -4006,19 +4006,26 @@ export function putNaverCampaignLossPolicy(
   });
 }
 
-// 쿠팡 4스트림 수집 신선도(전역 배너 전용). 자동 트리거 제거 후 '낡음/실패' 가시화 유일 경로.
+// 쿠팡 6스트림 수집 신선도(전역 배너 전용). 자동 트리거 제거 후 '낡음/실패' 가시화 유일 경로.
 // 'unknown' = 백엔드가 그 스트림의 상태를 **판정하지 못했다**(getter 예외). fresh와 절대
 // 섞지 않는다 — 모르는 것을 괜찮다고 표시하면 침묵과 같다(2026-08-07 적대리뷰 P1).
+// 'needs_login' = 계정 세션이 끊겨 **사람이 로그인하기 전까지 원리적으로 진행되지 않는다**
+//   (2026-08-22 W1). in_flight보다 우선한다 — 종전엔 로그인이 끊긴 채 버튼을 누르면
+//   requested=true라 「수집 중」으로 보였고, 그동안 아무도 Mac 앞으로 가지 않았다.
 export type CollectionState =
-  | "fresh" | "warn" | "critical" | "failed" | "in_flight" | "unknown";
+  | "fresh" | "warn" | "critical" | "failed" | "in_flight" | "unknown" | "needs_login";
 export interface CollectionStreamStatus {
-  key: "ofix_sales" | "ofix_ad" | "ohitech_ad" | "supplier_hub";
+  // ★rg_wing1/rg_wing2 추가(2026-08-22 W1): RG 정산이 전역 배너 대상이 아니어서
+  //   「WING 로그인이 끊겼다」가 버튼을 눌러 실패해 봐야만 보였다.
+  key: "ofix_sales" | "ofix_ad" | "ohitech_ad" | "supplier_hub" | "rg_wing1" | "rg_wing2";
   label: string;
   state: CollectionState;
   age_hours: number | null;
   last_success_at: string | null;
   last_error_at: string | null;
   last_error: string | null;
+  /** 마지막 실패의 분류. 문구 매칭 대신 이 값으로 처방을 고른다(2026-08-22 W1). */
+  last_error_kind?: string | null;
 }
 export interface CollectionStatus {
   streams: CollectionStreamStatus[];

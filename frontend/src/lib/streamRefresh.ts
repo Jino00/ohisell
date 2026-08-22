@@ -37,12 +37,28 @@ export interface RefreshStatusLike {
    * 없는 응답(구버전·다른 표면)도 받아들이도록 optional — 없으면 이 표시만 생략된다.
    */
   attempt_count?: number;
+  /**
+   * 지금 페처가 임대를 붙잡고 실제로 일하는 중인가(refresh_contract.status_fields).
+   * ★타임아웃 문구를 가르는 데 쓴다(2026-08-22 W4) — "215초가 지났다"는 사실 하나로
+   * 「Mac 꺼짐」과 「아직 일하는 중」을 같은 말로 부르던 것을 나눈다.
+   */
+  in_flight?: boolean;
+  /**
+   * 마지막 실패의 **분류**(login_required / access_denied / mapping_broken / no_response / null).
+   * ★2026-08-22 W1 신설. 종전엔 이 사실이 last_error **문자열** 안에만 있어서 프론트가
+   * 문구 매칭으로 읽었다 — 문구를 바꾸면 화면이 조용히 깨지는 결합이었다.
+   */
+  last_error_kind?: string | null;
 }
 
 export type RefreshOutcome =
   | { state: "done" }
-  | { state: "failed"; reason: string }
-  | { state: "no_response" }; // 타임아웃 = Mac 꺼짐·데몬 미설치·응답 없음
+  | { state: "failed"; reason: string; kind?: string | null }
+  // 타임아웃. ★단일 상태가 아니다(2026-08-22 W4): 215초가 지났다는 사실 하나에
+  //   「Mac 꺼짐」·「데몬이 요청을 못 집음」·「아직 일하는 중」이 뭉쳐 있었고, 그래서
+  //   Mac이 켜져 있고 방금 성공까지 한 상황에도 「Mac이 켜져 있는지 확인하세요」가 떴다.
+  //   마지막으로 관측한 상태를 실어 보내 문구를 가른다.
+  | { state: "no_response"; attemptCount?: number; inFlight?: boolean; kind?: string | null };
 
 export interface StreamRefreshSpec {
   /** collection-status의 stream key와 동일해야 한다(배너 항목 ↔ 갱신 대상 매칭 키). */
@@ -203,12 +219,16 @@ export async function runStreamRefresh(
   const deadline = now() + timeoutMs;
   let sawFetching = false;
   let pollFailures = 0;
+  // ★타임아웃 문구를 가르려면 «마지막으로 본 상태»가 필요하다(W4). 루프 안에서만 살아 있던
+  //   st를 밖으로 들고 나간다 — 없으면 타임아웃 시점에 우리가 아는 게 "215초 지났다"뿐이다.
+  let lastSeen: RefreshStatusLike | null = null;
   while (now() < deadline) {
     await sleep(pollMs);
 
     let st: RefreshStatusLike;
     try {
       st = await spec.getStatus();
+      lastSeen = st;
       pollFailures = 0; // 성공하면 연속 실패 카운터를 리셋한다.
     } catch (e) {
       pollFailures += 1;
@@ -259,7 +279,7 @@ export async function runStreamRefresh(
     // 실패 흔적이 지워져 done이 된다. 3회 모두 그렇게 끝날 때만 실패로 보고되는데, 정산(돈)
     // 데이터에서는 **거짓 완료가 거짓 실패보다 훨씬 나쁘다**(재클릭은 무해).
     if (spec.settleBeforeSuccess && settledFailure) {
-      return { state: "failed", reason: st.last_error || "원인 미상" };
+      return { state: "failed", reason: st.last_error || "원인 미상", kind: st.last_error_kind };
     }
 
     // ★성공 우선(순서 바꾸지 말 것 — 비RG): 둘 다 변했으면 성공이 이긴다. 라이브 실측
@@ -274,14 +294,21 @@ export async function runStreamRefresh(
     }
 
     if (settledFailure) {
-      return { state: "failed", reason: st.last_error || "원인 미상" };
+      return { state: "failed", reason: st.last_error || "원인 미상", kind: st.last_error_kind };
     }
 
     // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
     // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
     if (!st.requested) return { state: "done" };
   }
-  return { state: "no_response" };
+  // ★타임아웃 = 판정 불가이지 «Mac 꺼짐»이 아니다(W4). 마지막으로 본 상태를 실어 보내
+  //   describeOutcome이 처방이 다른 세 경우를 갈라 말하게 한다.
+  return {
+    state: "no_response",
+    attemptCount: lastSeen?.attempt_count,
+    inFlight: lastSeen?.in_flight,
+    kind: lastSeen?.last_error_kind,
+  };
 }
 
 /**
@@ -291,7 +318,17 @@ export async function runStreamRefresh(
  * 정하고, 이 문자열 매칭이 빗나가도 원문 사유는 그대로 노출된다(문구가 바뀌어도 조용히
  * 오작동하지 않는다). prod 실측 문구: "…(rc=3) [로그인 필요 — 재시도 안 함(…)]".
  */
-export function isLoginRequired(reason: string | null | undefined): boolean {
+export function isLoginRequired(
+  reason: string | null | undefined,
+  kind?: string | null,
+): boolean {
+  // ★kind가 «오면» 그것이 정본이다(2026-08-22 W1) — 백엔드가 기계 판독 값으로 알려주므로
+  //   문구가 바뀌어도 안 깨진다. 문자열 매칭은 kind를 **모르는** 응답용 폴백으로만 남긴다.
+  // ★null과 undefined를 가른다: null = 백엔드가 「분류된 실패 없음」이라고 **말한 것**이므로
+  //   정본이고, undefined = 그 필드를 모르는 응답(구버전 백엔드·프론트 선배포 창)이라 폴백이다.
+  //   섞으면 백엔드가 「로그인 문제 아님」이라 판정한 실패에도 문구 매칭이 로그인 꼬리표를
+  //   붙인다 — 그게 이번에 없애려는 결합 그 자체다.
+  if (kind !== undefined) return kind === "login_required";
   return !!reason && reason.includes("로그인 필요");
 }
 
@@ -300,12 +337,34 @@ export function describeOutcome(spec: StreamRefreshSpec, outcome: RefreshOutcome
   if (!outcome) return `⏳ ${spec.label} 진행 중`;
   if (outcome.state === "done") return `✅ ${spec.label} 완료`;
   if (outcome.state === "failed") {
-    return isLoginRequired(outcome.reason)
-      ? `🔑 ${spec.label} — ${spec.account} 로그인 필요(열린 Chrome 창에서 로그인 후 다시 누르세요)`
+    // ★문구 정정(W3): 이제 로그인만 하면 데몬이 감지해 요청을 자동으로 되살린다.
+    //   「다시 누르세요」는 더 이상 참이 아니고, 그 문구 때문에 사람이 창을 찾아 로그인하고도
+    //   또 버튼을 누르러 폰으로 돌아가야 했다.
+    return isLoginRequired(outcome.reason, outcome.kind)
+      ? `🔑 ${spec.label} — ${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인하면 자동으로 이어받습니다)`
       : `❌ ${spec.label} 실패(${outcome.reason})`;
   }
-  const where = spec.windowHint ? `, ${spec.windowHint} 창이 떠 있는지` : "";
-  return `⚠️ ${spec.label} 응답 없음 — Mac이 켜져 있는지${where} 확인하세요`;
+
+  // ── 타임아웃(no_response) 3분할 (2026-08-22 W4) ──────────────────────────
+  // 종전엔 여기가 한 문구였다: 「응답 없음 — Mac이 켜져 있는지 확인하세요」.
+  // 2026-08-22 10:47 실측에서 그 문구가 떴을 때 Mac은 **켜져 있었고 수집 중이었다** —
+  // 옆 레인이 로그인 대기로 폴 루프를 3분 점유해 이 요청을 늦게 집었을 뿐이다.
+  // 틀린 처방("Mac을 켜세요")은 침묵보다 나은 실패가 아니다.
+  if (isLoginRequired(null, outcome.kind)) {
+    return `🔑 ${spec.label} — ${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인하면 자동으로 이어받습니다)`;
+  }
+  if (outcome.inFlight) {
+    // Mac이 임대를 붙잡고 실제로 일하는 중 — 화면만 먼저 포기한 것이다. 실패가 아니다.
+    return `⏱️ ${spec.label} — 수집이 백그라운드에서 계속됩니다(화면 대기 시간 초과). 잠시 뒤 새로고침하세요`;
+  }
+  if ((outcome.attemptCount ?? 0) === 0) {
+    // 요청은 걸렸는데 아무도 claim하지 않았다 = Mac이 꺼졌거나 데몬이 죽었다.
+    // 이 경우에만 「Mac을 보라」가 참이다.
+    const where = spec.windowHint ? `, ${spec.windowHint} 창이 떠 있는지` : "";
+    return `⚠️ ${spec.label} — Mac이 요청을 집지 않았습니다(Mac이 켜져 있는지${where} 확인하세요)`;
+  }
+  // 집어갔는데 정착 보고가 안 왔다 — Mac 탓으로 돌리지 않는다.
+  return `⚠️ ${spec.label} 응답 지연 — Mac이 요청을 받았으나 아직 결과가 없습니다(잠시 뒤 새로고침)`;
 }
 
 /**

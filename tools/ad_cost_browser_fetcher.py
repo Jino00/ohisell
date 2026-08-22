@@ -226,6 +226,7 @@ def _push(cfg: dict, data: dict) -> int:
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/ingest",
             json={"date": today, "vendors": vendors},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=20,
         )
     except requests.RequestException as e:
@@ -293,6 +294,7 @@ def _push_sales(cfg: dict, sales_body: str) -> None:
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/ingest",
             json={"days": days},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=20,
         )
         pr.raise_for_status()
@@ -437,6 +439,7 @@ def _push_option_xlsx(cfg: dict, filename: str, content: bytes) -> bool:
                 "X-Report-Filename": filename,
                 "Content-Type": "application/octet-stream",
             },
+            auth=_basic_auth(cfg),
             timeout=60,
         )
         pr.raise_for_status()
@@ -858,9 +861,21 @@ _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 외부 요청 폭주�
 _MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
 
 
+def _basic_auth(cfg: dict):
+    """prod Basic Auth 자격증명 — 없으면 None(인증 켜기 전까지 기존 동작 유지).
+
+    ★설정에 키가 없으면 None을 돌려준다. 그래야 이 커밋을 먼저 배포해 두고
+      나중에 nginx를 켜는 «순서»가 성립한다(둘을 동시에 바꾸면 되돌릴 곳이 두 곳이 된다).
+    """
+    u = cfg.get("basic_auth_user")
+    p = cfg.get("basic_auth_pass")
+    return (u, p) if u and p else None
+
+
 def _prod_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/refresh-status",
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -871,6 +886,7 @@ def _prod_claim(cfg: dict) -> dict:
     r = requests.post(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/refresh-claim",
         headers={"X-Ingest-Token": cfg["ingest_token"]},
+        auth=_basic_auth(cfg),
         timeout=15,
     )
     r.raise_for_status()
@@ -898,6 +914,7 @@ def _prod_report_failure(cfg: dict, error: str, kind: str | None = None,
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/fetch-error",
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
             timeout=10,
         )
     except Exception as e:  # noqa: BLE001

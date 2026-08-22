@@ -199,11 +199,97 @@ M3은 그 목표의 **L4(학습층) 부품을 붙이는 칸**이다(북극성 re
 **Q3. 성적표 산출 저장 표면** — 신설 1개 vs 기존 표(retro/GAVE 산출 계열) 확장?
 → **추천: M3-p 착수 첫 실측 후 확장 우선, «다른 소비자의 전제를 깨는» 구조면 신설.** M2 Q3의 전례를 그대로 승계한다 — 원 추천은 확장 우선이었고, 실측(`forecast_scorer`가 grain 무관 백필)이 신설을 정당화해 Jino가 추인했다(D-NAO-215). 이번에는 **절차를 이탈하지 않는다**: 실측 결과와 선택 사유를 구현 «전에» 이 §8에 확정 각주로 남기고 간다.
 
+> ---
+> ## ★§8-Q3 확정 각주 — **확장**(신설 아님) · 구현 «전»에 남긴다 (2026-08-22 14:2x KST · 세션 `c7105dae` 「PAO 논의 34」 · M3-p 실측 근거)
+>
+> **확정: `naver_change_log` 확장.** 새 원장을 만들지 않는다.
+>
+> **근거 1 — 「다른 소비자의 전제를 깨는가」의 답이 «아니오»다(실측).** `naver_change_log.outcome` 소비처 전수 = **backend 14곳 + frontend 2곳**:
+> `routers/naver_ad.py:550·583·1338`(응답 직렬화) · `routers/naver_ad.py:1150·1289` · `ad_external_change.py:119` · `bid_rank_curve.py:151·226` · `perf_campaign_harness.py:98·323` · `perf_today_harness.py:213` · `improvement_events.py:131`(전부 `outcome=='failed'` 필터) · `proposal_scoreboard.py:112-116`(SELECT 필터) · `:123`(**유일한 UPDATE 지점**) · `:153-154`(자기 롤업) / 프론트 `frontend/src/lib/api.ts`의 `NaverProposalExecuteResult.outcome`·`NaverChangeLogRow.outcome`(둘 다 `string`/`string|null` 느슨한 타입).
+> ⇒ **전부 «기존 컬럼의 기존 값»에만 반응하고, 새 컬럼을 읽는 소비처는 0곳이다.** Q1이 확정한 「새 식 산출은 별도 컬럼」을 따르면 **추가(additive) 스키마 변경이라 어느 소비처도 구조적으로 깨지지 않는다.** D-NAO-215(M2-a `forecast_scorer`)에서 신설을 정당화했던 「grain 무관 백필이 다른 소비자의 전제를 깬다」 패턴은 **이번 목록에서 관측되지 않았다** ⇒ Q3 원문의 기본값(**확장 우선**)이 그대로 선다.
+>
+> **근거 2 — 신설의 이득이 없다.** 새 식의 산출은 «조치 1건»에 붙는 값이고 `naver_change_log`가 이미 그 grain의 유일한 원장이다. 별도 원장을 만들면 `change_log` 1:1 조인이 영구히 따라붙고, M3-a의 지혜 성적표가 조인을 **하나 더** 타야 한다(북극성 §5-3 ①의 문제의식이 정확히 *"지혜 id로 묶는 조인 하나가 없다"*인데, 신설은 그 조인을 하나 늘린다).
+>
+> **근거 3 — 원료가 이미 같은 행·같은 쿼리 안에 있다.** `_aggregate_entity_metrics`(`proposal_scoreboard.py:38-60`)가 `naver_ad_daily`에서 `clk`·`conv_direct_amt`·`conv_indirect_amt`를 걷는데 **`cost`만 없다** — 같은 `query(...)`에 컬럼 하나를 더하는 것이라 **추가 쿼리 0회**로 ROAS 원료가 확보된다.
+>
+> ### 확장 명세 (컬럼 4개 추가 — 삭제·타입 변경 0)
+> | 컬럼 | 타입 | 이유 |
+> |---|---|---|
+> | `outcome_profit` | `String(12)` nullable | 새 식 판정(improved/declined/neutral). **기존 `outcome`은 불변**(Q1) — 두 컬럼이 «옛 자 / 새 자»로 나란히 남아 교정 전후 대조가 영구 보존된다 |
+> | `gave_before` | `Float` nullable | 조치 «전» 창의 GAVE 점수 |
+> | `gave_after` | `Float` nullable | 조치 «후» 창의 GAVE 점수 |
+> | `bep_source` | `String(16)` nullable | `product_bep` / `account_default` / `unavailable` — **§4-B ⑥ 값 정확도 라벨의 원료**(상품BEP ↔ 계정 블렌디드 구분). ⚠️이 컬럼을 넣는다고 ⑥이 달성되는 것은 아니다 — ⑥의 판정면은 **성적표 산출물**이고 그건 M3-a 소관이다. 여기서는 «원료를 버리지 않는다»까지만 한다 |
+>
+> ⚠️`gave_before`/`gave_after`를 저장하는 이유(‖ `models.py:2750-2751`이 retro에서 *"재구성 가능하니 점수만 저장(최소 스키마)"*라 한 것과 **다른 선택**임을 밝힌다): retro는 렌즈(`cf_asof`·`bep_asof`)가 **같은 행에 얼어 있어** 점수를 되짚을 수 있지만, `naver_change_log`엔 렌즈 컬럼이 없다. 렌즈를 컬럼으로 4개 더 늘리는 대신 **산출 점수 2개만 컬럼으로 두고, 렌즈(`cost`·`bep`·`bep_source`·`gamma`·`cf`)는 기존 `actual_json`에 additive 키로 적는다** — `actual_json`은 이미 이 행의 관측 기록이고 스키마 변경이 아니다.
+>
+> ### 재사용 경로 (Q5 「기존 모양 재사용」의 구체 좌표 — 전부 실재 확인)
+> - 식: `gave_score.compute_gave_score(revenue, cost, bep_roas, gamma)` → `{score, penalty, roas, roas_ratio, gamma}` (`gave_score.py:21-71`, 페널티 `:60-61`, 점수 `:63`)
+> - γ: `NaverCampaignSettings.gamma` → 없으면 `gave_score.DEFAULT_GAMMA=1` — **`retro_scorer._gamma_for(:82-92)`의 캐시 패턴을 그대로 쓴다**
+> - BEP: `campaign_target_resolver.weighted_product_value_for_campaign(db, campaign_id, NaverProductBep.bep_roas)`(`:137-141`) → None이면 `account_default_bep_roas(db)`(`:169-176`). **이 폴백의 어느 쪽을 탔는지가 `bep_source`다**
+> - cf: `diagnosis.correction_factor(db, date_to)["factor"]` — `retro_snapshotter.py:57`이 `cf_asof`를 얻는 바로 그 경로
+> - 문턱: **기존 `IMPROVED_RATIO=1.1` / `DECLINED_RATIO=0.9` 재사용**(`proposal_scoreboard.py:33-34`). ★**새 문턱을 만들지 않는다**(§3) — 바뀌는 것은 «문턱»이 아니라 «재는 양»이다(RPC 배율 → GAVE 배율)
+>
+> ### ★실측이 계약의 서술 하나를 정정한다 — 「`gave_score`가 정지 중」은 부정확하다
+> §2-3·§8-Q5·북극성 부록 A ⑤가 *"이미 코드에 있고 «정지 중»"*이라 적었으나, prod 실측은 **매일 계산·저장되고 있음**을 보인다: `naver_retro_signal` 38,841행 중 `gave_score_d3` **28,964** · `gave_score_d7` **28,605** non-null, `MAX(scored_d3_at)=2026-08-22 08:30:10` · `MAX(scored_d7_at)=2026-08-22 08:30:13`(08:30 크론 `retro_scoring_loop`). 롤업 `naver_learning_state(scope='retro_board')`도 board 6종 전건 실재.
+> **정확한 문언**: 멈춰 있는 것은 «계산»이 아니라 **«입찰 반영»**이다 — `bid_simulator.py`는 `gave_score`를 import하지 않는다(import 전수 5파일: `expansion_pressure`·`expansion_allocator`·`auto_operator`·`retro_scorer`·`proposal_pipeline`). GAVE `score`를 실제로 소비하는 곳은 `proposal_pipeline.py:595`(성장군 제안 «정렬»)뿐이고 나머지 3곳은 `roas_ratio`만 쓴다.
+> ⇒ **Q5의 재사용은 전제보다 안전하다**(살아 있는 함수 + 테스트 `test_gave_score.py` 17개 · `test_naver_retro_gave.py` 7개). 계약 문언은 고치지 않는다 — 합격기준이 아니라 «배경 서술»의 부정확이고, 정정은 이 각주로 남긴다.
+>
+> ### ★부수 정정 — 「호출부 6곳」은 실측 **5곳**
+> 북극성 부록 A ⑤(`docs/references/82_pao_north_star_20260819.md:244`)와 ref 65(`:191`)가 *"호출부 6곳"*이라 적었으나 **좌표 목록은 어느 문서에도 없다.** 전수 grep 실측 = 외부 호출 **5곳**(`retro_scorer.py:124` · `proposal_pipeline.py:595` · `expansion_pressure.py:166` · `expansion_allocator.py:300` · `auto_operator.py:2334`) · import 파일 **5개**. `proposal_writer.py`는 **docstring에서만** 언급하고 실제 import·호출이 없다(6번째의 유력 후보이나 확정 불가). ⇒ **개수 불일치만 확정, 6번째의 정체는 판정불능**(M2-b2의 「문서 개수 ≠ 실측」 패턴 재발).
+>
+> ### 두 번째 축(ⓑ)에서 실제로 무엇이 틀렸는지 — 실측으로 확정
+> `wisdom_candidates._outcome_direction`(`:70-88`)의 `good = roas_c >= float(target)`에서 `target`은 `campaign_target_resolver.resolve_target_roas`가 준 값인데, **`models.py:2286`이 `target_roas = bep_roas × 공격성 배수`라고 정의한다** — 즉 `target ≥ bep`다.
+> ⇒ **현행 게이트는 «BEP를 넘겨 실제로 총이익을 낸» 조치를 `bad`로 센다**(bep ≤ roas_c < target 구간). 그 구간이 정확히 D-NAO-59 원문 *"Roas는 떨어지지만 매출이 늘어서 총 이익이 늘어나는 경우"*가 사는 자리다. **교정 = 게이트의 기준자를 `target_roas` → `bep_roas`로 바꾸고, 크기(절대액)를 GAVE 점수로 병기**한다. 원료는 이미 창 안에 있다 — `_window_metrics`(`diary_outcome.py:230-238`)가 `{cost, clk, conv, roas_c}`를 주고 `roas_c=(conv/cost)×cf`이므로 **보정 매출 = `roas_c × cost`로 정확히 복원**된다(추가 조회 0).
+
 **Q4. 합격 ②③(A#8 라벨·항등식)과 M2-d(S2-ⓐ·S2-①)의 경계** — 같은 라벨 배선과 같은 항등식 문언이 두 M에 걸쳐 있다(§4-A [⚠️애매] 2건).
 → **추천: 배선·항등식 «검산»의 정본은 M2-d(S2-①)로 두고, M3 몫은 «API 응답 층 실재»(②)의 추가 관측 + M2-d 검산 산출물의 좌표 인용(③)으로 한정한다.** 같은 검산 1회를 두 M의 달성 증거로 이중 계상하지 않게 판정문에 정본 좌표를 병기한다. M2-d가 미완이면 M3-c는 판정 대기(M3-a·b의 착수·종결은 막지 않는다 — 그 경우 M3-z는 ②③을 «M2-d 대기»로 명기하고 부분 종결).
 
 **Q5. 새 채점식의 형태** — 무엇으로 교정하나?
 → **추천: `gave_score.py:60-63`의 기존 모양 재사용 — `min((ROAS/BEP)^γ, 1) × revenue`(효율은 페널티로, 크기는 절대액으로).** 근거: ref 90 §4-4 ② *"올바른 목적함수가 이미 코드에 있다 — 그런데 그게 정지 중이다"* + §7 사실 3 + §2-3(북극성 부록 A ⑤가 «배선·정지중»으로 분류). 새 상수·새 문턱 발명 금지(§3)와 정합하는 유일한 기본값이다. 구현 실측에서 재사용 불가(grain 불일치 등)가 나오면 멈추고 이 §8 경로로 올린다.
+
+> ---
+> ## ★★§8-Q5 재확정 — **D-NAO-225: 판정식은 «GAVE 배율»이 아니라 «총이익 델타»다**
+> (2026-08-22 15:0x KST · 세션 `c7105dae` 「PAO 논의 34」 · Jino 확정 — 구현 실측이 Q5 초기 확정값을 반증)
+>
+> **Q5 본문이 예고한 분기가 발동했다**: *"구현 실측에서 재사용 불가(grain 불일치 등)가 나오면 멈추고 이 §8 경로로 올린다."* 멈추고 올렸고, Jino가 «총이익 델타»로 확정했다.
+>
+> ### 무엇이 반증됐나
+> `GAVE = min{(roas/bep)^γ, 1} × 매출`에는 **비용을 빼는 항이 없다.** 성장 후보를 «정렬»할 때는 맞지만(그게 원래 용도다 — `proposal_pipeline.py:595`), **비용이 함께 변하는 «전/후 판정»에서는 적자 대상의 지출을 줄인 조치를 「매출이 줄었다」는 이유로 악화로 읽는다.**
+>
+> ref 90 §2-2의 정본 4건(id 221·222·761·942)을 prod 실수치로 재계산했다(읽기 전용. 재계산한 `clk`·`conv_amt`가 원장 `actual_json` **4건 전건과 정확히 일치** ⇒ 창·grain 재현 검증됨):
+>
+> | id | 매출 | 비용 | 총이익(BEP 3) | 총이익 방향 | GAVE 배율 판정 |
+> |---|---|---|---|---|---|
+> | 221·222 | 178,900 → 138,200 | 122,240 → 88,002 | −62,607 → **−41,935** | **증가** | `declined` ❌ |
+> | 761 | 174,900 → 90,500 | 122,426 → 43,310 | −64,126 → **−13,143** | **증가** | `declined` ❌ |
+> | 942 | 59,400 → 50,400 | 90,627 → 16,930 | −70,827 → **−130** | **증가** | `improved` ✅ |
+>
+> **4건 전부 총이익은 증가**했는데(BEP 2·3·5 전 구간 동일) GAVE 배율은 **3건을 `declined`로** 찍었다. ⇒ 재사용 불가.
+>
+> ### 확정된 식
+> `총이익 = (cf 보정 매출 / bep_roas) − 비용` 의 **전/후 부호 비교**. `bep_roas`는 본전 ROAS(공헌이익률의 역수)라 `매출/BEP`가 그 매출이 낳은 공헌이익이고, 광고비를 빼면 총이익이다 — **D-NAO-59가 최대화하라고 한 그 양 자체**다.
+> - **GAVE 점수는 «크기» 축으로 계속 저장한다**(`gave_before`·`gave_after`) — Q5의 「기존 모양 재사용」 지시는 그 형태로 살아 있고, M3-a 성적표가 롤업할 때 «얼마나 큰 건이었나»를 준다.
+> - ★**새 문턱을 만들지 않았다**(§3): 기존 `IMPROVED_RATIO`/`DECLINED_RATIO`(±10% 배율 밴드)는 **부호 있는 양에 옮길 수 없다** — 「−70,827 → −130」의 배율은 0.002배지만 실제로는 7만원 개선이다. 밴드를 억지로 이식하는 대신 **부호 비교만** 하고, 노이즈 방어는 이미 있는 모수게이트(양쪽 창 `clk ≥ 10`)에 맡긴다.
+> - ⚠️**알려진 한계**: 아주 작은 델타도 판정이 된다. 이 축은 «표시 + 자기 롤업»에만 흐르고 조작 경로가 없어(ref 90 §2-3) 지금은 무해하지만, **M3-a가 이 값을 롤업할 때 델타 «크기»를 함께 봐야 한다**(그 크기가 `gave_*`와 `actual_json.lens`다).
+>
+> ### ★§4-B ④ 검산 결과 — 채점된 150건 전수 (prod 읽기 전용, 2026-08-22)
+> 정본 4건만으로는 **옛 자와 새 자가 갈리는지 보이지 않는다**(4건 다 양쪽이 `improved`). 그래서 채점 완료된 150건 전수로 혼동행렬을 냈다. 창·grain 재현은 위 4건 일치로 검증된 것과 같은 경로다.
+>
+> **BEP 3 · γ=1 · cf=1 기준 (모수 미달 0건)**
+>
+> | 옛 자 ＼ 새 자 | improved | declined |
+> |---|---|---|
+> | improved (4) | **4** | 0 |
+> | declined (89) | **17** | 72 |
+> | neutral (57) | **27** | 30 |
+>
+> **일치 76/150 (50.7%) — 74건(49.3%)이 뒤집힌다.** BEP 2에서 62건, BEP 5에서 76건으로 어느 렌즈에서도 절반 안팎이 뒤집힌다.
+> ⇒ 「옛 자가 대체로 맞는데 4건만 이상했다」가 **아니다.** 특히 옛 자가 `neutral`로 흘려보낸 57건 중 **27건이 실제로는 총이익 개선**이었다 — 성적표가 그동안 이 27건을 「아무 일도 없었다」로 롤업하고 있었다.
+>
+> ### ★④의 검산 문언 «매출 절대액 감소인데 개선 = 0건»에 대한 처분 (Jino 확정 2026-08-22)
+> **문언은 고치지 않는다. 「전제가 틀렸다」를 기록으로 남긴다.**
+> 그 문언은 「매출 감소 = 나쁨」을 전제하는데, **D-NAO-59의 목적함수는 매출이 아니라 총이익**이다. 적자 대상의 지출을 줄이면 매출은 줄고 총이익은 는다 — id 942가 정확히 그것이고(−70,827 → −130), 150건 전수에서도 **「매출 감소인데 개선」이 33건**이다. ⇒ **어느 판정식으로도 0건이 될 수 없고, 0건이 되어서도 안 된다.**
+> ⇒ 이 항목은 **문언 대비 미달**로 판정하고(기준 인하 금지, 전역 §2), 미달의 사유가 「채점기가 틀려서」가 아니라 **「검산 문언 자체가 목적함수와 어긋나서」**임을 판정문에 병기한다. 문언 수정은 새 계약 사안이다(§1 승인 지점 ①).
 
 **Q6. 채점기 교정의 범위** — ⓐ`proposal_scoreboard`(outcome 축)만인가, ⓑ지혜 승격 게이트(`_outcome_direction`, `ops_diary_entries.outcome_json` 축)까지인가? D-NAO-223의 문언(「채점기 교정」)은 축을 특정하지 않는다 — **[⚠️애매]**.
 → **추천: 두 축 모두.** 근거: ref 90 §7 사실 1 — *"성적표가 원료로 삼을 판정값 두 축(§2 `naver_change_log.outcome` · §3 `_outcome_direction`)이 둘 다 효율 기반"* + 사실 2 — 승격 게이트(ROAS)와 M5 성공 정의(총이익)가 다른 것을 잰다. ⓐ만 고치면 성적표의 «입구»(어떤 지혜가 승격되나)가 여전히 효율로 걸러져, M5 합격기준(「지혜→총이익 기여」 양수)과의 어긋남이 남는다. 단 두 축은 **다른 테이블·다른 경로**임을 구현이 혼동하지 않게 슬라이스 M3-b 안에서 커밋을 가른다.

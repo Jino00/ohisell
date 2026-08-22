@@ -1,6 +1,7 @@
 # test_naver_wisdom.py — D-NAO-54 P3 승격·망각층(candidate/judge/writer/retention·wisdom_loop
 # 하니스·크론 5지점·백필 스크립트) 단위 테스트. LLM은 전부 주입경계(invoke)로 몽키패치 — 실
-# claude CLI 호출 0. target 해석은 결정성 위해 픽스처에서 고정값으로 패치.
+# claude CLI 호출 0. BEP 해석은 결정성 위해 픽스처에서 고정값으로 패치(D-NAO-223 이후
+# 기준자가 target_roas가 아니라 bep_roas다 — _fixed_bep).
 from __future__ import annotations
 
 import inspect
@@ -45,11 +46,16 @@ def db():
 
 
 @pytest.fixture(autouse=True)
-def _fixed_target(monkeypatch):
-    """캠페인 target_roas를 2.0으로 고정 — outcome_direction good/bad가 결정적으로 나오게."""
+def _fixed_bep(monkeypatch):
+    """캠페인 **bep_roas**를 2.0으로 고정 — outcome_direction good/bad가 결정적으로 나오게.
+
+    ★D-NAO-223(M3-b 축 ⓑ): 기준자가 `target_roas` → `bep_roas`로 바뀌었다. 픽스처 이름도
+      같이 고친다 — 이 교정의 요점이 「target != bep」이라, 이름이 `_fixed_bep`으로 남으면
+      다음 사람이 «목표»와 «본전»을 다시 같은 것으로 읽는다.
+    """
     monkeypatch.setattr(
-        wisdom_candidates.campaign_target_resolver, "resolve_target_roas",
-        lambda db, cid: {"target_roas": 2.0, "source": "override"},
+        wisdom_candidates.campaign_target_resolver, "resolve_bep_roas",
+        lambda db, cid: {"bep_roas": 2.0, "source": "product_bep"},
     )
 
 
@@ -183,10 +189,10 @@ def test_harvest_revives_hidden_on_reoccurrence(db):
     assert set(json.loads(cand.source_entry_ids_json)) == {1, 2}
 
 
-def test_harvest_skips_when_target_unavailable(db, monkeypatch):
+def test_harvest_skips_when_bep_unavailable(db, monkeypatch):
     monkeypatch.setattr(
-        wisdom_candidates.campaign_target_resolver, "resolve_target_roas",
-        lambda db, cid: {"target_roas": None, "source": "unavailable"},
+        wisdom_candidates.campaign_target_resolver, "resolve_bep_roas",
+        lambda db, cid: {"bep_roas": None, "source": "unavailable"},
     )
     _diary(db, outcome=_good())
     res = wisdom_candidates.harvest_candidates(db, now=NOW)
@@ -533,3 +539,88 @@ def test_backfill_dry_run_writes_nothing(db):
     res = bf.backfill(db, apply=False)
     assert res["execute"] == 1
     assert db.query(OpsDiaryEntry).count() == 0  # dry-run은 카운트만
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-NAO-223 (M3-b 축 ⓑ) — 지혜 승격 게이트의 기준자를 target_roas → bep_roas로 교정
+# 계약 `docs/PLAN_naver-m3-wisdom-scorecard.md` §4-B ④ · §8-Q6
+# ══════════════════════════════════════════════════════════════════════════
+
+def _diary_entry(campaign_id="cmp1", action="update_bid"):
+    return OpsDiaryEntry(
+        campaign_id=campaign_id, action=action, event_type="execute",
+        target_type="adgroup", target_id="grp1",
+    )
+
+
+def test_outcome_direction_counts_above_bep_as_good_even_below_target(db, monkeypatch):
+    """★축 ⓑ 교정의 핵심 — 본전(bep)을 넘겼으면 «목표(target)»에 못 미쳐도 good이다.
+
+    `models.py`가 `target_roas = bep_roas x 공격성 배수`로 정의하므로 target >= bep이고,
+    그 사이 구간(bep <= roas < target)은 **실제로 총이익을 낸** 조치다. 옛 게이트는 이걸
+    `bad`로 세었고, 그 tally가 그대로 지혜 승격 심사로 올라갔다 — 북극성 M5의 성공 정의는
+    「지혜 -> 총이익 기여 양수」인데 승격 게이트는 효율을 재고 있었다(ref 90 §3).
+    """
+    monkeypatch.setattr(
+        wisdom_candidates.campaign_target_resolver, "resolve_bep_roas",
+        lambda db, cid: {"bep_roas": 2.0, "source": "product_bep"},
+    )
+
+    entry = _diary_entry()
+    # bep 2.0 < roas_c 3.0 < target(=2.0 x 공격성 2.5 = 5.0) — 옛 게이트라면 bad
+    assert wisdom_candidates._outcome_direction(
+        db, entry, {"cost": 10000, "clk": 20, "conv": 30000, "roas_c": 3.0}
+    ) == "good"
+    # 본전 미달은 그대로 bad — 게이트를 «없앤» 게 아니라 «기준자»를 바꾼 것이다
+    assert wisdom_candidates._outcome_direction(
+        db, entry, {"cost": 10000, "clk": 20, "conv": 15000, "roas_c": 1.5}
+    ) == "bad"
+
+
+def test_outcome_direction_no_longer_consults_target_roas(db, monkeypatch):
+    """★「교정이 실제로 배선됐나」를 못박는다 — 옛 이음매가 불리면 그 자리에서 실패한다.
+
+    이게 없으면 `resolve_bep_roas`를 추가만 해 두고 게이트는 여전히 target을 보는 상태가
+    테스트를 통과한다(M2-b2에서 «소비 좌표가 미스사이트»였던 것과 같은 종류의 구멍).
+    """
+    monkeypatch.setattr(
+        wisdom_candidates.campaign_target_resolver, "resolve_bep_roas",
+        lambda db, cid: {"bep_roas": 2.0, "source": "product_bep"},
+    )
+
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("승격 게이트가 아직 target_roas를 본다 — 축 ⓑ 교정이 배선되지 않았다")
+
+    monkeypatch.setattr(
+        wisdom_candidates.campaign_target_resolver, "resolve_target_roas", _must_not_be_called
+    )
+    assert wisdom_candidates._outcome_direction(
+        db, _diary_entry(), {"cost": 10000, "clk": 20, "conv": 30000, "roas_c": 3.0}
+    ) == "good"
+
+
+def test_outcome_direction_bep_cache_resolves_once_per_campaign(db, monkeypatch):
+    """회차 내 캐시 — 일지 행마다 BEP를 다시 해석하지 않는다(교정 전엔 캐시가 없어 N+1이었다)."""
+    calls = []
+    monkeypatch.setattr(
+        wisdom_candidates.campaign_target_resolver, "resolve_bep_roas",
+        lambda db, cid: (calls.append(cid), {"bep_roas": 2.0, "source": "product_bep"})[1],
+    )
+    cache: dict = {}
+    window = {"cost": 10000, "clk": 20, "conv": 30000, "roas_c": 3.0}
+    for _ in range(3):
+        wisdom_candidates._outcome_direction(db, _diary_entry(), window, bep_cache=cache)
+    assert calls == ["cmp1"]  # 3행인데 해석은 1회
+
+
+def test_outcome_direction_zero_cost_stays_neutral(db, monkeypatch):
+    """cost=0 관찰은 여전히 neutral — 교정이 기존 정직 경계(리뷰 P2-3)를 건드리지 않았다."""
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("cost=0인데 BEP를 해석했다 — 불필요한 조회")
+
+    monkeypatch.setattr(
+        wisdom_candidates.campaign_target_resolver, "resolve_bep_roas", _must_not_be_called
+    )
+    assert wisdom_candidates._outcome_direction(
+        db, _diary_entry(), {"cost": 0, "clk": 0, "conv": 0, "roas_c": None}
+    ) == "neutral"

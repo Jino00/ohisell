@@ -875,6 +875,13 @@ class CoupangWingCookie(Base):
         String(12), nullable=False, server_default="unknown"
     )  # green/red/unknown
     last_error: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    # 마지막 실패의 **분류**(refresh_contract.KIND_*). last_error 문자열과 달리 기계가 읽는다.
+    # ★왜 컬럼인가(2026-08-22, 계약 CONTRACT_collection_stability_s1 W1): 종전엔 「로그인 필요」의
+    #   유일한 흔적이 last_error 안의 "[로그인 필요 …]" 문구였고 프론트가 그걸 문자열 매칭으로
+    #   읽었다 — 문구를 바꾸면 화면이 조용히 깨지고, 무엇보다 «상태»가 아니라 «이벤트»라
+    #   버튼을 눌러 실패해 봐야만 로그인 필요를 알 수 있었다(2026-08-22 각 계정 9회 재발견).
+    #   None = 아직 분류된 실패가 없음(성공했거나 한 번도 실패 안 함).
+    last_error_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     last_saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 쿠키 저장 시각
     last_success_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True
@@ -2565,6 +2572,29 @@ class NaverChangeLog(Base):
     verify_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # D+7/14 검증 예정일
     actual_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 실측 결과
     outcome: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # improved/declined/neutral/executed
+    # ★D-NAO-223(M3-b) — 목적함수 정합 채점축. `outcome`(전/후 RPC 배율)과 **나란히** 둔다.
+    #   왜 별도 컬럼인가: `outcome`의 분모가 클릭이라 「클릭·매출이 함께 줄어도 매출이 덜
+    #   줄었으면 개선」이 된다(ref 90 §2 — improved 전건 4/4가 매출 감소, id 761은 매출
+    #   −48.3%인데 「개선」). 트랙 목표(D-NAO-59)는 총이익 «절대액»이라 자를 바꿔야 하는데,
+    #   기존 값을 덮으면 「교정 전 채점기가 무엇을 찍었나」라는 증거가 사라진다(교훈 #274) →
+    #   §8-Q1 확정 = 소급 UPDATE 없이 «별도 컬럼»에만 새 식을 적는다. 옛 자와 새 자가 같은
+    #   행에 나란히 남아 대조가 영구 보존된다.
+    #   식(D-NAO-225): **총이익 델타** — (cf 보정 매출 / bep_roas) − 비용 의 전/후 비교.
+    #   bep_roas는 본전 ROAS(공헌이익률의 역수)라 «매출/BEP»가 그 매출이 낳은 공헌이익이고,
+    #   광고비를 빼면 총이익이다 = D-NAO-59가 최대화하라고 한 그 양.
+    #   ★§8-Q5의 초기 확정값은 «GAVE 배율»이었으나 구현 실측이 재사용을 반증했다 — GAVE엔
+    #   비용을 빼는 항이 없어 적자 대상의 지출을 줄인 조치(총이익 증가)를 「매출이 줄었다」는
+    #   이유로 악화로 읽는다(ref 90 정본 4건 전부 총이익 증가인데 GAVE 배율은 3건 declined).
+    #   GAVE 점수는 «크기» 축으로 gave_before/gave_after에 계속 남는다(Q5 재사용은 그 형태로 생존).
+    #   ★새 문턱을 만들지 않았다 — ±10% 배율 밴드는 «부호 있는 양»에 옮길 수 없다(−70,827 →
+    #   −130은 0.002배지만 실제로는 큰 개선이다). 부호 비교만 하고 노이즈 방어는 기존 모수게이트.
+    outcome_profit: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # improved/declined/neutral
+    gave_before: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 조치 «전» 창 GAVE
+    gave_after: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 조치 «후» 창 GAVE
+    # §4-B ⑥ 값 정확도 라벨의 «원료»: product_bep(상품BEP 확보) / account_default(계정 블렌디드
+    #   근사) / unavailable. ⚠️이 컬럼 존재만으로 ⑥이 달성되는 게 아니다 — ⑥의 판정면은
+    #   성적표 «산출물»이고 그건 M3-a 소관이다. 여기서는 원료를 버리지 않는 데까지만 한다.
+    bep_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     proposal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # P5: 실제 API쓰기 없이 기록만
     executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # P5: 실행 시도 시각(dry-run 포함)
