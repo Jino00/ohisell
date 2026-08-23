@@ -27,6 +27,9 @@
 //   SUR-4 `put()`이 outcome을 싣지 않도록 되돌리기(= 08-23 결함 그 자체)
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+// Dashboard가 KPI 카드를 근거 페이지 링크로 감싸면서 Router 컨텍스트가 필요해졌다
+// (계약 CONTRACT_kpi_evidence_page.md, 2026-08-23). 이 파일이 재는 것은 그대로다.
+import { MemoryRouter } from "react-router-dom";
 
 import { BULK_REFRESH_STORAGE_KEY } from "../lib/bulkRefreshPersistence";
 import { outcomeView, specByKey } from "../lib/streamRefresh";
@@ -121,7 +124,7 @@ describe("전체 갱신 패널 — 문구의 저자는 outcomeView 하나다", (
   });
 
   it("집어가서 일하는 중 → 화면 글자가 outcomeView와 **같고**, 「Mac이 켜져 있는지」가 없다", () => {
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     const row = laneRow(ROCKET.label);
     // ★대조 대상은 내가 이 파일에 적은 문자열이 아니라 **모듈이 짓는 문구**다 —
     //   그래야 문구를 고쳐도 이 단언이 낡지 않고, 저자가 갈라지면 즉시 터진다.
@@ -136,7 +139,7 @@ describe("전체 갱신 패널 — 문구의 저자는 outcomeView 하나다", (
   //   `_revive_lane`은 wing 데몬에만 있어 판매분석·RG만 스스로 되살아나고, 광고비·로켓광고·
   //   공급자허브는 사람이 다시 눌러야 한다. 한 문구로 뭉치면 셋 중 한쪽은 반드시 거짓말이다.
   it("자동 재개가 있는 레인과 없는 레인이 **화면에서** 서로 다른 처방을 받는다", () => {
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     const auto = laneRow(OFIX_SALES.label);
     expect(auto.textContent).toContain(outcomeView(OFIX_SALES, LOGIN).text);
     expect(auto.textContent).toContain("자동으로 이어받습니다");
@@ -150,14 +153,14 @@ describe("전체 갱신 패널 — 문구의 저자는 outcomeView 하나다", (
   it("패널 하단 고정 문구가 레인 처방과 모순되지 않는다", () => {
     // 옛 문구: 「로그인 필요 표시가 뜨면 … 로그인한 뒤 누르세요」 — 자동 재개 레인 줄 바로 아래에서
     // 「누를 필요 없다」와 정면으로 부딪쳤다(적대 리뷰 P1-2 재현).
-    const { container } = render(<Dashboard />);
+    const { container } = render(<Dashboard />, { wrapper: MemoryRouter });
     const panel = container.textContent ?? "";
     expect(panel).not.toContain("로그인 필요 표시가 뜨면");
     expect(panel).toContain("처방은 줄마다 다릅니다");
   });
 
   it("아무도 안 집었다 → **그때만** 「Mac이 켜져 있는지」가 참이다", () => {
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     const row = laneRow(OHITECH.label);
     expect(row.textContent).toContain(outcomeView(OHITECH, NOT_PICKED).text);
     expect(row.textContent).toContain("Mac이 요청을 집지 않았습니다");
@@ -165,7 +168,7 @@ describe("전체 갱신 패널 — 문구의 저자는 outcomeView 하나다", (
   });
 
   it("★세 경우가 화면에서 서로 다른 문구로 갈린다(옛 패널은 셋 다 같은 한 줄이었다)", () => {
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     const texts = [ROCKET, OFIX_AD, OHITECH].map((s) => laneRow(s.label).textContent ?? "");
     expect(new Set(texts).size).toBe(3);
     // 옛 문구가 어느 줄에도 통째로 남아 있지 않다.
@@ -208,7 +211,7 @@ describe("전체 갱신 버튼 — 판정 결과가 패널까지 운반된다", 
     const baseline = { requested: false, last_success_at: null, last_error_at: null, last_error: null };
     h.statusFor = (_lane, nth) => (nth === 0 ? baseline : settled);
 
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     fireEvent.click(screen.getByRole("button", { name: /전체 갱신/ }));
     await vi.advanceTimersByTimeAsync(10000); // 폴 1회(3초)면 정착한다
 
@@ -230,7 +233,7 @@ describe("전체 갱신 버튼 — 판정 결과가 패널까지 운반된다", 
         ? { requested: false, last_success_at: null, last_error_at: null, last_error: null, attempt_count: 0 }
         : { requested: true, last_success_at: null, last_error_at: null, last_error: null, attempt_count: 0 };
 
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     fireEvent.click(screen.getByRole("button", { name: /전체 갱신/ }));
 
     // 120초 시점 — 이 레인은 아직 집힐 시간이 남았다. 여기서 「Mac이 꺼졌다」가 뜨면 그게 오보다.

@@ -14,6 +14,9 @@
 // 외 파일은 영구 수정하지 않는다) — 결과는 파일 하단 주석 참조.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
+// Dashboard가 KPI 카드를 근거 페이지 링크로 감싸면서 Router 컨텍스트가 필요해졌다
+// (계약 CONTRACT_kpi_evidence_page.md, 2026-08-23). 이 파일이 재는 것은 그대로다.
+import { MemoryRouter } from "react-router-dom";
 
 // Dashboard(fetchApi 기반)와 CommandCenter(fetchCommandCenter 등)가 같은 "../lib/api" 모듈을
 // 쓰므로 팩토리 하나에 둘 다 싣는다 — vi.mock은 모듈 경로당 한 번만 적용된다.
@@ -80,7 +83,7 @@ const RG_ROW = {
 describe("Dashboard 채널 요약표 — RG 정산공제 자백 칸", () => {
   it("판매일 축·요율·커버리지·장부대조 문구가 실제 DOM에 나타난다", async () => {
     h.channels = [RG_ROW];
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     await waitFor(() => expect(screen.getByText(/판매일 축/)).toBeTruthy());
     // 한 <div>의 텍스트 노드 하나에 " · "로 이어 붙는다(rgSettlementAxis.ts의 rgFeeNote).
     const note = screen.getByText((content) => content.includes("판매일 축") && content.includes("요율"));
@@ -94,7 +97,7 @@ describe("Dashboard 채널 요약표 — RG 정산공제 자백 칸", () => {
       ...RG_ROW, commission_axis: undefined, commission_basis: undefined,
       label: "자사몰",
     }];
-    render(<Dashboard />);
+    render(<Dashboard />, { wrapper: MemoryRouter });
     await waitFor(() => expect(screen.getByText("자사몰")).toBeTruthy());
     expect(screen.queryByText(/요율.*실측/)).toBeNull();
   });
