@@ -1234,6 +1234,18 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     if _is_success(res2):
                         save()  # 회전 쿠키 보존 (CDP: no-op)
                         res = res2
+                    elif (res3 := _vs_recover_and_refetch(page, cfg, windows[0])) is not None:
+                        # ★사람을 부르기 **전에** 자동 재로그인을 시도한다(계약 W1의 VS 절반,
+                        #   2026-08-23 라이브 실사고로 드러난 공백 — _recover_vs_session 참조).
+                        if _is_success(res3):
+                            save()
+                            res = res3
+                            log.info("VS: 자동 재로그인으로 세션 복구 — 사람 개입 없이 수집 계속.")
+                        else:
+                            log.warning("VS: 자동 복구를 선언했으나 재fetch가 실패 — 사람 로그인으로 폴백.")
+                            res = res3
+                            owner.keep_open = True
+                            login_needed = True
                     elif login_wait_secs > 0:
                         log.info("자동 회복 실패 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                         with contextlib.suppress(Exception):
@@ -2639,6 +2651,12 @@ def _landed_on(url: str, host: str) -> bool:
     return (parts.hostname or "").lower() == host and "/tenants/" in (parts.path or "")
 
 
+# VS(판매분석, m-wing 모바일 오리진)의 로그인 클라이언트 = 오리진 루트. RG와 같은 함정이 있다 —
+# 착지 판정이 이 출발 URL을 만족하면 coupang_auth가 LandingPredicateError로 즉시 죽으므로,
+# _landed_on이 요구하는 '인증 후에만 나오는 경로(/tenants/)'와 겹치지 않는 루트를 쓴다.
+_VS_SSO_URL = "https://m-wing.coupang.com/"
+
+
 def _acct_label(cfg: dict) -> str:
     """알림·로그에 쓸 계정 이름. 어느 계정이 로그인을 요구하는지 사람이 알아야 한다."""
     key = str(cfg.get("account_key") or "WING")
@@ -2674,6 +2692,55 @@ def _recover_rg_session(page, cfg: dict) -> str:
         sso_timeout_s=_RECOVER_SSO_TIMEOUT_S,
         verify=lambda: _rg_session_ok(page),
     )
+
+
+def _recover_vs_session(page, cfg: dict, window: tuple | None = None) -> str:
+    """VS(판매분석, m-wing.coupang.com 모바일) 세션 자가 복구. ①SSO → ②Keychain → ③알림.
+
+    ★왜 이제야 붙나 (2026-08-23 라이브 실사고): 계약 W1은 *"WING1·WING2 계정별, **VS·RG 양
+      경로**의 로그아웃 확증 지점"*에 배선하라고 적었는데 **RG 절반만 구현된 채 완료로 표시**됐다.
+      그 공백이 오늘 17:09 Jino의 「전체 갱신」에서 그대로 터졌다 — 같은 회차·같은 계정·같은
+      Keychain 항목인데:
+        17:09:12  VS(판매분석) → 사람 호출("이 탭에서 로그인하면 다음 폴이 이어받는다")
+        17:10:26  RG(정산)     → **자동 재로그인으로 세션 복구, 사람 개입 없이 수집 계속**
+      6레인 중 이 하나 때문에 합격 ①(「사람이 Mac에 가지 않는다」)이 미달이 됐다.
+
+    ★verify가 앱 프로브인 이유는 RG와 같다(적대 리뷰 P2-1의 교훈): URL 착지 판정만 믿으면
+      실제로 복구됐는데도 실패로 오판해 ②③으로 잘못 escalate한다. VS의 앱 프로브는
+      **vendor-summary 자체를 한 번 받아 보는 것**이다 — 이 레인이 실제로 하려는 일과 같다.
+      `retries=0`으로 짧게 잡는다: 여기서의 실패는 재시도할 실패가 아니라 «아직 복구 안 됨»이다.
+    """
+    login_id = cfg.get("wing_login_id")
+    if not login_id:
+        # RG와 같은 이유로 시끄럽게 만든다: login_id가 없으면 coupang_auth는 ②Keychain층을
+        # 에러 없이 건너뛰고, Wing은 ①SSO가 원리적으로 무효라 자동 복구가 통째로 무력해진다.
+        log.warning("VS: config에 wing_login_id가 없다 — Keychain 자동 로그인층이 통째로 "
+                    "건너뛰어진다(자동 복구가 사실상 무력). ~/.ohisell_wing*_fetcher.json 확인.")
+    return coupang_auth.ensure_session(
+        page,
+        sso_url=_VS_SSO_URL,
+        is_landed=lambda u: _landed_on(u, _VS_ORIGIN_HOST),
+        login_id=login_id,
+        label=f"{_acct_label(cfg)} 판매분석(VS)",
+        sso_timeout_s=_RECOVER_SSO_TIMEOUT_S,
+        verify=lambda: _is_success(_fetch_vendor_summary(page, cfg, retries=0, window=window)),
+    )
+
+
+def _vs_recover_and_refetch(page, cfg: dict, window: tuple | None = None):
+    """VS 자동 복구 → **복구를 선언했으면 실제 fetch로 재확증**하고 그 응답을 돌려준다.
+
+    반환: 복구를 시도해 «선언»까지 갔으면 재fetch 응답(성공/실패 둘 다), 복구가 안 됐으면 None.
+
+    ★굳이 함수로 뽑은 이유는 `_rg_loop_should_abort`와 같다: 루프 안에 인라인으로 두면
+      브라우저 없이 검증할 수 없어 **변이 테스트가 불가능**하다. 실제로 인라인일 때
+      「재확증(re-fetch)을 지우고 복구 선언만 믿기」 변이가 전건 초록으로 살아남았다.
+    ★재확증이 필요한 이유: 복구 «선언»을 그대로 믿으면 「복구했다는데 다음 층이 이유 없이
+      실패」하는 형태가 된다(2026-08-03 침묵 사고). 앱이 실제로 응답하는지가 유일한 증거다.
+    """
+    if _recover_vs_session(page, cfg, window) != coupang_auth.OK:
+        return None
+    return _fetch_vendor_summary(page, cfg, window=window)
 
 
 def _rg_loop_should_abort(verdict: str) -> bool:
