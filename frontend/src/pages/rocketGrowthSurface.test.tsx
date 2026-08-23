@@ -149,6 +149,25 @@ describe("RocketGrowthPnl — 「계정 공통」 표 (변이②)", () => {
     expect(screen.getByText("−800원")).toBeTruthy(); // fee_axis_fallback_gap
   });
 
+  // ★완료 QA가 라이브에서 잡았다(2026-08-23): 마이너스를 글자로 박아 둬서 실제로 음수인
+  //   payable_vat(부가세 «환급» −50,119원)에 `−-50,119원`이 떴다. 부호가 둘이고, 하나만
+  //   남겼어도 방향이 거꾸로였을 값이다. 차감액 v가 이익에 주는 영향은 −v다 — 계산해야 한다.
+  it("차감액이 음수면(부가세 환급) 이중부호가 아니라 «+»로 뜬다 — 완료 QA 지적", async () => {
+    h.response = {
+      ...BASE,
+      account_common: { ...BASE.account_common, payable_vat: "-50119.20", period_fees: "1000" },
+    };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText("계정 공통 (상품에 못 붙는 것)")).toBeTruthy());
+    // 있어야 할 것: 환급이므로 이익을 «늘린다»
+    expect(screen.getByText("+50,119원")).toBeTruthy();
+    // 없어야 할 것: 이중부호와, 부호를 잃은 형태
+    expect(screen.queryByText("−-50,119원")).toBeNull();
+    expect(screen.queryByText("−50,119원")).toBeNull();
+    // 양수 차감액은 여전히 «−»다(수정이 정상 방향까지 뒤집지 않았는지)
+    expect(screen.getByText("−1,000원")).toBeTruthy();
+  });
+
   it("계정 공통 표 자체가 없으면(응답에 account_common이 없으면) 안 뜬다", async () => {
     h.response = { ...BASE, account_common: undefined as unknown as RgOptionPnlResponse["account_common"] };
     renderPnl();
