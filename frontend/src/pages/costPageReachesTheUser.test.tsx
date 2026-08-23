@@ -41,6 +41,7 @@ import { approveCostRecipe, fetchCostRecipes, unapproveCostRecipe } from "../lib
 import {
   addCostManualPrice,
   createCostMaterial,
+  fetchCostLedgerMaterialLines,
   fetchCostMaterials,
   patchCostMaterial,
 } from "../lib/api";
@@ -62,16 +63,19 @@ import {
   excelRefNoteText,
   importedMaterialIds,
   ledgerLineCoverage,
+  ledgerLineMaterialId,
   ledgerLinesForMaterial,
   LIST_COLUMN_SCROLL_CLASS,
   lotCountText,
   MaterialList,
+  MaterialPriceHistory,
   recipePlaceholderText,
   reconcileSelectedId,
   RecipeList,
   StandardBreakdown,
   StandardCostBoard,
-  unattributedLedgerLines,
+  unreachableLedgerLines,
+  unreachableReason,
 } from "./CostPage";
 
 // ── prod 실측값(2026-08-22) — 합격 1이 화면에서 보겠다는 바로 그 두 로트 ──
@@ -1536,6 +1540,13 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     // prod 실측(2026-08-23): 수입 부자재 **1종**(cleaning kits) vs 비수입 **128종**.
     // 이 테스트 픽스처가 그 모양이다 — LEDGER_ROW 하나가 KIT(id=1)만 가리킨다.
 
+    // ★`mockResolvedValue`는 «영구»다 — 여기서 원장 라인을 갈아끼우면 뒤 테스트에서
+    //   FILM이 수입 종이 되어 「비수입」 단언들이 조용히 깨진다(실제로 2건 깨졌다).
+    //   실패로 중단돼도 복원되게 `afterEach`에 둔다.
+    afterEach(() => {
+      vi.mocked(fetchCostLedgerMaterialLines).mockResolvedValue({ items: [LEDGER_ROW] });
+    });
+
     it("합격 12 — 수입 종을 고르면 «그 종의» 원장 부자재 라인 표가 뜬다", async () => {
       await openMaterialsTab();
       fireEvent.click(screen.getByTestId(`material-${KIT.id}`));
@@ -1556,13 +1567,113 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(screen.getByTestId("material-origin-note").textContent).toContain("정본은 엑셀");
     });
 
-    it("★합격 13 — 미매칭 섹션은 **사라지지 않는다**. 0건이면 「미매칭 없음」이라고 말한다", async () => {
+    it("★합격 13 — 섹션은 **사라지지 않는다**. 0건이면 「미매칭 없음」이라고 말한다", async () => {
       await openMaterialsTab();
-      // 픽스처의 유일한 라인은 KIT을 가리키므로 미귀속은 0건이다.
       const section = screen.getByTestId("unattributed-ledger-lines");
       expect(screen.getByTestId("unattributed-count").textContent).toContain("미매칭 없음");
       // ★섹션 «자체»가 있어야 한다 — 0건이라고 지우면 단가 이력이 조용히 빈다.
       expect(section).toBeTruthy();
+      // ★0건 «문구»도 지킨다(1R ML13 SURVIVED) — 「없다」의 뜻이 표마다 다르다.
+      expect(within(section).getByText(/전부 지금 화면에서 도달 가능하다/)).toBeTruthy();
+    });
+
+    // ══════════════════════════════════════════════════════════════
+    // ★★적대 리뷰 1R P1 회귀 — 필터가 라인을 «감추는데» 화면은 「미매칭 없음」이라 말했다
+    //
+    // 재현(리뷰어): 폼팩터 필터 `bar`를 걸면 KIT(폼팩터 null)이 목록에서 빠져 고를 수
+    // 없게 되고, 그 종의 원장 라인은 종별 표에도 안 뜬다. 그런데 «제안이 있으니»
+    // 미귀속도 아니라 별도 섹션에도 안 떴다 — 사람의 확정(「연결」)을 기다리는 라인이
+    // 화면에서 통째로 사라졌다. origin/main은 하단 전건 표로 항상 보여줬으므로 회귀다.
+    // ══════════════════════════════════════════════════════════════
+    it("★★필터로 종이 목록에서 빠지면, 그 종의 라인이 «도달 불가»로 세어진다 (1R P1)", async () => {
+      await openMaterialsTab();
+      fireEvent.change(screen.getByTestId("material-product-select"), {
+        target: { value: "bar" },
+      });
+      // KIT은 이제 목록에 없다 — 즉 종별 표로는 영영 못 간다.
+      expect(screen.queryByTestId(`material-${KIT.id}`)).toBeNull();
+
+      // ★「미매칭 없음」이라고 말하면 안 된다. 건수가 실제로 세어져야 한다.
+      const count = screen.getByTestId("unattributed-count");
+      expect(count.textContent).toContain("1건");
+      expect(count.textContent).not.toContain("미매칭 없음");
+
+      // ★행 자체가 보이고, «왜» 도달 불가인지 사유가 붙는다(처분이 다르기 때문이다).
+      const section = screen.getByTestId("unattributed-ledger-lines");
+      expect(within(section).getByTestId(`ledger-line-${LEDGER_ROW.line_id}`)).toBeTruthy();
+      const reason = screen.getByTestId(`unreachable-reason-${LEDGER_ROW.line_id}`);
+      expect(reason.textContent).toContain(KIT.name);
+      expect(reason.textContent).toContain("필터 밖");
+
+      // ★「연결」이 여전히 눌린다 — 버튼이 없으면 연결이 원리적으로 불가능해진다(1R P2-2).
+      expect(within(section).getByRole("button", { name: /연결/ })).toBeTruthy();
+    });
+
+    it("★필터를 풀면 다시 도달 가능해진다 — 「영구 소실」이 아니라 «지금» 못 본다는 뜻이다", async () => {
+      await openMaterialsTab();
+      const select = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(select, { target: { value: "bar" } });
+      expect(screen.getByTestId("unattributed-count").textContent).toContain("1건");
+      fireEvent.change(select, { target: { value: "" } });
+      expect(screen.getByTestId("unattributed-count").textContent).toContain("미매칭 없음");
+    });
+
+    it("★합격 12 — 종별 표는 «그 종의» 라인만 그린다 (1R MS3 SURVIVED가 여기서 죽는다)", async () => {
+      // 수입 종 «둘»이 있어야 「전건 렌더」와 「그 종만」이 갈린다 — 픽스처가 1종뿐이면
+      // 필터를 통째로 없애도 화면이 똑같아서 아무 테스트도 안 운다.
+      const filmLine: CostLedgerMaterialLine = {
+        ...LEDGER_ROW,
+        line_id: 31,
+        item_name: "TPU 필름 원단",
+        suggestion: { ...LEDGER_ROW.suggestion, line_id: 31, material_id: FILM_WITH_REF.id },
+      };
+      vi.mocked(fetchCostLedgerMaterialLines).mockResolvedValue({
+        items: [LEDGER_ROW, filmLine],
+      });
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${KIT.id}`));
+
+      const table = await screen.findByTestId("material-ledger-lines");
+      expect(within(table).getByTestId(`ledger-line-${LEDGER_ROW.line_id}`)).toBeTruthy();
+      // ★다른 종의 라인이 여기 있으면 Jino가 00:01에 발의한 결함 그대로다.
+      expect(within(table).queryByTestId(`ledger-line-${filmLine.line_id}`)).toBeNull();
+    });
+
+    it("★합격 12 — 원산지 줄이 그 종의 라인 «건수»를 실제로 센다 (1R ML12)", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${KIT.id}`));
+      await screen.findByTestId("material-ledger-lines");
+      expect(screen.getByTestId("material-origin-note").textContent).toContain(
+        "원장 부자재 라인 1건",
+      );
+    });
+
+    it("★합격 11 — 비수입 종의 «빈 단가 이력»도 원장으로 보내지 않는다 (1R ML7)", () => {
+      const bare = { ...FILM_WITH_REF, prices: [] };
+      const { unmount } = render(<MaterialPriceHistory material={bare} imported={false} />);
+      const text = screen.getByText(/단가 이력이 없다/).textContent ?? "";
+      expect(text).toContain("레시피");
+      expect(text).not.toContain("원장 부자재 라인");
+      unmount();
+      // 대조군 — 수입 종은 원장으로 보내는 것이 맞다.
+      render(<MaterialPriceHistory material={bare} imported />);
+      expect(screen.getByText(/단가 이력이 없다/).textContent).toContain("원장 부자재 라인");
+    });
+
+    it("★목록 줄의 수입 판별이 «양방향»으로 배선돼 있다 (1R ML15)", () => {
+      // 단가가 0건인 «수입» 종이 픽스처에 없어서 이 방향이 통째로 안 잠겨 있었다.
+      const importedNoPrice = { ...FILM_WITH_REF, id: 77, name: "수입 부자재 (단가 없음)" };
+      render(
+        <MaterialList
+          materials={[importedNoPrice]}
+          selectedId={null}
+          onSelect={() => {}}
+          importedIds={new Set([77])}
+        />,
+      );
+      const row = screen.getByTestId("material-77");
+      expect(row.textContent).toContain("엑셀 참고값 600원");
+      expect(row.textContent).not.toContain("엑셀 단가(미확정)");
     });
 
     it("★합격 13 — 어느 종도 못 가지는 라인은 그 섹션에서 세어진다", () => {
@@ -1578,34 +1689,66 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
           unmatched: true,
         },
       };
-      expect(unattributedLedgerLines([LEDGER_ROW, orphan]).map((r) => r.line_id)).toEqual([99]);
+      const everyMaterial = new Set([1, 2, 3, FILM_WITH_REF.id]);
+      expect(
+        unreachableLedgerLines([LEDGER_ROW, orphan], everyMaterial).map((r) => r.line_id),
+      ).toEqual([99]);
       // ★모호한(ambiguous) 라인도 여기로 온다 — 안 그러면 화면에서 통째로 사라진다.
       const ambiguous: CostLedgerMaterialLine = {
         ...orphan,
         line_id: 98,
         suggestion: { ...orphan.suggestion, line_id: 98, ambiguous: true, unmatched: false },
       };
-      expect(unattributedLedgerLines([ambiguous]).map((r) => r.line_id)).toEqual([98]);
+      expect(unreachableLedgerLines([ambiguous], everyMaterial).map((r) => r.line_id)).toEqual([
+        98,
+      ]);
     });
 
-    it("★★종별 표 + 미매칭 섹션이 **전건을 덮는다** — 필터를 넣고 행을 흘리지 않았다", () => {
+    it("★★연결이 제안을 이긴다 — 우선순위가 실제로 측정된다 (1R ML1)", () => {
+      // 사람이 제안을 «교정해» 다른 종에 붙인 상태. 픽스처에 이 모양이 없어서
+      // 우선순위를 뒤집어도 아무 테스트가 안 울었다.
+      const corrected: CostLedgerMaterialLine = {
+        ...LEDGER_ROW,
+        line_id: 55,
+        linked_material_id: 2,
+        linked_material_name: "사람이 고른 종",
+        suggestion: { ...LEDGER_ROW.suggestion, line_id: 55, material_id: 1 },
+      };
+      expect(ledgerLineMaterialId(corrected)).toBe(2);
+      expect(ledgerLinesForMaterial([corrected], 2).map((r) => r.line_id)).toEqual([55]);
+      expect(ledgerLinesForMaterial([corrected], 1)).toEqual([]);
+      expect(importedMaterialIds([corrected])).toEqual(new Set([2]));
+    });
+
+    it("★★도달 가능/불가가 전건을 덮고, 건수를 «값으로» 잰다 (1R ML11 — 항등식이었다)", () => {
       const orphan: CostLedgerMaterialLine = {
         ...LEDGER_ROW,
         line_id: 99,
         suggestion: { ...LEDGER_ROW.suggestion, line_id: 99, material_id: null, unmatched: true },
       };
-      const linked: CostLedgerMaterialLine = {
+      const linkedElsewhere: CostLedgerMaterialLine = {
         ...LEDGER_ROW,
         line_id: 77,
         linked_material_id: 2,
         linked_material_name: "빛반사 필름",
         suggestion: { ...LEDGER_ROW.suggestion, line_id: 77, material_id: null, unmatched: true },
       };
-      const rows = [LEDGER_ROW, orphan, linked];
-      const cov = ledgerLineCoverage(rows);
-      expect(cov.total).toBe(3);
-      expect(cov.attributed + cov.unattributed).toBe(cov.total);
-      // ★연결이 제안을 이긴다 — 이미 붙여 둔 라인은 «붙어 있는 종»의 것이다.
+      const rows = [LEDGER_ROW, orphan, linkedElsewhere];
+
+      // 종 1·2가 다 목록에 있을 때: 미귀속 1건만 도달 불가.
+      const all = ledgerLineCoverage(rows, new Set([1, 2]));
+      expect(all).toEqual({ reachable: 2, unreachable: 1, total: 3 });
+
+      // ★종 1이 필터 밖일 때: 도달 불가가 «2건으로 늘어야» 한다. 이 단언이 1R P1을 잡는다 —
+      //   합이 total이라는 항등식은 `un`을 무엇으로 바꿔도 참이라 아무것도 안 지켰다.
+      const filtered = ledgerLineCoverage(rows, new Set([2]));
+      expect(filtered).toEqual({ reachable: 1, unreachable: 2, total: 3 });
+
+      expect(unreachableReason(orphan, [])).toContain("match_rule");
+      expect(
+        unreachableReason(LEDGER_ROW, [KIT as unknown as (typeof KIT)]),
+      ).toContain("필터 밖");
+
       expect(ledgerLinesForMaterial(rows, 2).map((r) => r.line_id)).toEqual([77]);
       expect(ledgerLinesForMaterial(rows, 1).map((r) => r.line_id)).toEqual([LEDGER_ROW.line_id]);
       expect(importedMaterialIds(rows)).toEqual(new Set([1, 2]));

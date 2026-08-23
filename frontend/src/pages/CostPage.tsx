@@ -116,15 +116,41 @@ export function ledgerLinesForMaterial(
   return rows.filter((r) => ledgerLineMaterialId(r) === materialId);
 }
 
-/** 어느 종에도 안 붙은 라인 — **합격 13이 붙드는 것**.
+/** ★적대 리뷰 1R P1 — **「어느 종에도 안 붙었다」보다 넓은 질문이 진짜 감시 대상이다.**
  *
- * ★종별 표를 도입하면서 이 집합을 안 그리면, 「원장에 부자재 라인이 있는데 어느 종에도
- * 안 붙었다」가 화면에서 사라지고 **단가 이력이 조용히 빈다.** 고치는 게 아니라
- * **자리를 옮기는** 것이다(계약 §6 S4). */
-export function unattributedLedgerLines(
+ * 재현(리뷰어): 종 목록에 폼팩터 필터 `bar`를 걸면 `cleaning kits`(폼팩터 null)가 목록에서
+ * 빠져 **고를 수 없게** 되고, 그 종의 원장 라인은 종별 표에도 안 뜬다. 그런데 그 라인은
+ * «제안이 있으니» 미귀속도 아니라 별도 섹션에도 안 떴다 — 결과적으로 **화면이 「미매칭 없음」
+ * 이라고 말하면서 사람의 확정(「연결」)을 기다리는 라인을 통째로 감췄다.**
+ * `origin/main`은 하단 전건 표로 항상 보여줬으므로 **이 슬라이스가 만든 회귀**였다.
+ *
+ * ⇒ 섹션이 세는 것은 「미매칭」이 아니라 **「지금 이 화면에서 도달할 수 없는 라인」**이다.
+ * 그게 계약 §6 S4가 적은 목적(*"안 보이면 단가 이력이 조용히 빈다"*)의 정확한 문언이다.
+ *
+ * `reachableMaterialIds` = **지금 목록에 떠 있는**(필터 통과) 종의 id. 그 종은 클릭하면
+ * 종별 표가 뜨므로 도달 가능하다 — 여기서 뺀다. */
+export function unreachableLedgerLines(
   rows: CostLedgerMaterialLine[],
+  reachableMaterialIds: Set<number>,
 ): CostLedgerMaterialLine[] {
-  return rows.filter((r) => ledgerLineMaterialId(r) === null);
+  return rows.filter((r) => {
+    const id = ledgerLineMaterialId(r);
+    return id === null || !reachableMaterialIds.has(id);
+  });
+}
+
+/** 도달 불가 라인이 «왜» 도달 불가인가. 두 사유는 **처분이 다르다** — 하나는 매칭 규칙을
+ * 손봐야 하고, 하나는 필터만 풀면 된다. 한 단어로 접으면 사람이 틀린 일을 한다. */
+export function unreachableReason(
+  r: CostLedgerMaterialLine,
+  materials: CostMaterial[],
+): string {
+  const id = ledgerLineMaterialId(r);
+  if (id === null) {
+    return "어느 종도 이 라인을 못 가진다 — 매칭 규칙(match_rule)을 손봐야 붙는다";
+  }
+  const name = materials.find((m) => m.id === id)?.name;
+  return `「${name ?? `종 id=${id}`}」의 라인인데 그 종이 지금 필터 밖이라 고를 수 없다 — 필터를 풀면 종별 표에서 보인다`;
 }
 
 /** 원장 라인이 하나라도 가리키는 종의 id 집합 = **수입 종**. */
@@ -137,17 +163,22 @@ export function importedMaterialIds(rows: CostLedgerMaterialLine[]): Set<number>
   return out;
 }
 
-/** 종별 표 + 미귀속 섹션이 **전건을 덮는가**. 한 라인도 화면 밖으로 떨어지면 안 된다.
+/** 종별 표 + 도달 불가 섹션이 **전건을 덮는가**. 한 라인도 화면 밖으로 떨어지면 안 된다.
  *
  * ★이 함수는 화면이 쓰라고 있는 게 아니라 **테스트가 재라고** 있다 — 필터를 도입하면
- * 「어느 표에도 안 들어가는 행」이 소리 없이 생기는 것이 전형적인 실패 모드다. */
-export function ledgerLineCoverage(rows: CostLedgerMaterialLine[]): {
-  attributed: number;
-  unattributed: number;
+ * 「어느 표에도 안 들어가는 행」이 소리 없이 생기는 것이 전형적인 실패 모드다.
+ * ★그래서 **`reachable`를 인자로 받는다**(적대 리뷰 1R P2-3): 필터를 안 보는 커버리지는
+ * 「필터가 만든 구멍」을 원리적으로 못 재고, 실제로 1R P1이 그 틈으로 통과했다. */
+export function ledgerLineCoverage(
+  rows: CostLedgerMaterialLine[],
+  reachableMaterialIds: Set<number>,
+): {
+  reachable: number;
+  unreachable: number;
   total: number;
 } {
-  const un = unattributedLedgerLines(rows).length;
-  return { attributed: rows.length - un, unattributed: un, total: rows.length };
+  const un = unreachableLedgerLines(rows, reachableMaterialIds).length;
+  return { reachable: rows.length - un, unreachable: un, total: rows.length };
 }
 
 /** 「이 표준의 근거는 로트 N건」 — 표본 부족을 숨기지 않는다(계약 §9-5).
@@ -213,8 +244,13 @@ export function excelRefNoteText(
 ): string | null {
   if (!m.excel_ref_price) return null;
   const value = formatCostWon(m.excel_ref_price);
+  // ★비수입 검사가 **먼저다**(적대 리뷰 1R P2-1). 순서를 뒤집으면 비수입 종이 「채택」으로
+  //   단가를 갖는 순간 그 엑셀 값을 다시 「대조값」이라 부른다 — 그 종엔 엑셀이 정본인데도.
+  if (!imported && m.price_count > 0) {
+    return `엑셀 단가(확정 반영됨) ${value} — 이 종은 수입 종이 아니라 이 값이 정본이고, 이미 단가로 들어가 있다. 값이 바뀌면 「+ 수동 단가 입력」으로 고친다.`;
+  }
   if (m.price_count > 0) {
-    // 이미 단가가 있는 종 — 채택은 «단가 없는 종»만 건드리므로 여기선 대조값일 뿐이다.
+    // 이미 단가가 있는 수입 종 — 채택은 «단가 없는 종»만 건드리므로 여기선 대조값일 뿐이다.
     return `엑셀 참고값 ${value} — 단가가 아니라 대조값이다. 이 종엔 이미 단가가 있어 「채택」은 건드리지 않는다.`;
   }
   if (!imported) {
@@ -1782,7 +1818,16 @@ export default function CostPage() {
     () => (selected ? ledgerLinesForMaterial(ledgerLines, selected.id) : []),
     [ledgerLines, selected],
   );
-  const unattributedLines = useMemo(() => unattributedLedgerLines(ledgerLines), [ledgerLines]);
+  // ★적대 리뷰 1R P1 — 「도달 가능」의 기준은 **지금 목록에 떠 있는 종**이다. `materials`
+  //   (전체 129종)를 쓰면 필터가 만든 구멍을 원리적으로 못 본다 — 그게 1R P1의 뿌리였다.
+  const unreachableLines = useMemo(
+    () =>
+      unreachableLedgerLines(
+        ledgerLines,
+        new Set(filteredMaterials.map((m) => m.id)),
+      ),
+    [ledgerLines, filteredMaterials],
+  );
 
   // ★선택 ID를 필터에 맞춰 되돌리는 유일한 자리(부자재). `useLayoutEffect`인 이유는
   //   아래 레시피 쪽과 같다 — 페인트 전에 맞춰야 첫 프레임이 깜빡이지 않는다.
@@ -2077,30 +2122,49 @@ export default function CostPage() {
               </section>
             ) : null}
 
-            {/* ★S4 ㉯ 합격 13 — **미귀속 라인은 자리를 옮기는 것이지 없애는 게 아니다.**
-                종별 표를 도입하면서 이 섹션을 안 두면 「원장에 부자재 라인이 있는데 어느 종에도
-                안 붙었다」가 화면에서 사라지고 단가 이력이 조용히 빈다(계약 §6 S4 · 합격 13).
-                ★건수는 `<summary>`에 있어 **접혀 있어도 보인다** — 접힌 것과 없는 것은 다르다. */}
+            {/* ★S4 ㉯ 합격 13 — **도달 불가 라인은 자리를 옮기는 것이지 없애는 게 아니다.**
+                종별 표를 도입하면서 이 섹션을 안 두면 「원장에 부자재 라인이 있는데 화면 어디에도
+                안 보인다」가 되고 단가 이력이 조용히 빈다(계약 §6 S4 · 합격 13).
+                ★건수는 `<summary>`에 있어 **접혀 있어도 보인다** — 접힌 것과 없는 것은 다르다.
+                ★적대 리뷰 1R P1으로 **질문이 넓어졌다**: 「어느 종에도 안 붙었다」만 세면,
+                붙을 종이 «필터 밖»이라 못 고르는 라인이 어느 표에도 안 남는데 화면은 「미매칭
+                없음」이라고 말한다. 세는 것은 **지금 도달할 수 없는 라인**이다. */}
             <details className="border rounded" data-testid="unattributed-ledger-lines">
               <summary className="text-sm font-semibold text-gray-700 cursor-pointer px-3 py-2">
-                어느 종에도 안 붙은 원장 부자재 라인{" "}
+                지금 화면에서 도달할 수 없는 원장 부자재 라인{" "}
                 <span data-testid="unattributed-count">
-                  {unattributedLines.length === 0
+                  {unreachableLines.length === 0
                     ? "— 미매칭 없음"
-                    : `${unattributedLines.length}건`}
+                    : `${unreachableLines.length}건`}
                 </span>
               </summary>
               <div className="px-3 pb-3">
                 <div className="text-xs text-gray-500 mb-2">
-                  원장엔 있는데 어느 부자재 종도 이 라인을 못 가진다(제안 없음 또는 모호). 종의
-                  매칭 규칙(<code>match_rule</code>)을 손봐야 붙는다 — 여기서 사라지면 그 종의 단가
-                  이력이 조용히 빈다.
+                  원장엔 있는데 지금 이 화면의 어느 표에도 안 뜨는 라인이다 — ①어느 종도 이 라인을
+                  못 가지거나(제안 없음·모호) ②붙을 종이 **필터 밖**이라 고를 수 없거나. 사유는
+                  행마다 아래에 적는다. 여기서 사라지면 그 종의 단가 이력이 조용히 빈다.
                 </div>
+                {/* ★행마다 «왜» 도달 불가인지 — 두 사유는 처분이 다르다(규칙 수정 vs 필터 해제). */}
+                <ul className="text-xs text-gray-600 mb-2 space-y-0.5">
+                  {unreachableLines.map((r) => (
+                    <li key={r.line_id} data-testid={`unreachable-reason-${r.line_id}`}>
+                      · {r.item_name} — {unreachableReason(r, materials)}
+                    </li>
+                  ))}
+                </ul>
+                {/* ★`onLink`를 넘긴다(적대 리뷰 1R P2-2) — 이 섹션엔 «제안이 있는데 종이 필터
+                    밖인» 라인이 오므로, 버튼을 빼면 연결이 원리적으로 불가능해진다. */}
                 <LedgerMaterialLines
-                  rows={unattributedLines}
+                  rows={unreachableLines}
                   materials={materials}
                   busy={busy}
-                  emptyText="미매칭 없음 — 원장의 부자재 라인이 전부 어느 종엔가 붙어 있다."
+                  onLink={(materialId, lineId) =>
+                    run(
+                      () => linkCostLedgerPrice(materialId, lineId),
+                      "원장 로트를 부자재에 연결했다",
+                    )
+                  }
+                  emptyText="미매칭 없음 — 원장의 부자재 라인이 전부 지금 화면에서 도달 가능하다."
                 />
               </div>
             </details>
