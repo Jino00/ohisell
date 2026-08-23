@@ -398,6 +398,55 @@ def test_conservation_diff_helper_none_is_undecidable():
 
 
 # ════════════════════════════════════════════════
+# 5d-2. 결함 A 회귀 — prod 08-21 「완전 일치인데 ⚠️ 어긋남」 (2026-08-23)
+# ════════════════════════════════════════════════
+def test_conservation_diff_sub_won_residue_is_ok():
+    """★결함 A 회귀 — 요율 곱셈·VAT 나눗셈 사슬이 남기는 극미 잔차는 「일치」다.
+
+    prod 08-21 실측: 대시보드와 상품 행 소계가 소수점까지 같은데도 배지가 「⚠️ 어긋남」을
+    단정했다. 원인은 옛 판정 `diff == ZERO`가 극미 잔차를 0이 아니라고 본 것 — 계약 §4 ⓓ
+    문언은 「원 단위 일치」이므로 판정도 그 단위로 해야 한다.
+
+    ★잔차 자릿수는 `1E-20`으로 둔다(1E-25가 아니다) — 기준값 `53803.497`(8자리)에 1E-25를
+    더하면 총 유효자리가 Decimal 기본 컨텍스트(prec=28)를 넘어 **덧셈 시점에 잔차 자체가
+    반올림으로 소실**되어 이 테스트가 소스가 아니라 파이썬 Decimal 컨텍스트를 검사하게 된다
+    (직접 확인: `Decimal("53803.497")+Decimal("1E-25")` → 잔차 소실). 1E-20이면 23자리로
+    prec=28 안에 들어와 잔차가 그대로 보존된다 — 여전히 원 단위론 무의미한 극미값이다.
+    """
+    residue = Decimal("1E-20")
+    diff, ok = _conservation_diff(Decimal("53803") + residue, Decimal("53803"))
+    assert ok is True, "1E-20급 잔차는 원 단위로는 일치 — ok=True여야 한다"
+    assert diff == residue, "diff 자체는 반올림 없이 원본 잔차 그대로여야 한다(드리프트 은폐 금지)"
+
+
+def test_conservation_diff_exact_zero_is_ok():
+    diff, ok = _conservation_diff(Decimal("100000"), Decimal("100000"))
+    assert diff == _Z
+    assert ok is True
+
+
+def test_conservation_diff_one_won_is_not_ok():
+    """1원 차이는 여전히 「어긋남」이어야 한다 — 임계가 원 단위 미만 잔차만 흡수한다."""
+    diff, ok = _conservation_diff(Decimal("100001"), Decimal("100000"))
+    assert diff == Decimal("1")
+    assert ok is False
+
+
+def test_conservation_diff_half_won_is_not_ok():
+    """0.5원은 반올림 규칙(ROUND_HALF_UP)상 1원으로 올라가 「어긋남」이어야 한다."""
+    diff, ok = _conservation_diff(Decimal("100000.5"), Decimal("100000"))
+    assert diff == Decimal("0.5")
+    assert ok is False
+
+
+def test_conservation_diff_sub_half_won_is_ok():
+    """0.4원은 반올림하면 0이 되어 「일치」여야 한다 — 0.5원(불일치)과의 경계 확인."""
+    diff, ok = _conservation_diff(Decimal("100000.4"), Decimal("100000"))
+    assert diff == Decimal("0.4")
+    assert ok is True
+
+
+# ════════════════════════════════════════════════
 # 5e. 정본 대조는 «실제 호출»이어야 한다 — 값 비교로는 못 잡는 변이
 # ════════════════════════════════════════════════
 def test_reference_net_actually_calls_compute_rg_summary_row(db):

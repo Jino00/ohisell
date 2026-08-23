@@ -297,6 +297,139 @@ describe("RocketGrowthSettlement — 요율 출처 (변이⑦)", () => {
   });
 });
 
+// ════════════════════════ 결함 B 회귀 — 소수점 노출 (2026-08-23) ════════════════════════
+//
+// prod 08-21 실측: `판매수수료 2,892.324원` · `남는 이익 14,334.676원` · `원가 2,930.4원`이 그대로
+// 떴다. 원인: 공용 `format.won()`은 반올림하지 않는데, 2P 두 화면만 `Decimal` 문자열을 그대로
+// 넘겼다. 수정은 두 화면에 로컬 `wonR = (v) => won(Math.round(n(v)))`를 두고 금액 렌더를 전부
+// 그것으로 통일한 것 — 이 아래 테스트는 백엔드가 소수 문자열을 주는 응답을 mock해 화면 A·B의
+// 여러 금액 칸이 전부 반올림된 원 단위로만 뜨는지(소수점 문자열이 «없는지») 확인한다.
+// 한 칸만 막으면 나머지가 다시 새므로 화면 A의 상품 행 5칸 + 소계 + 계정 공통 4칸 + 보존식
+// 5칸, 화면 B의 커버리지·장부대조 칸까지 덮는다.
+const DECIMAL: RgOptionPnlResponse = {
+  ...BASE,
+  options: [
+    {
+      vendor_item_id: "V-002",
+      name: "소수점 상품",
+      revenue: "100000.5",
+      units_sold: 7,
+      order_count: 5,
+      fee_logistics: "3000.12",
+      fee_sale_fee: "2892.324",
+      fee_total: "5892.444",
+      cost: "2930.4",
+      has_cost: true,
+      ad_spend: "1500.6",
+      net_profit: "14334.676",
+    },
+  ],
+  account_common: {
+    period_fees: "1000.1",
+    payable_vat: "2000.2",
+    revenue_axis_gap: "700.7",
+    ad_unallocated: "3456.3",
+    ad_unallocated_options: 2,
+    fee_axis_fallback_gap: "800.8",
+    cost_unmapped_revenue: "0",
+    fee_unmapped_revenue: "500.5",
+  },
+  conservation: {
+    options_net_sum: "14334.676",
+    account_common_sum: "-3000.3",
+    computed_total_net: "11334.376",
+    reference_net: "11334.376",
+    diff: "0",
+    ok: true,
+  },
+  reconciliation: {
+    cycle_from: "07-14",
+    cycle_to: "07-20",
+    computed: "250000.5",
+    actual: "250500.9",
+    diff: "-500.4",
+    diff_pct: "-0.05",
+  },
+};
+
+describe("RocketGrowthPnl — 결함 B 회귀: 소수점이 그대로 노출되면 안 된다", () => {
+  it("상품 행 다섯 칸(매출·물류비·판매수수료·원가·광고비·남는이익)이 반올림된 원 단위로만 뜬다", async () => {
+    h.response = DECIMAL;
+    renderPnl();
+    await waitFor(() => expect(screen.getByText("소수점 상품")).toBeTruthy());
+    expect(screen.getByText("100,001원")).toBeTruthy(); // revenue 100000.5 → round → 100001
+    expect(screen.getByText("3,000원")).toBeTruthy(); // fee_logistics 3000.12 → 3000
+    expect(screen.getByText("2,892원")).toBeTruthy(); // fee_sale_fee 2892.324 → 2892
+    expect(screen.getByText("2,930원")).toBeTruthy(); // cost 2930.4 → 2930
+    expect(screen.getByText("1,501원")).toBeTruthy(); // ad_spend 1500.6 → round → 1501
+    // net_profit 14334.676 → round → 14335. 옵션이 1건뿐이라 「상품 행 소계」도 같은 금액을
+    // 낸다(BASE 픽스처의 같은 자리 테스트와 동일 이유) — 개수(2)로 판정한다.
+    expect(screen.getAllByText("14,335원").length).toBe(2);
+
+    // ★있어야 할 것과 없어야 할 것을 함께 — 부정 단언만 두면 문구가 바뀌는 순간 소리 없이
+    //   참이 된다.
+    expect(screen.queryByText(/2,892\.324원/)).toBeNull();
+    expect(screen.queryByText(/14,334\.676원/)).toBeNull();
+    expect(screen.queryByText(/2,930\.4원/)).toBeNull();
+    expect(screen.queryByText(/100,000\.5원/)).toBeNull();
+    expect(screen.queryByText(/1,500\.6원/)).toBeNull();
+    expect(screen.queryByText(/3,000\.12원/)).toBeNull();
+  });
+
+  it("「계정 공통」 네 칸이 반올림된 원 단위로만 뜬다", async () => {
+    h.response = DECIMAL;
+    renderPnl();
+    await waitFor(() => expect(screen.getByText("계정 공통 (상품에 못 붙는 것)")).toBeTruthy());
+    expect(screen.getByText("−1,000원")).toBeTruthy(); // period_fees 1000.1 → 1000
+    expect(screen.getByText("−2,000원")).toBeTruthy(); // payable_vat 2000.2 → 2000
+    expect(screen.getByText("701원")).toBeTruthy(); // revenue_axis_gap 700.7 → round → 701
+    expect(screen.getByText("−801원")).toBeTruthy(); // fee_axis_fallback_gap 800.8 → round → 801
+
+    expect(screen.queryByText(/1,000\.1원/)).toBeNull();
+    expect(screen.queryByText(/2,000\.2원/)).toBeNull();
+    expect(screen.queryByText(/700\.7원/)).toBeNull();
+    expect(screen.queryByText(/800\.8원/)).toBeNull();
+  });
+
+  it("보존식 다섯 칸이 반올림된 원 단위로만 뜬다", async () => {
+    h.response = DECIMAL;
+    renderPnl();
+    await waitFor(() => expect(screen.getByText("✅ 대시보드 RG 행과 일치")).toBeTruthy());
+    const line = screen.getByText((c) => c.includes("상품 행 소계") && c.includes("계정 공통"));
+    expect(line.textContent).toContain("14,335원"); // options_net_sum 14334.676 → 14335
+    // ★account_common_sum의 부호는 JSX가 붙인 게 아니라 Number.toLocaleString이 낸 것이라
+    //   하이픈("-")이다(다른 칸의 "−"는 JSX가 직접 붙인 별개 문자 — U+2212).
+    expect(line.textContent).toContain("-3,000원"); // account_common_sum -3000.3 → -3000
+    expect(line.textContent).toContain("11,334원"); // computed_total_net 11334.376 → 11334
+    expect(line.textContent).not.toContain("14,334.676원");
+    expect(line.textContent).not.toContain("11,334.376원");
+    expect(line.textContent).not.toContain("-3,000.3원");
+  });
+});
+
+describe("RocketGrowthSettlement — 결함 B 회귀: 소수점이 그대로 노출되면 안 된다", () => {
+  it("커버리지 칸(원가 미상 매출)이 반올림된 원 단위로만 뜬다", async () => {
+    h.response = DECIMAL;
+    renderSettlement();
+    await waitFor(() => expect(screen.getByText("얼마나 덮었나 (커버리지)")).toBeTruthy());
+    expect(screen.getByText(/매출 501원에는/)).toBeTruthy(); // fee_unmapped_revenue 500.5 → round → 501
+    expect(screen.queryByText(/500\.5원/)).toBeNull();
+  });
+
+  it("장부 총액 대조 칸이 반올림된 원 단위로만 뜬다", async () => {
+    h.response = DECIMAL;
+    renderSettlement();
+    await waitFor(() => expect(screen.getByText("장부 총액 대조")).toBeTruthy());
+    expect(screen.getByText("250,001원")).toBeTruthy(); // computed 250000.5 → round → 250001
+    expect(screen.getByText("250,501원")).toBeTruthy(); // actual 250500.9 → round → 250501
+    const diffDd = screen.getByText("차이").nextElementSibling as HTMLElement;
+    expect(diffDd.textContent).toContain("500원"); // |diff|=500.4 → round → 500
+    expect(diffDd.textContent).not.toContain("500.4원");
+    expect(screen.queryByText(/250,000\.5원/)).toBeNull();
+    expect(screen.queryByText(/250,500\.9원/)).toBeNull();
+  });
+});
+
 // ════════════════════════ 변이 주입 결과 (실행 확인, 원복 완료·소스 영구 변경 없음) ════════════════════════
 // ①  {note && (...)} 삭제 → "RocketGrowthPnl — 자백 배너" 1건 RED, 나머지 12건 그린. 원복 후 13/13 그린.
 // ②  「계정 공통」 표 {ac && (...)} 삭제 → "「계정 공통」 표" 1건 + "ad_unallocated 행" 1건째(값 존재
