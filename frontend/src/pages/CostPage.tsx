@@ -512,8 +512,12 @@ export function ProductOptionPicker({
   }, [products, search, productValue]);
 
   return (
-    <div className="flex flex-wrap items-end gap-2 border rounded-md p-2 bg-gray-50">
-      <div className="flex flex-col gap-1">
+    // ★`min-w-0`이 없으면 그리드/플렉스 자식은 기본 `min-width: auto`라 **줄어들지 못하고**
+    //   고정폭 컨트롤이 칸을 뚫고 옆 패널로 삐져나온다(레시피 탭은 왼쪽이 320px다).
+    //   그래서 폭을 «고정»하지 않고 «채우고 넘치면 접히게» 한다 — 이 바는 보드 탭(넓다)과
+    //   레시피 탭(좁다) 둘 다에 놓이므로 어느 쪽에도 못 박으면 안 된다.
+    <div className="flex flex-wrap items-end gap-2 border rounded-md p-2 bg-gray-50 min-w-0">
+      <div className="flex flex-col gap-1 min-w-0 flex-1 basis-48">
         <label className="text-[11px] text-gray-500" htmlFor={`${idPrefix}-product-search`}>
           {productLabel} 검색
         </label>
@@ -522,18 +526,18 @@ export function ProductOptionPicker({
           type="text"
           value={search}
           placeholder={`${productLabel}명으로 찾기`}
-          className="text-xs border rounded px-2 py-1 w-56"
+          className="text-xs border rounded px-2 py-1 w-full min-w-0"
           data-testid={`${idPrefix}-product-search`}
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-1 min-w-0 flex-1 basis-56">
         <label className="text-[11px] text-gray-500" htmlFor={`${idPrefix}-product-select`}>
           {productLabel}
         </label>
         <select
           id={`${idPrefix}-product-select`}
-          className="text-xs border rounded px-2 py-1 min-w-[16rem]"
+          className="text-xs border rounded px-2 py-1 w-full min-w-0"
           value={productValue ?? ""}
           data-testid={`${idPrefix}-product-select`}
           onChange={(e) => onProductChange(e.target.value || null)}
@@ -546,13 +550,13 @@ export function ProductOptionPicker({
           ))}
         </select>
       </div>
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-1 min-w-0 flex-1 basis-56">
         <label className="text-[11px] text-gray-500" htmlFor={`${idPrefix}-option-select`}>
           {optionLabel}
         </label>
         <select
           id={`${idPrefix}-option-select`}
-          className="text-xs border rounded px-2 py-1 min-w-[16rem] disabled:bg-gray-100 disabled:text-gray-400"
+          className="text-xs border rounded px-2 py-1 w-full min-w-0 disabled:bg-gray-100 disabled:text-gray-400"
           value={productValue ? (optionValue ?? "") : ""}
           disabled={!productValue}
           data-testid={`${idPrefix}-option-select`}
@@ -1629,7 +1633,8 @@ export default function CostPage() {
             }
           />
           <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6">
-            <div>
+            {/* ★`min-w-0` — 없으면 320px 트랙이 내용 폭에 밀려 오른쪽 패널을 침범한다. */}
+            <div className="min-w-0">
               <h2 className="text-sm font-semibold text-gray-700 mb-2">
                 레시피 (상품명 × 폼팩터)
               </h2>
