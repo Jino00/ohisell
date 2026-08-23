@@ -152,4 +152,14 @@ Jino가 처음 ①(종합조망 결손 표현)을 선택해 **Fable이 계약 1�
 
 ## 10. 착지 결과
 
-- (착지 직후 채움)
+- **완료 단계**: 커밋 `1d34c554` → push → PR **#388** → ⚠️리뷰 생략(기록물만) → `safe_merge.sh 388 --force` 병합 **`b31ff304`** → 워크트리 정리. **멈춘 단계: 없음.**
+- **prod 배포**: 없음 — 이 PR엔 코드가 0파일이다.
+- **⚠️ `--force` 자백**: `safe_merge.sh 388`이 CI 3건 실패로 거부했으나 결제정지 서명 3요소를 **직접 실측**했다 — ①job 3종(`backend py3.10`·`backend py3.14`·`frontend`) 전부 **steps 개수 0** ②실행 **1~2초** ③로그 `BlobNotFound`. 러너 미부착이지 테스트 실패가 아니다. 기록 `$TMPDIR/safe_merge.log`(22:30:19 KST).
+- **「main에 세워둔다」 생략**: 로컬 `main`이 공유 폴더에 체크아웃돼 있다(착지 검사 L5). 다음 세션은 `git switch -c <새> origin/main`으로 **원격을 명시해** 브랜치를 따면 안전하다.
+- **`end_kst` 채움**: 2026-08-23 22:33 KST — 착지가 **끝난 뒤**에 채웠다(2단계 닫기. 먼저 채우면 세션이 커밋을 쓰는 구간 내내 「⛔ 살아 있는 세션」 훅이 침묵한다).
+- **정정 경로**: `git revert -m 1 b31ff304` · PR close. **force-push 금지**(정정 경로를 파괴하는 유일한 행위).
+- **검증 명령**(다음 세션이 그대로 실행):
+  ```
+  gh pr view 388 --json state
+  git show origin/main:.claude/memory/chains/쿠팡-손익정합.jsonl | tail -1 | python3 -c "import sys,json;r=json.load(sys.stdin);print(r['n'], r['end_kst'])"
+  ```
