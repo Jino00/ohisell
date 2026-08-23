@@ -2822,6 +2822,69 @@ def test_hourly_lane_shopping_adgroup_up_routes_to_servo(db):
     assert saved.rationale.startswith("[순위서보]")
 
 
+# ★D-NAO-231 · 적대 리뷰 2R P2-a — «런타임» 가드.
+#   `_SERVO_CORR`는 두 끝이 모두 1이라 상한/하한을 **원리적으로 구별 못 한다** — 그 픽스처
+#   위에서는 배선을 상한으로 되돌려도 아무 테스트가 안 깨진다(1R 변이 M7 생존의 이유).
+#   그래서 여기서만 두 끝을 벌리고, 소스 문자열이 아니라 **실제로 넘어온 인자**를 관측한다.
+_SERVO_CORR_WIDE = {
+    "factor": Decimal("1.3133"), "factor_low": Decimal("1"), "factor_high": Decimal("1.3133"),
+    "factor_point": Decimal("1.3133"), "source": "actual_revenue_ratio",
+}
+
+
+def test_servo_economic_ceiling_actually_receives_the_lower_end(db):
+    """서보 경제성 상한에 **하한이 실제로 넘어가는가**(D-NAO-231 「실쓰기 크기만 하한」).
+
+    상한이 넘어가면 하한이 정당화하는 값보다 높은 입찰까지 올라간다 — 라이브 계수 1.3133
+    기준 +31%(1,030원 → 1,350원). 서보는 매시 :20 KST에 도는 **실입찰** 레인이다.
+    적대 리뷰 1R P1-2가 이 자리를 잡았고, 그때는 이걸 지키는 테스트가 0개였다.
+    """
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db)
+    curve = _servo_curve(avg_rank=4.9)
+    seen: dict = {}
+    real_ceiling = auto_operator._servo_economic_ceiling
+
+    def _spy(*args, **kwargs):
+        seen["correction_factor"] = kwargs.get("correction_factor")
+        return real_ceiling(*args, **kwargs)
+
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR_WIDE), \
+         patch.object(auto_operator, "_servo_economic_ceiling", side_effect=_spy), \
+         patch.object(auto_operator.naver_execution_harness, "execute"):
+        auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+
+    assert "correction_factor" in seen, "_servo_economic_ceiling이 아예 안 불렸다 — 가드가 헛돈다"
+    assert seen["correction_factor"] == _SERVO_CORR_WIDE["factor_low"], (
+        f"서보 경제성 상한이 {seen['correction_factor']}(=상한)을 받았다 — "
+        "실쓰기 크기 층은 하한이어야 한다(D-NAO-231)"
+    )
+
+
+def test_servo_direction_is_unchanged_by_the_interval(db):
+    """★함정 가드 — 하한 배선이 **방향**까지 바꾸면 「액셀 판정 불변」 위반이다.
+
+    `simulate_bid`에 하한 하나만 넘기면 내부 유도가 `max(1, 하한)=1`이 되어 상향이 하향으로
+    뒤집힌다(적대 리뷰 1R이 수치로 경고: hold → down). 두 끝을 다 넘기므로 방향은 두 끝이
+    벌어져도 종전과 같아야 한다.
+    """
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db)
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR_WIDE), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    assert result["servo"] == 1
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_up_servo", "구간이 벌어져도 방향은 상향이어야 한다"
+
+
 # ══════ D-NAO-218(M2-b2): rank_servo:49 소비처 — 경제성상한 명목 스케일 환산 ══════
 # ref 65 정정 #2: economic_ceiling(실효/원가 스케일)을 current_bid·target_bid(명목)와
 # 같은 스케일로 비교하면 기기가중치≠100일 때 어긋난다. 두 테스트가 같은 시나리오

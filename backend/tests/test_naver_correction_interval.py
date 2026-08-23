@@ -209,7 +209,7 @@ _WIDE = {"factor": Decimal("2"), "factor_low": Decimal("1"), "factor_high": Deci
          "window_from": "2026-07-25", "window_to": "2026-08-23"}
 
 
-def test_build_diagnosis_response_carries_the_interval(board_spy, monkeypatch):
+def test_build_diagnosis_response_carries_the_interval(board_spy):
     """M8 상환 — Harness 출력이 구간 키를 «끝까지» 들고 나가는가.
 
     `_factor_payload`를 격리 호출로만 검사하면 「Harness가 그걸 쓰는가」는 아무도 안 본다
@@ -231,7 +231,10 @@ def test_build_diagnosis_error_branch_also_carries_the_interval(board_spy, monke
     out = diagnosis.build_diagnosis(None, date(2026, 8, 9), date(2026, 8, 23))
     assert out["boards"] is None
     for key in ("factor", "factor_low", "factor_high", "factor_point"):
+        # ★적대 리뷰 2R P2-b: `key in`만 단언하면 이 가지에서 변이 M8이 살아남는다
+        #   (Decimal 그대로 나가도 통과) — 정상 가지와 «같은» 강도로 단언한다.
         assert key in out["correction_factor"]
+        assert isinstance(out["correction_factor"][key], float)
 
 
 def test_execution_guard_uses_the_lower_end(monkeypatch):

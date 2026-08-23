@@ -382,6 +382,11 @@ def test_profit_is_reported_at_both_ends_of_the_interval(db, monkeypatch):
     assert result["correction_factor_high"] == 1.5
     assert result["total_profit_high"] == 5000
     assert result["total_profit_low"] == 0
+    # ★적대 리뷰 2R P2-c: 소비처가 아직 없는 키도 «존재»를 단언한다 — 안 그러면
+    #   조용히 사라져도 아무도 모른다(「표방↔실배선 괴리」의 씨앗).
+    assert result["total_profit_avg7_high"] == 5000
+    assert result["total_profit_avg7_low"] == 0
+    assert "30일" in result["profit_window_note"], "없는 창을 채우지 않았다는 사실이 응답에 남아야 한다"
 
     # ② ★표면 — Slack·일기 본문에 두 값이 **글자로** 나온다(계약 §3-6).
     text = captured["text"]
