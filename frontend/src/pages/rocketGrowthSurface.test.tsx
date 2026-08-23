@@ -149,6 +149,25 @@ describe("RocketGrowthPnl — 「계정 공통」 표 (변이②)", () => {
     expect(screen.getByText("−800원")).toBeTruthy(); // fee_axis_fallback_gap
   });
 
+  // ★완료 QA가 라이브에서 잡았다(2026-08-23): 마이너스를 글자로 박아 둬서 실제로 음수인
+  //   payable_vat(부가세 «환급» −50,119원)에 `−-50,119원`이 떴다. 부호가 둘이고, 하나만
+  //   남겼어도 방향이 거꾸로였을 값이다. 차감액 v가 이익에 주는 영향은 −v다 — 계산해야 한다.
+  it("차감액이 음수면(부가세 환급) 이중부호가 아니라 «+»로 뜬다 — 완료 QA 지적", async () => {
+    h.response = {
+      ...BASE,
+      account_common: { ...BASE.account_common, payable_vat: "-50119.20", period_fees: "1000" },
+    };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText("계정 공통 (상품에 못 붙는 것)")).toBeTruthy());
+    // 있어야 할 것: 환급이므로 이익을 «늘린다»
+    expect(screen.getByText("+50,119원")).toBeTruthy();
+    // 없어야 할 것: 이중부호와, 부호를 잃은 형태
+    expect(screen.queryByText("−-50,119원")).toBeNull();
+    expect(screen.queryByText("−50,119원")).toBeNull();
+    // 양수 차감액은 여전히 «−»다(수정이 정상 방향까지 뒤집지 않았는지)
+    expect(screen.getByText("−1,000원")).toBeTruthy();
+  });
+
   it("계정 공통 표 자체가 없으면(응답에 account_common이 없으면) 안 뜬다", async () => {
     h.response = { ...BASE, account_common: undefined as unknown as RgOptionPnlResponse["account_common"] };
     renderPnl();
@@ -209,6 +228,67 @@ describe("RocketGrowthPnl — 보존식 블록 (변이③)", () => {
   //   그런데 화면은 앞의 두 칸만 가드가 빠져 「0원」으로 덮고 있었다 — 「모름」과 「0」이 같은
   //   얼굴이 되는 자리다. 값 비교로는 안 잡힌다(0도 «있을 수 있는 값»이라서). 그러니
   //   **null일 때 「0원」이 «없어야» 한다**를 직접 단언한다.
+  // ★완료 QA가 잡은 «네 번째» 발현 — 표 하단 「상품 행 소계」와 보존식 박스의 같은 라벨이
+  //   한 화면에서 다른 숫자를 말했다. 화면이 `rows.reduce(...)`로 «직접 더하는» 두 번째
+  //   진실의 원천을 갖고 있었고, 원장 축 폴백 창에선 전 행 net_profit이 null이라 0으로 접혔다.
+  //   ⇒ 원천을 하나로(백엔드 `conservation.options_net_sum`) 줄였다.
+  it("원장 축 폴백 창에서 표 하단 소계가 보존식 박스와 «같은 숫자»다 — 완료 QA 지적", async () => {
+    h.response = {
+      ...BASE,
+      commission_axis: "recognition_date",
+      fee_trustworthy: false,
+      // 폴백 창: 개별 행은 net_profit을 못 낸다(null)지만 백엔드는 소계를 안다.
+      options: BASE.options.map((o) => ({
+        ...o, fee_logistics: null, fee_sale_fee: null, fee_total: null, net_profit: null,
+      })),
+      conservation: { ...BASE.conservation, options_net_sum: "1915331", ok: true },
+    };
+    renderPnl();
+    // 보존식 줄과 표 하단 소계가 «둘 다» 1,915,331원이어야 한다.
+    const line = await waitFor(() =>
+      screen.getByText((c) => c.includes("상품 행 소계") && c.includes("계정 공통")),
+    );
+    expect(line.textContent).toContain("1,915,331원");
+    // 표 하단 소계 «행»도 같은 숫자여야 한다 — 두 원천이 갈라지면 여기서 깨진다.
+    const subtotalRow = screen
+      .getAllByText("상품 행 소계")
+      .map((el) => el.closest("tr"))
+      .find((tr): tr is HTMLTableRowElement => tr != null);
+    expect(subtotalRow).toBeTruthy();
+    expect(subtotalRow?.textContent).toContain("1,915,331원");
+    // ★그리고 옛 결함의 서명(0원 소계)이 «없어야» 한다.
+    expect(subtotalRow?.textContent).not.toContain("0원");
+  });
+
+  // ★라이브가 잡은 세 번째 발현(2026-08-23, 08-22 창) — 배지가 「모름」을 「어긋남」으로
+  //   단정했다. 백엔드는 `ok: null`을 정직하게 내는데 프론트가 `cons.ok ? A : B`로 써서
+  //   null이 falsy로 접혔다. 「모름」과 「아니다」는 다른 말이다.
+  it("ok=null이면 「어긋남」이 아니라 «대조할 수 없다»로 뜬다 — 라이브 08-22", async () => {
+    h.response = {
+      ...BASE,
+      cost_trustworthy: false,
+      conservation: {
+        options_net_sum: null, account_common_sum: null, computed_total_net: null,
+        reference_net: null, diff: null, ok: null,
+      },
+    };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText(/대조할 수 없다/)).toBeTruthy());
+    // «없어야 할 것»과 «있어야 할 것»을 함께 단언한다(부정 단언만 두면 문구가 바뀔 때 공허해진다).
+    expect(screen.queryByText(/어긋남/)).toBeNull();
+    expect(screen.queryByText(/일치/)).toBeNull();
+  });
+
+  it("ok=false면 여전히 「어긋남」이다 — 위 수정이 진짜 어긋남까지 덮지 않는다", async () => {
+    h.response = {
+      ...BASE,
+      conservation: { ...BASE.conservation, ok: false, diff: "1200", reference_net: "50923" },
+    };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText(/어긋남/)).toBeTruthy());
+    expect(screen.queryByText(/대조할 수 없다/)).toBeNull();
+  });
+
   it("원가 게이트 미달 창(전 칸 null)에서 보존식이 「0원」이 아니라 「—」로 뜬다 — 1R P1-1", async () => {
     h.response = {
       ...BASE,

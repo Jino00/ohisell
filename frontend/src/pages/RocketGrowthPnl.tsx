@@ -40,6 +40,20 @@ const n = (v: unknown): number => Number(v ?? 0) || 0;
  */
 const wonR = (v: unknown): string => won(Math.round(n(v)));
 
+/** 차감 항목이 **순이익에 미치는 영향**을 부호와 함께 그린다.
+ *
+ * ★왜 하드코딩 `−`를 쓰면 안 되나(완료 QA가 라이브에서 잡았다, 2026-08-23):
+ *   종전엔 `−{wonR(ac.payable_vat)}`처럼 마이너스를 **글자로 박아** 뒀는데, 30일 창의
+ *   `payable_vat`는 실제로 **−50,119원**(부가세 환급)이었다. 그래서 화면에 `−-50,119원`이
+ *   떴다 — 부호가 둘이고, 하나만 남겼어도 **방향이 거꾸로**였을 값이다.
+ * ★차감액 `v`가 이익에 주는 영향은 `−v`다. 그러니 부호를 «찍지» 말고 «계산»해야 한다.
+ */
+function impact(v: string | null): string {
+  if (v == null) return NO_DATA;
+  const x = -Math.round(n(v));
+  return `${x < 0 ? "−" : x > 0 ? "+" : ""}${won(Math.abs(x))}`;
+}
+
 /** 값이 «없다»와 «0이다»를 가른다 — null은 0으로 그리지 않는다(계약 §3 추정 금지). */
 function cell(v: string | null): string {
   return v == null ? NO_DATA : wonR(v);
@@ -77,7 +91,16 @@ export default function RocketGrowthPnl() {
   const cons = data?.conservation;
 
   // 상품 행 소계 — «상품에 붙는 것만»의 합이다. 계정 공통 행과 더해야 총 순이익이 된다.
-  const optSum = rows.reduce((s, r) => s + n(r.net_profit), 0);
+  //
+  // ★백엔드가 낸 값을 그대로 쓴다. 화면이 따로 더하지 않는다 (완료 QA가 잡았다, 2026-08-23).
+  //   종전엔 `rows.reduce((s,r) => s + n(r.net_profit), 0)`로 화면이 **직접 더했는데**,
+  //   원장 축 폴백 창에서는 전 행의 `net_profit`이 `null`이라 그 합이 **0원으로 접혔다**.
+  //   그래서 같은 화면에서 표 하단 「상품 행 소계 0원」과 보존식 박스의 「상품 행 소계
+  //   1,915,331원」이 **같은 라벨로 다른 숫자**를 말했다.
+  // ★근본 원인은 계산이 아니라 «진실의 원천이 둘»이었다는 것이다 — 하나로 줄이면 갈라질 수 없다.
+  //   이건 이 계약에서 「모름」이 「0」으로 접힌 **네 번째** 자리다(1R P1 보존식 서브합 →
+  //   라이브 배지 반전 → 배지의 null falsy → 여기). 앞의 셋을 고치면서도 이 자리는 안 보였다.
+  const optSumCell = cell(cons?.options_net_sum ?? null);
 
   return (
     <div className="p-6 space-y-4">
@@ -201,7 +224,7 @@ export default function RocketGrowthPnl() {
               <tr className="border-t bg-gray-50 font-medium">
                 <td className="px-3 py-2">상품 행 소계</td>
                 <td colSpan={6} />
-                <td className="text-right px-3 py-2">{wonR(optSum)}</td>
+                <td className="text-right px-3 py-2">{optSumCell}</td>
               </tr>
             )}
           </tbody>
@@ -216,14 +239,14 @@ export default function RocketGrowthPnl() {
             <tbody>
               <tr className="border-t">
                 <td className="px-3 py-2">보관비·반품비 (기간비용 일할)</td>
-                <td className="text-right px-3 py-2">−{wonR((ac.period_fees))}</td>
+                <td className="text-right px-3 py-2">{impact(ac.period_fees)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">
                   판매일에 안 붙인다 — 매출 0인 주기에도 발생하는 재고 보유 비용이다(계약 §8-5).
                 </td>
               </tr>
               <tr className="border-t">
                 <td className="px-3 py-2">납부세액</td>
-                <td className="text-right px-3 py-2">−{wonR((ac.payable_vat))}</td>
+                <td className="text-right px-3 py-2">{impact(ac.payable_vat)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">계정 단위라 상품 행에 안 붙인다.</td>
               </tr>
               {n(ac.revenue_axis_gap) !== 0 && (
@@ -238,7 +261,7 @@ export default function RocketGrowthPnl() {
               {n(ac.fee_axis_fallback_gap) !== 0 && (
                 <tr className="border-t">
                   <td className="px-3 py-2">원장 축 폴백 잔여</td>
-                  <td className="text-right px-3 py-2">−{wonR((ac.fee_axis_fallback_gap))}</td>
+                  <td className="text-right px-3 py-2">{impact(ac.fee_axis_fallback_gap)}</td>
                   <td className="px-3 py-2 text-xs text-gray-500">
                     이 창은 판매일 축을 못 내 원장 축으로 물러섰다 — 옵션별로 못 가르는 몫이다.
                   </td>
@@ -259,15 +282,27 @@ export default function RocketGrowthPnl() {
         </div>
       )}
 
-      {/* ★보존식 — 이 화면이 대시보드와 같은 말을 하는가. 차이를 0으로 숨기지 않는다. */}
+      {/* ★보존식 — 이 화면이 대시보드와 같은 말을 하는가. 차이를 0으로 숨기지 않는다.
+          ★배지는 3상태다 — 「모름」을 「어긋남」으로 단정하지 않는다(2026-08-23 라이브가 잡았다).
+            원가 게이트가 미달인 창은 순이익 자체를 안 내므로 **대조할 것이 없다**. 그런데
+            `cons.ok ? A : B`로 쓰면 `null`이 falsy로 접혀 화면이 「어긋남」을 단정했다 —
+            같은 병(「모름」과 「아니다」가 같은 얼굴)의 세 번째 발현이다. */}
       {cons && (
         <div
           className={`border rounded-md p-3 text-sm ${
-            cons.ok ? "bg-green-50 border-green-200 text-green-900" : "bg-red-50 border-red-200 text-red-800"
+            cons.ok == null
+              ? "bg-gray-50 border-gray-200 text-gray-700"
+              : cons.ok
+                ? "bg-green-50 border-green-200 text-green-900"
+                : "bg-red-50 border-red-200 text-red-800"
           }`}
         >
           <div className="font-medium">
-            {cons.ok ? "✅ 대시보드 RG 행과 일치" : "⚠️ 대시보드 RG 행과 어긋남"}
+            {cons.ok == null
+              ? "— 대시보드 RG 행과 대조할 수 없다 (이 창은 순이익을 내지 않는다)"
+              : cons.ok
+                ? "✅ 대시보드 RG 행과 일치"
+                : "⚠️ 대시보드 RG 행과 어긋남"}
           </div>
           {/* ★다섯 칸 전부 `cell()`을 쓴다 — 적대 리뷰 1R P1: 앞의 두 칸만 가드가 빠져 있었고,
               원가 게이트가 미달인 창(백엔드가 정직하게 null을 내는 창)에서 화면이 «0원»으로
