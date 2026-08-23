@@ -14,19 +14,31 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   addCostManualPrice,
+  adoptCostExcelPrices,
+  approveCostRecipe,
   createCostMaterial,
   deleteCostMaterialPrice,
+  fetchCostBoard,
   fetchCostLedgerMaterialLines,
   fetchCostMaterials,
+  fetchCostRecipes,
   fetchCostSettings,
+  importCostRecipes,
   linkCostLedgerPrice,
   patchCostMaterial,
   refreshCostLedgerPrice,
+  unapproveCostRecipe,
+  type CostBoard,
+  type CostBoardRow,
+  type CostImportResult,
   type CostLedgerCheck,
   type CostLedgerMaterialLine,
   type CostMaterial,
   type CostMaterialPrice,
+  type CostRecipe,
+  type CostRecipeMatch,
   type CostSetting,
+  type CostStandard,
 } from "../lib/api";
 
 export type CostTab = "materials" | "recipes" | "board";
@@ -429,6 +441,381 @@ export function NotYetPanel({ what, slice }: { what: string; slice: string }) {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// S2 — 레시피 · 표준원가 보드 (계약 §5-3 탭2·탭3)
+// ══════════════════════════════════════════════════════════════════
+
+/** 폼팩터 표시. `null`(수입 완제품·매입품)은 「—」다 — 0이나 자리표시자로 채우지 않는다. */
+export function formFactorLabel(form: string | null): string {
+  return form && form.trim() ? form : "—";
+}
+
+/** 격차 표시. `null`은 「—」다 — 「격차 0%」와 「잴 수 없음」은 다른 사실이다. */
+export function gapText(gap: number | null): string {
+  if (gap === null || gap === undefined || !Number.isFinite(gap)) return "—";
+  const sign = gap > 0 ? "+" : "";
+  return `${sign}${gap.toFixed(2)}%`;
+}
+
+/** 왜 표준원가가 «없는지». ★빈 문자열을 돌려주지 않는다 — 이유 없는 빈 칸이 이 화면의 적이다. */
+export function uncomputedReason(row: CostBoardRow): string | null {
+  if (row.std_cost_inc_vat !== null) return null;
+  return row.reason ?? "계산 안 됨 — 사유 미상";
+}
+
+/** 매칭 근거 한 줄. 제안이지 확정이 아님을 문장이 스스로 말한다. */
+export function matchReasonText(match: CostRecipeMatch | null): string {
+  if (!match || !match.match_reason) return "매칭 근거 없음";
+  return match.match_reason;
+}
+
+export function RecipeStatusBadge({ recipe }: { recipe: CostRecipe }) {
+  const approved = recipe.status === "approved";
+  return (
+    <span
+      className={`text-xs px-1.5 py-0.5 rounded border ${
+        approved
+          ? "bg-green-50 text-green-700 border-green-200"
+          : "bg-amber-50 text-amber-800 border-amber-200"
+      }`}
+    >
+      {approved ? "승인됨" : "미확인 — 계산 안 함"}
+    </span>
+  );
+}
+
+/** 두 엑셀 업로드. **아무것도 승인하지 않는다**는 것을 화면이 먼저 말한다. */
+export function RecipeImportPanel({
+  busy,
+  onImport,
+  result,
+}: {
+  busy: boolean;
+  onImport: (cost: File, mapping: File) => void;
+  result: CostImportResult | null;
+}) {
+  const [cost, setCost] = useState<File | null>(null);
+  const [mapping, setMapping] = useState<File | null>(null);
+  return (
+    <section className="border rounded-md p-4">
+      <h2 className="text-sm font-semibold text-gray-700">엑셀 2종 업로드 → 구성 초안</h2>
+      <p className="text-xs text-gray-500 mt-1">
+        파싱은 <b>구성(부자재 목록·수량)</b>까지다 — 엑셀의 단가는 <b>참고값</b>으로만 실리고,
+        승인·채택을 눌러야 단가가 된다(계약 §3). 이미 승인된 레시피는 덮지 않는다.
+      </p>
+      <div className="mt-3 grid gap-2 text-xs">
+        <label className="flex items-center gap-2">
+          <span className="w-28 text-gray-600">원가 정본</span>
+          <input
+            type="file"
+            accept=".xlsx"
+            aria-label="원가 정본 파일"
+            onChange={(e) => setCost(e.target.files?.[0] ?? null)}
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="w-28 text-gray-600">매핑 정본</span>
+          <input
+            type="file"
+            accept=".xlsx"
+            aria-label="매핑 정본 파일"
+            onChange={(e) => setMapping(e.target.files?.[0] ?? null)}
+          />
+        </label>
+      </div>
+      <button
+        className="mt-3 text-xs px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-40"
+        disabled={busy || !cost || !mapping}
+        onClick={() => cost && mapping && onImport(cost, mapping)}
+      >
+        초안 만들기
+      </button>
+
+      {result ? (
+        <div className="mt-3 text-xs text-gray-700 space-y-1">
+          <div>
+            레시피 신규 <b>{result.recipes_created}</b> · 갱신 <b>{result.recipes_updated}</b> ·
+            승인분 건너뜀 <b>{result.skipped_approved}</b> · 구성 못 찾음{" "}
+            <b>{result.unmatched}</b> (묶음 {result.groups})
+          </div>
+          {/* ★이상은 숨기지 않는다 — 「몇 건 파싱됨」만 보이면 무엇이 빠졌는지 모른다. */}
+          {result.cost_table_anomalies.length ? (
+            <details>
+              <summary className="cursor-pointer text-amber-700">
+                원가표 이상 {result.cost_table_anomalies.length}건
+              </summary>
+              <ul className="mt-1 ml-4 list-disc text-gray-600">
+                {result.cost_table_anomalies.map((a) => (
+                  <li key={a}>{a}</li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+          {result.mapping_anomalies.length ? (
+            <details>
+              <summary className="cursor-pointer text-amber-700">
+                매핑 이상 {result.mapping_anomalies.length}건
+              </summary>
+              <ul className="mt-1 ml-4 list-disc text-gray-600">
+                {result.mapping_anomalies.map((a) => (
+                  <li key={a}>{a}</li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function RecipeList({
+  recipes,
+  selectedId,
+  onSelect,
+}: {
+  recipes: CostRecipe[];
+  selectedId: number | null;
+  onSelect: (id: number) => void;
+}) {
+  if (!recipes.length) {
+    return (
+      <div className="text-xs text-gray-500 border border-dashed rounded p-4">
+        레시피가 없다 — 위에서 엑셀 2종을 올리면 초안이 생긴다.
+      </div>
+    );
+  }
+  return (
+    <ul className="text-sm divide-y border rounded-md overflow-hidden">
+      {recipes.map((r) => (
+        <li key={r.id}>
+          <button
+            className={`w-full text-left px-3 py-2 hover:bg-gray-50 ${
+              r.id === selectedId ? "bg-blue-50" : ""
+            }`}
+            onClick={() => onSelect(r.id)}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate">{r.product_name}</span>
+              <span className="text-xs text-gray-500 shrink-0">
+                {formFactorLabel(r.form_factor)}
+              </span>
+            </div>
+            <div className="mt-1 flex items-center gap-2 flex-wrap">
+              <RecipeStatusBadge recipe={r} />
+              <span className="text-xs text-gray-500">
+                구성 {r.line_count} · SKU {r.link_count}
+              </span>
+              <span className="text-xs font-medium">
+                {formatCostWon(r.standard.std_cost_inc_vat)}
+              </span>
+              {r.anomaly_flag ? (
+                <span className="text-xs text-amber-700">⚠ {r.anomaly_flag}</span>
+              ) : null}
+            </div>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** ★계약 §7 합격 4의 표면 — 「계산되는 방법이 나오는」 화면. 부자재 × 수량 × 단가가 펼쳐진다. */
+export function StandardBreakdown({ standard }: { standard: CostStandard }) {
+  if (!standard.lines.length) {
+    return <div className="text-xs text-gray-500">구성이 비어 있다 — 계산할 것이 없다.</div>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead className="text-gray-500">
+          <tr className="text-left border-b">
+            <th className="py-1 pr-2">부자재</th>
+            <th className="py-1 pr-2 text-right">수량</th>
+            <th className="py-1 pr-2 text-right">단가(VAT 제외)</th>
+            <th className="py-1 pr-2 text-right">금액(VAT 제외)</th>
+            <th className="py-1 pr-2 text-right">금액(VAT 포함)</th>
+            <th className="py-1">상태</th>
+          </tr>
+        </thead>
+        <tbody>
+          {standard.lines.map((ln, i) => (
+            <tr key={`${ln.label}-${i}`} className="border-b last:border-0">
+              <td className="py-1 pr-2">{ln.label}</td>
+              <td className="py-1 pr-2 text-right">{ln.quantity ?? "—"}</td>
+              <td className="py-1 pr-2 text-right">{formatCostWon(ln.unit_price_ex_vat)}</td>
+              <td className="py-1 pr-2 text-right">{formatCostWon(ln.amount_ex_vat)}</td>
+              <td className="py-1 pr-2 text-right">
+                {formatCostWon(ln.amount_inc_vat)}
+                {/* ★유도했다는 사실이 화면까지 온다 — ×1.1은 «실제로 낸 부가세»가 아니다. */}
+                {ln.inc_derived ? <span className="text-gray-400"> (유도)</span> : null}
+              </td>
+              <td className="py-1">
+                {ln.usable ? (
+                  <span className="text-gray-500">{ln.price_source ?? ln.price_status}</span>
+                ) : (
+                  <span className="text-amber-700">{ln.price_status}</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="font-medium">
+            <td className="pt-2" colSpan={3}>
+              합계
+            </td>
+            <td className="pt-2 text-right">{formatCostWon(standard.std_cost_ex_vat)}</td>
+            <td className="pt-2 text-right">{formatCostWon(standard.std_cost_inc_vat)}</td>
+            <td />
+          </tr>
+        </tfoot>
+      </table>
+      {!standard.computable ? (
+        <div className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
+          {standard.reason ?? "계산 안 됨"} — 부분합{" "}
+          {formatCostWon(standard.partial_inc_vat)}은 <b>부분</b>이지 표준원가가 아니다.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function RecipeDetail({
+  recipe,
+  busy,
+  onApprove,
+  onUnapprove,
+  onAdopt,
+}: {
+  recipe: CostRecipe;
+  busy: boolean;
+  onApprove: () => void;
+  onUnapprove: () => void;
+  onAdopt: () => void;
+}) {
+  const m = recipe.match;
+  return (
+    <section className="border rounded-md p-4">
+      <div className="flex items-start justify-between gap-2 flex-wrap">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-800">{recipe.product_name}</h2>
+          <div className="text-xs text-gray-500 mt-0.5">
+            폼팩터 {formFactorLabel(recipe.form_factor)} · 구성 {recipe.line_count}종 · 링크된
+            SKU {recipe.link_count}건
+          </div>
+        </div>
+        <RecipeStatusBadge recipe={recipe} />
+      </div>
+
+      <div className="mt-3 text-xs bg-gray-50 border rounded p-2 text-gray-700">
+        <div className="font-medium text-gray-600">매칭 근거 (제안이지 확정이 아니다)</div>
+        <div className="mt-0.5">{matchReasonText(m)}</div>
+        {m?.cost_table_item ? (
+          <div className="mt-0.5 text-gray-500">
+            원가표 「{m.cost_table_item}」 · 제품원가(+VAT){" "}
+            {formatCostWon(m.excel_total_inc_vat)}
+          </div>
+        ) : null}
+        {m?.candidates && m.candidates.length > 1 ? (
+          <div className="mt-0.5 text-amber-700">후보 {m.candidates.length}건 — 사람이 고른다</div>
+        ) : null}
+      </div>
+
+      <div className="mt-3 flex gap-2 flex-wrap">
+        {recipe.status === "approved" ? (
+          <button
+            className="text-xs px-3 py-1.5 rounded border disabled:opacity-40"
+            disabled={busy}
+            onClick={onUnapprove}
+          >
+            승인 취소
+          </button>
+        ) : (
+          <button
+            className="text-xs px-3 py-1.5 rounded bg-green-600 text-white disabled:opacity-40"
+            disabled={busy || recipe.line_count === 0}
+            onClick={onApprove}
+          >
+            이 구성을 승인한다
+          </button>
+        )}
+        <button
+          className="text-xs px-3 py-1.5 rounded border disabled:opacity-40"
+          disabled={busy}
+          onClick={onAdopt}
+          title="엑셀에 적힌 참고값을 수동 단가로 채택한다. 이미 단가가 있는 종은 건드리지 않는다."
+        >
+          엑셀 참고값을 단가로 채택
+        </button>
+      </div>
+
+      <div className="mt-4">
+        <h3 className="text-xs font-semibold text-gray-600 mb-1">계산 내역</h3>
+        <StandardBreakdown standard={recipe.standard} />
+      </div>
+    </section>
+  );
+}
+
+/** 표준원가 보드 — SKU별. ★미계산 행도 빠짐없이 실리고 «왜»를 말한다. */
+export function StandardCostBoard({ board }: { board: CostBoard | null }) {
+  if (!board) {
+    return <div className="text-xs text-gray-500">불러오는 중…</div>;
+  }
+  if (!board.items.length) {
+    return (
+      <div className="text-xs text-gray-500 border border-dashed rounded p-4">
+        보드에 실릴 SKU가 없다 — 레시피 탭에서 엑셀을 올려 링크를 만든다.
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="text-xs text-gray-600">
+        SKU {board.sku_count}건 · 계산됨 <b>{board.computed_count}</b> · 계산 안 됨{" "}
+        <b>{board.uncomputed_count}</b> · 승인 레시피 {board.approved_recipe_count}/
+        {board.recipe_count}
+      </div>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-gray-500">
+            <tr className="text-left border-b">
+              <th className="py-1 pr-2">SKU</th>
+              <th className="py-1 pr-2">상품</th>
+              <th className="py-1 pr-2">폼팩터</th>
+              <th className="py-1 pr-2 text-right">표준원가(VAT 포함)</th>
+              <th className="py-1 pr-2 text-right">현 cost_price</th>
+              <th className="py-1 pr-2 text-right">격차</th>
+              <th className="py-1">비고</th>
+            </tr>
+          </thead>
+          <tbody>
+            {board.items.map((row) => (
+              <tr key={`${row.recipe_id}-${row.internal_sku}`} className="border-b last:border-0">
+                <td className="py-1 pr-2 font-mono">{row.internal_sku}</td>
+                <td className="py-1 pr-2 truncate max-w-[22rem]">
+                  {row.product_name ?? row.recipe_product_name}
+                </td>
+                <td className="py-1 pr-2">{formFactorLabel(row.form_factor)}</td>
+                <td className="py-1 pr-2 text-right font-medium">
+                  {formatCostWon(row.std_cost_inc_vat)}
+                </td>
+                {/* ★읽기 전용 대조값이다 — 이 화면은 이 칸에 쓰지 않는다(계약 §3 금지선). */}
+                <td className="py-1 pr-2 text-right text-gray-600">
+                  {formatCostWon(row.current_cost_price)}
+                </td>
+                <td className="py-1 pr-2 text-right">{gapText(row.gap_pct)}</td>
+                <td className="py-1 text-amber-700">{uncomputedReason(row) ?? ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
 // 페이지 (데이터 로딩만 — 표시는 위 순수 컴포넌트가 한다)
 // ══════════════════════════════════════════════════════════════════
 export default function CostPage() {
@@ -437,21 +824,37 @@ export default function CostPage() {
   const [ledgerLines, setLedgerLines] = useState<CostLedgerMaterialLine[]>([]);
   const [settings, setSettings] = useState<CostSetting[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [recipes, setRecipes] = useState<CostRecipe[]>([]);
+  const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
+  const [board, setBoard] = useState<CostBoard | null>(null);
+  const [importResult, setImportResult] = useState<CostImportResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [m, l, s] = await Promise.all([
+      const [m, l, s, r, b] = await Promise.all([
         fetchCostMaterials(),
         fetchCostLedgerMaterialLines(),
         fetchCostSettings(),
+        fetchCostRecipes(),
+        fetchCostBoard(),
       ]);
       setMaterials(m.items);
       setLedgerLines(l.items);
       setSettings(s.items);
+      setRecipes(r.items);
+      setBoard(b);
       setSelectedId((prev) => prev ?? (m.items.length ? m.items[0].id : null));
+      // ★선택은 유지한다 — 승인 직후 목록이 갱신되며 선택이 풀리면 방금 승인한 결과를 못 본다.
+      setSelectedRecipeId((prev) =>
+        prev !== null && r.items.some((x) => x.id === prev)
+          ? prev
+          : r.items.length
+            ? r.items[0].id
+            : null,
+      );
       setErr(null);
     } catch (e) {
       // ★조용히 빈 화면을 주지 않는다 — 실패는 실패라고 말한다(교훈 #319).
@@ -466,6 +869,11 @@ export default function CostPage() {
   const selected = useMemo(
     () => materials.find((m) => m.id === selectedId) ?? null,
     [materials, selectedId],
+  );
+
+  const selectedRecipe = useMemo(
+    () => recipes.find((r) => r.id === selectedRecipeId) ?? null,
+    [recipes, selectedRecipeId],
   );
 
   async function run(fn: () => Promise<unknown>, ok: string) {
@@ -641,13 +1049,64 @@ export default function CostPage() {
       ) : null}
 
       {tab === "recipes" ? (
-        <div className="mt-4">
-          <NotYetPanel what="레시피 (상품명 × 폼팩터 구성)" slice="S2" />
+        <div className="mt-4 space-y-4">
+          <RecipeImportPanel
+            busy={busy}
+            result={importResult}
+            onImport={(cost, mapping) =>
+              run(async () => {
+                setImportResult(await importCostRecipes(cost, mapping));
+              }, "엑셀에서 구성 초안을 만들었다 — 아직 아무것도 승인하지 않았다")
+            }
+          />
+          <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-700 mb-2">
+                레시피 (상품명 × 폼팩터)
+              </h2>
+              <RecipeList
+                recipes={recipes}
+                selectedId={selectedRecipeId}
+                onSelect={setSelectedRecipeId}
+              />
+            </div>
+            {selectedRecipe ? (
+              <RecipeDetail
+                recipe={selectedRecipe}
+                busy={busy}
+                onApprove={() =>
+                  run(
+                    () => approveCostRecipe(selectedRecipe.id),
+                    "구성을 승인했다 — 이제 표준원가가 저장된다",
+                  )
+                }
+                onUnapprove={() =>
+                  run(
+                    () => unapproveCostRecipe(selectedRecipe.id),
+                    "승인을 취소했다 — 저장된 표준원가도 함께 사라진다",
+                  )
+                }
+                onAdopt={() =>
+                  run(async () => {
+                    const out = await adoptCostExcelPrices(selectedRecipe.id);
+                    // ★건너뛴 것을 조용히 넘기지 않는다 — 「채택됨」만 보이면 무엇이 안 바뀌었는지 모른다.
+                    if (out.skipped_has_price.length || out.skipped_no_ref.length) {
+                      setErr(
+                        `건너뜀 — 이미 단가 있음 ${out.skipped_has_price.length}건 · 참고값 없음 ${out.skipped_no_ref.length}건`,
+                      );
+                    }
+                  }, "엑셀 참고값을 수동 단가로 채택했다")
+                }
+              />
+            ) : (
+              <div className="text-xs text-gray-500">왼쪽에서 레시피를 고른다.</div>
+            )}
+          </div>
         </div>
       ) : null}
       {tab === "board" ? (
         <div className="mt-4">
-          <NotYetPanel what="표준원가 보드" slice="S2·S3" />
+          <StandardCostBoard board={board} />
         </div>
       ) : null}
     </div>
