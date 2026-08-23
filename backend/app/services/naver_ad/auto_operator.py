@@ -430,7 +430,7 @@ def _settlement_roas_status(
             f"보정계수 unavailable(source={factor_info.get('source')!r}) — 실주문 매출 부재, "
             "보정ROAS 검증 불가(fail-closed, codex 5R[P1-1])"
         )
-    factor = factor_info["factor"]
+    factor = factor_info["factor_low"]  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
     roas_corrected = (agg["conv_amt"] / agg["cost"]) * float(factor)
     target_roas = _resolve_target_roas(db, campaign_id)
     if target_roas is None:
@@ -1498,7 +1498,11 @@ def _servo_economic_ceiling(
     """쇼검 광고그룹 경제성 상한(원) — compute_bid_sims의 SHOPPING 처리 동형(PLAN §2 R1).
     pooled_rpc(정착창 adgroup 실적, group_agg=campaign_agg 근사, 상위 prior={campaign,account})
     → affordable_ceiling(rpc×보정계수, target_roas). rpc≤0(심층 콜드)·target_roas 미해석 →
-    0(입찰 근거 없음 → 서보 fail-closed hold)."""
+    0(입찰 근거 없음 → 서보 fail-closed hold).
+
+    ★D-NAO-231: `correction_factor`로 **구간 하한**을 받는다 — 이 상한은 실제 입찰 쓰기의
+    «크기»를 정하고(방향은 밴드 관제가 이미 정했다) 「실쓰기 크기만 하한」이 그 결정이다.
+    상한을 받으면 하한이 정당화하는 값보다 높은 입찰까지 올라간다(라이브 계수 1.31 기준 +31%)."""
     target_roas = _resolve_target_roas(db, campaign_id)
     if target_roas is None or target_roas <= 0:
         return 0
@@ -1639,7 +1643,7 @@ def _fetch_estimate_rank_bid(
 def _estimate_direct_step(
     db: Session, *, keyword_id: str, campaign_id: str, current_bid: int, weighted_rank,
     servo_agg: dict, correction_factor: Decimal, window_from: date, window_to: date,
-    cache: dict, counter: dict,
+    cache: dict, counter: dict, correction_factor_low: Decimal | None = None,
 ) -> dict:
     """파워링크 estimate 직행 스텝(PLAN §2 R2) — 목표순위(현재−1)로 estimate 필요입찰을 받아
     bid_simulator.simulate_bid의 min(경제성 상한, rank_bid)로 최종 목표가를 낸다.
@@ -1674,7 +1678,8 @@ def _estimate_direct_step(
     sim = bid_simulator.simulate_bid(
         keyword_row, Decimal(str(target_roas)),
         group_agg=group_agg, campaign_agg=campaign_agg, account_agg=servo_agg["account"],
-        correction_factor=correction_factor, estimate={"rank_bid": rank_bid},
+        correction_factor=correction_factor, correction_factor_low=correction_factor_low,
+        estimate={"rank_bid": rank_bid},
     )
     target_bid = sim["recommended_bid"]  # min(경제성 상한, estimate rank_bid)
     if target_bid is None or target_bid <= current_bid or target_bid < _VALID_BID_MIN:
@@ -2330,7 +2335,7 @@ def _deep_expansion_ok(
     factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
     if factor_info.get("source") != "actual_revenue_ratio":
         return False  # 보정계수 unavailable → 무보정 추정으로 과열 진입 금지(fail-closed)
-    factor = Decimal(str(factor_info["factor"]))
+    factor = Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
     scored = gave_score.compute_gave_score(
         revenue=Decimal(agg["conv_amt"]) * factor, cost=agg["cost"], bep_roas=Decimal(str(bep_roas)),
     )
@@ -3075,6 +3080,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     campaigns = _auto_operate_campaigns(db)
     servo_agg: dict | None = None
     servo_correction_factor: Decimal | None = None
+    servo_correction_factor_low: Decimal | None = None
     # IU-R R3: 서보 response_prior(입찰→순위 반응 곡선 기울기, 원/rank개선) — 캠페인 순회 밖에서
     # 1회 벌크 적재(N+1 방지). {scope_key: slope}. 서보 유닛의 "adgroup:<id>" 키만 조회해 콜드
     # 스타트 대신 "한 단 위 필요 증분"을 근접 산정한다(없으면 None → rank_servo 콜드스타트 폴백).
@@ -3083,7 +3089,12 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         from app.services.naver_ad import proposal_pipeline
         servo_agg = proposal_pipeline._precompute_aggregates(db, window_from, window_to)
         _cf = diagnosis.correction_factor(db, today - timedelta(days=1))
-        servo_correction_factor = Decimal(str(_cf["factor"]))
+        # ★D-NAO-231: 서보는 **실쓰기 크기**를 정하는 층이다(방향은 `_judge_hourly` 밴드 관제가
+        # 이미 정했고 계수와 무관하다) ⇒ 경제성 상한은 **하한**으로 누른다. 다만 `simulate_bid`는
+        # 방향 판정도 하므로 **두 끝을 다 넘겨야** 한다 — 하한 하나만 넘기면 그 안에서
+        # `max(1, 하한)=1`이 되어 direction이 바뀐다(= 「액셀 판정 불변」 위반).
+        servo_correction_factor = Decimal(str(_cf["factor_high"]))
+        servo_correction_factor_low = Decimal(str(_cf["factor_low"]))
         response_priors = bid_rank_curve.load_response_priors(db)
 
     for campaign_id in campaigns:
@@ -3326,7 +3337,9 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     rank_kind, rank_step_type, rank_tag = "estimate", "bid_up_rank", "순위직행"
 
             step_bid = None
-            if rank_kind is not None and servo_agg is not None and servo_correction_factor is not None:
+            if (rank_kind is not None and servo_agg is not None
+                    and servo_correction_factor is not None
+                    and servo_correction_factor_low is not None):
                 # prefilter(쿨다운/일일캡) — estimate 호출·서보 산정 전에 실행 시점 guardrail이
                 # 어차피 막을 유닛을 동일 판별로 미리 거른다(R1 GATE P2-2 백로그·중복 금지).
                 prefilter_reason = _rank_step_prefilter(
@@ -3345,7 +3358,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 if rank_kind == "servo":
                     economic_ceiling = _servo_economic_ceiling(
                         db, adgroup_id=exec_target_id, campaign_id=campaign_id,
-                        servo_agg=servo_agg, correction_factor=servo_correction_factor,
+                        servo_agg=servo_agg, correction_factor=servo_correction_factor_low,
                         window_from=window_from, window_to=window_to,
                     )
                     # D-NAO-218(M2-b2, ref 65 정정 #2 — rank_servo:49 소비처): 위 economic_ceiling은
@@ -3384,6 +3397,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         db, keyword_id=exec_target_id, campaign_id=campaign_id, current_bid=step_base,
                         weighted_rank=verdict.get("weighted_rank"), servo_agg=servo_agg,
                         correction_factor=servo_correction_factor,
+                        correction_factor_low=servo_correction_factor_low,
                         window_from=window_from, window_to=window_to,
                         cache=estimate_cache, counter=estimate_counter,
                     )

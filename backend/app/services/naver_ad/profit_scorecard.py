@@ -182,16 +182,33 @@ def _fmt_row(row: dict) -> str:
     return f"- {name}: 어제 {yday_s} · 7일평균 {avg7_s} · 6월평균 {june_s} (대비 {pct_s})"
 
 
-def _build_text(rows: list[dict], yesterday: date, factor_info: dict) -> str:
-    total_yesterday = sum(
-        r["yesterday_profit"] for r in rows if r.get("yesterday_profit") is not None
-    )
-    factor = factor_info["factor"]
+def _total(rows: list[dict], key: str) -> int:
+    """None을 빼고 합산 — 「데이터 없음」과 「0원」을 섞지 않는다."""
+    return sum(r[key] for r in rows if r.get(key) is not None)
+
+
+def _build_text(rows: list[dict], yesterday: date, factor_info: dict, rows_low: list[dict]) -> str:
+    total_yesterday = _total(rows, "yesterday_profit")
+    # ★D-NAO-230 계약 §5-7 — 총이익을 **구간 양끝으로 병기**한다.
+    #   계정 30일 총이익은 이 계수 하나에 «부호»가 달려 있다(보정 +5,963,568원 ↔ 무보정
+    #   −234,545원, 계약 §1-3). 한쪽만 적으면 읽는 사람이 그 사실을 알 길이 없다 — §3-6
+    #   「계수와 그 파생 총이익은 가정·창과 함께 표면에 내보낸다」의 이행이다.
+    total_low = _total(rows_low, "yesterday_profit")
+    # 표기 자릿수는 진단 보드 카드(NaverAdDiagnosisBoard 「보정계수」)와 맞춘다 — 같은 값이
+    # 화면과 Slack에서 다르게 보이면 대조가 안 된다.
+    ends = f"[{factor_info['factor_low']:.4f}~{factor_info['factor_high']:.4f}]"
     corrected = factor_info.get("source") == "actual_revenue_ratio"
-    factor_note = f"{factor}(실측)" if corrected else f"{factor}(무보정 — source={factor_info.get('source')})"
+    w_from, w_to = factor_info.get("window_from"), factor_info.get("window_to")
+    # ★창이 없으면 「창 None~None」을 찍지 않고 창을 생략한다 — 없는 것을 있는 것처럼 적지 않는다.
+    window = f", 창 {w_from}~{w_to}" if w_from and w_to else ""
+    factor_note = (
+        f"{ends}(실측 구간{window})" if corrected
+        else f"{ends}(무보정 — 산출 불가, source={factor_info.get('source')})"
+    )
     header = (
         f"{yesterday.isoformat()} 일일 이익 스코어카드(D-NAO-59 목적함수=총이익 절대액) — "
-        f"어제 합계 {total_yesterday:+,}원 · 보정계수 {factor_note}"
+        f"어제 합계 상한기준 {total_yesterday:+,}원 · 하한기준 {total_low:+,}원 · "
+        f"보정계수 {factor_note}"
     )
     if not rows:
         return header + "\n- 대상 캠페인 없음(auto_operate/optimizer=ours 없음)"
@@ -213,7 +230,10 @@ def run_profit_scorecard(db: Session, now: datetime | None = None) -> dict:
     yesterday = n.date() - timedelta(days=1)
 
     factor_info = correction_factor(db, yesterday)
-    factor = factor_info["factor"]
+    # D-NAO-230: 표시 전용 모듈이라 «판정»은 없지만, 총이익 부호가 계수에 달려 있어
+    # 구간 양끝으로 두 벌 계산해 병기한다(계약 §5-7).
+    factor = factor_info["factor_high"]
+    factor_low = factor_info["factor_low"]
 
     campaign_ids = _target_campaign_ids(db, today=n.date())
     if not campaign_ids:
@@ -228,8 +248,12 @@ def run_profit_scorecard(db: Session, now: datetime | None = None) -> dict:
         _campaign_row(db, cid, names.get(cid, cid), yesterday, factor=factor)
         for cid in sorted(campaign_ids)
     ]
+    rows_low = [
+        _campaign_row(db, cid, names.get(cid, cid), yesterday, factor=factor_low)
+        for cid in sorted(campaign_ids)
+    ]
 
-    text = _build_text(rows, yesterday, factor_info)
+    text = _build_text(rows, yesterday, factor_info, rows_low)
     write_diary_entry(
         db, "observe", "", actor=ACTOR_SYSTEM, action=ACTION_PROFIT_SCORECARD, rationale=text, now=n,
     )
@@ -240,6 +264,19 @@ def run_profit_scorecard(db: Session, now: datetime | None = None) -> dict:
         "campaigns": len(rows),
         "bep_unknown": sum(1 for r in rows if r["status"] == _STATUS_BEP_UNKNOWN),
         "correction_factor_source": factor_info.get("source"),
+        # D-NAO-230 §5-7: 구간 양끝과 그 기준 총이익 합계를 응답에도 싣는다 — Slack 문구만
+        # 고치면 프로그램적으로 읽는 경로(완료 QA·적대 리뷰·후속 채점)가 여전히 점추정만 본다.
+        # ⚠️계약 §5-7 문구는 「계정 **30일** 총이익」인데 이 모듈의 창은 «어제 / 7일평균 /
+        #   6월평균»이다 — 30일 창은 이 SA에 없다. 그러니 이 모듈이 실제로 가진 두 창
+        #   (어제·7일평균)에 대해 쌍을 낸다. 30일 쌍이 필요하면 별도 산출 경로가 필요하고,
+        #   그 사실을 여기 적어 둔다(없는 창을 있는 것처럼 채우지 않는다).
+        "profit_window_note": "창=어제·7일평균(이 SA엔 30일 창이 없다 — 계약 §5-7 문구 대비 차이)",
+        "correction_factor_low": float(factor_info["factor_low"]),
+        "correction_factor_high": float(factor_info["factor_high"]),
+        "total_profit_high": _total(rows, "yesterday_profit"),
+        "total_profit_low": _total(rows_low, "yesterday_profit"),
+        "total_profit_avg7_high": _total(rows, "avg7_profit"),
+        "total_profit_avg7_low": _total(rows_low, "avg7_profit"),
         "slack_sent": bool(slack_result.get("sent")),
     }
     log.info("[P7] 일일 이익 스코어카드: %s", result)

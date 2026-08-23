@@ -19,7 +19,7 @@ TODAY = date(2026, 7, 20)
 @pytest.fixture
 def db(monkeypatch):
     def _fixed_cf(db, date_to):
-        return {"factor": Decimal("1"), "source": "test-fixed", "window_revenue": 0, "window_conv_amt": 0}
+        return {"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "test-fixed", "window_revenue": 0, "window_conv_amt": 0}
 
     monkeypatch.setattr(diagnosis, "correction_factor", _fixed_cf)
 

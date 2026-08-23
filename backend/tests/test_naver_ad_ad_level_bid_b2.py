@@ -443,7 +443,7 @@ def _bep_board_row(**overrides):
 
 
 def _diagnosis(**boards):
-    return {"window": {}, "correction_factor": {"factor": 1.0}, "boards": boards}
+    return {"window": {}, "correction_factor": {"factor": 1.0, "factor_low": 1.0, "factor_high": 1.0, "factor_point": 1.0}, "boards": boards}
 
 
 def test_build_shopping_bep_skips_disconnected_group(db):

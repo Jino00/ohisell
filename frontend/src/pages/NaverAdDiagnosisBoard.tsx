@@ -164,14 +164,24 @@ export default function NaverAdDiagnosisBoard() {
               <div className="text-lg font-semibold text-gray-900 tabular-nums">{roasX(data.account_target_roas)}</div>
             </div>
             <div className="bg-white rounded-lg border border-gray-200 p-3">
-              <div className="text-xs text-gray-500 mb-1">D-NAO-21 보정계수</div>
+              <div className="text-xs text-gray-500 mb-1">D-NAO-21 보정계수 (구간 자)</div>
+              {/* ★D-NAO-230 계약 §5-5: 점추정 하나가 아니라 **구간 양끝을 병기**한다.
+                  분자에 광고 귀속 조인이 없어 「채널 매출 100%를 광고가 견인」 가정과 동치이고,
+                  계정 총이익의 부호가 이 값 하나에 달려 있다 — 한 숫자로 쓰면 그 사실이 숨는다. */}
               <div className="text-lg font-semibold text-gray-900 tabular-nums">
-                ×{data.correction_factor.factor.toFixed(4)}
+                ×{data.correction_factor.factor_low.toFixed(4)} ~ ×
+                {data.correction_factor.factor_high.toFixed(4)}
               </div>
               <div className="text-xs text-gray-400 mt-0.5">
                 {data.correction_factor.source === "actual_revenue_ratio"
-                  ? `${data.correction_factor.window_from}~${data.correction_factor.window_to}`
+                  ? `${data.correction_factor.window_from}~${data.correction_factor.window_to} · 점추정 ×${data.correction_factor.factor_point.toFixed(4)}`
                   : "산출 불가(1.0 폴백)"}
+              </div>
+              <div className="text-[11px] text-gray-400 mt-1 leading-snug">
+                하한=보정 없음 · 상한=채널매출÷광고전환매출(광고 귀속 조인 없음 ={" "}
+                <span className="text-gray-500">100% 견인 가정</span>).{" "}
+                <span className="text-gray-500">아래 보드의 후보 «선정»은 전부 상한</span>이고(액셀
+                판정 불변), 하한은 실제 쓰기의 «크기»에만 쓴다 — 입찰 크기·증액 가드·확장 배분·진입 게이트.
               </div>
             </div>
             <div className="bg-white rounded-lg border border-gray-200 p-3">

@@ -57,7 +57,7 @@ def _stub_correction_factor():
     """보정계수를 결정적으로 고정(cf=1.0) — roas_corrected 판정을 실주문 데이터 부재에
     좌우되지 않게(test_naver_auto_operator와 동일 관례)."""
     with patch.object(probe_revert.diagnosis, "correction_factor",
-                      return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}):
         yield
 
 

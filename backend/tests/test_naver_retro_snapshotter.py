@@ -24,7 +24,7 @@ def db(monkeypatch):
     # naver_ad 테스트들도 fetcher/campaign_target_resolver 등 이웃 SA를 monkeypatch — 예:
     # test_naver_proposal_pipeline.py).
     def _fixed_cf(db, date_to):
-        return {"factor": Decimal("1"), "source": "test-fixed", "window_revenue": 0, "window_conv_amt": 0}
+        return {"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "test-fixed", "window_revenue": 0, "window_conv_amt": 0}
 
     monkeypatch.setattr(diagnosis, "correction_factor", _fixed_cf)
 

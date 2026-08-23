@@ -22,8 +22,8 @@ CAMPAIGN = "cmp-shop"
 TODAY = date(2026, 7, 23)
 WINDOW = expansion_pressure._settlement_window(TODAY)  # [오늘-8, 오늘-2]
 IN_WINDOW = TODAY - timedelta(days=5)  # 정착창 안
-ACTUAL_FACTOR = {"factor": Decimal("1"), "source": "actual_revenue_ratio"}
-UNAVAILABLE_FACTOR = {"factor": Decimal("1"), "source": "unavailable"}
+ACTUAL_FACTOR = {"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}
+UNAVAILABLE_FACTOR = {"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "unavailable"}
 
 
 @pytest.fixture

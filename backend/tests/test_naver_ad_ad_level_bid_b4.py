@@ -260,7 +260,7 @@ def test_lever_resume_first_pause_recent_not_cooled(db):
 # (3) build() 라우팅 — 카나리·ML 사전 제외·순서강제·rationale 정직화
 # ══════════════════════════════════════════════════════════════════
 def _diagnosis(**boards):
-    return {"window": {}, "correction_factor": {"factor": 1.0}, "boards": boards}
+    return {"window": {}, "correction_factor": {"factor": 1.0, "factor_low": 1.0, "factor_high": 1.0, "factor_point": 1.0}, "boards": boards}
 
 
 def _resume_board_row(action, **o):

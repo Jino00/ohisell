@@ -923,7 +923,7 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
             if agg["cost"] > 0:
                 correction = compute_correction_factor(db, as_of)
                 roas_naver = agg["conv_amt"] / agg["cost"]
-                context["roas_corrected"] = roas_naver * float(correction["factor"])
+                context["roas_corrected"] = roas_naver * float(correction["factor_low"])  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
                 context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
             context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
             context["cost_today"], context["daily_budget"] = _latest_hourly_snapshot_fields(
@@ -1002,7 +1002,7 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
             if agg["cost"] > 0:
                 correction = compute_correction_factor(db, as_of)
                 roas_naver = agg["conv_amt"] / agg["cost"]
-                context["roas_corrected"] = roas_naver * float(correction["factor"])
+                context["roas_corrected"] = roas_naver * float(correction["factor_low"])  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
                 context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
             context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
             context["cost_today"], context["daily_budget"] = _latest_hourly_snapshot_fields(
@@ -1090,7 +1090,7 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
     if agg["cost"] > 0:
         correction = compute_correction_factor(db, as_of)
         roas_naver = agg["conv_amt"] / agg["cost"]
-        context["roas_corrected"] = roas_naver * float(correction["factor"])
+        context["roas_corrected"] = roas_naver * float(correction["factor_low"])  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
         context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
 
     context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
