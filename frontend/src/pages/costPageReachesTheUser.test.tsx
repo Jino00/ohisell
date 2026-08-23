@@ -787,6 +787,32 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(summary.textContent).toContain("1건 표시 중");
       expect(summary.textContent).not.toContain("0건 표시 중");
     });
+
+    // ★레이아웃 가드 (2026-08-23 Jino 실관측: *"칸이 옆으로 나오고 그러잖아?"*)
+    //
+    // 이 필터 바는 **넓은 보드 탭과 320px 레시피 탭 둘 다**에 놓인다. 초판이 보드 폭만 보고
+    // `w-56`·`min-w-[16rem]` 같은 고정폭을 박았고, 그리드/플렉스 자식의 기본 `min-width: auto`가
+    // 축소를 막아 **컨트롤이 왼쪽 칸을 뚫고 오른쪽 패널을 덮었다.**
+    //
+    // jsdom은 레이아웃을 계산하지 않으므로 「겹쳤는가」는 못 잰다. 대신 **그 원인이 된 클래스가
+    // 돌아오지 않는지**를 잰다 — 약한 가드지만 아무것도 안 지키는 것보다 낫고, 다음 사람에게
+    // 「여기 고정폭을 박으면 안 된다」는 사실을 전달한다. 진짜 판정은 라이브 화면이 한다.
+    it("필터 바는 좁은 칸에서 «접힌다» — 고정폭을 박으면 옆 패널을 덮는다", async () => {
+      await openRecipesTabForFilter();
+      const search = screen.getByTestId("recipe-product-search");
+      const productSelect = screen.getByTestId("recipe-product-select");
+      const optionSelect = screen.getByTestId("recipe-option-select");
+
+      for (const el of [search, productSelect, optionSelect]) {
+        // 칸을 «채우되» 줄어들 수 있어야 한다.
+        expect(el.className).toContain("w-full");
+        expect(el.className).toContain("min-w-0");
+        // 고정폭·최소폭은 좁은 칸에서 넘친다.
+        // ★`\b`를 쓰면 `min-w-0`의 `w-0`까지 잡힌다 — 클래스 경계는 공백이다.
+        expect(el.className).not.toMatch(/(^|\s)w-\d/);
+        expect(el.className).not.toMatch(/min-w-\[/);
+      }
+    });
   });
 
   // ── S3: 엑셀 2종 업로드가 «카드형 드롭존»으로 바뀐다 (Jino: "선택이 쉽게 직관적으로") ──
@@ -1029,6 +1055,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       );
       expect(screen.getByText(/해당 조건에 맞는 레시피가 없다/)).toBeTruthy();
     });
+
   });
 });
 // ★다른 라우트에서 같은 단언을 반복하지 않는다: 메뉴는 `Layout`이 라우트와 무관하게 그리므로
