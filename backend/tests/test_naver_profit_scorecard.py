@@ -362,8 +362,13 @@ def test_profit_is_reported_at_both_ends_of_the_interval(db, monkeypatch):
     """상한기준·하한기준 총이익이 **둘 다** 사람이 읽는 문구에 나온다.
 
     bep=2.0 · cost=10000 · conv_amt=20000 →
-      상한(1.5): (20000×1.5)/2.0 − 10000 = +5,000원
-      하한(1.0): (20000×1.0)/2.0 − 10000 =      0원
+      상한(1.5):   (20000×1.5)/2.0   − 10000 = +5,000원
+      하한(0.827): (20000×0.827)/2.0 − 10000 = −1,730원
+
+    ★★D-NAO-234로 하한이 1.0 → 0.827이 되면서 **하한 총이익의 부호가 0에서 음수로 뒤집혔다.**
+    그게 이 결정의 요점이다 — 옛 하한 1.0은 「보정 없음」이라, 북극성 §6 각주의 운용 질문
+    「하한으로도 흑자인가」를 사실상 **묻지 않고** 있었다(항상 무보정 매출로 재니까).
+    실측 하한이 들어와야 그 질문이 비로소 답을 갖는다.
     """
     _settings(db, "cmp1", auto_operate=True)
     _campaign_name(db, "cmp1", "04.아이폰_필름")
@@ -378,21 +383,25 @@ def test_profit_is_reported_at_both_ends_of_the_interval(db, monkeypatch):
     result = profit_scorecard.run_profit_scorecard(db, now=NOW)
 
     # ① 응답이 양끝을 들고 나간다 — Slack 문구만 고치면 프로그램 경로는 여전히 점추정만 본다.
-    assert result["correction_factor_low"] == 1.0
+    assert result["correction_factor_low"] == 0.827
     assert result["correction_factor_high"] == 1.5
     assert result["total_profit_high"] == 5000
-    assert result["total_profit_low"] == 0
+    assert result["total_profit_low"] == -1730
+    assert result["total_profit_low"] < 0 < result["total_profit_high"], (
+        "이 픽스처의 값어치는 **부호가 갈리는 것**이다 — 두 끝이 같은 부호면 "
+        "「하한으로도 흑자인가」를 묻는 테스트가 아니게 된다"
+    )
     # ★적대 리뷰 2R P2-c: 소비처가 아직 없는 키도 «존재»를 단언한다 — 안 그러면
     #   조용히 사라져도 아무도 모른다(「표방↔실배선 괴리」의 씨앗).
     assert result["total_profit_avg7_high"] == 5000
-    assert result["total_profit_avg7_low"] == 0
+    assert result["total_profit_avg7_low"] == -1730
     assert "30일" in result["profit_window_note"], "없는 창을 채우지 않았다는 사실이 응답에 남아야 한다"
 
     # ② ★표면 — Slack·일기 본문에 두 값이 **글자로** 나온다(계약 §3-6).
     text = captured["text"]
     assert "상한기준 +5,000원" in text
-    assert "하한기준 +0원" in text
-    assert "[1.0000~1.5000]" in text, "계수도 구간으로 표기해야 한다(카드와 같은 자릿수)"
+    assert "하한기준 -1,730원" in text
+    assert "[0.8270~1.5000]" in text, "계수도 구간으로 표기해야 한다(카드와 같은 자릿수)"
     entry = _observes(db)[0]
     assert "하한기준" in entry.rationale, "일기에도 같은 문구가 남아야 사후 감사가 된다"
 

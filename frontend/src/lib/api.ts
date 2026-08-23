@@ -3153,6 +3153,17 @@ export interface NaverAdDiagnosis {
     window_to?: string;
     window_revenue?: number;
     window_conv_amt?: number;
+    /** ★D-NAO-234 — 하한의 근거. 하한이 실제로 실측값(0.827)일 때만 실린다.
+     *  퇴화 구간 [1,1](보정계수 산출 불가)에는 **안 실린다** — 없는 근거를 화면이 말하지 않게. */
+    factor_low_source?: string;
+    /** 하한을 잰 창(KST). 계수는 창 없이 말하지 않는다(계약 §3-5). */
+    factor_low_window?: string;
+    /** 재현 문서 경로. */
+    factor_low_evidence?: string;
+    /** 하한에 붙박인 [미상] — 플러스스토어 라벨의 SA 소속 미확정(포함 시 1.067). */
+    factor_low_caveat?: string;
+    /** 창 4개에서 잰 하한의 변동폭 — 「고정값이 안 흔들린다」고 말하지 않기 위해. */
+    factor_low_window_spread?: string;
   };
   account_bep_roas: number | null;
   account_target_roas: number | null;

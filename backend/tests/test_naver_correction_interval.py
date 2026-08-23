@@ -2,23 +2,34 @@
 #
 # 계약: docs/PLAN_naver-profit-yardstick-review.md (승인됨) · 전수표: docs/references/93_*.md
 #
-# ## 이 파일이 지키는 약속 셋
-# ①`correction_factor`는 점추정 하나가 아니라 **구간**을 준다(하한=min(1,p) · 상한=max(1,p)).
-# ②**D-NAO-231(Jino 결정 2026-08-23)**: 「액셀=하한」은 «후보 선정»이 아니라 «실쓰기의 크기»에
-#   적용한다 ⇒ 진단 보드는 **전부 상한**이고, 하한은 실쓰기 층만 쓴다. 이걸 어기면 라이브에서
-#   액셀 후보가 220→195건으로 줄어 브레이크 편중이 3.02:1 → 3.41:1로 벌어진다(실측 2026-08-23)
-#   — 그게 북극성 §7의 「ROAS 방어로의 표류」이자 D-NAO-85(ROAS +7%·매출 −52%)의 볼륨판 재현이고,
-#   계약 §6 금지선 2가 막으려던 바로 그 배포다.
+# ## 이 파일이 지키는 약속 넷
+# ①`correction_factor`는 점추정 하나가 아니라 **구간**을 준다.
+#   ★★**끝값은 D-NAO-234(Jino 결정 2026-08-23)로 개정됐다** — 하한 = `min(0.827, p)`.
+#   옛 하한 1.0은 「보정 없음」을 하한이라 부른 것이지 근거가 아니었고, inflowPath 실측
+#   (ref 95: 「광고>」5종 매출 ÷ direct 전환매출 = 0.8289)이 그보다 낮은 **정합한 측정**을
+#   주면서 「하한 1.0은 보수적이지 않다」가 확정됐다.
+# ②**층은 셋이다 — 둘이 아니다**(D-NAO-234 ⓐ가 D-NAO-231을 개정):
+#     선정=상한 · **게이트(통과/차단)=상한** · 크기=하한.
+#   D-NAO-231은 «선정»과 «크기» 둘로만 갈랐고 그 사이 «게이트»에 배정이 없었다. 배정이 없으니
+#   게이트들이 옛 코드대로 하한을 계속 썼고, 게이트에서 하한은 «보수적 크기»가 아니라
+#   **차단 증가**로 뒤집힌다 — ref 94 §6 실측: 액셀 221→195건 · 대칭 3.005:1 → 3.405:1.
+#   그게 북극성 §7의 「ROAS 방어로의 표류」이자 D-NAO-85(ROAS +7%·매출 −52%)의 볼륨판이다.
 # ③응답이 구간 양끝을 **끝까지 들고 나간다**(표면 계약 §5-5) — 키가 하나라도 빠지면 화면이
 #   점추정으로 되돌아간다(D-NAO-204 `response_model` 키 삭제 사고와 같은 자리).
-from datetime import date
+# ④★**하한의 유도식은 한 곳에만 있다**(`correction_interval`) — 예전엔 `diagnosis`와
+#   `bid_simulator` 두 곳에 복사돼 있어서, 상수를 한쪽만 바꾸면 다른 경로가 옛 하한으로
+#   계속 돌면서 테스트는 양쪽 다 초록이 된다.
+import ast
+from datetime import date, datetime
 from decimal import Decimal
 import pathlib
 
 import pytest
 
-from app.services.naver_ad import bid_simulator, diagnosis
+from app.services.naver_ad import bid_simulator, correction_interval, diagnosis
 from app.services.naver_ad.diagnosis import _as_interval, _factor_payload
+
+FLOOR = correction_interval.CORRECTION_FACTOR_FLOOR  # 0.827 (D-NAO-234)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -27,9 +38,9 @@ from app.services.naver_ad.diagnosis import _as_interval, _factor_payload
 @pytest.mark.parametrize(
     "point,expect_low,expect_high",
     [
-        ("1.3133", "1", "1.3133"),   # 라이브 방향(계수>1): 하한이 「보정 없음」
-        ("1", "1", "1"),             # 폴백: 구간이 한 점으로 접힌다 = 종전과 동일
-        ("0.72", "0.72", "1"),       # ★계수<1로 재확정돼도 «하한=상향 쪽 보수값» 불변식 유지
+        ("1.3133", "0.827", "1.3133"),  # 라이브 방향(계수>1): 하한 = inflowPath 실측(D-NAO-234)
+        ("1", "0.827", "1"),            # ★옛 「1이면 한 점으로 접힘」은 더 이상 참이 아니다
+        ("0.72", "0.72", "0.827"),      # ★계수<0.827로 재확정돼도 «하한=상향 쪽 보수값» 불변식 유지
     ],
 )
 def test_interval_endpoints(point, expect_low, expect_high):
@@ -41,11 +52,64 @@ def test_interval_endpoints(point, expect_low, expect_high):
     assert got["factor_low"] <= got["factor_high"]
 
 
+def test_the_floor_is_the_inflowpath_measurement_not_no_correction():
+    """★D-NAO-234의 본체 — 하한이 「보정 없음(1.0)」이 아니라 **실측값**인가.
+
+    이 단언이 없으면 하한을 슬그머니 1.0으로 되돌려도 위 파라미터 테스트만 고치면 초록이
+    된다. 값과 «그 값이 무엇인가»를 따로 못 박는다.
+    """
+    assert FLOOR == Decimal("0.827")
+    assert FLOOR < correction_interval.NO_CORRECTION, (
+        "하한이 「보정 없음」보다 크면 그건 하한이 아니다 — 실측이 반증한 바로 그 상태다"
+    )
+    assert _as_interval(Decimal("1.3291"))["factor_low"] == FLOOR
+
+
 def test_interval_never_inverts_for_any_point():
     """어떤 점추정이 와도 하한 ≤ 상한이고 점추정은 구간 안에 있다."""
     for p in ["0.01", "0.5", "0.999", "1", "1.001", "2.6", "10"]:
         iv = _as_interval(Decimal(p))
         assert iv["factor_low"] <= iv["factor_point"] <= iv["factor_high"]
+
+
+def test_unavailable_correction_degenerates_to_no_correction_not_to_the_floor(monkeypatch):
+    """★★근거가 없으면 하한도 없다 — 계약 §4 금지선 5.
+
+    실주문 매출이 없어 계수를 못 만드는 경우까지 0.827을 씌우면, 아무 근거 없이 매출을
+    17.3% 깎는 보정이 전 소비처에 걸린다. 그때는 구간이 **[1, 1]로 퇴화**해야 한다.
+    """
+    monkeypatch.setattr(diagnosis.diag, "earliest_real_data_date", lambda *a, **k: None)
+    out = diagnosis.correction_factor(None, date(2026, 8, 23))
+    assert out["source"] == "unavailable"
+    assert out["factor_low"] == Decimal("1") and out["factor_high"] == Decimal("1"), (
+        "근거 없는 하한을 씌우면 안 된다"
+    )
+    assert "factor_low_source" not in _factor_payload(out), (
+        "없는 근거를 화면이 말하게 하면 안 된다"
+    )
+
+
+def test_the_floor_formula_lives_in_exactly_one_place():
+    """★유도식이 두 곳에 복사돼 있으면 한쪽만 고쳐도 테스트가 전부 초록이다(교훈 #348의 값 버전).
+
+    `diagnosis`도 `bid_simulator`도 자기 파일에 하한 상수·유도식을 다시 적지 않는다.
+    """
+    base = pathlib.Path(diagnosis.__file__).parent
+    for fname in ("diagnosis.py", "bid_simulator.py"):
+        src = (base / fname).read_text()
+        # 주석·docstring은 「왜 0.827인가」를 **설명해야** 하므로 문자열 스캔으로는 못 가른다.
+        # ast로 파싱해 docstring을 걷어낸 뒤 **실행되는 코드**만 본다.
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    body.pop(0)
+        code = ast.unparse(tree)
+        assert "min(Decimal('1')" not in code, f"{fname}에 하한 유도식이 복사돼 있다"
+        assert "0.827" not in code, f"{fname}에 하한 상수가 복사돼 있다 — 정본은 correction_interval"
+        assert "correction_interval" in code, f"{fname}이 하한 정본을 안 쓴다"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -56,8 +120,25 @@ def test_factor_payload_carries_every_end_as_float():
     for key in ("factor", "factor_low", "factor_high", "factor_point"):
         assert key in payload, f"{key}가 응답에서 사라지면 화면이 점추정으로 되돌아간다"
         assert isinstance(payload[key], float)
-    assert payload["factor_low"] == 1.0
+    assert payload["factor_low"] == pytest.approx(0.827)
     assert payload["factor_high"] == pytest.approx(1.3133)
+
+
+def test_payload_carries_the_basis_of_the_floor_not_just_its_value():
+    """★D-NAO-234 표면 요건 — 값만 내보내면 화면이 「0.827이 어디서 왔나」를 못 말한다.
+
+    계약 §4 금지선 5: 가정(마지막터치·창·플러스스토어 처분) 병기 없이 새 표면에
+    내보내지 않는다. 근거 문자열이 사라지는 변이를 이 단언이 잡는다.
+    """
+    payload = _factor_payload(_as_interval(Decimal("1.3291"), source="actual_revenue_ratio"))
+    for key in ("factor_low_source", "factor_low_window", "factor_low_evidence",
+                "factor_low_caveat", "factor_low_window_spread"):
+        assert payload.get(key), f"{key}가 없으면 화면이 근거 없는 숫자를 그린다"
+    assert "2026-07-25" in payload["factor_low_window"], "계수는 창과 함께 말한다(계약 §3-5)"
+    assert "플러스스토어" in payload["factor_low_caveat"], (
+        "하한에 붙박인 [미상]을 화면이 말해야 한다 — 포함하면 1.067로 올라간다"
+    )
+    assert "95_inflowpath" in payload["factor_low_evidence"], "재현 문서 좌표가 실려야 한다"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -237,34 +318,89 @@ def test_build_diagnosis_error_branch_also_carries_the_interval(board_spy, monke
         assert isinstance(out["correction_factor"][key], float)
 
 
-def test_execution_guard_uses_the_lower_end(monkeypatch):
-    """M7 상환 — 증액 가드의 `roas_corrected`가 «하한» 기준인가.
+@pytest.mark.parametrize("target_type", ["keyword", "campaign"])
+def test_execution_guard_gate_uses_the_upper_end_at_runtime(monkeypatch, target_type):
+    """★★D-NAO-234 ⓐ — 증액 가드의 `roas_corrected`가 «상한» 기준인가. **실행해서** 잰다.
 
-    기존 테스트는 전부 `factor=1`(구간이 한 점으로 접힘) 픽스처라 상한/하한을 구별할 수
-    없었다. 여기서는 하한 1 · 상한 2로 벌려 두 끝을 갈라낸다.
+    ⚠️이 테스트는 원래 **소스 grep**이었다(줄에 `factor_low`가 있나만 봤다). 직전 세션
+    적대 리뷰 P2-a가 「소스 grep은 런타임을 검사하지 않는다」고 지적했고, 실제로 ref 94에서
+    **배선 절단 변이가 grep 테스트를 통과한 채 생존**했다. 그래서 두 끝을 벌린 픽스처로
+    `_build_guardrail_context`를 **호출**해 나온 값을 단언한다.
+
+    증액 가드는 «얼마나 올리나»가 아니라 «올려도 되나»를 가르는 게이트다 ⇒ 상한.
+    하한을 쓰면 하한이 내려갈수록 target_roas 미달 판정이 늘어 **차단이 증가**한다.
     """
     from app.services.naver_ad import naver_execution_harness as harness
-    src = pathlib.Path(harness.__file__).read_text()
-    hits = [ln for ln in src.splitlines() if 'context["roas_corrected"]' in ln]
-    assert len(hits) == 3, f"증액 가드 주입 지점이 3곳이어야 한다(실제 {len(hits)})"
-    for ln in hits:
-        assert 'correction["factor_low"]' in ln, (
-            "증액 가드가 상한을 쓰면 「실쓰기 크기만 하한」(D-NAO-231)이 깨진다: " + ln.strip()
+
+    agg = {"cost": 1_000_000, "conv_amt": 2_000_000}  # roas_naver = 2.0
+    low, high = Decimal("0.5"), Decimal("2.0")  # 두 끝을 크게 벌려 어느 쪽을 썼는지 갈라낸다
+    monkeypatch.setattr(harness, "compute_correction_factor",
+                        lambda *a, **k: {"factor_low": low, "factor_high": high, "factor": high})
+    monkeypatch.setattr(harness.account_diagnosis, "keyword_window_agg", lambda *a, **k: agg)
+    monkeypatch.setattr(harness.account_diagnosis, "campaign_window_agg", lambda *a, **k: agg)
+    monkeypatch.setattr(harness.account_diagnosis, "adgroup_window_agg", lambda *a, **k: agg)
+    monkeypatch.setattr(harness.naver_sa_writer, "get_keyword", lambda *a, **k: {"bidAmt": 100})
+    monkeypatch.setattr(harness.naver_sa_writer, "get_campaign", lambda *a, **k: {"dailyBudget": 100})
+    monkeypatch.setattr(harness, "_resolve_target_roas_float", lambda *a, **k: 1.9)
+    monkeypatch.setattr(harness, "_latest_hourly_snapshot_fields", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(harness, "compute_change_cadence", lambda *a, **k: (None, 0))
+    monkeypatch.setattr(harness.guardrail_params, "get_params", lambda *a, **k: {})
+
+    class _P:
+        target_type = None
+        target_id = "t1"
+        campaign_id = "c1"
+        adgroup_id = "g1"
+        proposal_type = "bid_up"
+        approval_source = "console"   # is_auto_exec 판별용(사람 승인 경로)
+        id = 1
+        status = "pending"
+    p = _P()
+    p.target_type = target_type
+
+    ctx = harness._build_guardrail_context(None, p, datetime(2026, 8, 23, 12, 0))
+    assert ctx["roas_corrected"] == pytest.approx(2.0 * float(high)), (
+        "게이트가 하한을 쓰면 하한이 내려갈수록 차단이 늘어 브레이크가 커진다(D-NAO-234 ⓐ) — "
+        f"관측 {ctx['roas_corrected']}"
+    )
+    assert ctx["roas_corrected"] != pytest.approx(2.0 * float(low)), "하한을 쓰고 있다"
+
+
+def test_no_boolean_gate_reads_the_lower_end_anywhere():
+    """★★D-NAO-234 ⓐ — «게이트» 층에 하한이 한 곳도 남아 있으면 안 된다.
+
+    D-NAO-231이 «선정»·«크기» 둘로만 갈랐을 때 그 사이의 «게이트»에 배정이 없었고, 배정이
+    없으니 게이트들이 옛 하한을 계속 썼다. 그 구멍이 ref 94 §6에서 액셀 −26건·대칭
+    3.005→3.405:1로 실측됐다. 새 게이트가 하한을 집어 들면 **같은 구멍이 다시 열린다**.
+
+    ⚠️이 단언은 소스 스캔이다 — 위의 런타임 spy를 «대체»하는 게 아니라, 런타임 spy가 못 도는
+    나머지 게이트에 대한 **회귀 저지선**이다. 새 게이트를 추가하면서 하한을 집으면 여기서 걸린다.
+    """
+    base = pathlib.Path(diagnosis.__file__).parent
+    gate_files = ("expansion_allocator.py", "expansion_pressure.py", "auto_operator.py",
+                  "naver_execution_harness.py")
+    for fname in gate_files:
+        src = (base / fname).read_text()
+        offenders = [
+            ln.strip() for ln in src.splitlines()
+            if ('factor_info["factor_low"]' in ln or 'correction["factor_low"]' in ln)
+            and not ln.strip().startswith("#")
+        ]
+        assert offenders == [], (
+            f"{fname}: 게이트가 하한을 직접 읽고 있다 — 하한은 «크기» 산식에만 쓴다: {offenders}"
         )
 
 
-def test_expansion_and_settlement_gates_use_the_lower_end():
-    """M7 상환 — 확장 배분·진입 게이트 4곳이 하한을 쓰는가(census 93 §3 실쓰기 행)."""
-    targets = {
-        "expansion_allocator.py": 1,
-        "expansion_pressure.py": 1,
-        "auto_operator.py": 2,   # _settlement_roas_status(UP 거부권) · 심층확장 진입
-    }
-    base = pathlib.Path(diagnosis.__file__).parent
-    for fname, expect in targets.items():
-        src = (base / fname).read_text()
-        n = src.count('factor_info["factor_low"]')
-        assert n == expect, f"{fname}: 하한 배선이 {expect}곳이어야 한다(실제 {n})"
+def test_size_layer_still_uses_the_lower_end():
+    """★반대쪽 저지선 — ⓐ 재배정이 «크기» 층까지 상한으로 밀어버리면 안 된다.
+
+    게이트를 상한으로 옮기는 변경이 과하게 번지면 서보 경제성 상한까지 상한이 되어
+    입찰이 +31%(1,030→1,350원) 뛴다. 크기 층은 하한 그대로여야 한다.
+    """
+    src = pathlib.Path(diagnosis.__file__).parent.joinpath("auto_operator.py").read_text()
+    assert 'servo_correction_factor_low = Decimal(str(_cf["factor_low"]))' in src, (
+        "서보 «크기»는 하한이다 — 상한으로 바뀌면 실입찰이 +31% 튄다"
+    )
 
 
 def test_servo_ceiling_uses_the_lower_end():

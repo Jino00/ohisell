@@ -37,8 +37,13 @@ ASSUMPTION = (
     "보정계수의 분자에 광고 귀속 조인이 없어 「채널 매출 100%를 광고가 견인」 가정과 동치다"
     " — 그래서 총이익을 구간 양끝으로 병기한다(D-NAO-230)."
 )
+# ★★D-NAO-234 ⓐ로 이 문장이 뒤집혔다 — 게이트는 이제 **상한**을 쓴다.
+#   화면 문구를 코드와 같이 안 고치면 「배포 동작과 정반대인 카드」가 남는다(n=39 P1-1·n=40 P1-2가
+#   연속으로 그 모양이었고, 두 번 다 낡은 문장을 **프론트 테스트가 단언**하고 있었다).
 GATE_NOTE = (
-    "액셀 게이트(BEP 증액금지)는 구간의 «하한»을 쓴다 — 하한은 보정을 없애 차단을 최대로 만든다."
+    "액셀 게이트(BEP 증액금지)는 구간의 «상한»을 쓴다 — 게이트는 «크기»가 아니라 «통과/차단»이라, "
+    "하한을 쓰면 하한이 내려갈수록 차단이 늘어 브레이크가 커진다(D-NAO-234 ⓐ). "
+    "하한은 통과한 뒤 «얼마나 쓰나»에서만 누른다."
 )
 # ★적대 리뷰 1R P2-2: 이 수치는 «보드 창»의 roas_naver로 잰 근사다. 실제 게이트는
 #   `account_diagnosis.keyword_window_agg`(as_of=D-1)의 다른 창을 쓴다 — 양끝이 같은
@@ -172,7 +177,7 @@ def build(boards: dict[str, Any] | None, *, factor_low: float, factor_high: floa
         })
 
     return {
-        "gate_end": "factor_low",
+        "gate_end": "factor_high",  # ★D-NAO-234 ⓐ — 게이트 층을 상한으로 재배정
         "gate_note": GATE_NOTE,
         "window_caveat": WINDOW_CAVEAT,
         "assumption": ASSUMPTION,

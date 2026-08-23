@@ -172,21 +172,40 @@ export default function NaverAdDiagnosisBoard() {
                 ×{data.correction_factor.factor_low.toFixed(4)} ~ ×
                 {data.correction_factor.factor_high.toFixed(4)}
               </div>
-              <div className="text-xs text-gray-400 mt-0.5">
+              <div className="text-xs text-gray-400 mt-0.5" data-testid="factor-window">
                 {data.correction_factor.source === "actual_revenue_ratio"
                   ? `${data.correction_factor.window_from}~${data.correction_factor.window_to} · 점추정 ×${data.correction_factor.factor_point.toFixed(4)}`
                   : "산출 불가(1.0 폴백)"}
               </div>
-              <div className="text-[11px] text-gray-400 mt-1 leading-snug">
-                하한=보정 없음 · 상한=채널매출÷광고전환매출(광고 귀속 조인 없음 ={" "}
+              {/* ★★D-NAO-234 — 하한의 «근거»를 값 옆에 같이 쓴다.
+                  옛 문구는 「하한=보정 없음」이었다. 그건 1.0을 하한이라 부른 것이지 근거가 아니었고,
+                  inflowPath 실측(ref 95)이 그보다 낮은 정합 측정 0.827을 주면서 반증됐다.
+                  계약 §4 금지선 5: 가정(마지막터치·창·플러스스토어 처분) 병기 없이 내보내지 않는다. */}
+              {data.correction_factor.factor_low_source ? (
+                <div className="text-[11px] text-gray-400 mt-1 leading-snug" data-testid="factor-low-basis">
+                  <span className="text-gray-500">하한 근거</span>: 유입경로 「광고&gt;」 5종 매출 ÷ 광고 direct 전환매출
+                  {data.correction_factor.factor_low_window ? ` (창 ${data.correction_factor.factor_low_window})` : ""} —{" "}
+                  <span className="text-gray-500">마지막터치 라벨 기준</span>.{" "}
+                  {data.correction_factor.factor_low_caveat}
+                  {data.correction_factor.factor_low_window_spread
+                    ? ` 창을 바꾸면 ${data.correction_factor.factor_low_window_spread}.`
+                    : ""}
+                </div>
+              ) : (
+                <div className="text-[11px] text-gray-400 mt-1 leading-snug" data-testid="factor-low-basis">
+                  <span className="text-gray-500">하한 근거 없음</span> — 계수를 못 만들어 구간이 [1, 1]로 퇴화했다(보정 안 함).
+                </div>
+              )}
+              <div className="text-[11px] text-gray-400 mt-1 leading-snug" data-testid="factor-end-assignment">
+                상한=채널매출÷광고전환매출(광고 귀속 조인 없음 ={" "}
                 <span className="text-gray-500">100% 견인 가정</span>).{" "}
-                {/* ★D-NAO-232 적대 리뷰 1R P1-2: 초판은 「하한은 «크기»에만 쓴다」였는데
-                    이 PR의 실측이 그걸 반증했다 — 실행 게이트(BEP 증액금지)도 하한을 쓰고,
-                    거기서 하한은 크기가 아니라 «통과/차단»을 정한다(ref 94 §6). 세 층으로 적는다. */}
-                <span className="text-gray-500">후보 «선정»은 전부 상한</span>이고(액셀 판정 불변),
-                하한은 두 곳에 쓴다 — 실제 쓰기의 «크기»(입찰 크기·확장 배분)와{" "}
-                <span className="text-gray-500">«실행 게이트»의 통과·차단</span>(증액 가드·진입 게이트).
-                게이트에서 하한은 보수적 «크기»가 아니라 <span className="text-gray-500">차단 증가</span>로 작동한다.
+                {/* ★D-NAO-234 ⓐ: 층이 셋이라는 것까지는 D-NAO-232가 밝혔고, 이 PR이 **게이트를 상한으로
+                    재배정**했다. 화면 문구를 같이 안 고치면 배포 동작과 정반대인 카드가 남는다
+                    (n=39 P1-1·n=40 P1-2가 연속으로 그 모양이었다). */}
+                층은 셋이다 — <span className="text-gray-500">«선정»은 상한</span>(액셀 판정 불변),{" "}
+                <span className="text-gray-500">«게이트»(통과·차단)도 상한</span>(D-NAO-234 ⓐ — 하한을 쓰면
+                하한이 내려갈수록 차단이 늘어 브레이크가 커진다), 하한은{" "}
+                <span className="text-gray-500">«크기»에만</span> 쓴다(입찰 크기·서보 경제성 상한·확장 배분).
               </div>
             </div>
             <div className="bg-white rounded-lg border border-gray-200 p-3">
@@ -206,13 +225,28 @@ export default function NaverAdDiagnosisBoard() {
                 {/* ★testid로 «위치»를 고정한다 — 적대 리뷰 1R 변이 M1(헤드라인의 survive_low를
                     survive_high로 바꿔 「막힌 게 없다」로 말하기)이 생존한 이유가, 테스트가
                     card.textContent 어딘가에 "195"만 있으면 만족했기 때문이다. */}
+                {/* ★★D-NAO-234 ⓐ: 통과 건수를 `survive_low`로 **못 박아 두면** 게이트가 상한으로
+                    재배정된 뒤에도 화면이 옛 끝을 말한다. 어느 끝을 쓰는지는 백엔드의 `gate_end`가
+                    유일한 진실이므로 **그것을 읽어 고른다** — 화면이 자기 사본으로 판정하지 않게. */}
                 <div className="text-xs text-gray-500 tabular-nums" data-testid="accel-gate-headline">
                   액셀 후보 {num(data.accel_gate.accel_total)}건 → 게이트 통과{" "}
                   <span className="font-semibold text-gray-900" data-testid="accel-gate-survive">
-                    {num(data.accel_gate.survive_low)}건
+                    {num(
+                      data.accel_gate.gate_end === "factor_high"
+                        ? data.accel_gate.survive_high
+                        : data.accel_gate.survive_low,
+                    )}건
                   </span>
                   {data.accel_gate.survive_high !== data.accel_gate.survive_low && (
-                    <> (상한이었다면 {num(data.accel_gate.survive_high)}건)</>
+                    <>
+                      {" "}
+                      ({data.accel_gate.gate_end === "factor_high" ? "하한" : "상한"}이었다면{" "}
+                      {num(
+                        data.accel_gate.gate_end === "factor_high"
+                          ? data.accel_gate.survive_low
+                          : data.accel_gate.survive_high,
+                      )}건)
+                    </>
                   )}
                 </div>
               </div>
@@ -285,8 +319,17 @@ export default function NaverAdDiagnosisBoard() {
                   대칭(브레이크:액셀) 선정{" "}
                   <span className="font-medium text-gray-900">{data.accel_gate.ratio_selection ?? NO_DATA}:1</span>
                   {" → "}게이트 후{" "}
-                  <span className="font-medium text-gray-900">{data.accel_gate.ratio_after_gate_low ?? NO_DATA}:1</span>
-                  {" (상한이었다면 "}{data.accel_gate.ratio_after_gate_high ?? NO_DATA}:1)
+                  {/* ★D-NAO-234 ⓐ — 헤드라인과 같은 이유로 `gate_end`가 고른다. 여기만 옛 끝으로
+                      남으면 같은 카드 안에서 두 문장이 다른 게이트를 말한다(n=40 P1-2의 모양). */}
+                  <span className="font-medium text-gray-900">
+                    {(data.accel_gate.gate_end === "factor_high"
+                      ? data.accel_gate.ratio_after_gate_high
+                      : data.accel_gate.ratio_after_gate_low) ?? NO_DATA}:1
+                  </span>
+                  {` (${data.accel_gate.gate_end === "factor_high" ? "하한" : "상한"}이었다면 `}
+                  {(data.accel_gate.gate_end === "factor_high"
+                    ? data.accel_gate.ratio_after_gate_low
+                    : data.accel_gate.ratio_after_gate_high) ?? NO_DATA}:1)
                 </span>
                 <span>브레이크 후보 {num(data.accel_gate.brake_total)}건</span>
                 {/* 0이어도 «측정했더니 없음»임을 보이려고 항상 그린다 — 키 부재 ≠ 0건(교훈 #123) */}

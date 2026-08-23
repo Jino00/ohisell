@@ -430,7 +430,10 @@ def _settlement_roas_status(
             f"보정계수 unavailable(source={factor_info.get('source')!r}) — 실주문 매출 부재, "
             "보정ROAS 검증 불가(fail-closed, codex 5R[P1-1])"
         )
-    factor = factor_info["factor_low"]  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+    # ★★D-NAO-234 ⓐ(계약 §5-Q4): 정착창 보정ROAS 검증은 below/ok를 가르는 **판정**이지
+    # 크기가 아니다 ⇒ **상한**. 하한을 쓰면 하한이 내려갈수록 "below"가 더 쉽게 나
+    # 재개·진입이 막힌다 — 액셀이 주는 방향(ref 94 §6, 금지선 2).
+    factor = factor_info["factor_high"]
     roas_corrected = (agg["conv_amt"] / agg["cost"]) * float(factor)
     target_roas = _resolve_target_roas(db, campaign_id)
     if target_roas is None:
@@ -2335,7 +2338,10 @@ def _deep_expansion_ok(
     factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
     if factor_info.get("source") != "actual_revenue_ratio":
         return False  # 보정계수 unavailable → 무보정 추정으로 과열 진입 금지(fail-closed)
-    factor = Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+    # ★★D-NAO-234 ⓐ(계약 §5-Q4): deep_ok는 «심층 확장에 넣나 마나»의 불리언 게이트다 ⇒ **상한**.
+    # 하한을 쓰면 하한이 내려갈수록 _EX_DEEP_RATIO 통과가 어려워져 심층 확장이 줄어든다
+    # — 액셀이 주는 방향(ref 94 §6, 금지선 2).
+    factor = Decimal(str(factor_info["factor_high"]))
     scored = gave_score.compute_gave_score(
         revenue=Decimal(agg["conv_amt"]) * factor, cost=agg["cost"], bep_roas=Decimal(str(bep_roas)),
     )

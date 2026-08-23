@@ -275,8 +275,11 @@ def allocate_expansion(
     # 보정계수(자기 그룹 보정ROAS 판정용) — 확장 모드면 actual_revenue_ratio 보장(pressure 게이트②)
     # 이지만, 폴백 대비 명시적으로 확인한다. 부재면 factor=None → 전 그룹 campaign_prior 상속.
     factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
+    # ★★D-NAO-234 ⓐ(계약 §5-Q4): own_ratio는 «이 그룹을 확장 대상에 넣나 빼나»를 가르는
+    # 제외 게이트다(통과/차단) ⇒ **상한**. 하한을 쓰면 하한이 내려갈수록 own_ratio<1 제외가
+    # 더 쉽게 발동해 확장 대상이 줄어든다 — 액셀이 주는 방향(ref 94 §6, 금지선 2).
     factor = (
-        Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+        Decimal(str(factor_info["factor_high"]))
         if factor_info.get("source") == "actual_revenue_ratio" else None
     )
 

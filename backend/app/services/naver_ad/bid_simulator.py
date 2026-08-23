@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
 
+from app.services.naver_ad import correction_interval
 from app.services.naver_ad.account_diagnosis import LOW_CLICK_THRESHOLD
 
 _Q4 = Decimal("0.0001")
@@ -125,11 +126,20 @@ def simulate_bid(
     #     「하한에서는 올릴 근거가 없다」는 뜻이므로 올리지 않는다(hold). 현재보다 낮은 값으로
     #     "up" 하는 모순을 만들지 않기 위한 것이고, 이건 크기 보수화의 필연적 귀결이다.
     #   - down 일 때 크기: 상한 상한선(rec_high) — 덜 내린다(브레이크는 상한, 안3 원문).
-    # 두 끝을 명시하지 않으면 받은 단일 계수에서 **유도**한다: 하한=min(1,cf) · 상한=max(1,cf)
-    # (`diagnosis._as_interval`과 같은 규칙 — 여러 층을 거쳐 내려오는 배관을 늘리지 않으려고
-    # 여기서 다시 편다). cf=1(기본값·보정 불가 폴백)이면 두 끝이 같아져 종전과 **완전히 동일**하다.
-    cf_low = min(Decimal("1"), correction_factor) if correction_factor_low is None else correction_factor_low
-    cf_high = max(Decimal("1"), correction_factor) if correction_factor_high is None else correction_factor_high
+    # 두 끝을 명시하지 않으면 받은 단일 계수에서 **유도**한다.
+    # ★★D-NAO-234: 유도식은 `correction_interval.interval_ends`가 정본이다 — 예전엔 같은 식이
+    # 여기와 `diagnosis._as_interval` **두 곳**에 복사돼 있었고, 그 상태로 하한 상수를 한쪽만
+    # 바꾸면 이 경로는 옛 하한으로 계속 돌면서 테스트는 양쪽 다 초록이 된다.
+    # ⚠️단 이 폴백은 **근거가 안 실려 온 경로**다 — 그래서 D-NAO-234의 0.827이 아니라
+    # `NO_CORRECTION`(=1.0)을 기준점으로 쓴다. 0.827은 ref 95 창의 실측이고, 그 근거를 아는 것은
+    # `diagnosis.correction_factor` 하나뿐이다. 근거 없이 여기서 17% 깎으면 금지선 5 위반이다.
+    # ⇒ **라이브 경로 3곳(proposal_pipeline ×2 · auto_operator 서보)은 두 끝을 다 명시해 넘긴다**
+    #   (그 배선은 소스 grep이 아니라 spy 테스트가 지킨다 — ref 94에서 배선 절단 변이가 생존했다).
+    _derived_low, _derived_high = correction_interval.interval_ends(
+        correction_factor, correction_interval.NO_CORRECTION,
+    )
+    cf_low = _derived_low if correction_factor_low is None else correction_factor_low
+    cf_high = _derived_high if correction_factor_high is None else correction_factor_high
 
     rank_bid = estimate.get("rank_bid")
 
