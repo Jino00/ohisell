@@ -539,6 +539,8 @@ export interface KpiEvidence extends Record<string, unknown> {
     net_matches: boolean;
     order_count_matches: boolean;
     net_fully_explained: boolean;
+    // 네 칸이 전부 자기 배지를 갖는다 — 이익률만 빠져 있던 비대칭을 2026-08-23에 닫았다.
+    profit_rate_matches: boolean;
   };
   order_count_excluded: number;
   has_floor: boolean;

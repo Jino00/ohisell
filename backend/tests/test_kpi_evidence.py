@@ -149,6 +149,71 @@ def test_unmeasured_revenue_explains_the_rate_denominator():
     assert Decimal(ev["totals"]["unmeasured_revenue"]) == Decimal("0")
 
 
+# ── ④ 이익률도 자기 검산 배지를 갖는다 (2026-08-23 — 네 칸 중 이 칸만 빠져 있었다) ──────
+def test_profit_rate_check_is_true_when_rows_rebuild_the_card_rate():
+    """행에서 다시 센 분모·비율이 카드 값과 같으면 ✓."""
+    rows = [_full_row(), _partial_row(), _ad_only_row()]
+    totals = _kpi_totals(None, rows, ROCKET_ID)
+    ev = build_kpi_evidence(rows, totals, ROCKET_ID, CMAP)
+
+    assert ev["checks"]["profit_rate_matches"] is True
+    # 배지가 참이라고 말하는 그 산술이 화면 값과 실제로 맞는지 손으로 확인한다.
+    rate = Decimal(ev["totals"]["net_profit"]) / Decimal(ev["totals"]["basis_revenue"]) * 100
+    assert Decimal(ev["totals"]["profit_rate"]) == rate.quantize(Decimal("0.01"))
+
+
+def test_profit_rate_check_catches_a_diverged_denominator():
+    """★이 테스트가 이 배지의 존재 이유다 — **공허 단언이면 여기서 죽는다.**
+
+    초판 `checks`의 병은 「같은 payload를 자기 자신과 비교」였다. 그런 판정식은 totals가
+    행과 갈라져도 언제나 ✓를 찍는다. 그래서 여기선 **행은 그대로 두고 totals만** 흔든다 —
+    누군가 카드 쪽에 두 번째 계산 경로를 신설한 날의 모양이다.
+    """
+    rows = [_full_row(), _partial_row(), _ad_only_row()]
+    totals = _kpi_totals(None, rows, ROCKET_ID)
+
+    tampered = dict(totals, basis_revenue=totals["basis_revenue"] + Decimal("100000"))
+    ev = build_kpi_evidence(rows, tampered, ROCKET_ID, CMAP)
+    assert ev["checks"]["profit_rate_matches"] is False, (
+        "분모가 행 합과 갈라졌는데 ✓를 찍었다 — 배지가 아무것도 안 보고 있다"
+    )
+    # 다른 배지는 이 변화를 못 본다 — 그래서 이익률에 **자기 배지**가 필요했다.
+    assert ev["checks"]["revenue_matches"] is True
+    assert ev["checks"]["net_matches"] is True
+
+
+def test_profit_rate_check_is_false_when_the_numerator_diverges():
+    """분자(순이익)가 갈라져도 이익률 배지가 ✗여야 한다 — 비율은 두 값의 함수다."""
+    rows = [_full_row(), _partial_row(), _ad_only_row()]
+    totals = _kpi_totals(None, rows, ROCKET_ID)
+
+    tampered = dict(totals, net_profit=totals["net_profit"] + Decimal("50000"))
+    ev = build_kpi_evidence(rows, tampered, ROCKET_ID, CMAP)
+    assert ev["checks"]["profit_rate_matches"] is False
+
+
+def test_profit_rate_check_survives_the_vat_dust():
+    """★D-7 — `payable_vat`의 `×10/110`이 남기는 28자리 먼지로 «맞는데 ✗»가 나면 안 된다.
+
+    행 합을 먼저 원 단위로 끊고 나누면 그 반올림이 비율에 실린다. 실제 금액(끊어지지 않는
+    부가세)으로 돌려서 배지가 라이브에서 뒤집히지 않는지 본다.
+    """
+    rows = [_full_row()]
+    totals = _kpi_totals(None, rows, ROCKET_ID)
+    ev = build_kpi_evidence(rows, totals, ROCKET_ID, CMAP)
+    assert ev["checks"]["profit_rate_matches"] is True
+    assert ev["totals"]["profit_rate"] == "36.36"
+
+
+def test_profit_rate_check_is_true_when_nothing_is_measurable():
+    """분모가 0인 창(잰 게 아무것도 없다)에서도 배지가 «불일치»로 뜨면 안 된다."""
+    rows = [_ad_only_row()]
+    totals = _kpi_totals(None, rows, ROCKET_ID)
+    ev = build_kpi_evidence(rows, totals, ROCKET_ID, CMAP)
+    assert Decimal(ev["totals"]["basis_revenue"]) == Decimal("0")
+    assert ev["checks"]["profit_rate_matches"] is True
+
+
 def test_rows_carry_company_labels():
     rows = [_full_row()]
     ev = build_kpi_evidence(rows, _kpi_totals(None, rows, ROCKET_ID), ROCKET_ID, CMAP)
@@ -181,6 +246,7 @@ def test_response_model_keeps_the_evidence_fields():
     assert "residual" in body["rows"][0]
     assert set(body["checks"]) == {
         "revenue_matches", "net_matches", "order_count_matches", "net_fully_explained",
+        "profit_rate_matches",
     }
     assert body["totals"]["unmeasured_revenue"] is not None
     assert body["deduction_totals"]["cost"] == "600000"  # 아는 행만 더한 합(400,000 + 200,000)

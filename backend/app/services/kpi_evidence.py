@@ -34,6 +34,10 @@ ZERO = Decimal("0")
 #:   픽스처로는 안 드러나고 실제 금액에서만 드러나는 자리다.
 RESIDUAL_SCALE = Decimal("0.01")
 
+#: 이익률을 재는 눈금 — 카드(`dashboard_kpi`)가 `rate.quantize(Decimal("0.01"))`로 내는 것과
+#: **같아야** 검산이 뜻을 갖는다. 다르면 「값은 같은데 배지는 ✗」가 된다.
+RATE_SCALE = Decimal("0.01")
+
 #: 순이익 검산식에서 매출에서 «빼는» 항목들. 표시 순서 = 검산식에 쓰는 순서.
 #: 행이 이 키를 안 갖고 있으면 그 행은 그 항목을 **모르는** 것이다(0이 아니다).
 DEDUCTION_KEYS: tuple[str, ...] = (
@@ -199,6 +203,24 @@ def build_kpi_evidence(
     # 사용자는 −285,507 ÷ 1,670,990을 손으로 계산해 보고 화면과 다르다고 결론 내린다.
     basis_revenue = totals["basis_revenue"]
     rate = (net_total / basis_revenue * 100) if basis_revenue > 0 else ZERO
+    rate_q = rate.quantize(RATE_SCALE)
+
+    # ★이익률 검산 — 다른 세 체크와 **같은 모양**(행 합 ↔ totals)으로 잰다.
+    #   왜 이 모양이어야 하나: `rate`는 `totals`의 두 값을 나눈 것이라, 그걸 다시
+    #   `totals["profit_rate"]`와 비교하면 **같은 값을 두 번 읽는 공허 단언**이 된다 —
+    #   그런 배지는 어떤 변이도 못 잡으면서 화면엔 언제나 ✓로 뜬다(초판 `checks`가 정확히
+    #   그 병이었다: 「✓ 카드와 일치」가 카드를 한 번도 본 적이 없었다).
+    #   ⇒ 분모·분자를 **행에서 다시 세어** totals와 맞추고, 그 행 합으로 비율을 새로 만든다.
+    #   ★행 합은 «끊기 전» 값으로 나눈다 — 먼저 원 단위로 끊고 나누면 그 반올림이 비율에
+    #     실려 「값은 맞는데 배지는 ✗」가 나올 수 있다(D-7: `payable_vat`의 28자리 먼지).
+    rows_basis = _sum(ev_rows, "net_basis_revenue")
+    rows_net = _sum_net(ev_rows)
+    rows_rate = (
+        (rows_net / rows_basis * 100).quantize(RATE_SCALE)
+        if rows_basis > ZERO
+        else ZERO.quantize(RATE_SCALE)
+    )
+    profit_rate_matches = _q(rows_basis) == _q(basis_revenue) and rows_rate == rate_q
 
     order_rows_total = sum(r["order_count"] for r in ev_rows)
     order_excluded = sum(
@@ -215,7 +237,7 @@ def build_kpi_evidence(
             "net_profit": str(net_total),
             "basis_revenue": str(basis_revenue),
             "floor_ad": str(totals["floor_ad"]),
-            "profit_rate": str(rate.quantize(Decimal("0.01"))),
+            "profit_rate": str(rate_q),
             "order_count": totals["order_count"],
             "residual": str(residual_total),
             # 이익률 분모에서 빠진 매출 — 「원가를 몰라 손익을 못 잰」 몫이다.
@@ -231,6 +253,9 @@ def build_kpi_evidence(
             "net_matches": _q(_sum_net(ev_rows)) == _q(net_total),
             "order_count_matches": (order_rows_total - order_excluded) == totals["order_count"],
             "net_fully_explained": residual_total == ZERO,
+            # 이익률은 «두 칸이 동시에» 맞아야 참이다 — 분모(손익을 잰 매출)와 그 비율.
+            # 분자는 `net_matches`가 이미 같은 모양으로 재고 있다.
+            "profit_rate_matches": profit_rate_matches,
         },
         "order_count_excluded": order_excluded,
         "has_floor": totals["floor_ad"] > ZERO
