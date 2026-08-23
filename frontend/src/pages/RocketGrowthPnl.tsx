@@ -259,15 +259,27 @@ export default function RocketGrowthPnl() {
         </div>
       )}
 
-      {/* ★보존식 — 이 화면이 대시보드와 같은 말을 하는가. 차이를 0으로 숨기지 않는다. */}
+      {/* ★보존식 — 이 화면이 대시보드와 같은 말을 하는가. 차이를 0으로 숨기지 않는다.
+          ★배지는 3상태다 — 「모름」을 「어긋남」으로 단정하지 않는다(2026-08-23 라이브가 잡았다).
+            원가 게이트가 미달인 창은 순이익 자체를 안 내므로 **대조할 것이 없다**. 그런데
+            `cons.ok ? A : B`로 쓰면 `null`이 falsy로 접혀 화면이 「어긋남」을 단정했다 —
+            같은 병(「모름」과 「아니다」가 같은 얼굴)의 세 번째 발현이다. */}
       {cons && (
         <div
           className={`border rounded-md p-3 text-sm ${
-            cons.ok ? "bg-green-50 border-green-200 text-green-900" : "bg-red-50 border-red-200 text-red-800"
+            cons.ok == null
+              ? "bg-gray-50 border-gray-200 text-gray-700"
+              : cons.ok
+                ? "bg-green-50 border-green-200 text-green-900"
+                : "bg-red-50 border-red-200 text-red-800"
           }`}
         >
           <div className="font-medium">
-            {cons.ok ? "✅ 대시보드 RG 행과 일치" : "⚠️ 대시보드 RG 행과 어긋남"}
+            {cons.ok == null
+              ? "— 대시보드 RG 행과 대조할 수 없다 (이 창은 순이익을 내지 않는다)"
+              : cons.ok
+                ? "✅ 대시보드 RG 행과 일치"
+                : "⚠️ 대시보드 RG 행과 어긋남"}
           </div>
           {/* ★다섯 칸 전부 `cell()`을 쓴다 — 적대 리뷰 1R P1: 앞의 두 칸만 가드가 빠져 있었고,
               원가 게이트가 미달인 창(백엔드가 정직하게 null을 내는 창)에서 화면이 «0원»으로

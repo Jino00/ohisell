@@ -209,6 +209,35 @@ describe("RocketGrowthPnl — 보존식 블록 (변이③)", () => {
   //   그런데 화면은 앞의 두 칸만 가드가 빠져 「0원」으로 덮고 있었다 — 「모름」과 「0」이 같은
   //   얼굴이 되는 자리다. 값 비교로는 안 잡힌다(0도 «있을 수 있는 값»이라서). 그러니
   //   **null일 때 「0원」이 «없어야» 한다**를 직접 단언한다.
+  // ★라이브가 잡은 세 번째 발현(2026-08-23, 08-22 창) — 배지가 「모름」을 「어긋남」으로
+  //   단정했다. 백엔드는 `ok: null`을 정직하게 내는데 프론트가 `cons.ok ? A : B`로 써서
+  //   null이 falsy로 접혔다. 「모름」과 「아니다」는 다른 말이다.
+  it("ok=null이면 「어긋남」이 아니라 «대조할 수 없다»로 뜬다 — 라이브 08-22", async () => {
+    h.response = {
+      ...BASE,
+      cost_trustworthy: false,
+      conservation: {
+        options_net_sum: null, account_common_sum: null, computed_total_net: null,
+        reference_net: null, diff: null, ok: null,
+      },
+    };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText(/대조할 수 없다/)).toBeTruthy());
+    // «없어야 할 것»과 «있어야 할 것»을 함께 단언한다(부정 단언만 두면 문구가 바뀔 때 공허해진다).
+    expect(screen.queryByText(/어긋남/)).toBeNull();
+    expect(screen.queryByText(/일치/)).toBeNull();
+  });
+
+  it("ok=false면 여전히 「어긋남」이다 — 위 수정이 진짜 어긋남까지 덮지 않는다", async () => {
+    h.response = {
+      ...BASE,
+      conservation: { ...BASE.conservation, ok: false, diff: "1200", reference_net: "50923" },
+    };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText(/어긋남/)).toBeTruthy());
+    expect(screen.queryByText(/대조할 수 없다/)).toBeNull();
+  });
+
   it("원가 게이트 미달 창(전 칸 null)에서 보존식이 「0원」이 아니라 「—」로 뜬다 — 1R P1-1", async () => {
     h.response = {
       ...BASE,
