@@ -60,6 +60,10 @@ import {
 //   들여온다(위 P2-A와 같은 사정 — 전체 App 경로로는 필터 0건 조합을 못 만든다).
 import {
   excelRefNoteText,
+  importedMaterialIds,
+  ledgerLineCoverage,
+  ledgerLinesForMaterial,
+  LIST_COLUMN_SCROLL_CLASS,
   lotCountText,
   MaterialList,
   recipePlaceholderText,
@@ -67,6 +71,7 @@ import {
   RecipeList,
   StandardBreakdown,
   StandardCostBoard,
+  unattributedLedgerLines,
 } from "./CostPage";
 
 // ── prod 실측값(2026-08-22) — 합격 1이 화면에서 보겠다는 바로 그 두 로트 ──
@@ -1482,6 +1487,131 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     });
   });
 
+  // ══════════════════════════════════════════════════════════════════
+  // ★S4 (2026-08-24) — 계약 A′ §7 합격 10~13. Jino가 라이브 `/cost`를 보며 발의한 분.
+  //
+  // ⚠️**이 블록의 한계를 먼저 자백한다**: 합격 10은 «스크롤해도 오른쪽이 남는가»인데
+  //    jsdom은 레이아웃도 스크롤도 계산하지 않는다. 여기서 지키는 것은 «그 동작을 만드는
+  //    구조가 두 탭 다에 살아 있는 것»뿐이고, **판정은 배포 후 Jino의 눈**이다(계약 §7-10).
+  //    합격 11·12·13은 «무엇이 그려지는가»라 jsdom이 실제로 잰다.
+  // ══════════════════════════════════════════════════════════════════
+  describe("★S4 ㉮ — 레시피 탭도 목록만 스크롤된다 (합격 10 · 「한쪽만 고친다」 다섯 번째의 수리)", () => {
+    async function openRecipesTabS4() {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      await screen.findByTestId("recipe-list-scroll");
+    }
+
+    it("레시피 목록이 «자기» 스크롤 컨테이너를 갖고, 목록이 실제로 그 안에 있다", async () => {
+      await openRecipesTabS4();
+      const box = screen.getByTestId("recipe-list-scroll");
+      expect(box.className).toContain("overflow-y-auto");
+      expect(box.className).toMatch(/max-h-/);
+      expect(box.className).toContain("sticky");
+      // ★컨테이너만 남기고 목록을 밖으로 빼는 변이를 막는다(부자재 탭과 같은 가드).
+      expect(within(box).getByTestId(`recipe-row-${RECIPE.id}`)).toBeTruthy();
+    });
+
+    it("★두 탭이 «같은» 규율을 쓴다 — 한쪽만 고치는 것이 원리적으로 불가능해야 한다", async () => {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      const materialBox = await screen.findByTestId("material-list-scroll");
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      const recipeBox = await screen.findByTestId("recipe-list-scroll");
+      // 문자열 복사본 둘이 아니라 **상수 하나**여야 한다 — 복사본은 반드시 갈라진다.
+      expect(recipeBox.className).toBe(materialBox.className);
+      expect(recipeBox.className).toBe(LIST_COLUMN_SCROLL_CLASS);
+    });
+
+    it("★그리드가 `items-start`여야 sticky가 산다 — 없으면 클래스만 살고 동작은 죽는다", async () => {
+      await openRecipesTabS4();
+      const grid = screen.getByTestId("recipe-list-scroll").closest("div.grid");
+      expect(grid).toBeTruthy();
+      expect(grid!.className).toContain("items-start");
+    });
+  });
+
+  describe("★S4 ㉯ — 수입 종과 비수입 종을 가른다 (합격 11·12·13)", () => {
+    // prod 실측(2026-08-23): 수입 부자재 **1종**(cleaning kits) vs 비수입 **128종**.
+    // 이 테스트 픽스처가 그 모양이다 — LEDGER_ROW 하나가 KIT(id=1)만 가리킨다.
+
+    it("합격 12 — 수입 종을 고르면 «그 종의» 원장 부자재 라인 표가 뜬다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${KIT.id}`));
+      const table = await screen.findByTestId("material-ledger-lines");
+      expect(within(table).getByTestId(`ledger-line-${LEDGER_ROW.line_id}`)).toBeTruthy();
+      // 「연결」이 사람의 확정이다 — 표가 옮겨졌다고 그 버튼이 사라지면 안 된다(계약 §5-2).
+      expect(within(table).getByRole("button", { name: /연결/ })).toBeTruthy();
+      expect(screen.getByTestId("material-origin-note").textContent).toContain("수입 종");
+    });
+
+    it("★합격 11 — 비수입 종을 고르면 원장 표가 **안 뜬다** (필름 종에 cleaning kits가 뜨던 결함)", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      await screen.findByTestId("material-excel-ref-note");
+      // ★이것이 Jino가 00:01에 발의한 결함의 정확한 모양이다.
+      expect(screen.queryByTestId("material-ledger-lines")).toBeNull();
+      expect(screen.getByTestId("material-origin-note").textContent).toContain("비수입 종");
+      expect(screen.getByTestId("material-origin-note").textContent).toContain("정본은 엑셀");
+    });
+
+    it("★합격 13 — 미매칭 섹션은 **사라지지 않는다**. 0건이면 「미매칭 없음」이라고 말한다", async () => {
+      await openMaterialsTab();
+      // 픽스처의 유일한 라인은 KIT을 가리키므로 미귀속은 0건이다.
+      const section = screen.getByTestId("unattributed-ledger-lines");
+      expect(screen.getByTestId("unattributed-count").textContent).toContain("미매칭 없음");
+      // ★섹션 «자체»가 있어야 한다 — 0건이라고 지우면 단가 이력이 조용히 빈다.
+      expect(section).toBeTruthy();
+    });
+
+    it("★합격 13 — 어느 종도 못 가지는 라인은 그 섹션에서 세어진다", () => {
+      const orphan: CostLedgerMaterialLine = {
+        ...LEDGER_ROW,
+        line_id: 99,
+        item_name: "정체불명 부자재",
+        suggestion: {
+          ...LEDGER_ROW.suggestion,
+          line_id: 99,
+          material_id: null,
+          candidates: [],
+          unmatched: true,
+        },
+      };
+      expect(unattributedLedgerLines([LEDGER_ROW, orphan]).map((r) => r.line_id)).toEqual([99]);
+      // ★모호한(ambiguous) 라인도 여기로 온다 — 안 그러면 화면에서 통째로 사라진다.
+      const ambiguous: CostLedgerMaterialLine = {
+        ...orphan,
+        line_id: 98,
+        suggestion: { ...orphan.suggestion, line_id: 98, ambiguous: true, unmatched: false },
+      };
+      expect(unattributedLedgerLines([ambiguous]).map((r) => r.line_id)).toEqual([98]);
+    });
+
+    it("★★종별 표 + 미매칭 섹션이 **전건을 덮는다** — 필터를 넣고 행을 흘리지 않았다", () => {
+      const orphan: CostLedgerMaterialLine = {
+        ...LEDGER_ROW,
+        line_id: 99,
+        suggestion: { ...LEDGER_ROW.suggestion, line_id: 99, material_id: null, unmatched: true },
+      };
+      const linked: CostLedgerMaterialLine = {
+        ...LEDGER_ROW,
+        line_id: 77,
+        linked_material_id: 2,
+        linked_material_name: "빛반사 필름",
+        suggestion: { ...LEDGER_ROW.suggestion, line_id: 77, material_id: null, unmatched: true },
+      };
+      const rows = [LEDGER_ROW, orphan, linked];
+      const cov = ledgerLineCoverage(rows);
+      expect(cov.total).toBe(3);
+      expect(cov.attributed + cov.unattributed).toBe(cov.total);
+      // ★연결이 제안을 이긴다 — 이미 붙여 둔 라인은 «붙어 있는 종»의 것이다.
+      expect(ledgerLinesForMaterial(rows, 2).map((r) => r.line_id)).toEqual([77]);
+      expect(ledgerLinesForMaterial(rows, 1).map((r) => r.line_id)).toEqual([LEDGER_ROW.line_id]);
+      expect(importedMaterialIds(rows)).toEqual(new Set([1, 2]));
+    });
+  });
+
   describe("★C: 부자재 종 드롭다운 — 129종을 눈으로 훑지 않는다", () => {
     it("폼팩터 셀렉트가 존재하고, 고르면 다른 폼팩터의 종이 목록에서 사라진다", async () => {
       await openMaterialsTab();
@@ -1579,6 +1709,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
           onSelect={() => {}}
           totalCount={129}
           filterSummary="129건 중 0건 표시 중 — 필터: 폼팩터=doorlock, 부품=필름"
+          importedIds={new Set()}
         />,
       );
       expect(screen.getByText(/해당 조건에 맞는 부자재 종이 없다/)).toBeTruthy();
@@ -1590,7 +1721,14 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     });
 
     it("데이터 자체가 0건이면 필터 탓으로 돌리지 않는다", () => {
-      render(<MaterialList materials={[]} selectedId={null} onSelect={() => {}} />);
+      render(
+        <MaterialList
+          materials={[]}
+          selectedId={null}
+          onSelect={() => {}}
+          importedIds={new Set()}
+        />,
+      );
       expect(screen.getByText("등록된 부자재 종이 없다.")).toBeTruthy();
     });
   });
@@ -1601,16 +1739,20 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     // prod 실측: 단가 보유 1/129 vs 참고값 보유 128/129인데 화면은 전 종에 대해
     // 「원장 연결 또는 수동 입력 필요」라고만 말했다 — **할 일이 셋인데 둘만 제시했고,
     // 빠진 셋째가 가장 싼 길이었다.** 화면이 사람을 더 비싼 일로 보내고 있었다.
-    it("참고값이 있는 종을 고르면 «그 값»과 «단가가 아니다»와 «단가가 되는 길»이 보인다", async () => {
+    // ★2026-08-24 S4 ㉯ 개정: 「무엇이 아닌지」는 **수입 종에만** 참이다. FILM은 비수입
+    //   종(원장 라인 0건)이라 엑셀이 정본이고(계약 §0-C, Jino 정정 00:06), 화면은 값을
+    //   의심하게 만드는 대신 «아직 확정만 안 했다»를 말한다. 이 테스트가 그 전환을 붙든다.
+    it("참고값이 있는 비수입 종을 고르면 «그 값»과 «엑셀이 정본»과 «확정하는 길»이 보인다", async () => {
       await openMaterialsTab();
       fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
 
       const note = await screen.findByTestId("material-excel-ref-note");
       expect(note.textContent).toContain("600원");         // 값
-      expect(note.textContent).toContain("단가가 아니다");   // 무엇이 아닌지
+      expect(note.textContent).toContain("정본");           // 무엇인지 (「단가가 아니다」가 아니다)
       expect(note.textContent).toContain("레시피");         // 어디에 그 조작이 있는지
-      expect(note.textContent).toContain("원장 부자재 라인");
       expect(note.textContent).toContain("수동 단가 입력");
+      // ★없는 길을 가리키지 않는다 — 이 종엔 원장 부자재 라인이 0건이다.
+      expect(note.textContent).not.toContain("원장 부자재 라인");
     });
 
     it("★안내가 «없는 버튼»을 가리키지 않는다 — 부자재 탭엔 채택 버튼이 없다", async () => {
@@ -1636,20 +1778,63 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     it("목록 줄도 참고값의 «존재»를 말한다 — 「원장 연결 또는 수동 입력 필요」만 말하지 않는다", async () => {
       await openMaterialsTab();
       const row = screen.getByTestId(`material-${FILM_WITH_REF.id}`);
-      expect(row.textContent).toContain("엑셀 참고값 600원");
+      // ★2026-08-24 S4 ㉯: FILM은 **비수입 종**(원장 라인 0건)이라 「참고값」이 아니라
+      //   「엑셀 단가(미확정)」이라고 부른다 — 엑셀이 정본이기 때문이다(계약 §0-C · 합격 11).
+      expect(row.textContent).toContain("엑셀 단가(미확정) 600원");
       expect(row.textContent).not.toContain("원장 연결 또는 수동 입력 필요");
     });
 
     it("순수 계층: 참고값 유무가 목록 문구를 가른다", () => {
-      expect(lotCountText({ lot_count: 0, price_count: 0, stale_count: 0 })).toBe(
+      expect(lotCountText({ lot_count: 0, price_count: 0, stale_count: 0 }, true)).toBe(
         "단가 없음 — 원장 연결 또는 수동 입력 필요",
       );
       expect(
-        lotCountText({ lot_count: 0, price_count: 0, stale_count: 0, excel_ref_price: "600.00" }),
+        lotCountText(
+          { lot_count: 0, price_count: 0, stale_count: 0, excel_ref_price: "600.00" },
+          true,
+        ),
       ).toContain("엑셀 참고값 600원");
       // ★이미 단가가 있는 종은 «대조값»이라고 말한다 — 채택이 안 건드리기 때문이다.
-      expect(excelRefNoteText({ excel_ref_price: "600.00", price_count: 2 })).toContain("대조값");
-      expect(excelRefNoteText({ excel_ref_price: null, price_count: 0 })).toBeNull();
+      expect(excelRefNoteText({ excel_ref_price: "600.00", price_count: 2 }, true)).toContain(
+        "대조값",
+      );
+      expect(excelRefNoteText({ excel_ref_price: null, price_count: 0 }, true)).toBeNull();
+      expect(excelRefNoteText({ excel_ref_price: null, price_count: 0 }, false)).toBeNull();
+    });
+
+    // ══════════════════════════════════════════════════════════════
+    // ★S4 ㉯ 순수 계층 — 수입/비수입이 문구를 «가른다» (합격 11·12)
+    //
+    // 이 블록이 없으면 「128종에게 틀린 말을 한다」가 다시 돌아와도 테스트는 초록이다.
+    // ══════════════════════════════════════════════════════════════
+    it("★비수입 종은 엑셀 값을 «정본»이라 부르고 원장 연결로 안내하지 않는다 (합격 11)", () => {
+      const m = { lot_count: 0, price_count: 0, stale_count: 0, excel_ref_price: "600.00" };
+      const line = lotCountText(m, false);
+      // 값을 «의심하게» 만드는 말이 아니다 — 아직 «넣지» 않았을 뿐이다.
+      expect(line).toContain("엑셀 단가(미확정) 600원");
+      expect(line).not.toContain("단가 아님");
+      expect(line).not.toContain("대조값");
+
+      const note = excelRefNoteText({ excel_ref_price: "600.00", price_count: 0 }, false);
+      expect(note).toContain("정본");
+      // ★핵심 — **원장 연결을 안내하지 않는다.** 그 길은 이 종에 0건이라 영영 안 온다.
+      expect(note).not.toContain("원장 부자재 라인");
+      expect(note).toContain("엑셀 참고값을 단가로 채택");
+      expect(note).toContain("수동 단가 입력");
+    });
+
+    it("★수입 종은 엑셀 값을 «대조값»이라 부르고 원장 연결을 안내한다 (합격 12)", () => {
+      const note = excelRefNoteText({ excel_ref_price: "600.00", price_count: 0 }, true);
+      expect(note).toContain("대조값");
+      expect(note).toContain("원장 부자재 라인");
+    });
+
+    it("★참고값이 없을 때도 두 종이 다른 길을 안내한다", () => {
+      const bare = { lot_count: 0, price_count: 0, stale_count: 0 };
+      expect(lotCountText(bare, true)).toBe("단가 없음 — 원장 연결 또는 수동 입력 필요");
+      // 비수입 종에게 「원장 연결」은 없는 길이다 — 말하지 않는다.
+      expect(lotCountText(bare, false)).not.toContain("원장 연결");
+      expect(lotCountText(bare, false)).toContain("수동 단가 입력");
     });
   });
 
@@ -1794,19 +1979,22 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
           selectedId={null}
           onSelect={() => {}}
           onApprove={() => {}}
+          importedIds={new Set()}
         />,
       );
       const row = screen.getByTestId(`material-${FILM_WITH_REF.id}`);
       expect(within(row).queryByRole("button", { name: "승인" })).toBeNull();
     });
 
-    // M22를 죽인다. ★안내 문구(③)와 버튼의 실재를 «한 테스트에서 함께» 잰다 —
+    // M22를 죽인다. ★안내 문구와 버튼의 실재를 «한 테스트에서 함께» 잰다 —
     //   문구가 가리키는 대상이 실제로 있는지를 같이 재면, 둘 중 하나가 사라질 때 운다.
-    it("「+ 수동 단가 입력」 버튼이 실재하고, 안내 문구(③)가 가리키는 대상과 일치한다 — 누르면 그 종 id로 addCostManualPrice가 불린다", async () => {
+    //   ★2026-08-24 S4 ㉯: 비수입 종의 안내가 ③ 번호 매김을 안 쓰게 바뀌었지만
+    //   **가드의 본질은 「가리킨 버튼이 실재하는가」**라 그대로 유효하다 — 문자열만 옮겼다.
+    it("「+ 수동 단가 입력」 버튼이 실재하고, 안내 문구가 가리키는 대상과 일치한다 — 누르면 그 종 id로 addCostManualPrice가 불린다", async () => {
       await openMaterialsTab();
       fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
       const note = await screen.findByTestId("material-excel-ref-note");
-      expect(note.textContent).toContain("③「+ 수동 단가 입력」");
+      expect(note.textContent).toContain("「+ 수동 단가 입력」");
 
       // ★버튼이 «실재»한다 — 안내가 가리키는 대상이 화면에 없으면 그 자체가 거짓말이다.
       const manualBtn = screen.getByRole("button", {
