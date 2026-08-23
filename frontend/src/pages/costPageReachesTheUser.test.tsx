@@ -389,6 +389,210 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     // 미계산 행의 표준원가 칸은 「—」다 — 0원으로 그리면 미입력이 확정값으로 둔갑한다.
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
   });
+
+  // ── S3: 엑셀 2종 업로드가 «카드형 드롭존»으로 바뀐다 (Jino: "선택이 쉽게 직관적으로") ──
+  describe("★S3: 원가 정본/매핑 정본 드롭존 — 클릭 전엔 안내, 클릭 후엔 확인, 잘못 넣으면 사유", () => {
+    function makeXlsx(name: string, bytes = 2048): File {
+      return new File([new Uint8Array(bytes)], name, {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+    }
+
+    async function openRecipesTab() {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    }
+
+    it("드롭존 2개가 칸 이름 · 기대 시트 이름과 함께 렌더된다", async () => {
+      await openRecipesTab();
+      const costZone = await screen.findByTestId("cost-dropzone-cost");
+      expect(within(costZone).getByText("원가 정본")).toBeTruthy();
+      expect(within(costZone).getByText(/제품 원가표/)).toBeTruthy();
+      expect(within(costZone).getByText(/MD_원가 계산_/)).toBeTruthy();
+
+      const mappingZone = screen.getByTestId("cost-dropzone-mapping");
+      expect(within(mappingZone).getByText("매핑 정본")).toBeTruthy();
+      expect(within(mappingZone).getByText(/원가 매핑/)).toBeTruthy();
+      expect(within(mappingZone).getByText(/ohisell_mapping_template_/)).toBeTruthy();
+
+      // .xlsx만 받는다는 것도 두 칸 모두에서 보인다.
+      expect(within(costZone).getByText(".xlsx만")).toBeTruthy();
+      expect(within(mappingZone).getByText(".xlsx만")).toBeTruthy();
+    });
+
+    it("파일을 넣으면 파일명 · 크기가 뜨고, 「바꾸기」·「지우기」가 나타난다", async () => {
+      await openRecipesTab();
+      const input = screen.getByLabelText("원가 정본 파일") as HTMLInputElement;
+      const file = makeXlsx("MD_원가 계산_20260823.xlsx", 3072);
+      fireEvent.change(input, { target: { files: [file] } });
+
+      const costZone = screen.getByTestId("cost-dropzone-cost");
+      expect(within(costZone).getByText("MD_원가 계산_20260823.xlsx")).toBeTruthy();
+      expect(within(costZone).getByText("3.0KB")).toBeTruthy();
+      expect(within(costZone).getByRole("button", { name: "바꾸기" })).toBeTruthy();
+      const clearBtn = within(costZone).getByRole("button", { name: "지우기" });
+      expect(clearBtn).toBeTruthy();
+
+      // 지우기 → 다시 안내 문구로 돌아간다(선택 해제).
+      fireEvent.click(clearBtn);
+      expect(within(costZone).queryByText("MD_원가 계산_20260823.xlsx")).toBeNull();
+      expect(within(costZone).getByText(/제품 원가표/)).toBeTruthy();
+    });
+
+    it(".xlsx가 아닌 파일을 넣으면 그 자리에서 거부 사유가 뜬다 — 서버까지 안 간다", async () => {
+      await openRecipesTab();
+      const input = screen.getByLabelText("매핑 정본 파일") as HTMLInputElement;
+      const badFile = new File(["a,b,c"], "report.csv", { type: "text/csv" });
+      fireEvent.change(input, { target: { files: [badFile] } });
+
+      const mappingZone = screen.getByTestId("cost-dropzone-mapping");
+      const errorEl = within(mappingZone).getByTestId("cost-dropzone-mapping-error");
+      expect(errorEl.textContent).toMatch(/\.xlsx 파일이 아닙니다/);
+      expect(errorEl.textContent).toMatch(/report\.csv/); // 사유가 «무엇을 받았는지»를 말한다
+      // ★사유는 «무엇을 해야 하는지»도 같이 말한다(교훈 #349).
+      expect(errorEl.textContent).toMatch(/xlsx로 바꿔 다시 올리세요/);
+      // 거부된 파일은 선택 상태로 채택되지 않는다.
+      expect(within(mappingZone).queryByText("report.csv")).toBeNull();
+    });
+
+    it("비활성 사유가 문장으로 보이고, 둘 다 고르면 사라지며 버튼이 활성화된다", async () => {
+      await openRecipesTab();
+      // 처음엔 둘 다 없다 — 「엑셀 2종을 모두 고르세요」
+      expect(screen.getByTestId("import-disabled-reason").textContent).toMatch(
+        /엑셀 2종을 모두 고르세요/,
+      );
+      const importBtn = screen.getByRole("button", {
+        name: "초안 만들기",
+      }) as HTMLButtonElement;
+      expect(importBtn.disabled).toBe(true);
+
+      fireEvent.change(screen.getByLabelText("원가 정본 파일"), {
+        target: { files: [makeXlsx("MD_원가 계산_1.xlsx")] },
+      });
+      // 원가 정본만 있으면 「매핑 정본을 아직 고르지 않았습니다」
+      expect(screen.getByTestId("import-disabled-reason").textContent).toMatch(
+        /매핑 정본을 아직 고르지 않았습니다/,
+      );
+      expect(importBtn.disabled).toBe(true);
+
+      fireEvent.change(screen.getByLabelText("매핑 정본 파일"), {
+        target: { files: [makeXlsx("ohisell_mapping_template_1.xlsx")] },
+      });
+      // 둘 다 고르면 안내가 사라지고 버튼이 활성화된다.
+      expect(screen.queryByTestId("import-disabled-reason")).toBeNull();
+      expect(importBtn.disabled).toBe(false);
+    });
+
+    it("카드 밖 드롭은 조용히 무시된다 — 페이지 이탈용 브라우저 기본 동작이 안 뜬다", async () => {
+      await openRecipesTab();
+      const panel = screen.getByText("엑셀 2종 업로드 → 구성 초안").closest("section")!;
+      const badFile = new File(["x"], "random.pdf", { type: "application/pdf" });
+      const dataTransfer = { files: [badFile] };
+      // panel 영역(카드 밖)에 드롭 — preventDefault만 되고 아무 상태도 안 바뀐다.
+      const dropEvent = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(dropEvent, "dataTransfer", { value: dataTransfer });
+      const prevented = !panel.dispatchEvent(dropEvent);
+      expect(prevented).toBe(true);
+      // 에러 팝업·파일 채택 둘 다 없다.
+      expect(screen.queryByTestId("cost-dropzone-cost-error")).toBeNull();
+      expect(screen.queryByTestId("cost-dropzone-mapping-error")).toBeNull();
+    });
+
+    // ★이 테스트가 없으면 「드롭 경로」가 통째로 죽어도 전건 초록이다 — 실제로 변이를 넣어
+    //   확인했고 **SURVIVED**였다(2026-08-23, 세션 5432a577). 클릭 선택만 재는 테스트는
+    //   `onChange`만 밟으므로 `onDrop`을 한 줄도 지키지 못한다. Jino가 처음 물은 것이
+    //   *"파일을 그냥 드롭하면 되나?"*였으니, 드롭은 이 화면의 «사람이 쓰는 경로»다.
+    it("카드 «안»에 드롭하면 실제로 선택된다 — 드롭 경로가 끊기면 이 테스트가 빨개진다", async () => {
+      await openRecipesTab();
+      const costZone = await screen.findByTestId("cost-dropzone-cost");
+      const file = new File(["x"], "MD_원가 계산_260822.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const dropEvent = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(dropEvent, "dataTransfer", { value: { files: [file] } });
+      costZone.dispatchEvent(dropEvent);
+
+      // 고른 파일이 화면에 «보여야» 한다 — 상태만 바뀌고 안 그려지면 사람은 모른다.
+      expect(await within(costZone).findByText("MD_원가 계산_260822.xlsx")).toBeTruthy();
+      // 그리고 그 선택이 다음 단계로 «이어져야» 한다: 남은 비활성 사유는 매핑 정본 하나뿐.
+      expect(screen.getByTestId("import-disabled-reason").textContent).toContain("매핑 정본");
+    });
+
+    it("잘못된 파일을 «드롭»해도 그 자리에서 거부된다 — 클릭 경로와 같은 판정을 탄다", async () => {
+      await openRecipesTab();
+      const mappingZone = await screen.findByTestId("cost-dropzone-mapping");
+      const badFile = new File(["x"], "매핑.csv", { type: "text/csv" });
+      const dropEvent = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(dropEvent, "dataTransfer", { value: { files: [badFile] } });
+      mappingZone.dispatchEvent(dropEvent);
+
+      const errorEl = await within(mappingZone).findByTestId("cost-dropzone-mapping-error");
+      expect(errorEl.textContent).toContain("매핑.csv");
+      expect(errorEl.textContent).toContain("xlsx");
+    });
+
+    // ── 적대 리뷰 1R 산출물 (2026-08-23) ────────────────────────────────
+    // P1: 카드가 role="button"이라 중첩된 「지우기」의 Enter를 가로채 죽이고 파일 선택창을
+    //     대신 열었다. 「바꾸기」는 목적이 우연히 같아 증상이 안 보였다 — 그래서 놓칠 뻔했다.
+    it("P1: 「지우기」가 키보드(Enter)로도 작동한다 — 카드가 자식의 키를 가로채지 않는다", async () => {
+      await openRecipesTab();
+      const input = screen.getByLabelText("원가 정본 파일");
+      const file = new File(["x"], "MD_원가 계산_260822.xlsx");
+      fireEvent.change(input, { target: { files: [file] } });
+
+      const costZone = screen.getByTestId("cost-dropzone-cost");
+      expect(within(costZone).getByText("MD_원가 계산_260822.xlsx")).toBeTruthy();
+
+      const clearBtn = within(costZone).getByRole("button", { name: "지우기" });
+
+      // ★단언의 자리를 조심해야 한다. `fireEvent.click`을 뒤에 붙이면 그 클릭이 파일을 지워
+      //   버려서, 결함이 있어도 초록으로 통과한다(실제로 그렇게 썼다가 변이가 SURVIVED 했다).
+      //   jsdom은 keydown 뒤 네이티브 버튼 활성화를 대신해 주지 않으므로, 브라우저가 그 활성화를
+      //   «할 수 있는 상태인가»를 직접 잰다 — 즉 부모가 preventDefault로 죽이지 않았는가.
+      const pickerSpy = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+      const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      clearBtn.dispatchEvent(ev);
+
+      expect(ev.defaultPrevented).toBe(false); // 죽이면 브라우저가 「지우기」를 못 누른다
+      expect(pickerSpy).not.toHaveBeenCalled(); // 대신 파일 선택창이 열려서도 안 된다
+      pickerSpy.mockRestore();
+    });
+
+    // P2-1 채택: 거부만 말하고 «이전 선택이 사라졌다»를 안 말하면, 사람은 멀쩡한 파일이
+    //   아직 들어 있는 줄 알고 다음 단계로 간다. 부작용을 감추는 사유는 틀린 사유다.
+    it("P2-1: 고른 파일 위에 잘못된 파일을 넣으면 «이전 선택이 취소됐다»고 말한다", async () => {
+      await openRecipesTab();
+      const input = screen.getByLabelText("원가 정본 파일");
+      fireEvent.change(input, { target: { files: [new File(["x"], "정상.xlsx")] } });
+      fireEvent.change(input, { target: { files: [new File(["x"], "잘못.csv")] } });
+
+      const errorEl = within(screen.getByTestId("cost-dropzone-cost")).getByTestId(
+        "cost-dropzone-cost-error",
+      );
+      expect(errorEl.textContent).toContain("잘못.csv");
+      expect(errorEl.textContent).toContain("정상.xlsx"); // 무엇이 취소됐는지 이름으로 말한다
+      expect(errorEl.textContent).toContain("취소");
+    });
+
+    // P2-2 채택: 두 엑셀을 한 칸에 함께 떨어뜨리는 것은 실사용에서 충분히 일어난다.
+    //   나머지를 조용히 버리면 사람은 둘 다 올린 줄 안다.
+    it("P2-2: 한 칸에 여러 파일을 드롭하면 «하나만 받았다»고 말한다 — 조용히 안 버린다", async () => {
+      await openRecipesTab();
+      const costZone = await screen.findByTestId("cost-dropzone-cost");
+      const dropEvent = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(dropEvent, "dataTransfer", {
+        value: { files: [new File(["x"], "첫.xlsx"), new File(["x"], "둘.xlsx")] },
+      });
+      costZone.dispatchEvent(dropEvent);
+
+      const noteEl = await within(costZone).findByTestId("cost-dropzone-cost-error");
+      expect(noteEl.textContent).toContain("하나만 받습니다");
+      expect(noteEl.textContent).toContain("첫.xlsx");
+      // ★거부가 아니다 — 첫 파일은 실제로 선택돼 있어야 한다.
+      expect(within(costZone).getByText("첫.xlsx")).toBeTruthy();
+    });
+  });
 });
 // ★다른 라우트에서 같은 단언을 반복하지 않는다: 메뉴는 `Layout`이 라우트와 무관하게 그리므로
 //   SUR-4가 이미 그 사실을 잰다. 대신 다른 페이지(대시보드 등)를 렌더하면 그 페이지의 목데이터
