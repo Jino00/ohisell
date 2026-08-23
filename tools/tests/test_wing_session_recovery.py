@@ -132,6 +132,19 @@ def test_recover_shortens_sso_timeout(spy_ensure):
     assert spy_ensure["sso_timeout_s"] < 45
 
 
+def test_recover_passes_app_probe_as_verify(spy_ensure):
+    """★verify(앱 프로브)를 넘기는가 — 적대 리뷰 P2-1(2026-08-23, PR #342)의 유일한 생존 변이.
+
+    리뷰어가 `verify=` 인자를 통째로 지웠는데 71건이 전부 초록이었다. 그런데 그 인자는
+    **라이브에서 실제로 복구를 살린 것**이다: 2026-08-23 12:42:58 회차에서 URL 착지 판정
+    (is_landed, /tenants/ 요구)이 False였고 verify가 그 판정을 뒤집어 복구가 완주했다.
+    없으면 진짜 복구를 실패로 오판해 ②③으로 escalate하고 사람에게 불필요한 알림이 간다 —
+    즉 「사람이 Mac에 가지 않는다」는 합격기준이 그 한 인자에 달려 있는데 가드가 없었다.
+    """
+    w._recover_rg_session(object(), {"wing_login_id": "x"})
+    assert callable(spy_ensure.get("verify")), "verify(앱 프로브)가 coupang_auth로 안 넘어간다"
+
+
 # ════════════════════════════════════════════════════════════════════
 # 3. ★배선 절단 감지 — 계약 W4가 요구한 «표면 변이»
 # ════════════════════════════════════════════════════════════════════

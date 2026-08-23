@@ -602,3 +602,75 @@ describe("진행 단계 통지(onPhase)", () => {
     expect(phases).not.toContain("fetching");
   });
 });
+
+// ── 2단 판정 T_pickup / T_max (2026-08-23 W3, 계약 CONTRACT_collection_works_everywhere §3) ──
+//
+// ★존재 이유: 종전엔 상한이 «215초 하나»였고, 그 한 숫자가 두 질문을 뭉쳐 답했다 —
+//   「데몬이 집기는 했나」(30초면 안다)와 「집어간 수집이 끝났나」(수 분 걸린다).
+//   그래서 어느 값을 골라도 한쪽이 틀렸다: 2026-08-07 supplier_hub 227초 회차는 **성공한
+//   수집인데 화면은 「응답 없음」**이었고, 반대로 Mac이 꺼진 날엔 3분 넘게 아무 말도 못 했다.
+//   이 블록이 죽으면 그 뭉침이 되살아난 것이다.
+describe("2단 판정 — 픽업 전엔 90초에 정착하고, 픽업 뒤엔 600초까지 추적한다", () => {
+  it("아무도 안 집으면 T_max를 기다리지 않고 T_pickup(90초)에 정착한다", async () => {
+    const clock = fakeClock();
+    const { spec } = mkSpec([
+      S({ requested: false, attempt_count: 0 }),
+      S({ requested: true, attempt_count: 0 }), // 데몬이 영원히 집지 않는다
+    ]);
+    const out = await runStreamRefresh(spec, { ...clock, pollMs: 3000 });
+    expect(out).toEqual({ state: "no_response", attemptCount: 0, inFlight: undefined, kind: undefined });
+    // 90초 근처에서 끝났다 — 600초를 기다리지 않았다.
+    expect(clock.now()).toBeLessThanOrEqual(95000);
+    expect(clock.now()).toBeGreaterThanOrEqual(90000);
+    // ★그리고 그때만 「Mac을 보라」가 참이다.
+    expect(describeOutcome(spec, out)).toContain("Mac이 요청을 집지 않았습니다");
+  });
+
+  it("집어간 뒤에는 90초에 포기하지 않는다 — 200초 뒤 성공도 done으로 잡는다", async () => {
+    // 2026-08-07 supplier_hub 실측(227초)이 이 자리다. 옛 구현이었다면 성공 직전에 포기했다.
+    const statuses: RefreshStatusLike[] = [S({ requested: false, attempt_count: 0 })];
+    for (let i = 0; i < 66; i++) statuses.push(S({ requested: true, attempt_count: 1, in_flight: true }));
+    statuses.push(S({ requested: false, attempt_count: 1, last_success_at: "T1" }));
+    const clock = fakeClock();
+    const { spec } = mkSpec(statuses);
+    const out = await runStreamRefresh(spec, { ...clock, pollMs: 3000 });
+    expect(out).toEqual({ state: "done" });
+    expect(clock.now()).toBeGreaterThan(90000); // 픽업 상한을 넘겨서까지 추적했다
+  });
+
+  it("T_max(600초)에 닿아도 실패라 부르지 않는다 — 수집은 계속된다고 말한다", async () => {
+    const clock = fakeClock();
+    const { spec } = mkSpec([
+      S({ requested: false, attempt_count: 0 }),
+      S({ requested: true, attempt_count: 1, in_flight: true }), // 집어가서 계속 일하는 중
+    ]);
+    const out = await runStreamRefresh(spec, { ...clock, pollMs: 3000 });
+    expect(out.state).toBe("no_response");
+    expect(clock.now()).toBeGreaterThanOrEqual(600000);
+    const msg = describeOutcome(spec, out);
+    expect(msg).toContain("백그라운드에서 계속");
+    expect(msg).not.toContain("Mac이 켜져 있는지");
+  });
+
+  it("attempt_count를 «모르는» 표면에서는 조기 정착하지 않는다(없는 정보로 단정 금지)", async () => {
+    const clock = fakeClock();
+    const { spec } = mkSpec([
+      S({ requested: false }),
+      S({ requested: true }), // attempt_count 필드 자체가 없다
+    ]);
+    const out = await runStreamRefresh(spec, { ...clock, pollMs: 3000 });
+    expect(out.state).toBe("no_response");
+    expect(clock.now()).toBeGreaterThanOrEqual(600000); // 90초에 끊지 않았다
+  });
+
+  it("호출자가 준 T_max를 존중한다(통합 대사 화면의 300초)", async () => {
+    const clock = fakeClock();
+    const { spec } = mkSpec([
+      S({ requested: false, attempt_count: 0 }),
+      S({ requested: true, attempt_count: 2 }),
+    ]);
+    await runStreamRefresh(spec, { ...clock, timeoutMs: 300000, pollMs: 5000 });
+    expect(clock.now()).toBeGreaterThanOrEqual(300000);
+    expect(clock.now()).toBeLessThan(310000);
+  });
+});

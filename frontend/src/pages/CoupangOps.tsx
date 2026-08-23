@@ -5,7 +5,8 @@ import { useSearchParams } from "react-router-dom";
 import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
 import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
 import { customRangeError, kstDate, OPS_MAX_SPAN_DAYS } from "../lib/periodRange";
-import { fetchSalesSummary, getCoupangAdCostDaily, requestAdCostRefresh, getAdCostRefreshStatus, type SalesSummary, type SalesProductRow, type SalesSellTypeRow, type SalesSummaryData } from "../lib/api";
+import { fetchSalesSummary, getCoupangAdCostDaily, type SalesSummary, type SalesProductRow, type SalesSellTypeRow, type SalesSummaryData } from "../lib/api";
+import { runStreamRefresh, describeOutcome, specByKey } from "../lib/streamRefresh";
 
 const COMPANIES = [
   { value: "ALL", label: "전체" },
@@ -294,44 +295,27 @@ export default function CoupangOps() {
   }
 
   // "광고비 갱신" — Jino Mac 페처를 깨워 오늘 쿠팡 광고비를 즉시 가져온다(Akamai로 prod 직접 fetch 불가).
-  // request-refresh → Mac 데몬이 fetch·push → last_success_at 변화를 폴링해 완료 감지 → 오늘 광고비 리로드.
+  //
+  // ★2026-08-23 W2: 자체 폴링·자체 문구를 걷어내고 공용 모듈에 위임한다. 종전 사본은
+  //   (a)215초 고정 (b)「⚠️ Mac 응답 없음 — Mac이 켜져 있는지…」 옛 한 문구였다. 그래서
+  //   08-22 W4의 «타임아웃 3분할»도, 08-22 W3의 «로그인하면 자동으로 이어받는다»도 이 화면엔
+  //   **하나도 오지 않았다** — 판정·문구가 한 곳이어야 하는 이유가 정확히 이것이다
+  //   (LESSONS #55: 우회 사본이 원본 결함을 은폐한다).
   async function refreshAdCostNow() {
+    const spec = specByKey("ofix_ad");
     setAdRefreshing(true);
     setAdSyncMsg("Mac에서 광고비 가져오는 중… (~20초, 첫 갱신이면 Mac 로그인 창 확인)");
     try {
-      const before = await getAdCostRefreshStatus();
-      const baseline = before.last_success_at;
-      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
-      await requestAdCostRefresh();
-      const deadline = Date.now() + 215000; // 215초 — 데몬 로그인 대기(180s)+fetch 여유까지 커버
-      let done = false;
-      let failed: string | null = null;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const st = await getAdCostRefreshStatus();
-        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
-        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
-        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
-        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
-          failed = st.last_error || "원인 미상";
-          break;
-        }
-        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
-        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
-        if (!st.requested) { done = true; break; }
-      }
-      if (done) {
+      const outcome = await runStreamRefresh(spec);
+      if (outcome.state === "done") {
         await loadTodayAdCost();
         await loadAdCookieStatus();
         setAdSyncMsg("✅ 광고비 갱신 완료");
         setTimeout(() => setAdSyncMsg(null), 4000);
-      } else if (failed) {
-        await loadAdCookieStatus();
-        setAdSyncMsg("❌ Mac 페처 실패: " + failed);
       } else {
-        setAdSyncMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, 첫 갱신이면 로그인 창을 확인하세요.");
+        // 실패면 쿠키 상태를 다시 읽는다 — 종전 사본과 같은 처방(세션 만료가 흔한 사유).
+        if (outcome.state === "failed") await loadAdCookieStatus();
+        setAdSyncMsg(describeOutcome(spec, outcome));
       }
     } catch (e: any) {
       setAdSyncMsg("❌ 갱신 요청 실패: " + (e?.message || ""));

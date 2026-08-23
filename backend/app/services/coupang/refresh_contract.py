@@ -416,7 +416,13 @@ def report_failure(
     attempt = int(row.attempt_count or 0)
     reason: str | None = None
     if kind == KIND_LOGIN_REQUIRED:
-        reason = "로그인 필요 — 재시도 안 함(로그인 후 다시 갱신을 눌러주세요)"
+        # ★「로그인 필요」 접두는 유지한다 — 프론트의 구버전 폴백(kind를 모르는 응답)이 이
+        #   문자열로 매칭한다(streamRefresh.isLoginRequired). 접두를 바꾸면 그 화면이 조용히 깨진다.
+        # ★처방만 정정(2026-08-23 W2): 「로그인 후 다시 갱신을 눌러주세요」는 더 이상 참이 아니다 —
+        #   2026-08-22 W3 이후 데몬이 로그인 회복을 감지해 요청을 자동으로 되살리고(wing_browser_fetcher
+        #   _revive_after_login), 08-23 W1로 Wing은 Keychain 자동 재로그인까지 한다. 사람을 폰으로
+        #   돌려보내는 문구가 남아 있으면 «틀린 처방»이고, 그게 이 계약이 없애려는 것이다.
+        reason = "로그인 필요 — 재시도 안 함(Mac Chrome 탭에서 로그인하면 수집이 자동으로 이어집니다)"
     elif kind == KIND_ACCESS_DENIED:
         reason = "접근 권한/구독 만료 — 재시도 안 함(구독 상태를 확인한 뒤 다시 갱신을 눌러주세요)"
     elif kind == KIND_MAPPING_BROKEN:

@@ -32,9 +32,12 @@ import { RocketBasisToggle } from "../components/RocketBasisToggle";
 import {
   ALL_REFRESH_SPECS,
   isLoginRequired,
+  outcomeView,
   runStreamsRefresh,
   REQUEST_RETRY_DELAYS_MS,
+  type OutcomeTone,
   type RefreshOutcome,
+  type StreamRefreshSpec,
 } from "../lib/streamRefresh";
 import {
   loadBulkRefreshState,
@@ -50,9 +53,36 @@ type SortBy = "revenue" | "net_profit" | "profit_rate";
 // ★단계를 굳이 나눈 이유: "요청이 안 갔다"와 "Mac이 안 받는다"와 "수집하다 실패했다"는
 //   처방이 전부 다른데, 예전 화면은 셋 다 똑같이 아무 말이 없었다.
 
-/** 큐 상태 → 화면 한 줄(아이콘·문구). 실패 사유는 자르지 않고 그대로 보인다. */
-function bulkStateText(st: BulkQueueState | undefined): { icon: string; text: string; tone: string } {
+/** outcomeView의 의미 tone → 화면 색. lib은 Tailwind를 모른다(프레젠테이션은 여기 몫). */
+const TONE_CLASS: Record<OutcomeTone, string> = {
+  progress: "text-gray-600",
+  ok: "text-green-700",
+  warn: "text-amber-700",
+  error: "text-red-700",
+};
+
+/**
+ * 큐 상태 → 화면 한 줄(아이콘·문구). 실패 사유는 자르지 않고 그대로 보인다.
+ *
+ * ★정착 상태(done/failed/timeout)의 문구는 **여기서 짓지 않는다**(2026-08-23 W2) —
+ *   streamRefresh.outcomeView가 유일한 저자다. 종전엔 이 함수가 자기 문구를 갖고 있어서
+ *   08-22 W4가 타임아웃을 세 경우로 가른 뒤에도 패널만 옛 한 문구에 머물렀고, 08-23 10:32
+ *   폰 화면에서 **수집에 성공한 레인**이 「응답 없음 — Mac이 켜져 있는지 확인하세요」로 떴다.
+ *   spec을 넘기지 않는 호출자(__fatal)와 이 배포 전 저장분에는 outcome이 없으므로 폴백이
+ *   남아 있는데, 그 폴백도 **틀린 처방을 말하지 않는다**(사유만 그대로 보이거나 모른다고 한다).
+ */
+function bulkStateText(
+  st: BulkQueueState | undefined,
+  spec?: StreamRefreshSpec,
+): { icon: string; text: string; tone: string } {
   if (!st) return { icon: "·", text: "대기", tone: "text-gray-400" };
+
+  if (spec && (st.kind === "done" || st.kind === "failed" || st.kind === "timeout") && st.outcome) {
+    const v = outcomeView(spec, st.outcome);
+    // 완료 시각은 사실의 «부가»이지 처방이 아니다 — 문구 자체는 위임된 것을 그대로 쓴다.
+    return { icon: v.icon, text: st.kind === "done" ? `${v.text} ${st.at}` : v.text, tone: TONE_CLASS[v.tone] };
+  }
+
   switch (st.kind) {
     case "requesting":
       return st.retry === 0
@@ -69,7 +99,12 @@ function bulkStateText(st: BulkQueueState | undefined): { icon: string; text: st
         ? { icon: "🔑", text: `로그인 필요 — ${st.reason}`, tone: "text-red-700" }
         : { icon: "❌", text: `실패 — ${st.reason}`, tone: "text-red-700" };
     case "timeout":
-      return { icon: "⚠️", text: "응답 없음 — Mac이 켜져 있는지 확인하세요", tone: "text-amber-700" };
+      // 폴백(이 배포 전 저장분 등) — 「Mac을 켜세요」는 참인지 모르므로 말하지 않는다.
+      return {
+        icon: "⚠️",
+        text: "이 회차의 상세를 알 수 없습니다 — 전체 갱신을 다시 누르면 확인됩니다",
+        tone: "text-amber-700",
+      };
     case "stale": {
       // ★P1-7: 페이지를 벗어났다 돌아온 큐 — 폴링이 언마운트로 끊겨 지금 상태를 모른다.
       //   "수집 중"으로 계속 보이면 그것도 거짓말이므로, 추적이 끊겼다는 사실만 말한다.
@@ -446,13 +481,26 @@ export default function Dashboard() {
       results = await runStreamsRefresh(
         ALL_REFRESH_SPECS,
         (spec, outcome) => {
+          // ★outcome을 통째로 싣는다(2026-08-23 W2) — 접어서 넘기면 attemptCount·inFlight·kind가
+          //   사라져 패널이 타임아웃 세 경우를 가를 수 없다(그게 08-23 10:32 폰 오보의 자리다).
           put(
             spec.key,
             outcome.state === "done"
-              ? { kind: "done", at: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) }
+              ? {
+                  kind: "done",
+                  at: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }),
+                  outcome,
+                }
               : outcome.state === "failed"
-                ? { kind: "failed", reason: outcome.reason ?? "실패", login: isLoginRequired(outcome.reason) }
-                : { kind: "timeout" },
+                ? {
+                    kind: "failed",
+                    reason: outcome.reason ?? "실패",
+                    // ★2인자다: kind가 오면 그게 정본이다(1인자 호출은 백엔드의 기계 판독 분류를
+                    //   버리고 문자열 매칭으로 되돌아가는 퇴행이었다 — W1이 없앤 결합).
+                    login: isLoginRequired(outcome.reason, outcome.kind),
+                    outcome,
+                  }
+                : { kind: "timeout", outcome },
           );
         },
         {
@@ -597,7 +645,7 @@ export default function Dashboard() {
           </div>
           <ul className="space-y-1">
             {ALL_REFRESH_SPECS.map((spec) => {
-              const v = bulkStateText(bulkStates[spec.key]);
+              const v = bulkStateText(bulkStates[spec.key], spec);
               return (
                 <li key={spec.key} className="flex items-start gap-2 text-sm">
                   <span className="shrink-0 w-5 text-center">{v.icon}</span>
