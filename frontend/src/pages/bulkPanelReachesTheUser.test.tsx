@@ -74,8 +74,9 @@ import Dashboard from "./Dashboard";
 
 // prod 실측에서 온 세 경우 — 옛 패널은 이 셋을 **한 문구**로 뭉쳤다.
 const ROCKET = specByKey("supplier_hub"); // 집어가서 아직 일하는 중
-const OFIX_AD = specByKey("ofix_ad"); // 세션 만료(kind=login_required)
-const OHITECH = specByKey("ohitech_ad"); // 아무도 안 집었다(attempt 0)
+const OFIX_AD = specByKey("ofix_ad"); // 세션 만료 · 자동 재개 **없는** 레인
+const OFIX_SALES = specByKey("ofix_sales"); // 세션 만료 · 자동 재개 **있는** 레인(wing)
+const OHITECH = specByKey("ohitech_ad"); // 아무도 안 집었다(attempt 0) · 느린 캐던스 레인
 
 const IN_FLIGHT = { state: "no_response", attemptCount: 1, inFlight: true } as const;
 const LOGIN = {
@@ -92,6 +93,7 @@ function seedPanel() {
       states: {
         [ROCKET.key]: { kind: "timeout", outcome: IN_FLIGHT },
         [OFIX_AD.key]: { kind: "failed", reason: LOGIN.reason, login: true, outcome: LOGIN },
+        [OFIX_SALES.key]: { kind: "failed", reason: LOGIN.reason, login: true, outcome: LOGIN },
         [OHITECH.key]: { kind: "timeout", outcome: NOT_PICKED },
       },
       panelOpen: true,
@@ -130,12 +132,28 @@ describe("전체 갱신 패널 — 문구의 저자는 outcomeView 하나다", (
     expect(within(row).getByText(outcomeView(ROCKET, IN_FLIGHT).icon)).toBeTruthy();
   });
 
-  it("세션 만료 → 「자동으로 이어받습니다」가 뜬다(「다시 누르세요」가 아니다)", () => {
+  // ★2026-08-23 적대 리뷰 P1-2: 로그인 처방은 «그 레인에 자동 재개가 배선됐는가»로 갈린다.
+  //   `_revive_lane`은 wing 데몬에만 있어 판매분석·RG만 스스로 되살아나고, 광고비·로켓광고·
+  //   공급자허브는 사람이 다시 눌러야 한다. 한 문구로 뭉치면 셋 중 한쪽은 반드시 거짓말이다.
+  it("자동 재개가 있는 레인과 없는 레인이 **화면에서** 서로 다른 처방을 받는다", () => {
     render(<Dashboard />);
-    const row = laneRow(OFIX_AD.label);
-    expect(row.textContent).toContain(outcomeView(OFIX_AD, LOGIN).text);
-    expect(row.textContent).toContain("자동으로 이어받습니다");
-    expect(row.textContent).not.toContain("다시 누르세요");
+    const auto = laneRow(OFIX_SALES.label);
+    expect(auto.textContent).toContain(outcomeView(OFIX_SALES, LOGIN).text);
+    expect(auto.textContent).toContain("자동으로 이어받습니다");
+
+    const manual = laneRow(OFIX_AD.label);
+    expect(manual.textContent).toContain(outcomeView(OFIX_AD, LOGIN).text);
+    expect(manual.textContent).toContain("다시 눌러주세요");
+    expect(manual.textContent).not.toContain("자동으로 이어받습니다");
+  });
+
+  it("패널 하단 고정 문구가 레인 처방과 모순되지 않는다", () => {
+    // 옛 문구: 「로그인 필요 표시가 뜨면 … 로그인한 뒤 누르세요」 — 자동 재개 레인 줄 바로 아래에서
+    // 「누를 필요 없다」와 정면으로 부딪쳤다(적대 리뷰 P1-2 재현).
+    const { container } = render(<Dashboard />);
+    const panel = container.textContent ?? "";
+    expect(panel).not.toContain("로그인 필요 표시가 뜨면");
+    expect(panel).toContain("처방은 줄마다 다릅니다");
   });
 
   it("아무도 안 집었다 → **그때만** 「Mac이 켜져 있는지」가 참이다", () => {
@@ -174,8 +192,11 @@ describe("전체 갱신 버튼 — 판정 결과가 패널까지 운반된다", 
 
   it("kind=login_required로 소멸한 요청 → 패널이 로그인 안내를 보인다(문구 매칭 없이)", async () => {
     // ★사유 문자열에 「로그인 필요」를 **일부러 넣지 않는다**. 백엔드의 기계 판독 분류(kind)만으로
-    //   갈려야 하기 때문이다 — isLoginRequired를 1인자로 되돌리면(=W1이 없앤 결합) 이 줄이
-    //   평범한 실패로 그려지고 테스트가 죽는다.
+    //   갈려야 하기 때문이다 — 문자열 매칭에 기대면 백엔드가 문구를 바꾸는 순간 화면이 조용히
+    //   깨진다(W1이 없앤 결합).
+    //   ⚠️ 다만 이 테스트가 `isLoginRequired`의 **2인자 호출을 지키지는 못한다**(자가 변이 MUT-6
+    //     생존, 적대 리뷰 P2-5 확인): 위임 이후 `BulkQueueState.login`은 구버전 저장분 폴백에서만
+    //     읽혀 표면에 닿지 않기 때문이다. 여기서 지켜지는 것은 **outcome.kind 경로**다.
     const settled = {
       requested: false,
       last_success_at: null,
@@ -191,14 +212,19 @@ describe("전체 갱신 버튼 — 판정 결과가 패널까지 운반된다", 
     fireEvent.click(screen.getByRole("button", { name: /전체 갱신/ }));
     await vi.advanceTimersByTimeAsync(10000); // 폴 1회(3초)면 정착한다
 
-    const row = laneRow(OFIX_AD.label);
-    expect(row.textContent).toContain("자동으로 이어받습니다");
-    expect(row.textContent).toContain(OFIX_AD.account);
+    // 자동 재개가 있는 레인과 없는 레인이 **같은 회차 안에서** 다른 처방을 받는다.
+    expect(laneRow(OFIX_SALES.label).textContent).toContain("자동으로 이어받습니다");
+    const manual = laneRow(OFIX_AD.label);
+    expect(manual.textContent).toContain("다시 눌러주세요");
+    expect(manual.textContent).toContain(OFIX_AD.account);
   });
 
-  it("아무도 안 집은 요청 → 90초에 정착하고, 그 «타임아웃»도 상세를 실어 나른다", async () => {
-    // ★이 케이스가 따로 필요한 이유: 위 테스트는 failed 경로만 지나서, 정착 상태 중
-    //   **timeout**의 운반이 끊겨도(= 08-23 결함 그 자체) 살아남았다(자가 변이 MUT-4 생존).
+  it("아무도 안 집은 요청 → 자기 레인 상한에 정착하고, 그 «타임아웃»도 상세를 실어 나른다", async () => {
+    // ★이 케이스가 따로 필요한 이유 둘:
+    //   ① 위 테스트는 failed 경로만 지나서, 정착 상태 중 **timeout**의 운반이 끊겨도
+    //     (= 08-23 결함 그 자체) 살아남았다(자가 변이 MUT-4 생존 → 이 테스트가 죽였다).
+    //   ② 느린 레인(ohitech_ad: poll 60s + 쿨다운 60s → 최악 claim ~120s)이 공통 90초에
+    //     잘리면 **집힐 예정인 요청**을 「Mac이 꺼졌다」고 오보한다(적대 리뷰 P1-1).
     h.statusFor = (_lane, nth) =>
       nth === 0
         ? { requested: false, last_success_at: null, last_error_at: null, last_error: null, attempt_count: 0 }
@@ -206,8 +232,13 @@ describe("전체 갱신 버튼 — 판정 결과가 패널까지 운반된다", 
 
     render(<Dashboard />);
     fireEvent.click(screen.getByRole("button", { name: /전체 갱신/ }));
-    await vi.advanceTimersByTimeAsync(120000); // T_pickup(90초)을 넘긴다 — T_max 600초는 안 기다린다
 
+    // 120초 시점 — 이 레인은 아직 집힐 시간이 남았다. 여기서 「Mac이 꺼졌다」가 뜨면 그게 오보다.
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(laneRow(OHITECH.label).textContent).not.toContain("Mac이 요청을 집지 않았습니다");
+
+    // 자기 상한(180초)을 넘기면 그때는 참이다.
+    await vi.advanceTimersByTimeAsync(80000);
     const row = laneRow(OHITECH.label);
     expect(row.textContent).toContain(outcomeView(OHITECH, NOT_PICKED).text);
     expect(row.textContent).toContain("Mac이 요청을 집지 않았습니다");

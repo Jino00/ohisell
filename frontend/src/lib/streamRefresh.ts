@@ -84,6 +84,33 @@ export interface StreamRefreshSpec {
    * 9225=오하이테크 공급자허브. (구 문구가 로켓을 9223으로 잘못 안내하고 있었다.)
    */
   windowHint?: string;
+  /**
+   * 이 레인만의 픽업 상한(ms). 없으면 공통 기본값 PICKUP_TIMEOUT_MS(90초, 계약 승인값).
+   *
+   * ★왜 레인별인가 (2026-08-23 적대 리뷰 P1-1, 저장소 출하 기본값 실측):
+   *     wing(ofix_sales·rg)   poll 15s + 쿨다운 45s → 최악 claim ~60s
+   *     ad_cost(ofix_ad)      poll 15s + 쿨다운 45s → ~60s
+   *     rocket(supplier_hub)  poll 30s, 쿨다운 없음 → ~30s
+   *     **ohitech_ad          poll 60s + 쿨다운 60s → ~120s**  ← 90초를 넘는다
+   *   `ohitech_ad_fetcher.py:1103` 쿨다운은 claim «전에» 검사하고 다음 폴 틱으로 미루므로
+   *   60+60이 그대로 더해진다. 90초로 자르면 **집힐 예정인 요청을 「Mac이 꺼졌다」고 오보**한다 —
+   *   고치려던 병을 다른 레인에서 새로 만드는 셈이다.
+   * ★이건 «전 레인 공통 상한의 단순 상향»(계약 §4 금지선)이 아니다. 상한은 그 레인 데몬의
+   *   캐던스에서 유도하고, 캐던스가 빠른 레인은 90초 그대로 둔다.
+   */
+  pickupTimeoutMs?: number;
+  /**
+   * 사람이 Mac에서 로그인하면 **데몬이 요청을 스스로 되살리는가**.
+   *
+   * ★처방이 갈리는 지점이라 spec에 둔다(2026-08-23 적대 리뷰 P1-2). 실측: 자동 재개
+   *   (`_revive_lane` → `POST …/request-refresh`)는 `wing_browser_fetcher.py:1493·1979-1985`
+   *   **한 곳에만** 있고 VS·RG 레인만 덮는다. `ohitech_ad_fetcher.py`·`ad_cost_browser_fetcher.py`
+   *   ·`rocket_supplier_fetcher.py`에는 재요청이 0건이다.
+   *   그런데 08-22 W3 이후 화면은 **6레인 전부**에 「로그인하면 자동으로 이어받습니다」라고
+   *   말했다 — 셋에겐 거짓이고, 사람은 로그인만 하고 기다리다 아무 일도 안 일어난다.
+   *   침묵보다 나쁜 실패는 **틀린 처방**이라는 이 계약의 전제가 그대로 적용되는 자리다.
+   */
+  autoResumeOnLogin?: boolean;
 }
 
 export interface RunnerDeps {
@@ -229,7 +256,8 @@ export async function runStreamRefresh(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => Date.now());
   const timeoutMs = deps.timeoutMs ?? MAX_TRACKING_MS;
-  const pickupTimeoutMs = deps.pickupTimeoutMs ?? PICKUP_TIMEOUT_MS;
+  // 호출자 지정 > 레인 고유값 > 공통 기본값(계약 승인 90초) 순.
+  const pickupTimeoutMs = deps.pickupTimeoutMs ?? spec.pickupTimeoutMs ?? PICKUP_TIMEOUT_MS;
   const pollMs = deps.pollMs ?? 3000;
 
   const maxRetries = REQUEST_RETRY_DELAYS_MS.length;
@@ -417,10 +445,14 @@ export interface OutcomeView {
 export function outcomeView(spec: StreamRefreshSpec, outcome: RefreshOutcome | null): OutcomeView {
   const loginView = (): OutcomeView => ({
     icon: "🔑",
-    // ★문구 정정(2026-08-22 W3): 이제 로그인만 하면 데몬이 감지해 요청을 자동으로 되살린다.
-    //   「다시 누르세요」는 더 이상 참이 아니고, 그 문구 때문에 사람이 창을 찾아 로그인하고도
-    //   또 버튼을 누르러 폰으로 돌아가야 했다.
-    text: `${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인하면 자동으로 이어받습니다)`,
+    // ★처방은 «그 레인에 자동 재개가 배선돼 있는가»로 갈린다(2026-08-23 적대 리뷰 P1-2).
+    //   - 배선된 레인(wing: 판매분석·RG): 08-22 W3 이후 로그인만 하면 데몬이 요청을 되살린다.
+    //     「다시 누르세요」는 참이 아니고, 그 문구 탓에 사람이 로그인하고도 폰으로 돌아가 또 눌렀다.
+    //   - 배선 없는 레인(광고비·로켓광고·공급자허브): 되살리는 주체가 **없다**. 여기에
+    //     「자동으로 이어받습니다」를 쓰면 사람은 로그인만 하고 영영 기다린다 — 틀린 처방이다.
+    text: spec.autoResumeOnLogin
+      ? `${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인하면 자동으로 이어받습니다)`
+      : `${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인한 뒤 「전체 갱신」을 다시 눌러주세요 — 이 레인은 자동 재개가 없습니다)`,
     tone: "error",
   });
 
@@ -510,6 +542,9 @@ export const STREAM_SPECS: StreamRefreshSpec[] = [
     account: "오픽스(A01564720)",
     getStatus: getWingVendorSummaryRefreshStatus,
     request: requestWingVendorSummaryRefresh,
+    // wing_browser_fetcher: poll 15s + 쿨다운 45s → 최악 ~60s. 90초 기본값으로 충분.
+    // ★자동 재개 배선 있음(`_revive_lane`, wing_browser_fetcher.py:1983).
+    autoResumeOnLogin: true,
   },
   {
     key: "ofix_ad",
@@ -517,6 +552,7 @@ export const STREAM_SPECS: StreamRefreshSpec[] = [
     account: "오픽스(A01564720)",
     getStatus: getAdCostRefreshStatus,
     request: requestAdCostRefresh,
+    // ad_cost_browser_fetcher: poll 15s + 쿨다운 45s → ~60s. 자동 재개 배선 **없음**.
   },
   {
     key: "ohitech_ad",
@@ -525,6 +561,10 @@ export const STREAM_SPECS: StreamRefreshSpec[] = [
     getStatus: getOhitechAdRefreshStatus,
     request: requestOhitechAdRefresh,
     windowHint: "Chrome CDP 9224(오하이테크 광고센터)",
+    // ★이 레인만 캐던스가 느리다: ohitech_ad_fetcher poll 60s + 쿨다운 60s → 최악 ~120s.
+    //   90초로 자르면 집힐 예정인 요청을 「Mac이 꺼졌다」고 오보한다(적대 리뷰 P1-1).
+    //   (60+60)×1.5 = 180초. 자동 재개 배선 **없음**.
+    pickupTimeoutMs: 180000,
   },
   {
     key: "supplier_hub",
@@ -546,6 +586,13 @@ export const RG_STREAM_SPECS: StreamRefreshSpec[] = [
     getStatus: () => getWingRgSettlementRefreshStatus("COUPANG_WING1"),
     request: () => requestWingRgSettlementRefresh("COUPANG_WING1"),
     settleBeforeSuccess: true,
+    autoResumeOnLogin: true,
+    // ★RG 자체 캐던스는 빠르다(poll 15s·버튼은 쿨다운 면제). 그런데 같은 프로세스의 판매분석
+    //   run이 flock을 쥔 채 동기 실행되는 구간이 앞에 있어(wing_browser_fetcher.py:1797-1845),
+    //   그 run이 길면 RG claim이 그만큼 밀린다 — 2026-08-22에 옆 레인이 폴 루프를 약 3분
+    //   점유한 것이 관측된 자리다(그날의 오보가 이 계약의 발단이다). VS run 소요는 아직
+    //   실측이 없으므로(계약 §7 미확인) 관측된 점유 시간을 상한 유도에 쓴다.
+    pickupTimeoutMs: 180000,
   },
   {
     key: "rg_wing2",
@@ -554,6 +601,8 @@ export const RG_STREAM_SPECS: StreamRefreshSpec[] = [
     getStatus: () => getWingRgSettlementRefreshStatus("COUPANG_WING2"),
     request: () => requestWingRgSettlementRefresh("COUPANG_WING2"),
     settleBeforeSuccess: true,
+    autoResumeOnLogin: true,
+    pickupTimeoutMs: 180000, // 위 WING1과 같은 이유(같은 프로세스·같은 flock 구조)
   },
 ];
 

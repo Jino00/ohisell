@@ -315,12 +315,26 @@ describe("describeOutcome — 로그인 필요엔 계정명이 반드시 붙는�
       expect(msg).not.toContain("Mac이 켜져 있는지");
     });
 
-    it("「다시 누르세요」는 더 이상 쓰지 않는다 — 로그인하면 자동으로 이어받는다(W3)", () => {
-      const msg = describeOutcome(spec, {
-        state: "failed", reason: "…", kind: "login_required",
-      });
+    // ★2026-08-23 개정(적대 리뷰 P1-2): 이 단언은 원래 «모든 레인»에 대해 「로그인하면 자동으로
+    //   이어받는다」를 주장했다. 실측하니 자동 재개(`_revive_lane` → request-refresh 재POST)는
+    //   `wing_browser_fetcher.py`에만 있고 광고비·로켓광고·공급자허브 셋은 **되살리는 주체가
+    //   없다**. 그 셋에 그 문구를 쓰면 사람은 로그인만 하고 영영 기다린다 — 침묵보다 나쁜
+    //   «틀린 처방»이고, 이 계약이 없애려는 것이 정확히 그것이다.
+    it("자동 재개가 배선된 레인만 「자동으로 이어받습니다」라고 말한다", () => {
+      const wing = RG_STREAM_SPECS.find((s) => s.key === "rg_wing1")!;
+      expect(wing.autoResumeOnLogin).toBe(true);
+      const msg = describeOutcome(wing, { state: "failed", reason: "…", kind: "login_required" });
       expect(msg).toContain("자동으로 이어받습니다");
-      expect(msg).not.toContain("다시 누르세요");
+      expect(msg).not.toContain("다시 눌러주세요");
+    });
+
+    it("배선이 없는 레인엔 「다시 눌러주세요」가 참이다 — 되살리는 주체가 없다", () => {
+      // spec = supplier_hub(로켓 공급자허브). rocket_supplier_fetcher에 request-refresh 재POST 0건.
+      expect(spec.autoResumeOnLogin).toBeFalsy();
+      const msg = describeOutcome(spec, { state: "failed", reason: "…", kind: "login_required" });
+      expect(msg).toContain("다시 눌러주세요");
+      expect(msg).toContain("자동 재개가 없습니다");
+      expect(msg).not.toContain("자동으로 이어받습니다");
     });
   });
 });
@@ -672,5 +686,52 @@ describe("2단 판정 — 픽업 전엔 90초에 정착하고, 픽업 뒤엔 600
     await runStreamRefresh(spec, { ...clock, timeoutMs: 300000, pollMs: 5000 });
     expect(clock.now()).toBeGreaterThanOrEqual(300000);
     expect(clock.now()).toBeLessThan(310000);
+  });
+});
+
+// ── 레인별 픽업 상한 (2026-08-23 적대 리뷰 P1-1) ─────────────────────────────
+//
+// ★T_pickup 90초의 근거는 「데몬 폴링이 15~60초라 정상이면 그 안에 집힌다」였는데, 저장소가
+//   출하하는 기본값을 전수로 재니 **ohitech_ad만 그 전제를 깬다**:
+//     wing(판매분석·RG)   poll 15s + 쿨다운 45s → 최악 ~60s
+//     ad_cost(광고비)      poll 15s + 쿨다운 45s → ~60s
+//     rocket(공급자허브)   poll 30s, 쿨다운 없음 → ~30s
+//     ohitech_ad          poll 60s + 쿨다운 60s → **~120s**
+//   (`ohitech_ad_fetcher.py:1088-1105` — 쿨다운은 claim 전에 검사하고 다음 폴 틱으로 미룬다.)
+//   90초로 자르면 «집힐 예정인» 요청을 「Mac이 꺼졌다」고 오보한다 — 고치려던 병을 다른 레인에
+//   새로 만드는 것이고, prod는 fresh인데 폰 패널만 빨간 그 상태가 합격 ④의 위반이다.
+describe("픽업 상한은 레인의 데몬 캐던스에서 온다", () => {
+  const stuck = (): RefreshStatusLike[] => [
+    S({ requested: false, attempt_count: 0 }),
+    S({ requested: true, attempt_count: 0 }),
+  ];
+
+  it("느린 레인(ohitech_ad)은 90초에 포기하지 않는다 — 120초에도 아직 기다린다", async () => {
+    const lane = STREAM_SPECS.find((s) => s.key === "ohitech_ad")!;
+    expect(lane.pickupTimeoutMs).toBeGreaterThan(120000); // 최악 claim ~120s를 덮는다
+    const clock = fakeClock();
+    const { spec } = mkSpec(stuck(), { pickupTimeoutMs: lane.pickupTimeoutMs });
+    const out = await runStreamRefresh(spec, { ...clock, pollMs: 3000 });
+    expect(out.state).toBe("no_response");
+    expect(clock.now()).toBeGreaterThanOrEqual(180000); // 90초가 아니라 자기 상한에서 정착
+  });
+
+  it("빠른 레인은 공통 기본값 90초 그대로다(상한을 통째로 올리지 않는다)", async () => {
+    for (const key of ["ofix_sales", "ofix_ad", "supplier_hub"]) {
+      const lane = STREAM_SPECS.find((s) => s.key === key)!;
+      expect(lane.pickupTimeoutMs).toBeUndefined();
+    }
+    const clock = fakeClock();
+    const { spec } = mkSpec(stuck());
+    await runStreamRefresh(spec, { ...clock, pollMs: 3000 });
+    expect(clock.now()).toBeLessThanOrEqual(95000);
+  });
+
+  it("RG 레인은 옆 레인(판매분석)의 폴 루프 점유를 견딜 만큼 기다린다", async () => {
+    // 2026-08-22 실측: 한 레인이 폴 루프를 약 3분 점유했고 그때의 오보가 이 계약의 발단이다.
+    for (const key of ["rg_wing1", "rg_wing2"]) {
+      const lane = RG_STREAM_SPECS.find((s) => s.key === key)!;
+      expect(lane.pickupTimeoutMs ?? 0).toBeGreaterThanOrEqual(180000);
+    }
   });
 });
