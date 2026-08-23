@@ -475,12 +475,20 @@ def _merge_rg_summary(db: Session, rows: list[dict], df, dt) -> list[dict]:
             row_3p = next((r for r in out if r["channel_id"] == ch_3p.id), None)
             if row_3p is not None:
                 row_3p["ad_spend"] = str(Decimal(row_3p["ad_spend"]) + ad["p3"])
+                input_vat = ad["p3"] * Decimal("10") / Decimal("110")
                 if row_3p.get("net_profit") is not None:
                     # 광고비가 늘면 순이익이 그만큼 줄고, 매입세액도 그만큼 는다.
                     row_3p["net_profit"] = str(
-                        Decimal(row_3p["net_profit"])
-                        - ad["p3"]
-                        + ad["p3"] * Decimal("10") / Decimal("110")
+                        Decimal(row_3p["net_profit"]) - ad["p3"] + input_vat
+                    )
+                # ★자백 칸도 같이 움직여야 한다(적대 리뷰 1R P1-4). 종전엔 `net_profit`만 고치고
+                #   `payable_vat`은 병합 전 값 그대로 뒀다 — 근거 화면이 「이 행이 실제로 뺀
+                #   부가세」라며 **광고비 매입세액만큼 큰 값**을 보이고, 그 차액이 잔차로 떠서
+                #   「설명 못 한 돈」에 **틀린 이름**이 붙었다(쿠팡 3P 광고가 도는 날 상시 재현).
+                #   카드 4값은 안 바뀐다 — `net_profit`은 위에서 이미 같은 값으로 조정돼 있다.
+                if row_3p.get("payable_vat") is not None:
+                    row_3p["payable_vat"] = str(
+                        Decimal(row_3p["payable_vat"]) - input_vat
                     )
             else:
                 out.append(_ad_only_row(ch_3p, ad["p3"]))

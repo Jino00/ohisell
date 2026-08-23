@@ -54,6 +54,31 @@ def _opt_dec(value) -> Decimal | None:
     return Decimal(str(value))
 
 
+def _cost_is_unknown(row: dict) -> bool:
+    """이 행의 `cost: "0"`이 «원가가 0원»이 아니라 «원가를 모른다»인가.
+
+    ★적대 리뷰 1R P1-1 — 초판은 「키가 없으면 모른다」만 봤는데, **두 평행 엔진은 원가를 못 믿는
+      분기에서 `cost`를 «0으로 실어 보낸다».** 그 분기의 주석이 스스로 그렇게 말한다:
+        · `rocket_1p_channel_pnl.py` — *"basis=settlement(기본): … 순이익 없음(원가 축이 안 닿는다)"*
+        · `rg_channel_pnl.py`        — *"원가를 못 믿는다 → 순이익 없음. … `cost`를 0으로 실어
+                                        보내면 화면이 「원가 0」으로 읽으므로"*
+      (RG는 그렇게 적어 놓고 바로 아래에서 `cost = ZERO`를 싣는다.)
+      그래서 초판 화면은 로켓1P 원가 칸에 **「0원」**을 찍었다 — 계약 §2-2가 금지한 바로 그 거짓말.
+
+    판정 신호는 **행이 스스로 낸 자백**을 쓴다: `net_profit`이 None이면 그 행은 「손익을 못 잰다」고
+    선언한 것이고, 두 엔진 모두 **정확히 그 분기에서만** 원가를 0으로 만든다. 원가가 0이 아닌 값이면
+    그건 실측이므로 손대지 않는다.
+
+    ★고치는 자리를 producer가 아니라 여기로 잡은 이유: producer의 `cost`는 다른 화면들이 이미 읽고
+      있어 건드리면 이번 계약의 「숫자 자체 수정 안 함」을 넘는다. 여기서 내리면 **근거 화면에서만**
+      «모른다»가 되고 어떤 합계도 안 바뀐다(0을 빼는 것이라 잔차가 불변이다).
+    """
+    if row.get("net_profit") is not None:
+        return False
+    cost = _opt_dec(row.get("cost"))
+    return cost is not None and cost == ZERO
+
+
 def build_row_evidence(row: dict, rocket_channel_id: int | None) -> dict:
     """채널 행 1개 → 근거 행 1개.
 
@@ -67,6 +92,8 @@ def build_row_evidence(row: dict, rocket_channel_id: int | None) -> dict:
     net, basis_rev, floor_ad = net_contribution(row, revenue)
 
     deductions = {k: _opt_dec(row.get(k)) for k in DEDUCTION_KEYS}
+    if _cost_is_unknown(row):
+        deductions["cost"] = None   # 「0원」이 아니라 「모른다」 — 위 함수 주석 참조
     missing = [k for k, v in deductions.items() if v is None]
     known_sum = sum((v for v in deductions.values() if v is not None), ZERO)
 
@@ -75,7 +102,7 @@ def build_row_evidence(row: dict, rocket_channel_id: int | None) -> dict:
         residual: Decimal | None = None
         explains = False
     else:
-        residual = (net - (revenue - known_sum)).quantize(RESIDUAL_SCALE)
+        residual = _q(net - (revenue - known_sum))
         # ★`explains_net`은 **화면에 그린 산술이 순이익을 재현하는가**만 묻는다 — `missing`이
         #   비었는지는 묻지 않는다. 왜냐하면 `promo_burden`처럼 **한 채널에만 있는 항목**은
         #   나머지 행에서 영원히 비어 있고, 그걸 미달로 치면 정상 행이 전부 ✗가 되어
@@ -149,7 +176,7 @@ def build_kpi_evidence(
     revenue_total = totals["revenue"]
     net_total = totals["net_profit"]
     known_sum = sum((Decimal(v) for v in ded_totals.values()), ZERO)
-    residual_total = (net_total - (revenue_total - known_sum)).quantize(RESIDUAL_SCALE)
+    residual_total = _q(net_total - (revenue_total - known_sum))
 
     # 이익률 분모가 총매출과 다른 몫 — 「손익을 못 잰 매출」이다. 이 차액을 안 보여 주면
     # 사용자는 −285,507 ÷ 1,670,990을 손으로 계산해 보고 화면과 다르다고 결론 내린다.
@@ -195,7 +222,10 @@ def build_kpi_evidence(
 
 
 def _q(value: Decimal) -> Decimal:
-    return value.quantize(RESIDUAL_SCALE)
+    """원 단위 2자리로 끊는다. **음의 0(`-0.00`)은 0으로 편다** — Decimal은 부호를 보존해서
+    검산이 정확히 맞는 행이 `-0.00`으로 나오고, 그 문자열이 그대로 화면·응답에 실린다."""
+    q = value.quantize(RESIDUAL_SCALE)
+    return ZERO.quantize(RESIDUAL_SCALE) if q == ZERO else q
 
 
 def _sum(rows: list[dict], key: str) -> Decimal:

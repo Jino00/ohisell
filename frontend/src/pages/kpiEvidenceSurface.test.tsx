@@ -78,12 +78,17 @@ function evidence(over: Record<string, unknown> = {}) {
         channel_id: 5, channel_name: "쿠팡 로켓배송", company: "오하이테크",
         label: "오하이테크 · 쿠팡 로켓배송(1P)",
         revenue: "570000", product_revenue: "570000", shipping_revenue: "0",
-        // ★배송비·고정비·부가세를 **원래 안 싣는 행** — null이지 0이 아니다.
+        // ★로켓1P 계산서 축이 **실제로 내는 모양**(적대 리뷰 1R P1-1로 정정).
+        //   producer는 `cost`·`commission`·`shipping`을 "0"으로 싣고 `fixed_cost`·`promo_burden`·
+        //   `payable_vat`은 아예 안 싣는다. 그중 «원가»만 백엔드가 «모른다»로 내려 준다 —
+        //   그 축이 스스로 「원가 축이 안 닿는다」고 선언했기 때문이다. 나머지 0은 사실이다.
+        //   초판 픽스처는 `cost: null`을 «백엔드가 원래 그렇게 준다»고 가정했는데,
+        //   그건 **백엔드가 한 번도 만들지 않는 모양**이었다.
         deductions: {
           cost: null, commission: "0", ad_spend: "557888",
-          shipping: null, fixed_cost: null, payable_vat: null,
+          shipping: "0", fixed_cost: null, payable_vat: null,
         },
-        missing: ["cost", "shipping", "fixed_cost", "payable_vat"],
+        missing: ["cost", "fixed_cost", "promo_burden", "payable_vat"],
         net_profit: "-557888", net_scope: "ad_only", net_floor_ad: "557888",
         net_basis_revenue: "0", unmapped_revenue: "570000",
         residual: "570000.00", explains_net: false, order_count: 31,
@@ -232,8 +237,9 @@ describe("모르는 항목", () => {
 
     const rocketRow = screen.getByText("오하이테크 · 쿠팡 로켓배송(1P)").closest("tr")!;
     const cells = within(rocketRow).getAllByText("—");
-    // cost·shipping·fixed_cost·payable_vat 넷이 «모른다»다
-    expect(cells.length).toBeGreaterThanOrEqual(4);
+    // cost(백엔드가 «모른다»로 내림)·fixed_cost·payable_vat 셋이 "—"다.
+    // shipping "0"은 사실이므로 "—"가 아니다 — 모르는 것과 없는 것을 섞지 않는다.
+    expect(cells.length).toBe(3);
     expect(rocketRow.textContent).not.toContain("0원원");
     // 각주도 그 뜻을 말해야 한다
     expect(screen.getByText(/"—"는 0원이 아니라/)).toBeTruthy();
@@ -243,6 +249,41 @@ describe("모르는 항목", () => {
     h.evidence = evidence();
     renderEvidence("net_profit");
     await waitFor(() => expect(screen.getByText(/잔차 570,000원/)).toBeTruthy());
+  });
+
+  it("M8 — 총계 잔차가 남으면 검산식에 «+ 설명 못 한 잔차» 줄이 뜬다", async () => {
+    // ★부호가 «더하기»여야 한다(적대 리뷰 1R P1-2): residual := net − (매출 − 항목합) 이므로
+    //   net = 매출 − 항목합 **+** residual. 초판 라벨 「− 잔차」로는 화면에 적힌 산술을
+    //   그대로 따라가면 총계가 2×잔차만큼 안 맞았다.
+    // 로켓1P의 원가가 «모른다»라 항목 합에서 570,000이 빠진 상태를 재현한다.
+    const base = evidence();
+    h.evidence = evidence({
+      deduction_totals: { ...base.deduction_totals, cost: "242400" },
+      totals: { ...base.totals, residual: "-570000.00" },
+    });
+    renderEvidence("net_profit");
+    const line = await screen.findByText("+ 설명 못 한 잔차");
+    expect(line.parentElement!.parentElement!.textContent).toContain("-570,000원");
+
+    // ★화면에 적힌 산술이 실제로 화면의 총계를 만들어내야 한다 — 이게 검산 페이지의 존재 이유다.
+    const known = 242400 + 241330 + 570405 + 30000 + 88120 + 214242;
+    expect(1670990 - known + -570000).toBe(-285507);
+  });
+
+  it("P1-3 — 잔차가 남아도 카드와 값이 같으면 ✓다 (두 질문은 다르다)", async () => {
+    // 기본 축에서 로켓1P 잔차는 «항상» 남는다. 그걸로 ✗를 찍으면 라이브에서 매일 ✗가 뜨고,
+    // 진짜 불일치가 생긴 날과 구별할 수 없게 된다.
+    h.evidence = evidence({
+      totals: { ...evidence().totals, residual: "-570000.00" },
+      deduction_totals: { ...evidence().deduction_totals, cost: "242400" },
+      checks: {
+        revenue_matches: true, net_matches: true,
+        order_count_matches: true, net_fully_explained: false,
+      },
+    });
+    renderEvidence("net_profit");
+    await waitFor(() => expect(screen.getByText(/✓ 카드와 일치/)).toBeTruthy());
+    expect(screen.queryByText(/✗ 카드와 불일치/)).toBeNull();
   });
 });
 

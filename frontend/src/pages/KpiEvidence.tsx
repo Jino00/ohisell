@@ -136,7 +136,11 @@ export function NetProfitEvidence({ data }: { data: KpiEvidenceData }) {
         residual={residual !== 0 ? data.totals.residual : undefined}
         total={data.totals.net_profit}
         totalLabel="= 순이익"
-        ok={data.checks.net_matches && data.checks.net_fully_explained}
+        // ★배지는 «카드와 같은 숫자인가»만 말한다(적대 리뷰 1R P1-3). 종전엔 `net_fully_explained`
+        //   까지 AND로 묶었는데, 기본 축에서 로켓1P 행의 잔차는 **항상** −매출이라 라이브에서
+        //   **매일 ✗**가 떴다 — 카드와 값이 같은데도 「불일치」라고 말하고, 그래서 진짜 불일치가
+        //   생긴 날과 구별이 안 된다. 「설명 못 한 몫이 있다」는 아래 잔차 줄이 따로 말한다.
+        ok={data.checks.net_matches}
       />
 
       {data.has_floor && (
@@ -316,19 +320,26 @@ function Equation({
         {first && (
           <Row label={first.label} value={fmt(first.value, first.unit ?? unit)} />
         )}
-        {lines.map((l) => (
+        {/* ★key에 index를 섞는다 — leaf 라벨은 회사·판매방식이 같으면 겹친다(WING1·WING2가
+            같은 「… · 쿠팡 3P」로 분류된다). 라벨만 key로 쓰면 매출 근거의 채널 줄이 조용히
+            하나로 합쳐 보인다. */}
+        {lines.map((l, i) => (
           <Row
-            key={l.label}
+            key={`${i}:${l.label}`}
             label={l.label}
             value={fmt(l.value, l.unit ?? unit)}
             note={l.note}
           />
         ))}
         {residual !== undefined && (
+          // ★부호는 «더하기»다(적대 리뷰 1R P1-2). residual := net − (매출 − 항목합) 이므로
+          //   net = 매출 − 항목합 **+** residual 이다. 초판 라벨이 「− 잔차」였고, 그래서
+          //   화면에 적힌 산술을 그대로 따라가면 **총계가 2×잔차만큼 안 맞았다** —
+          //   검산하라고 만든 화면이 검산을 실패하게 만드는 자리였다.
           <Row
-            label="− 설명 못 한 잔차"
+            label="+ 설명 못 한 잔차"
             value={won(residual)}
-            note="항목 합으로 재현되지 않는 금액 — 숨기지 않고 이름을 붙인다"
+            note="항목 합으로 재현되지 않는 금액 — 숨기지 않고 부호 그대로 더한다"
             tone="text-amber-700"
           />
         )}
