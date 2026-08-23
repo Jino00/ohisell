@@ -531,6 +531,67 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(errorEl.textContent).toContain("매핑.csv");
       expect(errorEl.textContent).toContain("xlsx");
     });
+
+    // ── 적대 리뷰 1R 산출물 (2026-08-23) ────────────────────────────────
+    // P1: 카드가 role="button"이라 중첩된 「지우기」의 Enter를 가로채 죽이고 파일 선택창을
+    //     대신 열었다. 「바꾸기」는 목적이 우연히 같아 증상이 안 보였다 — 그래서 놓칠 뻔했다.
+    it("P1: 「지우기」가 키보드(Enter)로도 작동한다 — 카드가 자식의 키를 가로채지 않는다", async () => {
+      await openRecipesTab();
+      const input = screen.getByLabelText("원가 정본 파일");
+      const file = new File(["x"], "MD_원가 계산_260822.xlsx");
+      fireEvent.change(input, { target: { files: [file] } });
+
+      const costZone = screen.getByTestId("cost-dropzone-cost");
+      expect(within(costZone).getByText("MD_원가 계산_260822.xlsx")).toBeTruthy();
+
+      const clearBtn = within(costZone).getByRole("button", { name: "지우기" });
+
+      // ★단언의 자리를 조심해야 한다. `fireEvent.click`을 뒤에 붙이면 그 클릭이 파일을 지워
+      //   버려서, 결함이 있어도 초록으로 통과한다(실제로 그렇게 썼다가 변이가 SURVIVED 했다).
+      //   jsdom은 keydown 뒤 네이티브 버튼 활성화를 대신해 주지 않으므로, 브라우저가 그 활성화를
+      //   «할 수 있는 상태인가»를 직접 잰다 — 즉 부모가 preventDefault로 죽이지 않았는가.
+      const pickerSpy = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+      const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      clearBtn.dispatchEvent(ev);
+
+      expect(ev.defaultPrevented).toBe(false); // 죽이면 브라우저가 「지우기」를 못 누른다
+      expect(pickerSpy).not.toHaveBeenCalled(); // 대신 파일 선택창이 열려서도 안 된다
+      pickerSpy.mockRestore();
+    });
+
+    // P2-1 채택: 거부만 말하고 «이전 선택이 사라졌다»를 안 말하면, 사람은 멀쩡한 파일이
+    //   아직 들어 있는 줄 알고 다음 단계로 간다. 부작용을 감추는 사유는 틀린 사유다.
+    it("P2-1: 고른 파일 위에 잘못된 파일을 넣으면 «이전 선택이 취소됐다»고 말한다", async () => {
+      await openRecipesTab();
+      const input = screen.getByLabelText("원가 정본 파일");
+      fireEvent.change(input, { target: { files: [new File(["x"], "정상.xlsx")] } });
+      fireEvent.change(input, { target: { files: [new File(["x"], "잘못.csv")] } });
+
+      const errorEl = within(screen.getByTestId("cost-dropzone-cost")).getByTestId(
+        "cost-dropzone-cost-error",
+      );
+      expect(errorEl.textContent).toContain("잘못.csv");
+      expect(errorEl.textContent).toContain("정상.xlsx"); // 무엇이 취소됐는지 이름으로 말한다
+      expect(errorEl.textContent).toContain("취소");
+    });
+
+    // P2-2 채택: 두 엑셀을 한 칸에 함께 떨어뜨리는 것은 실사용에서 충분히 일어난다.
+    //   나머지를 조용히 버리면 사람은 둘 다 올린 줄 안다.
+    it("P2-2: 한 칸에 여러 파일을 드롭하면 «하나만 받았다»고 말한다 — 조용히 안 버린다", async () => {
+      await openRecipesTab();
+      const costZone = await screen.findByTestId("cost-dropzone-cost");
+      const dropEvent = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(dropEvent, "dataTransfer", {
+        value: { files: [new File(["x"], "첫.xlsx"), new File(["x"], "둘.xlsx")] },
+      });
+      costZone.dispatchEvent(dropEvent);
+
+      const noteEl = await within(costZone).findByTestId("cost-dropzone-cost-error");
+      expect(noteEl.textContent).toContain("하나만 받습니다");
+      expect(noteEl.textContent).toContain("첫.xlsx");
+      // ★거부가 아니다 — 첫 파일은 실제로 선택돼 있어야 한다.
+      expect(within(costZone).getByText("첫.xlsx")).toBeTruthy();
+    });
   });
 });
 // ★다른 라우트에서 같은 단언을 반복하지 않는다: 메뉴는 `Layout`이 라우트와 무관하게 그리므로

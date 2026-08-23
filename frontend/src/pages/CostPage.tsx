@@ -510,6 +510,28 @@ export function validateCostExcelFile(file: File): string | null {
   return null;
 }
 
+/** 선택 한 번이 만드는 «할 말»을 전부 모은다 — 거부 사유 + 부작용 고지.
+ *
+ * ★거부만 말하고 «그래서 이전 선택이 사라졌다»를 안 말하면, 사람은 멀쩡한 파일이
+ *   아직 들어 있는 줄 알고 다음 단계로 간다. 부작용을 감추는 사유는 틀린 사유다
+ *   (교훈 #349의 같은 결 — 적대 리뷰 1R P2-1·P2-2 채택, 2026-08-23). */
+export function buildSelectNotes(
+  problem: string | null,
+  had: File | null,
+  droppedCount: number,
+  file: File,
+): { message: string | null; rejected: boolean } {
+  const parts: string[] = [];
+  if (problem) {
+    parts.push(problem);
+    if (had) parts.push(`앞서 고른 「${had.name}」은 취소됐습니다 — 다시 골라 주세요.`);
+  } else if (droppedCount > 1) {
+    // 거부가 아니다. 받아들이되 «나머지를 안 받았다»는 사실을 말한다.
+    parts.push(`한 칸은 파일 하나만 받습니다 — ${droppedCount}개 중 「${file.name}」만 골랐습니다.`);
+  }
+  return { message: parts.length ? parts.join(" ") : null, rejected: Boolean(problem) };
+}
+
 /** 파일 크기를 KB/MB로 사람이 읽게 바꾼다. */
 export function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
@@ -551,7 +573,7 @@ function CostExcelDropZone({
   file: File | null;
   error: string | null;
   busy: boolean;
-  onSelect: (file: File) => void;
+  onSelect: (file: File, droppedCount?: number) => void;
   onClear: () => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
@@ -570,6 +592,11 @@ function CostExcelDropZone({
       data-testid={`cost-dropzone-${slot}`}
       onClick={openPicker}
       onKeyDown={(e) => {
+        // ★카드 «자신»에 포커스가 있을 때만 받는다. 이 가드가 없으면 카드가 role="button"이라
+        //   중첩된 「바꾸기」·「지우기」의 Enter/Space를 가로채 preventDefault로 죽이고 대신
+        //   파일 선택창을 연다 — 「지우기」는 목적이 정반대라 **키보드로는 영영 안 지워진다**.
+        //   (적대 리뷰 1R P1, 2026-08-23. 「바꾸기」는 우연히 목적이 같아 증상이 안 보였다.)
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           openPicker();
@@ -590,8 +617,10 @@ function CostExcelDropZone({
         e.stopPropagation();
         setDragOver(false);
         if (busy) return;
-        const f = e.dataTransfer.files?.[0];
-        if (f) onSelect(f);
+        const files = e.dataTransfer.files;
+        const f = files?.[0];
+        // ★한 칸은 파일 하나만 받는다. 나머지를 «조용히» 버리면 사람은 둘 다 올린 줄 안다.
+        if (f) onSelect(f, files?.length ?? 1);
       }}
       className={`relative flex flex-col gap-1 rounded-md border-2 border-dashed p-3 select-none ${
         busy ? "cursor-not-allowed" : "cursor-pointer"
@@ -696,14 +725,15 @@ export function RecipeImportPanel({
   const [costError, setCostError] = useState<string | null>(null);
   const [mappingError, setMappingError] = useState<string | null>(null);
 
-  const handleSelect = (slot: "cost" | "mapping", file: File) => {
-    const problem = validateCostExcelFile(file);
+  const handleSelect = (slot: "cost" | "mapping", file: File, droppedCount = 1) => {
+    const had = slot === "cost" ? cost : mapping;
+    const notes = buildSelectNotes(validateCostExcelFile(file), had, droppedCount, file);
     if (slot === "cost") {
-      setCostError(problem);
-      setCost(problem ? null : file);
+      setCostError(notes.message);
+      setCost(notes.rejected ? null : file);
     } else {
-      setMappingError(problem);
-      setMapping(problem ? null : file);
+      setMappingError(notes.message);
+      setMapping(notes.rejected ? null : file);
     }
   };
 
@@ -732,7 +762,7 @@ export function RecipeImportPanel({
           file={cost}
           error={costError}
           busy={busy}
-          onSelect={(f) => handleSelect("cost", f)}
+          onSelect={(f, n) => handleSelect("cost", f, n)}
           onClear={() => {
             setCost(null);
             setCostError(null);
@@ -747,7 +777,7 @@ export function RecipeImportPanel({
           file={mapping}
           error={mappingError}
           busy={busy}
-          onSelect={(f) => handleSelect("mapping", f)}
+          onSelect={(f, n) => handleSelect("mapping", f, n)}
           onClear={() => {
             setMapping(null);
             setMappingError(null);
