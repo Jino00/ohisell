@@ -77,7 +77,16 @@ export default function RocketGrowthPnl() {
   const cons = data?.conservation;
 
   // 상품 행 소계 — «상품에 붙는 것만»의 합이다. 계정 공통 행과 더해야 총 순이익이 된다.
-  const optSum = rows.reduce((s, r) => s + n(r.net_profit), 0);
+  //
+  // ★백엔드가 낸 값을 그대로 쓴다. 화면이 따로 더하지 않는다 (완료 QA가 잡았다, 2026-08-23).
+  //   종전엔 `rows.reduce((s,r) => s + n(r.net_profit), 0)`로 화면이 **직접 더했는데**,
+  //   원장 축 폴백 창에서는 전 행의 `net_profit`이 `null`이라 그 합이 **0원으로 접혔다**.
+  //   그래서 같은 화면에서 표 하단 「상품 행 소계 0원」과 보존식 박스의 「상품 행 소계
+  //   1,915,331원」이 **같은 라벨로 다른 숫자**를 말했다.
+  // ★근본 원인은 계산이 아니라 «진실의 원천이 둘»이었다는 것이다 — 하나로 줄이면 갈라질 수 없다.
+  //   이건 이 계약에서 「모름」이 「0」으로 접힌 **네 번째** 자리다(1R P1 보존식 서브합 →
+  //   라이브 배지 반전 → 배지의 null falsy → 여기). 앞의 셋을 고치면서도 이 자리는 안 보였다.
+  const optSumCell = cell(cons?.options_net_sum ?? null);
 
   return (
     <div className="p-6 space-y-4">
@@ -201,7 +210,7 @@ export default function RocketGrowthPnl() {
               <tr className="border-t bg-gray-50 font-medium">
                 <td className="px-3 py-2">상품 행 소계</td>
                 <td colSpan={6} />
-                <td className="text-right px-3 py-2">{wonR(optSum)}</td>
+                <td className="text-right px-3 py-2">{optSumCell}</td>
               </tr>
             )}
           </tbody>
