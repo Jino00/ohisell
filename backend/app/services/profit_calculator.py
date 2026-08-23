@@ -1220,13 +1220,17 @@ def calculate_channel_summary(
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
         # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
+        # ★값을 **한 번만** 계산해 net과 출력 행이 같은 것을 쓴다(2026-08-23, 근거 페이지).
+        #   행에 싣는 이유: 이 항목이 없으면 「매출 − 비용들 = 순이익」 검산식이 화면에서
+        #   원 단위로 안 맞는다 — 그리고 안 맞는 이유가 **부가세라는 사실 자체가 화면 밖**이었다.
+        #   두 번 계산하면 언젠가 갈라지므로 재계산이 아니라 노출이다.
+        vat_due = payable_vat(
+            b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"],
+            b["fixed_cost"],
+        )
         net = (
             b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
-            - b["fixed_cost"]
-            - payable_vat(
-                b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"],
-                b["fixed_cost"],
-            )
+            - b["fixed_cost"] - vat_due
         )
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
@@ -1242,6 +1246,7 @@ def calculate_channel_summary(
             "fixed_cost": str(b["fixed_cost"]),
             "unmapped_revenue": str(b["unmapped_revenue"]),
             "shipping": str(b["shipping"]),
+            "payable_vat": str(vat_due),
             "net_profit": str(net),
             "profit_rate": str(rate_pct.quantize(Decimal("0.01")) if isinstance(rate_pct, Decimal) else "0.00"),
             "order_count": b["order_count"],

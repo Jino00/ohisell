@@ -2,6 +2,8 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
+// KPI 카드 4칸의 근거(계산) 페이지 — 계약 CONTRACT_kpi_evidence_page.md.
+import KpiEvidence from "./pages/KpiEvidence";
 import Orders from "./pages/Orders";
 import Products from "./pages/Products";
 import InventoryPage from "./pages/InventoryPage";
@@ -39,6 +41,7 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="kpi-evidence" element={<KpiEvidence />} />
           <Route path="command-center" element={<CommandCenter />} />
           <Route path="coupang-ops" element={<CoupangOps />} />
           <Route path="coupang-ad-changes" element={<CoupangAdChanges />} />

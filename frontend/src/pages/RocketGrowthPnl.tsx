@@ -66,6 +66,8 @@ export default function RocketGrowthPnl() {
   const [data, setData] = useState<RgOptionPnlResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** 판매도 광고도 없는 행을 펼쳐 볼 것인가. 기본은 접힘 — 진짜 행이 묻히지 않게. */
+  const [showQuiet, setShowQuiet] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -101,6 +103,20 @@ export default function RocketGrowthPnl() {
   //   이건 이 계약에서 「모름」이 「0」으로 접힌 **네 번째** 자리다(1R P1 보존식 서브합 →
   //   라이브 배지 반전 → 배지의 null falsy → 여기). 앞의 셋을 고치면서도 이 자리는 안 보였다.
   const optSumCell = cell(cons?.options_net_sum ?? null);
+
+  // ★조용한 행 접기 — 판매도 광고도 없는 옵션이 표에 대량 섞여 진짜 행을 묻는다(n=6 이월).
+  //
+  // ★«접는다»이지 «거른다»가 아니다. 셋을 지킨다:
+  //   ①합계는 백엔드의 `conservation.options_net_sum`이라 **접기와 무관**하다 — 화면이 다시
+  //     더하지 않으므로 접힌 행의 금액이 합계에서 새는 일이 원리적으로 없다.
+  //   ②접은 개수를 **수치로 자백**하고 한 번 눌러 펼칠 수 있다. 숨긴 것을 «없는 것»으로
+  //     만들면 그게 이 사슬이 네 번 밟은 「모름/있음이 0으로 접히는」 병의 다섯 번째다.
+  //   ③판정은 «판매 0 · 매출 0 · 광고 0» 셋 다일 때만이다. 반품으로 매출이 **음수**인 행은
+  //     판매수량이 0이어도 조용하지 않다 — 손익에 실제로 영향을 준다.
+  const isQuiet = (r: (typeof rows)[number]): boolean =>
+    n(r.units_sold) === 0 && n(r.revenue) === 0 && n(r.ad_spend) === 0;
+  const quietCount = rows.filter(isQuiet).length;
+  const visibleRows = showQuiet ? rows : rows.filter((r) => !isQuiet(r));
 
   return (
     <div className="p-6 space-y-4">
@@ -203,7 +219,7 @@ export default function RocketGrowthPnl() {
                 </td>
               </tr>
             )}
-            {rows.map((r) => (
+            {visibleRows.map((r) => (
               <tr key={r.vendor_item_id} className="border-t">
                 <td className="px-3 py-2">
                   <div>{r.name || NO_DATA}</div>
@@ -220,6 +236,25 @@ export default function RocketGrowthPnl() {
                 <td className="text-right px-3 py-2 font-medium">{cell(r.net_profit)}</td>
               </tr>
             ))}
+            {quietCount > 0 && (
+              <tr className="border-t bg-gray-50">
+                <td colSpan={8} className="px-3 py-2 text-sm text-gray-600">
+                  판매도 광고도 없는 행 <strong>{num(quietCount)}개</strong>를{" "}
+                  {showQuiet ? "펼쳤다" : "접었다"} —{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowQuiet((v) => !v)}
+                    className="text-blue-600 underline"
+                  >
+                    {showQuiet ? "다시 접기" : "펼치기"}
+                  </button>
+                  <span className="block text-xs text-gray-400 mt-0.5">
+                    접은 것이지 «없는» 것이 아니다. 아래 소계는 백엔드가 낸 값이라
+                    <strong> 접기와 무관하게 전 행을 포함</strong>한다.
+                  </span>
+                </td>
+              </tr>
+            )}
             {rows.length > 0 && (
               <tr className="border-t bg-gray-50 font-medium">
                 <td className="px-3 py-2">상품 행 소계</td>
