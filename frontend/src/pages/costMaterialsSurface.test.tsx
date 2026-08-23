@@ -68,6 +68,9 @@ const KIT: CostMaterial = {
   category: "부자재",
   status: "unconfirmed",
   excel_label: null,
+  // ★cleaning kit은 **엑셀 대응 항목이 없는 유일한 종**이다(`excel_label: null`과 같은
+  //   사실의 다른 면) — 그래서 참고값도 없다. prod 실측 2026-08-23: 참고값 보유 128/129.
+  excel_ref_price: null,
   match_rule: "cleaning kit",
   form_factor: null,
   part: null,
@@ -579,6 +582,8 @@ describe("표준원가 계산 내역 — 못 쓰는 사유가 사람 말이 된�
         price_note: null,
         material_id: 1,
         usable: false,
+        // cleaning kit엔 엑셀 대응 항목이 없다 → 참고값도 없다(위 KIT과 같은 사실).
+        excel_ref_price: null,
       },
     ],
   };

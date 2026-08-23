@@ -186,6 +186,14 @@ def material_payload(m: CostMaterial, prices: list[CostMaterialPrice]) -> dict:
         "category": m.category,
         "status": m.status,
         "excel_label": m.excel_label,
+        # ★엑셀 원가 정본의 **참고값** — 단가가 아니다(계약 §3 금지선).
+        #   ★왜 실어 보내나(2026-08-23 실측): prod에서 단가 보유 종은 **1/129**인데 참고값
+        #   보유 종은 **128/129**다. 그런데 이 payload가 참고값을 안 실어서 화면은
+        #   「단가 없음 — 원장 연결 또는 수동 입력 필요」라고만 말했다 — 할 일이 셋인데 둘만
+        #   제시했고, **빠진 셋째(채택)가 가장 싼 길**이었다. 백엔드만 아는 사실은 없는 것과
+        #   같다(`check_payload` docstring과 같은 결).
+        #   ★`latest_price_*`엔 절대 안 섞는다 — 참고값이 단가 자리에 앉으면 그게 §3 위반이다.
+        "excel_ref_price": _d(m.excel_ref_price),
         "match_rule": m.match_rule,
         "form_factor": m.form_factor,
         "part": m.part,

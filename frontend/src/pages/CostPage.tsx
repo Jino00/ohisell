@@ -10,7 +10,7 @@
 //
 // ★「없음」은 「0」이 아니다(계약 §2-7). 단가 표시는 전부 `formatCostWon`을 지난다 —
 //   `null`은 「—」이고, 그 자리에 0원을 그리면 미입력이 확정값으로 둔갑한다.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   addCostManualPrice,
@@ -94,10 +94,21 @@ export function valuationBadgeText(settings: CostSetting[]): string | null {
  * ★어긋난 연결(`stale_count`)을 **따로 말한다**(적대 리뷰 1R P1-1). 그 행들은 최신 단가
  * 산정에서 빠지는데, 왜 빠졌는지를 화면이 안 말하면 「단가가 왜 없지?」가 결함 조사로 번진다. */
 export function lotCountText(
-  m: Pick<CostMaterial, "lot_count" | "price_count" | "stale_count">,
+  m: Pick<CostMaterial, "lot_count" | "price_count" | "stale_count"> &
+    Partial<Pick<CostMaterial, "excel_ref_price">>,
 ): string {
   const stale = m.stale_count ?? 0;
-  if (m.price_count === 0) return "단가 없음 — 원장 연결 또는 수동 입력 필요";
+  if (m.price_count === 0) {
+    // ★단가가 없을 때 할 일은 **셋**이지 둘이 아니다(2026-08-23 발견).
+    //   prod 실측: 단가 보유 종 1/129 · 엑셀 참고값 보유 종 128/129. 그런데 이 줄이
+    //   「원장 연결 또는 수동 입력 필요」라고만 말해 **가장 싼 길(채택)을 감췄다** —
+    //   화면이 사람을 더 비싼 일로 보내고 있었다.
+    //   ★문구는 «있는 조작»만 가리킨다: 부자재 탭엔 채택 버튼이 없으므로, 여기서
+    //   「채택을 누르세요」라고 쓰면 없는 버튼을 가리키는 거짓말이 된다(교훈 #349).
+    return m.excel_ref_price
+      ? `단가 없음 — 엑셀 참고값 ${formatCostWon(m.excel_ref_price)}은 있다(단가 아님)`
+      : "단가 없음 — 원장 연결 또는 수동 입력 필요";
+  }
   const manual = m.price_count - m.lot_count - stale;
   const parts = [`로트 ${m.lot_count}건`];
   if (manual > 0) parts.push(`수동 ${manual}건`);
@@ -112,6 +123,32 @@ export function lotCountText(
 export function ledgerCheckText(check: CostLedgerCheck | null | undefined): string | null {
   if (!check || check.ok) return null;
   return `⚠ ${check.label}`;
+}
+
+/** ★엑셀 참고값 자백 — 「이 값이 있다 · 이건 단가가 아니다 · 단가가 되는 길은 어디에 있나」.
+ *
+ * ★**없는 조작을 지시하지 않는다.** 「채택」은 **레시피 단위** 동작이고
+ * (`POST /recipes/{id}/adopt-excel-prices` — 레시피 상세의 「엑셀 참고값을 단가로 채택」),
+ * 부자재 탭에는 그 버튼이 없다. 그러니 여기서 「채택 버튼을 누르세요」라고 쓰면 **없는
+ * 버튼을 가리키는 거짓말**이 된다 — 그 대신 «그 버튼이 어디 있는지»를 말한다.
+ * 사유가 틀리면 사람이 틀린 일을 한다(교훈 #349).
+ *
+ * 반환 `null` = 참고값이 없다(할 말이 없다). 조용한 빈 칸이 아니라 «해당 없음»이다. */
+export function excelRefNoteText(
+  m: Pick<CostMaterial, "excel_ref_price" | "price_count">,
+): string | null {
+  if (!m.excel_ref_price) return null;
+  const value = formatCostWon(m.excel_ref_price);
+  if (m.price_count > 0) {
+    // 이미 단가가 있는 종 — 채택은 «단가 없는 종»만 건드리므로 여기선 대조값일 뿐이다.
+    return `엑셀 참고값 ${value} — 단가가 아니라 대조값이다. 이 종엔 이미 단가가 있어 「채택」은 건드리지 않는다.`;
+  }
+  return (
+    `엑셀 참고값 ${value} — 이건 단가가 아니다(계약 §3). ` +
+    `단가로 만드는 길 셋: ①이 종을 쓰는 레시피의 상세 화면에서 「엑셀 참고값을 단가로 채택」 ` +
+    `②아래 「원장 부자재 라인」에서 연결 ③「+ 수동 단가 입력」. ` +
+    `이 탭에는 채택 버튼이 없다 — 채택은 레시피 단위 동작이기 때문이다.`
+  );
 }
 
 /** 「최신 단가」 칸이 왜 비었나 / 왜 그 값인가. 침묵하지 않는다(계약 §2-7·§9-5). */
@@ -271,18 +308,44 @@ export function MaterialList({
   onSelect,
   onApprove,
   busy,
+  totalCount,
+  filterSummary,
 }: {
   materials: CostMaterial[];
   selectedId: number | null;
   onSelect: (id: number) => void;
   onApprove?: (m: CostMaterial) => void;
   busy?: boolean;
+  /** 필터 적용 «전» 전체 종 수 — 필터가 만든 0건과 «원래 없음»을 가른다. */
+  totalCount?: number;
+  /** 「129건 중 N건 표시 중 — 필터: …」. null/undefined면 필터 없음. */
+  filterSummary?: string | null;
 }) {
+  // ★조용한 0은 커버리지 착시다 — 0건이면 «사유»를 그린다(RecipeList와 같은 관례).
   if (materials.length === 0) {
-    return <div className="text-sm text-gray-500 py-3">등록된 부자재 종이 없다.</div>;
+    return (
+      <div>
+        {filterSummary ? (
+          <div className="text-xs text-gray-500 mb-2" data-testid="material-filter-summary">
+            {filterSummary}
+          </div>
+        ) : null}
+        <div className="text-sm text-gray-500 py-3">
+          {totalCount
+            ? "해당 조건에 맞는 부자재 종이 없다 — 필터를 풀거나 다른 폼팩터를 고른다."
+            : "등록된 부자재 종이 없다."}
+        </div>
+      </div>
+    );
   }
   return (
-    <ul className="divide-y">
+    <div>
+      {filterSummary ? (
+        <div className="text-xs text-gray-500 mb-2" data-testid="material-filter-summary">
+          {filterSummary}
+        </div>
+      ) : null}
+      <ul className="divide-y">
       {materials.map((m) => (
         <li
           key={m.id}
@@ -328,7 +391,8 @@ export function MaterialList({
           ) : null}
         </li>
       ))}
-    </ul>
+      </ul>
+    </div>
   );
 }
 
@@ -598,6 +662,43 @@ export function ProductOptionPicker({
 /** 폼팩터 표시. `null`(수입 완제품·매입품)은 「—」다 — 0이나 자리표시자로 채우지 않는다. */
 export function formFactorLabel(form: string | null): string {
   return form && form.trim() ? form : "—";
+}
+
+/**
+ * ★필터가 걸린 화면에서 «오른쪽 패널이 무엇을 가리키는가»의 유일한 진실의 원천.
+ *
+ * 필터가 바뀌거나 데이터가 재조회돼 `filtered`가 달라질 때마다 이 함수 하나로 다음 선택을
+ * 다시 계산한다 — 호출하는 자리가 여럿이어도 로직은 여기 하나뿐이라 서로 다른 기준으로
+ * 같은 상태를 다투지 않는다.
+ *
+ * - 현재 선택이 `filtered` 안에 여전히 있으면 그대로 유지한다(승인 직후 재조회돼도
+ *   방금 승인한 항목을 계속 보여주기 위해서다).
+ * - 없으면(필터가 바뀌었거나 항목 자체가 사라졌으면) `filtered`의 첫 항목으로 스냅한다.
+ * - `filtered`가 0건이면 `null`이다 — 있지도 않은 항목을 붙들고 있지 않는다.
+ *
+ * ★2026-08-23: 레시피 전용이던 것을 **부자재 탭에도 필터가 생기면서** 제네릭으로 넓혔다.
+ *   복사본을 하나 더 만들지 않는다 — 「같은 결함을 두 번 밟으면 값이 아니라 «모양»을
+ *   고쳐라」(교훈 #348 계열). 두 벌이 되면 반드시 갈라진다.
+ */
+export function reconcileSelectedId<T extends { id: number }>(
+  filtered: T[],
+  currentId: number | null,
+): number | null {
+  if (currentId !== null && filtered.some((r) => r.id === currentId)) return currentId;
+  return filtered.length ? filtered[0].id : null;
+}
+
+/** 오른쪽 패널의 «고를 것이 없다» 안내 — 왼쪽이 0건인데 「왼쪽에서 고른다」고 하면
+ * **고를 것이 없는데 고르라고 하는 것**이다(적대 리뷰 1R P2-3 채택, 2026-08-23).
+ *
+ * `totalCount`가 0이면 필터 문제가 아니라 데이터가 아예 없는 것이다 — 처분이 다르므로
+ * 문장도 다르다(`lotCountText`·`RecipeList`의 0건 분기와 같은 결). */
+export function recipePlaceholderText(filteredCount: number, totalCount: number): string {
+  if (filteredCount > 0) return "왼쪽에서 레시피를 고른다.";
+  if (totalCount > 0) {
+    return "고를 레시피가 없다 — 필터가 전부 걸러냈다. 위에서 필터를 풀거나 다른 제품을 고른다.";
+  }
+  return "고를 레시피가 없다 — 위에서 엑셀 2종을 올리면 초안이 생긴다.";
 }
 
 /** 격차 표시. `null`은 「—」다 — 「격차 0%」와 「잴 수 없음」은 다른 사실이다. */
@@ -1031,6 +1132,7 @@ export function RecipeList({
         {recipes.map((r) => (
         <li key={r.id}>
           <button
+            data-testid={`recipe-row-${r.id}`}
             className={`w-full text-left px-3 py-2 hover:bg-gray-50 ${
               r.id === selectedId ? "bg-blue-50" : ""
             }`}
@@ -1075,6 +1177,14 @@ export function StandardBreakdown({ standard }: { standard: CostStandard }) {
             <th className="py-1 pr-2">부자재</th>
             <th className="py-1 pr-2 text-right">수량</th>
             <th className="py-1 pr-2 text-right">단가(VAT 제외)</th>
+            {/* ★열 이름이 스스로 「단가가 아니다」를 말한다 — 색·기울임만으로는 안 된다.
+                합계 행에서도 이 열은 비어 있고, 그 이유를 각주가 한 줄로 밝힌다.
+                ★VAT 기준을 이름에 박는다 — `adopt_excel_prices`가 이 값을
+                `unit_price_ex_vat`로 쓰므로 «VAT 제외»가 사실이고, 이 화면의 기본
+                표기는 VAT «포함»이라(D-CPP-51) 기준을 안 적으면 반대로 읽힌다. */}
+            <th className="py-1 pr-2 text-right text-gray-400 font-normal">
+              엑셀 참고값(채택 전 · VAT 제외)
+            </th>
             <th className="py-1 pr-2 text-right">금액(VAT 제외)</th>
             <th className="py-1 pr-2 text-right">금액(VAT 포함)</th>
             <th className="py-1">상태</th>
@@ -1086,6 +1196,14 @@ export function StandardBreakdown({ standard }: { standard: CostStandard }) {
               <td className="py-1 pr-2">{ln.label}</td>
               <td className="py-1 pr-2 text-right">{ln.quantity ?? "—"}</td>
               <td className="py-1 pr-2 text-right">{formatCostWon(ln.unit_price_ex_vat)}</td>
+              {/* ★참고값 칸 — 흐린 이탤릭으로 「값이지만 단가는 아니다」를 시각으로도 말한다.
+                  `formatCostWon`을 지나므로 없으면 「—」다(0원으로 안 그린다, §2-7). */}
+              <td
+                className="py-1 pr-2 text-right text-gray-400 italic"
+                data-testid={`breakdown-excel-ref-${i}`}
+              >
+                {formatCostWon(ln.excel_ref_price)}
+              </td>
               <td className="py-1 pr-2 text-right">{formatCostWon(ln.amount_ex_vat)}</td>
               <td className="py-1 pr-2 text-right">
                 {formatCostWon(ln.amount_inc_vat)}
@@ -1107,12 +1225,32 @@ export function StandardBreakdown({ standard }: { standard: CostStandard }) {
             <td className="pt-2" colSpan={3}>
               합계
             </td>
-            <td className="pt-2 text-right">{formatCostWon(standard.std_cost_ex_vat)}</td>
-            <td className="pt-2 text-right">{formatCostWon(standard.std_cost_inc_vat)}</td>
+            {/* ★★참고값 열엔 **합계가 없다.** 여기에 Σ를 그리는 순간 화면이 계약 §3
+                («저장되는 단가는 원장 파생이거나 Jino가 입력·승인한 값뿐»)을 어긴다 —
+                채택하지 않은 값으로 만든 총액은 표준원가가 아니다. 「합계 없음」이라고
+                **말한다** — 빈 칸으로 두면 「깜빡 잊었나」와 구별이 안 된다. */}
+            <td
+              className="pt-2 text-right text-[10px] text-gray-400 font-normal"
+              data-testid="breakdown-excel-ref-total"
+            >
+              합계 없음
+            </td>
+            <td className="pt-2 text-right" data-testid="breakdown-total-ex">
+              {formatCostWon(standard.std_cost_ex_vat)}
+            </td>
+            <td className="pt-2 text-right" data-testid="breakdown-total-inc">
+              {formatCostWon(standard.std_cost_inc_vat)}
+            </td>
             <td />
           </tr>
         </tfoot>
       </table>
+      {/* ★각주 — 열 이름만으로 부족한 「왜 합계에 안 들어가나」를 한 줄로 말한다. */}
+      <div className="mt-1 text-[11px] text-gray-500" data-testid="breakdown-excel-ref-note">
+        「엑셀 참고값(채택 전 · VAT 제외)」은 <b>단가가 아니다</b> — 합계에 들어가지 않는다. 채택은 이 패널
+        위쪽의 「엑셀 참고값을 단가로 채택」이 하고, 그때 <code>source=manual</code> 단가 행이
+        생긴다(계약 §3).
+      </div>
       {!standard.computable ? (
         <div className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
           {standard.reason ?? "계산 안 됨"} — 부분합{" "}
@@ -1138,7 +1276,7 @@ export function RecipeDetail({
 }) {
   const m = recipe.match;
   return (
-    <section className="border rounded-md p-4">
+    <section className="border rounded-md p-4" data-testid="recipe-detail-panel">
       <div className="flex items-start justify-between gap-2 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold text-gray-800">{recipe.product_name}</h2>
@@ -1299,6 +1437,81 @@ export default function CostPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  // ── N5: 부자재 탭 폼팩터 → 부품 필터 (Jino: "부자재 종도 드랍다운 버튼을 만들자") ──
+  //
+  // prod 실측(2026-08-23, 129종): 폼팩터 fold 30 · flip 30 · tablet 27 · bar 14 ·
+  // trifold 10 · doorlock 10 · buddy 7 · **null 1**. `part`는 **83/129가 비어 있어**
+  // 주축이 못 된다 — 그래서 폼팩터가 1단, `part`가 2단이고, 빈 `part`는 감추지 않고
+  // 「(부품 미지정)」이라는 **자기 이름을 가진 선택지**로 세운다(조용한 0 금지).
+  const [materialForm, setMaterialForm] = useState<string | null>(null);
+  const [materialPart, setMaterialPart] = useState<string | null>(null);
+  const handleMaterialFormChange = useCallback((v: string | null) => {
+    setMaterialForm(v);
+    setMaterialPart(null); // 폼팩터가 바뀌면 이전 폼팩터의 부품값은 더 이상 유효하지 않다.
+  }, []);
+  const handleMaterialReset = useCallback(() => {
+    setMaterialForm(null);
+    setMaterialPart(null);
+  }, []);
+
+  const materialForms = useMemo<PickerItem[]>(() => {
+    const counts = new Map<string, number>();
+    for (const m of materials) {
+      const key = m.form_factor ?? "__none__";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return Array.from(counts, ([value, count]) => ({
+      value,
+      label: value === "__none__" ? "— (폼팩터 없음)" : value,
+      count,
+    })).sort((a, b) => a.label.localeCompare(b.label, "ko"));
+  }, [materials]);
+
+  const materialPartsForForm = useMemo<PickerItem[]>(() => {
+    if (!materialForm) return [];
+    const counts = new Map<string, number>();
+    for (const m of materials) {
+      if ((m.form_factor ?? "__none__") !== materialForm) continue;
+      const key = m.part && m.part.trim() ? m.part : "__none__";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    // ★라벨에 건수를 박는다 — 이 셀렉트는 `count`를 따로 안 그리므로, 안 박으면
+    //   「부품 미지정이 절대다수」라는 사실이 화면에서 사라진다(prod 83/129).
+    return Array.from(counts, ([value, count]) => ({
+      value,
+      label: value === "__none__" ? `(부품 미지정) (${count})` : `${value} (${count})`,
+      count,
+    })).sort((a, b) => a.label.localeCompare(b.label, "ko"));
+  }, [materials, materialForm]);
+
+  const materialCountForSelectedForm = useMemo(() => {
+    if (!materialForm) return 0;
+    return materialForms.find((f) => f.value === materialForm)?.count ?? 0;
+  }, [materialForms, materialForm]);
+
+  const filteredMaterials = useMemo(() => {
+    return materials.filter((m) => {
+      if (materialForm && (m.form_factor ?? "__none__") !== materialForm) return false;
+      if (materialPart) {
+        const key = m.part && m.part.trim() ? m.part : "__none__";
+        if (key !== materialPart) return false;
+      }
+      return true;
+    });
+  }, [materials, materialForm, materialPart]);
+
+  const materialFilterSummary = useMemo(() => {
+    if (!materialForm && !materialPart) return null;
+    const parts: string[] = [];
+    if (materialForm) {
+      parts.push(`폼팩터=${materialForm === "__none__" ? "—(없음)" : materialForm}`);
+    }
+    if (materialPart) {
+      parts.push(`부품=${materialPart === "__none__" ? "(미지정)" : materialPart}`);
+    }
+    return `${materials.length}건 중 ${filteredMaterials.length}건 표시 중 — 필터: ${parts.join(", ")}`;
+  }, [materials, materialForm, materialPart, filteredMaterials]);
+
   // ── S3: 보드 탭 제품 → 옵션 필터 ──────────────────────────────────
   const [boardProduct, setBoardProduct] = useState<string | null>(null);
   const [boardOption, setBoardOption] = useState<string | null>(null);
@@ -1419,15 +1632,12 @@ export default function CostPage() {
       setSettings(s.items);
       setRecipes(r.items);
       setBoard(b);
-      setSelectedId((prev) => prev ?? (m.items.length ? m.items[0].id : null));
-      // ★선택은 유지한다 — 승인 직후 목록이 갱신되며 선택이 풀리면 방금 승인한 결과를 못 본다.
-      setSelectedRecipeId((prev) =>
-        prev !== null && r.items.some((x) => x.id === prev)
-          ? prev
-          : r.items.length
-            ? r.items[0].id
-            : null,
-      );
+      // ★부자재 선택도 여기서 건드리지 않는다(2026-08-23 N5) — 부자재 탭에도 필터가
+      //   생겼으므로, 여기서 `setSelectedId`를 하면 「전체 목록 기준」과 「필터된 목록
+      //   기준」 두 곳이 같은 상태를 다투게 된다. 레시피에서 이미 밟은 결함이다.
+      // ★레시피 선택은 여기서 건드리지 않는다 — 진실의 원천은 아래 단일 effect
+      // (filteredRecipes 기준)뿐이다. 여기서도 setSelectedRecipeId를 하면 두 곳이
+      // 서로 다른 기준(전체 recipes vs 필터된 목록)으로 같은 값을 다투게 된다.
       setErr(null);
     } catch (e) {
       // ★조용히 빈 화면을 주지 않는다 — 실패는 실패라고 말한다(교훈 #319).
@@ -1439,15 +1649,41 @@ export default function CostPage() {
     void load();
   }, [load]);
 
+  // ★레시피와 같은 규율: 오른쪽 단가 이력 패널은 **필터된 목록 안에서만** 종을 찾는다.
+  //   `materials`(전체 129종)에서 찾으면 필터 밖 종이 그대로 패널에 남아, 사람은 목록에
+  //   없는 종의 단가를 보며 「승인」을 누르게 된다 — 그게 레시피에서 이미 밟은 결함이다.
   const selected = useMemo(
-    () => materials.find((m) => m.id === selectedId) ?? null,
-    [materials, selectedId],
+    () => filteredMaterials.find((m) => m.id === selectedId) ?? null,
+    [filteredMaterials, selectedId],
   );
 
+  // ★선택 ID를 필터에 맞춰 되돌리는 유일한 자리(부자재). `useLayoutEffect`인 이유는
+  //   아래 레시피 쪽과 같다 — 페인트 전에 맞춰야 첫 프레임이 깜빡이지 않는다.
+  useLayoutEffect(() => {
+    setSelectedId((prev) => reconcileSelectedId(filteredMaterials, prev));
+  }, [filteredMaterials]);
+
+  // ★진실의 원천은 여기 하나뿐이다 — selectedRecipeId가 무엇을 가리키든,
+  // 화면에 실제로 뜨는 selectedRecipe는 항상 filteredRecipes(현재 필터가 적용된
+  // 목록) 안에서만 찾는다. recipes(전체 100건) 안에서 찾으면 필터 밖 레시피가
+  // 그대로 상세 패널에 남는다 — 그게 이 파일이 고치는 결함이다.
   const selectedRecipe = useMemo(
-    () => recipes.find((r) => r.id === selectedRecipeId) ?? null,
-    [recipes, selectedRecipeId],
+    () => filteredRecipes.find((r) => r.id === selectedRecipeId) ?? null,
+    [filteredRecipes, selectedRecipeId],
   );
+
+  // ★선택 ID를 필터에 맞춰 되돌리는 유일한 자리 — load()는 더 이상 selectedRecipeId를
+  // 건드리지 않는다. 로직 자체는 reconcileSelectedId 하나뿐이고, 여기선 그저
+  // 「filteredRecipes가 바뀔 때마다 다시 계산해라」만 배선한다.
+  //
+  // ★`useEffect`가 아니라 `useLayoutEffect`다 (적대 리뷰 1R P2-2 채택, 2026-08-23).
+  //   load()에서 선택 설정을 빼고 나서 최초 진입이 **두 페인트**로 갈렸다:
+  //   ①데이터 도착(선택 null → 「왼쪽에서 레시피를 고른다」) ②effect(스냅 → 상세 패널).
+  //   `useLayoutEffect`는 브라우저가 그리기 «전»에 동기로 돌아 그 1프레임을 없앤다.
+  //   ★진실의 원천은 여전히 하나다 — 로직을 두 곳으로 되돌리지 않고 «시점»만 당겼다.
+  useLayoutEffect(() => {
+    setSelectedRecipeId((prev) => reconcileSelectedId(filteredRecipes, prev));
+  }, [filteredRecipes]);
 
   async function run(fn: () => Promise<unknown>, ok: string) {
     setBusy(true);
@@ -1463,8 +1699,42 @@ export default function CostPage() {
     }
   }
 
+  // ★P1-1 수정(적대 리뷰 2R) — 필터가 걸린 채 종을 추가하면 새 종은 늘 필터 밖에
+  //   떨어진다. `create_material`(백엔드)이 `name`만 세팅해 `form_factor`·`part`가
+  //   항상 `null`이기 때문이다 — 이건 이번 범위 밖이라 고치지 않는다(위임문 경계).
+  //   대신 **성공했을 때만** ①필터를 해제하고 ②새로 만든 종을 선택하고 ③왜
+  //   해제했는지 화면이 말한다. 실패·취소 시엔 아무것도 건드리지 않는다.
+  //   ★필터가 애초에 안 걸려 있었으면 「필터를 해제했다」는 거짓말을 붙이지 않는다 —
+  //   `hadFilter`로 문구 자체를 가른다.
+  //   ★P2-3도 같이 닫는다 — 필터가 없어도 새로 만든 종을 항상 선택한다(사람이 방금
+  //   만든 종을 다시 찾아 누르지 않게).
+  async function handleAddMaterial(name: string) {
+    const hadFilter = materialForm !== null || materialPart !== null;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const created = await createCostMaterial({ name });
+      await load();
+      if (hadFilter) {
+        setMaterialForm(null);
+        setMaterialPart(null);
+      }
+      setSelectedId(created.id);
+      setMsg(
+        hadFilter
+          ? `「${name}」 추가됨 — 새 종은 폼팩터·부품이 비어 있어 지금 건 필터 밖이다. 필터를 해제하고 방금 만든 종을 선택했다.`
+          : `「${name}」 추가됨`,
+      );
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="p-6 max-w-6xl">
+    <div className="p-6 max-w-[96rem]">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">💰 원가</h1>
         <div className="flex items-center gap-2 flex-wrap">
@@ -1511,8 +1781,13 @@ export default function CostPage() {
       ) : null}
 
       {tab === "materials" ? (
-        <div className="mt-4 grid grid-cols-1 md:grid-cols-[260px_1fr] gap-6">
-          <div>
+        // ★B (Jino 2026-08-23: *"오른쪽 빈 곳이 넓어 … 부자재 종 부분의 공간을 좀 더 옆으로"*)
+        //   260px에선 종 이름이 2~3줄로 접히고 「미승인」 배지가 «미/확/인» 세로로 깨졌다.
+        //   ★고정폭을 **박지 않는다** — `minmax()`라 좁은 화면에선 22rem까지 줄고 넓으면
+        //   28rem까지만 자란다. 고정폭을 박았다가 옆 패널을 덮은 것이 이 파일의 여덟 번째
+        //   결함이었고, 그 가드 테스트(「필터 바는 좁은 칸에서 접힌다」)가 아직 살아 있다.
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-[minmax(22rem,28rem)_1fr] gap-6 items-start">
+          <div className="min-w-0">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-gray-700">부자재 종</h2>
               <button
@@ -1521,27 +1796,56 @@ export default function CostPage() {
                 onClick={() => {
                   const name = window.prompt("새 부자재 종 이름");
                   if (!name) return;
-                  void run(() => createCostMaterial({ name }), `「${name}」 추가됨`);
+                  void handleAddMaterial(name);
                 }}
               >
                 + 종 추가
               </button>
             </div>
-            <MaterialList
-              materials={materials}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              busy={busy}
-              onApprove={(m) =>
-                run(
-                  () => patchCostMaterial(m.id, { status: "approved" }),
-                  `「${m.name}」 승인됨`,
-                )
-              }
-            />
+            {/* ★C — 129종을 눈으로 훑을 수 없다. 보드·레시피 탭이 쓰는 «같은» 컴포넌트를
+                재사용한다(새 피커를 만들면 세 벌이 되고 세 벌은 갈라진다). */}
+            <div className="mt-2 mb-2">
+              <ProductOptionPicker
+                idPrefix="material"
+                productLabel="폼팩터"
+                optionLabel="부품"
+                products={materialForms}
+                options={materialPartsForForm}
+                optionTotalCount={materialCountForSelectedForm}
+                productValue={materialForm}
+                optionValue={materialPart}
+                onProductChange={handleMaterialFormChange}
+                onOptionChange={setMaterialPart}
+                onReset={handleMaterialReset}
+              />
+            </div>
+            {/* ★A (Jino 2026-08-23: *"부자재 종에서 스크롤을 내리면 부자재 종만 내려가고
+                전체 화면은 고정되게"*). 목록 «자신»이 스크롤 컨테이너가 되고, 칼럼 전체는
+                `sticky`로 뷰포트에 붙어 오른쪽 단가 이력이 화면 밖으로 밀려나지 않는다.
+                ⚠️jsdom은 레이아웃을 계산하지 않는다 — 테스트는 「이 클래스가 살아 있나」까지만
+                재고, 진짜 판정은 배포 후 라이브 화면이 한다. */}
+            <div
+              className="md:sticky md:top-4 md:max-h-[calc(100vh-14rem)] md:overflow-y-auto pr-1"
+              data-testid="material-list-scroll"
+            >
+              <MaterialList
+                materials={filteredMaterials}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                busy={busy}
+                totalCount={materials.length}
+                filterSummary={materialFilterSummary}
+                onApprove={(m) =>
+                  run(
+                    () => patchCostMaterial(m.id, { status: "approved" }),
+                    `「${m.name}」 승인됨`,
+                  )
+                }
+              />
+            </div>
           </div>
 
-          <div className="space-y-6">
+          <div className="space-y-6 min-w-0">
             {selected ? (
               <section>
                 <h2 className="text-sm font-semibold text-gray-700">
@@ -1550,6 +1854,16 @@ export default function CostPage() {
                 <div className="text-xs text-gray-500 mt-0.5">
                   엑셀 대응: {excelLabelText(selected.excel_label)} · {lotCountText(selected)}
                 </div>
+                {/* ★D — 참고값이 «있다는 사실»과 «그 값»과 «단가가 되는 길»을 말한다.
+                    참고값이 없으면 이 줄 자체가 없다(해당 없음 — 빈 칸이 아니다). */}
+                {excelRefNoteText(selected) ? (
+                  <div
+                    className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded p-2 mt-1"
+                    data-testid="material-excel-ref-note"
+                  >
+                    {excelRefNoteText(selected)}
+                  </div>
+                ) : null}
                 {latestPriceNote(selected) ? (
                   <div className="text-xs text-amber-800 mt-1" data-testid="latest-price-note">
                     {latestPriceNote(selected)}
@@ -1689,7 +2003,12 @@ export default function CostPage() {
                 }
               />
             ) : (
-              <div className="text-xs text-gray-500">왼쪽에서 레시피를 고른다.</div>
+              // ★G (적대 리뷰 1R P2-3 채택) — 왼쪽이 0건인데 「왼쪽에서 고른다」고 하면
+              //   **고를 것이 없는데 고르라고 하는 것**이다. 왼쪽은 이미 정직하게
+              //   「해당 조건에 맞는 레시피가 없다」라고 말하는데 오른쪽만 어긋나 있었다.
+              <div className="text-xs text-gray-500" data-testid="recipe-detail-placeholder">
+                {recipePlaceholderText(filteredRecipes.length, recipes.length)}
+              </div>
             )}
           </div>
         </div>
