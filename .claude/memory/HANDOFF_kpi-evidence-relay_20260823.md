@@ -29,11 +29,14 @@
 > ⚠️ 오해 방지: 계약 `CONTRACT_kpi_evidence_page.md`는 **n=1에서 이미 8/8로 종결**됐다(2026-08-23 19:50, 완료 QA 달성/달성). 이 세션이 그 계약을 이어받아 미달로 만든 것이 **아니다**.
 
 ## 2-3. 착지
-- **완료 단계**: (Step 6에서 채움)
-- **멈춘 단계**: (Step 6에서 채움)
-- **재개 명령**: (Step 6에서 채움)
-- **좌표**: (Step 6에서 채움)
-- **리뷰 판정**: (Step 6에서 채움)
+- **완료 단계**: 커밋 → push → PR → (리뷰 생략) → **머지까지 전부 완료**
+- **멈춘 단계**: 없음
+- **재개 명령**: 해당 없음
+- **좌표**: 커밋 `57fa87e5` → PR **#376** → 머지 **`6bf536fb`** / 착지 절·등록부 마감 커밋은 PR **#377**
+- **리뷰 판정**: ⚠️ **리뷰 생략: 기록물만** — `.claude/memory/HANDOFF_kpi-evidence-relay_20260823.md` · `.claude/memory/chains/근거자료.jsonl` (코드 0파일, 전역 §6 기록물 예외)
+- **CI**: 잡 3종 전부 `conclusion=failure`인데 **`steps=0` · 로그 없음**(`gh run view 32638128676 --log-failed` → `log not found`) = **결제정지로 실행되지 않음**. 빨간불이 아니라 「안 돎」 — n=1과 동일. `safe_merge.sh 376 --force`로 병합, 자백이 `$TMPDIR/safe_merge.log`에 기록됨(`2026-08-23 21:00:34 KST PR#376 --force 병합 (verdict=FAIL)`).
+- **착지 전제 검사 결과**: L1 = 내 대상 체인 `근거자료`는 CLEAR(n=1 `end_kst` 채워짐), 살아 있는 3체인은 미접촉 → «예» · L2 = 공유 메인 폴더에 남의 미커밋 14파일 → **작업을 그 폴더에서 하지 않고 `origin/main`에서 딴 워크트리 `~/.claude-worktrees/ohiselling/relay-n2`에서 수행**, 커밋은 경로 지정 · L3 = 내 브랜치는 이 워크트리에만 · L4 = 워크트리 base가 `origin/main`이라 0 · L5 = 로컬 `main`이 공유 메인 폴더에 잡혀 있음 → 「저장소를 main에 세워둔다」 **생략**(그 폴더는 143커밋 뒤처진 채 두고 건드리지 않았다. 다음 세션은 `git switch -c <새> origin/main`으로 원격을 명시해 갈라질 것).
+- **정리**: 브랜치 `docs/relay-n2-handoff`·`docs/relay-n2-landing`은 이 워크트리에만 있다. 워크트리 제거는 다음 세션 재량.
 
 ## 3. 확정된 결정사항
 - **D-1. 공유 메인 폴더에서 커밋·merge 하지 않는다 (이 시점 실측 근거).** `git diff --name-only HEAD origin/main` ∩ `git status`의 수정 파일 = **12개 겹침**(`LESSONS_LEARNED.md`·`pao-논의.jsonl`·`쿠팡-손익정합.jsonl`·`reflection_loop.py`·`wisdom_scorecard.py`·`test_naver_diary_reflection.py`·`TRACKS.md`·`82_pao_north_star`·`track_naver-ad-optimization.md`·`api.ts`·`NaverAdOptimizationConsole.tsx`·`naverAdWisdomScorecardPanel.test.tsx`). 여기서 `git merge origin/main`을 하면 **살아 있는 세션 3기의 미커밋 작업을 덮는다.** ⇒ 착지는 `origin/main`에서 딴 새 워크트리에서만 한다.
