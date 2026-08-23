@@ -32,7 +32,7 @@
 - **완료 단계**: 커밋 → push → PR → (리뷰 생략) → **머지까지 전부 완료**
 - **멈춘 단계**: 없음
 - **재개 명령**: 해당 없음
-- **좌표**: 커밋 `57fa87e5` → PR **#376** → 머지 **`6bf536fb`** / 착지 절·등록부 마감 커밋은 PR **#377**
+- **좌표**: 커밋 `57fa87e5` → PR **#376** → 머지 **`6bf536fb`** / 착지 절·등록부 마감 커밋은 PR **#380**
 - **리뷰 판정**: ⚠️ **리뷰 생략: 기록물만** — `.claude/memory/HANDOFF_kpi-evidence-relay_20260823.md` · `.claude/memory/chains/근거자료.jsonl` (코드 0파일, 전역 §6 기록물 예외)
 - **CI**: 잡 3종 전부 `conclusion=failure`인데 **`steps=0` · 로그 없음**(`gh run view 32638128676 --log-failed` → `log not found`) = **결제정지로 실행되지 않음**. 빨간불이 아니라 「안 돎」 — n=1과 동일. `safe_merge.sh 376 --force`로 병합, 자백이 `$TMPDIR/safe_merge.log`에 기록됨(`2026-08-23 21:00:34 KST PR#376 --force 병합 (verdict=FAIL)`).
 - **착지 전제 검사 결과**: L1 = 내 대상 체인 `근거자료`는 CLEAR(n=1 `end_kst` 채워짐), 살아 있는 3체인은 미접촉 → «예» · L2 = 공유 메인 폴더에 남의 미커밋 14파일 → **작업을 그 폴더에서 하지 않고 `origin/main`에서 딴 워크트리 `~/.claude-worktrees/ohiselling/relay-n2`에서 수행**, 커밋은 경로 지정 · L3 = 내 브랜치는 이 워크트리에만 · L4 = 워크트리 base가 `origin/main`이라 0 · L5 = 로컬 `main`이 공유 메인 폴더에 잡혀 있음 → 「저장소를 main에 세워둔다」 **생략**(그 폴더는 143커밋 뒤처진 채 두고 건드리지 않았다. 다음 세션은 `git switch -c <새> origin/main`으로 원격을 명시해 갈라질 것).
