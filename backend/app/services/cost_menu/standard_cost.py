@@ -115,6 +115,14 @@ class RecipeLineInput:
     ledger_item_name: Optional[str] = None
     price_source: Optional[str] = None           # ledger / manual — 근거 표시용
     price_note: Optional[str] = None
+    #: ★엑셀 원가 정본의 **참고값**이지 단가가 아니다(계약 §3 금지선).
+    #:  이 값은 **어떤 산술에도 안 들어간다** — `_resolve_line`은 `unit_price_ex_vat`만 보고
+    #:  usable을 정하며, 합계(`partial_*`·`std_cost_*`)는 라인의 `amount_*`만 더한다.
+    #:  여기 싣는 목적은 하나뿐이다: 화면이 「채택하면 이 값이 단가가 된다」를 **말할 수 있게**.
+    #:  ★왜 필요했나(2026-08-23 실측): prod에서 단가 보유 종은 **1/129**인데 엑셀 참고값
+    #:  보유 종은 **128/129**다. 그런데 화면은 「원장 연결 또는 수동 입력 필요」라고만 말해
+    #:  **사람을 더 비싼 일로 보내고 있었다** — 가장 싼 길(채택)이 화면 어디에도 없었다.
+    excel_ref_price: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -133,9 +141,13 @@ class StandardCostLine:
     price_note: Optional[str] = None
     material_id: Optional[int] = None
     ledger_item_name: Optional[str] = None
+    #: 참고값 — **단가가 아니다.** `usable`도 `amount_*`도 이 값을 보지 않는다(§3 금지선).
+    excel_ref_price: Optional[Decimal] = None
 
     @property
     def usable(self) -> bool:
+        # ★`excel_ref_price`는 여기 **들어오지 않는다.** 참고값이 usable을 참으로 만들면
+        #   그 순간 「채택 안 한 값」이 표준원가 합계에 섞인다 — 계약 §3 금지선이다.
         return self.amount_ex_vat is not None
 
 
@@ -190,6 +202,9 @@ def _resolve_line(line: RecipeLineInput) -> StandardCostLine:
             price_note=line.price_note,
             material_id=line.material_id,
             ledger_item_name=line.ledger_item_name,
+            # ★못 쓰는 라인일수록 참고값이 중요하다 — 「단가 없음」이라고만 말하면 사람은
+            #   채택이라는 가장 싼 길을 못 본다. 그래도 금액은 여전히 None이다.
+            excel_ref_price=line.excel_ref_price,
         )
 
     ex = line.unit_price_ex_vat
@@ -211,6 +226,7 @@ def _resolve_line(line: RecipeLineInput) -> StandardCostLine:
         price_note=line.price_note,
         material_id=line.material_id,
         ledger_item_name=line.ledger_item_name,
+        excel_ref_price=line.excel_ref_price,
     )
 
 
@@ -274,6 +290,10 @@ def breakdown_payload(result: StandardCostResult) -> list[dict]:
 
     계산 «시점»의 단가가 남아야 한다(계약 §5-2) — 나중에 원장이 바뀌어도 이 값은 그때 무엇을
     보고 계산했는지 말한다.
+
+    ★`excel_ref_price`도 같이 남는다 — **단가가 아니라 «아직 채택 안 한 값»의 기록**이다.
+      합계엔 안 들어간다(위 `usable` 주석 참조). 남기는 이유는 계산 시점의 단가를 남기는
+      이유와 같다: 나중에 「그때 무엇을 두고 채택을 안 했나」를 화면이 말할 수 있어야 한다.
     """
 
     return [
@@ -290,6 +310,9 @@ def breakdown_payload(result: StandardCostResult) -> list[dict]:
             "price_note": ln.price_note,
             "material_id": ln.material_id,
             "ledger_item_name": ln.ledger_item_name,
+            "excel_ref_price": (
+                None if ln.excel_ref_price is None else str(ln.excel_ref_price)
+            ),
         }
         for ln in result.lines
     ]

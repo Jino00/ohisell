@@ -225,6 +225,52 @@ def test_empty_recipe_is_not_zero_cost():
     assert out.computable is False and out.std_cost_ex_vat is None
 
 
+# ──────────────────────────────────────────────
+# N5 (2026-08-23) — 엑셀 참고값은 «보이되 안 더해진다» (계약 §3 금지선)
+#
+# ★이 두 테스트가 지키는 것은 **화면에 새 열을 만든 대가로 §3이 무너지지 않는 것**이다.
+#   참고값이 `unit_price_ex_vat`나 `partial_*`로 한 칸만 새어도 「채택 안 한 값」이
+#   표준원가가 된다 — 계약이 *"저장되는 단가는 원장 파생이거나 Jino가 입력·승인한 값뿐"*
+#   이라고 못 박은 바로 그 자리다.
+# ──────────────────────────────────────────────
+def test_excel_reference_price_never_becomes_cost():
+    """★참고값만 있는 라인은 **여전히 «단가 없음»**이다 — 합계에도 부분합에도 안 들어간다."""
+
+    out = compute_standard_cost([
+        RecipeLineInput(label="A", quantity=D("1"), unit_price_ex_vat=D("100"),
+                        price_status="manual", excel_ref_price=D("111")),
+        # 채택 «전» 상태 — prod의 다수파(128/129)가 이 모양이다.
+        RecipeLineInput(label="B", quantity=D("3"), price_status="missing",
+                        excel_ref_price=D("600")),
+    ])
+    assert out.computable is False          # 참고값이 usable을 참으로 만들면 안 된다
+    assert out.std_cost_ex_vat is None
+    assert out.unresolved == ("B",)
+    # ★600×3=1800이 부분합에 새면 100.00이 1900.00이 된다.
+    assert out.partial_ex_vat == D("100.00")
+    b = next(ln for ln in out.lines if ln.label == "B")
+    assert b.usable is False
+    assert b.amount_ex_vat is None and b.amount_inc_vat is None
+    assert b.unit_price_ex_vat is None      # ★참고값이 «단가 자리»로 옮겨 앉지 않는다
+    # 그런데 참고값 «자신»은 살아서 화면까지 간다 — 안 그러면 사람은 채택이란 길을 못 본다.
+    assert b.excel_ref_price == D("600")
+
+
+def test_breakdown_payload_carries_the_reference_without_summing_it():
+    """`cost_standard.breakdown`(저장 근거)에도 실린다 — 단, 금액 칸은 여전히 None."""
+
+    from app.services.cost_menu.standard_cost import breakdown_payload
+
+    out = compute_standard_cost([
+        RecipeLineInput(label="B", quantity=D("3"), price_status="missing",
+                        excel_ref_price=D("600")),
+    ])
+    row = breakdown_payload(out)[0]
+    assert row["excel_ref_price"] == "600"
+    assert row["unit_price_ex_vat"] is None
+    assert row["amount_ex_vat"] is None
+
+
 def test_derived_column_is_not_read_as_quantity():
     """⚠️`필름*매입`(유도값)을 수량으로 읽으면 안 된다 — 파서에서 가장 깨지기 쉬운 자리."""
 
@@ -499,6 +545,45 @@ def test_missing_price_is_not_reported_as_unapproved(client):
     assert std["lines"][0]["price_status"] == "missing"
     assert "단가 없음" in std["reason"]
     assert "부자재 종 미승인" not in std["reason"]
+
+
+def test_standard_lines_carry_the_excel_reference_over_http(client):
+    """★N5 — 「엑셀 참고값(채택 전)」 열의 원료가 **HTTP body까지** 온다.
+
+    서비스층 dict만 보면 못 잡는 사고가 이 저장소에서 실제로 났다(교훈 #321: `response_model`이
+    선언 안 된 키를 응답에서 지워, 서비스층 9건이 초록인데 배너가 통째로 안 떴다).
+
+    ★그리고 **합계엔 안 들어간다** — 참고값 600이 단가로 둔갑하면 계약 §3 위반이다.
+    """
+
+    from app.models import CostMaterial, CostRecipe, CostRecipeLine
+
+    with client.testing_session() as s:
+        m = CostMaterial(
+            name="필름(참고값만)", status="unconfirmed", category="부자재",
+            excel_label="필름", excel_ref_price=D("600"),
+        )
+        s.add(m)
+        s.flush()
+        r = CostRecipe(product_name="P", form_factor="bar", status="draft", source="manual")
+        s.add(r)
+        s.flush()
+        s.add(CostRecipeLine(recipe_id=r.id, material_id=m.id, quantity=D("3")))
+        s.commit()
+        rid = r.id
+
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    std = client.get(f"/api/cost/recipes/{rid}").json()["standard"]
+    line = std["lines"][0]
+
+    assert line["excel_ref_price"] == "600.00"      # ★값이 화면까지 갈 원료
+    assert line["unit_price_ex_vat"] is None        # ★단가 자리로 옮겨 앉지 않는다
+    assert line["usable"] is False
+    assert line["amount_ex_vat"] is None
+    # ★★600×3=1800이 어디에도 안 나타난다 — 합계도 부분합도.
+    assert std["computable"] is False
+    assert std["std_cost_ex_vat"] is None and std["std_cost_inc_vat"] is None
+    assert std["partial_ex_vat"] == "0"
 
 
 def test_column_roles_are_classified():

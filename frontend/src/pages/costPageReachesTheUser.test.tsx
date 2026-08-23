@@ -40,11 +40,24 @@ import { approveCostRecipe, fetchCostRecipes, unapproveCostRecipe } from "../lib
 //   (`costMaterialsSurface.test.tsx`가 같은 파일의 다른 순수 컴포넌트에 쓰는 것과 같은 결).
 //   전체 App 경로로는 이 분기에 진짜 0건을 못 만든다 — 옵션 목록이 항상 «현재 제품에
 //   속한 것만»으로 구성되게 P1을 고쳤기 때문에, 정상 네비게이션으로는 0건이 안 나온다.
-// ★2026-08-23 추가: `reconcileSelectedRecipeId`는 「선택이 필터 밖으로 나가면 상세
+// ★2026-08-23 추가: `reconcileSelectedId`는 「선택이 필터 밖으로 나가면 상세
 //   패널이 뭘 보여줘야 하나」를 정하는 유일한 진실의 원천이다(CostPage.tsx). 순수 함수라
 //   전체 App 경로로는 못 만드는 조합(0건 등)까지 직접 단언할 수 있다 — 같은 이유로
 //   RecipeList·StandardCostBoard를 직접 렌더하는 이 파일의 기존 관례를 그대로 따른다.
-import { reconcileSelectedRecipeId, RecipeList, StandardCostBoard } from "./CostPage";
+//   (N5에서 부자재 탭에도 필터가 생기며 제네릭으로 넓혔다 — 이름에서 «Recipe»가 빠졌다.)
+// ★N5 추가: `excelRefNoteText`·`recipePlaceholderText`·`lotCountText`는 「참고값이 있다는
+//   사실이 사람 말이 되는가」의 순수 계층이다. `MaterialList`는 0건 안내 분기를 직접 잡으려
+//   들여온다(위 P2-A와 같은 사정 — 전체 App 경로로는 필터 0건 조합을 못 만든다).
+import {
+  excelRefNoteText,
+  lotCountText,
+  MaterialList,
+  recipePlaceholderText,
+  reconcileSelectedId,
+  RecipeList,
+  StandardBreakdown,
+  StandardCostBoard,
+} from "./CostPage";
 
 // ── prod 실측값(2026-08-22) — 합격 1이 화면에서 보겠다는 바로 그 두 로트 ──
 const KIT: CostMaterial = {
@@ -54,6 +67,10 @@ const KIT: CostMaterial = {
   category: "부자재",
   status: "unconfirmed",
   excel_label: null,
+  // ★cleaning kit은 **엑셀 대응 항목이 없는 유일한 종**이다(`excel_label: null`과 같은
+  //   사실의 다른 면 — 원가 정본에 대응 항목이 없다). 그래서 참고값도 «없음»이다.
+  //   prod 실측 2026-08-23: 단가 보유 1/129(이 종) · 참고값 보유 128/129(나머지 전부).
+  excel_ref_price: null,
   match_rule: "cleaning kit",
   form_factor: null,
   part: null,
@@ -130,6 +147,55 @@ const KIT: CostMaterial = {
   ],
 };
 
+// ── N5: prod의 **다수파** — 단가는 없고 엑셀 참고값만 있는 종(128/129가 이 모양이다).
+//    KIT 하나만으로는 이 경우가 픽스처에 아예 없어서, 화면이 「원장 연결 또는 수동 입력
+//    필요」라고만 말하며 **가장 싼 길(채택)을 감추고 있어도** 아무 테스트가 안 울었다.
+//    `form_factor: "bar"` · `part: "필름"`을 준 이유는 부자재 탭 드롭다운(C)의 두 축을
+//    실제로 갈라 보기 위해서다 — KIT은 `form_factor: null`이라 sentinel 쪽에 선다.
+const FILM_WITH_REF: CostMaterial = {
+  id: 21,
+  name: "지문방지필름 TPU 3매 · 필름 (bar)",
+  unit: "ea",
+  category: "부자재",
+  status: "unconfirmed",
+  excel_label: "필름",
+  excel_ref_price: "600.00",
+  match_rule: null,
+  form_factor: "bar",
+  part: "필름",
+  note: null,
+  lot_count: 0,
+  price_count: 0,
+  stale_count: 0,
+  latest_price_ex_vat: null,
+  latest_price_inc_vat: null,
+  latest_price_source: null,
+  prices: [],
+};
+
+// `part`가 비어 있는 종 — prod에선 **83/129가 이 모양**이다. 화면이 그 사실을 숨기면
+// 안 된다(「(부품 미지정) (N)」 선택지가 그 자백이다).
+const JIG_NO_PART: CostMaterial = {
+  id: 23,
+  name: "부착 지그 (bar)",
+  unit: "ea",
+  category: "부자재",
+  status: "unconfirmed",
+  excel_label: "부착 지그",
+  excel_ref_price: "100.00",
+  match_rule: null,
+  form_factor: "bar",
+  part: null,
+  note: null,
+  lot_count: 0,
+  price_count: 0,
+  stale_count: 0,
+  latest_price_ex_vat: null,
+  latest_price_inc_vat: null,
+  latest_price_source: null,
+  prices: [],
+};
+
 const LEDGER_ROW: CostLedgerMaterialLine = {
   line_id: 15,
   shipment_id: 1,
@@ -203,6 +269,9 @@ const RECIPE: CostRecipe = {
         price_note: null,
         material_id: 21,
         usable: true,
+        // ★채택이 끝난 뒤에도 참고값은 종에 그대로 남는다(`adopt_excel_prices`는 지우지
+        //   않는다) — 그래서 이 열은 「채택 전 값이 얼마였나」의 대조값으로 계속 보인다.
+        excel_ref_price: "600.00",
       },
       {
         label: "패키지 (bar)",
@@ -217,6 +286,7 @@ const RECIPE: CostRecipe = {
         price_note: null,
         material_id: 22,
         usable: true,
+        excel_ref_price: "98.00",
       },
     ],
   },
@@ -394,7 +464,9 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchCostMaterials: vi.fn(async () => ({ items: [KIT] })),
+    // ★KIT이 첫 항목이다 — 백엔드는 `ORDER BY name`으로 내주고, 화면의 기본 선택은
+    //   목록 첫 항목이다. 순서를 바꾸면 SUR-1(단가 이력 2로트)이 다른 종을 보게 된다.
+    fetchCostMaterials: vi.fn(async () => ({ items: [KIT, FILM_WITH_REF, JIG_NO_PART] })),
     fetchCostLedgerMaterialLines: vi.fn(async () => ({ items: [LEDGER_ROW] })),
     fetchCostSettings: vi.fn(async () => ({ items: SETTINGS })),
     fetchCostRecipes: vi.fn(async () => ({
@@ -953,24 +1025,24 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(screen.getByTestId("recipe-detail-panel")).toBe(panelBeforeReload);
     });
 
-    describe("0건: reconcileSelectedRecipeId — 상세 패널이 엉뚱한 레시피를 안 보여준다", () => {
+    describe("0건: reconcileSelectedId — 상세 패널이 엉뚱한 레시피를 안 보여준다", () => {
       // ★전체 App 경로로는 진짜 0건을 못 만든다(폼팩터 셀렉트가 항상 «현재 제품에
       //   속한 것만»이라 0건 조합 자체가 안 만들어진다 — 위 P2-A 설명과 같은 사정).
       //   그래서 이 결함 수리의 «유일한 진실의 원천»인 순수 함수를 직접 잰다.
       it("필터 결과가 0건이면 이전 선택과 무관하게 null이다", () => {
-        expect(reconcileSelectedRecipeId([], RECIPE_OTHER_PRODUCT.id)).toBeNull();
-        expect(reconcileSelectedRecipeId([], null)).toBeNull();
+        expect(reconcileSelectedId([], RECIPE_OTHER_PRODUCT.id)).toBeNull();
+        expect(reconcileSelectedId([], null)).toBeNull();
       });
 
       it("현재 선택이 필터된 목록 안에 있으면 그대로 유지한다", () => {
         expect(
-          reconcileSelectedRecipeId([RECIPE, RECIPE_FLIP], RECIPE_FLIP.id),
+          reconcileSelectedId([RECIPE, RECIPE_FLIP], RECIPE_FLIP.id),
         ).toBe(RECIPE_FLIP.id);
       });
 
       it("현재 선택이 필터된 목록 밖이면 첫 항목으로 스냅한다", () => {
         expect(
-          reconcileSelectedRecipeId([RECIPE, RECIPE_FLIP], RECIPE_OTHER_PRODUCT.id),
+          reconcileSelectedId([RECIPE, RECIPE_FLIP], RECIPE_OTHER_PRODUCT.id),
         ).toBe(RECIPE.id);
       });
     });
@@ -1317,6 +1389,343 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(screen.getByText(/해당 조건에 맞는 레시피가 없다/)).toBeTruthy();
     });
 
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // N5 (2026-08-23) — Jino가 라이브 화면을 보며 발의한 개선 A~C + 새 발견 D·E + P2 F·G
+  // ══════════════════════════════════════════════════════════════════
+
+  async function openMaterialsTab() {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    // 부자재가 기본 탭이다 — 목록이 실제로 들어찬 뒤에 잰다.
+    await screen.findByTestId(`material-${KIT.id}`);
+  }
+
+  describe("★A·B: 부자재 종 칸 — 자체 스크롤 · 넓힌 폭 (jsdom은 «레이아웃»을 못 잰다)", () => {
+    // ⚠️**약한 가드다.** jsdom은 레이아웃도 스크롤도 계산하지 않으므로 「오른쪽 단가가
+    //    화면에 남는가」·「배지가 세로로 안 깨지는가」를 여기서 증명할 수 없다. 이 두
+    //    테스트가 지키는 것은 **그 동작을 만드는 클래스가 지워지지 않는 것**뿐이고,
+    //    진짜 판정은 배포 후 라이브 화면이 한다(기존 「필터 바는 좁은 칸에서 접힌다」
+    //    가드와 같은 성격·같은 한계).
+    it("A: 종 목록이 «자기» 스크롤 컨테이너를 갖는다 — 지우면 화면 전체가 같이 내려간다", async () => {
+      await openMaterialsTab();
+      const box = screen.getByTestId("material-list-scroll");
+      // 목록이 실제로 이 컨테이너 «안»에 있어야 의미가 있다 — 컨테이너만 남기고 목록을
+      // 밖으로 빼는 변이를 막는다.
+      expect(within(box).getByTestId(`material-${KIT.id}`)).toBeTruthy();
+      expect(box.className).toContain("overflow-y-auto");
+      expect(box.className).toMatch(/max-h-/);
+      // 칸이 뷰포트에 붙어 있어야 오른쪽 단가 이력이 같이 밀려나지 않는다.
+      expect(box.className).toContain("sticky");
+    });
+
+    it("B: 종 칸 폭은 «고정»이 아니라 minmax다 — 고정폭을 박으면 옆 패널을 덮는다", async () => {
+      await openMaterialsTab();
+      const grid = screen.getByTestId("material-list-scroll").closest("div.grid");
+      expect(grid).toBeTruthy();
+      // 260px 고정폭이 「미승인」 배지를 «미/확/인»으로 깨뜨렸다(Jino 실관측).
+      expect(grid!.className).toContain("minmax(22rem,28rem)");
+      // ★px 고정 트랙이 돌아오면 안 된다 — 이 파일이 여덟 번째로 밟은 결함의 모양이다.
+      expect(grid!.className).not.toMatch(/grid-cols-\[\d+px/);
+    });
+  });
+
+  describe("★C: 부자재 종 드롭다운 — 129종을 눈으로 훑지 않는다", () => {
+    it("폼팩터 셀렉트가 존재하고, 고르면 다른 폼팩터의 종이 목록에서 사라진다", async () => {
+      await openMaterialsTab();
+      // 필터 전엔 셋 다 보인다(KIT은 form_factor null, 나머지 둘은 bar).
+      expect(screen.getByTestId(`material-${FILM_WITH_REF.id}`)).toBeTruthy();
+      expect(screen.getByTestId(`material-${KIT.id}`)).toBeTruthy();
+
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } });
+
+      expect(screen.getByTestId(`material-${FILM_WITH_REF.id}`)).toBeTruthy();
+      expect(screen.getByTestId(`material-${JIG_NO_PART.id}`)).toBeTruthy();
+      // ★KIT(form_factor null)은 사라진다 — 이게 필터의 요점이다.
+      expect(screen.queryByTestId(`material-${KIT.id}`)).toBeNull();
+    });
+
+    it("폼팩터가 «없는»(null) 종도 「— (폼팩터 없음)」이라는 자기 선택지를 갖는다", async () => {
+      await openMaterialsTab();
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      // sentinel이 없으면 KIT은 어느 선택지에도 안 걸려 «영영 못 찾는 종»이 된다.
+      expect(within(formSelect).getByText(/— \(폼팩터 없음\) \(1\)/)).toBeTruthy();
+
+      fireEvent.change(formSelect, { target: { value: "__none__" } });
+      expect(screen.getByTestId(`material-${KIT.id}`)).toBeTruthy();
+      expect(screen.queryByTestId(`material-${FILM_WITH_REF.id}`)).toBeNull();
+    });
+
+    it("필터가 걸리면 「3건 중 N건 표시 중 — 필터: …」를 말한다 — 조용한 0은 커버리지 착시다", async () => {
+      await openMaterialsTab();
+      expect(screen.queryByTestId("material-filter-summary")).toBeNull();
+
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } });
+
+      const summary = await screen.findByTestId("material-filter-summary");
+      expect(summary.textContent).toContain("3건 중 2건 표시 중");
+      expect(summary.textContent).toContain("폼팩터=bar");
+    });
+
+    it("★`part`가 비어 있는 다수를 숨기지 않는다 — 「(부품 미지정) (N)」이 건수와 함께 뜬다", async () => {
+      await openMaterialsTab();
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } });
+
+      const partSelect = screen.getByTestId("material-option-select") as HTMLSelectElement;
+      expect(partSelect.disabled).toBe(false);
+      // prod에선 83/129가 `part` 공백이다 — 건수를 라벨에 박지 않으면 그 사실이 사라진다.
+      expect(within(partSelect).getByText("(부품 미지정) (1)")).toBeTruthy();
+      expect(within(partSelect).getByText("필름 (1)")).toBeTruthy();
+
+      fireEvent.change(partSelect, { target: { value: "__none__" } });
+      expect(screen.getByTestId(`material-${JIG_NO_PART.id}`)).toBeTruthy();
+      expect(screen.queryByTestId(`material-${FILM_WITH_REF.id}`)).toBeNull();
+    });
+
+    it("폼팩터를 바꾸면 이전 부품 선택이 남지 않는다 — 있는 종이 「없다」로 보이면 안 된다", async () => {
+      await openMaterialsTab();
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } });
+      const partSelect = screen.getByTestId("material-option-select") as HTMLSelectElement;
+      fireEvent.change(partSelect, { target: { value: "필름" } });
+      expect(screen.queryByTestId(`material-${JIG_NO_PART.id}`)).toBeNull();
+
+      // 폼팩터를 바꾼다 — `__none__` 쪽엔 「필름」 부품이 없다.
+      fireEvent.change(formSelect, { target: { value: "__none__" } });
+
+      expect(screen.getByTestId(`material-${KIT.id}`)).toBeTruthy();
+      expect(partSelect.value).toBe("");
+      expect(screen.queryByText(/해당 조건에 맞는 부자재 종이 없다/)).toBeNull();
+    });
+
+    it("★「+ 종 추가」는 필터가 걸려도 그대로 눌린다 — 필터가 조작을 삼키면 안 된다", async () => {
+      await openMaterialsTab();
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } });
+
+      const addBtn = screen.getByRole("button", { name: "+ 종 추가" }) as HTMLButtonElement;
+      expect(addBtn.disabled).toBe(false);
+      // 실제로 눌러 본다 — prompt를 취소해도 화면이 깨지지 않아야 한다.
+      const promptSpy = vi.spyOn(window, "prompt").mockReturnValue(null);
+      fireEvent.click(addBtn);
+      expect(promptSpy).toHaveBeenCalled();
+      promptSpy.mockRestore();
+      expect(screen.getByTestId(`material-${FILM_WITH_REF.id}`)).toBeTruthy();
+    });
+
+    // ★전체 App 경로로는 부자재 필터 0건 조합을 못 만든다(부품 목록이 늘 «현재 폼팩터에
+    //   속한 것만»이라 정상 네비게이션으로는 0건이 안 나온다 — 위 P2-A와 같은 사정).
+    //   그래서 0건 «안내 분기» 자체는 순수 컴포넌트를 직접 렌더해 잡는다.
+    it("0건이면 빈 목록이 아니라 «사유»를 그린다", () => {
+      render(
+        <MaterialList
+          materials={[]}
+          selectedId={null}
+          onSelect={() => {}}
+          totalCount={129}
+          filterSummary="129건 중 0건 표시 중 — 필터: 폼팩터=doorlock, 부품=필름"
+        />,
+      );
+      expect(screen.getByText(/해당 조건에 맞는 부자재 종이 없다/)).toBeTruthy();
+      expect(screen.getByTestId("material-filter-summary").textContent).toContain(
+        "129건 중 0건 표시 중",
+      );
+      // ★「등록된 부자재 종이 없다」와 «다른 문장»이어야 한다 — 처분이 다르기 때문이다.
+      expect(screen.queryByText("등록된 부자재 종이 없다.")).toBeNull();
+    });
+
+    it("데이터 자체가 0건이면 필터 탓으로 돌리지 않는다", () => {
+      render(<MaterialList materials={[]} selectedId={null} onSelect={() => {}} />);
+      expect(screen.getByText("등록된 부자재 종이 없다.")).toBeTruthy();
+    });
+  });
+
+  describe("★D: 「엑셀 참고값」이 부자재 탭 화면에 닿는다 (열한 번째 같은 병)", () => {
+    // 발견(2026-08-23): `recipe_parser.py`는 참고값이 「화면에 보이기만 하고」라고 적어
+    // 뒀는데, 실제로는 **어느 API 응답에도 안 실렸고** 프론트 `grep excel_ref` = 0건이었다.
+    // prod 실측: 단가 보유 1/129 vs 참고값 보유 128/129인데 화면은 전 종에 대해
+    // 「원장 연결 또는 수동 입력 필요」라고만 말했다 — **할 일이 셋인데 둘만 제시했고,
+    // 빠진 셋째가 가장 싼 길이었다.** 화면이 사람을 더 비싼 일로 보내고 있었다.
+    it("참고값이 있는 종을 고르면 «그 값»과 «단가가 아니다»와 «단가가 되는 길»이 보인다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+
+      const note = await screen.findByTestId("material-excel-ref-note");
+      expect(note.textContent).toContain("600원");         // 값
+      expect(note.textContent).toContain("단가가 아니다");   // 무엇이 아닌지
+      expect(note.textContent).toContain("레시피");         // 어디에 그 조작이 있는지
+      expect(note.textContent).toContain("원장 부자재 라인");
+      expect(note.textContent).toContain("수동 단가 입력");
+    });
+
+    it("★안내가 «없는 버튼»을 가리키지 않는다 — 부자재 탭엔 채택 버튼이 없다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      await screen.findByTestId("material-excel-ref-note");
+
+      // 이 탭에 「엑셀 참고값을 단가로 채택」 버튼은 **실제로 없다**(레시피 상세 몫이다).
+      expect(screen.queryByRole("button", { name: /엑셀 참고값을 단가로 채택/ })).toBeNull();
+      // 그러니 안내도 「이 탭에는 없다」를 스스로 말해야 한다 — 없는 조작을 시키면
+      // 사유가 틀린 것이고, 사유가 틀리면 사람이 틀린 일을 한다(교훈 #349).
+      const note = screen.getByTestId("material-excel-ref-note");
+      expect(note.textContent).toContain("이 탭에는 채택 버튼이 없다");
+    });
+
+    it("참고값이 «없는» 종엔 그 줄이 아예 안 뜬다 — 빈 칸이 아니라 «해당 없음»이다", async () => {
+      await openMaterialsTab();
+      // 기본 선택은 KIT(참고값 없음).
+      await screen.findByTestId("price-row-11");
+      expect(screen.queryByTestId("material-excel-ref-note")).toBeNull();
+    });
+
+    it("목록 줄도 참고값의 «존재»를 말한다 — 「원장 연결 또는 수동 입력 필요」만 말하지 않는다", async () => {
+      await openMaterialsTab();
+      const row = screen.getByTestId(`material-${FILM_WITH_REF.id}`);
+      expect(row.textContent).toContain("엑셀 참고값 600원");
+      expect(row.textContent).not.toContain("원장 연결 또는 수동 입력 필요");
+    });
+
+    it("순수 계층: 참고값 유무가 목록 문구를 가른다", () => {
+      expect(lotCountText({ lot_count: 0, price_count: 0, stale_count: 0 })).toBe(
+        "단가 없음 — 원장 연결 또는 수동 입력 필요",
+      );
+      expect(
+        lotCountText({ lot_count: 0, price_count: 0, stale_count: 0, excel_ref_price: "600.00" }),
+      ).toContain("엑셀 참고값 600원");
+      // ★이미 단가가 있는 종은 «대조값»이라고 말한다 — 채택이 안 건드리기 때문이다.
+      expect(excelRefNoteText({ excel_ref_price: "600.00", price_count: 2 })).toContain("대조값");
+      expect(excelRefNoteText({ excel_ref_price: null, price_count: 0 })).toBeNull();
+    });
+  });
+
+  describe("★E: 계산 내역의 「엑셀 참고값(채택 전)」 열 — 보이되 합계엔 «절대» 안 들어간다", () => {
+    async function openRecipeDetail() {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      return screen.findByTestId("recipe-detail-panel");
+    }
+
+    it("열 헤더와 행 값이 실제 픽셀이 된다", async () => {
+      const panel = await openRecipeDetail();
+      // ★VAT 기준까지 이름에 있어야 한다 — 이 화면의 기본 표기는 VAT «포함»(D-CPP-51)이라
+      //   기준을 안 적으면 참고값이 반대로 읽힌다. `adopt_excel_prices`가 이 값을
+      //   `unit_price_ex_vat`로 쓰므로 «VAT 제외»가 사실이다.
+      expect(within(panel).getByText("엑셀 참고값(채택 전 · VAT 제외)")).toBeTruthy();
+      // 첫 라인(필름)의 참고값 칸 — 「600원」이 그 칸 «안»에 있어야 한다.
+      expect(within(panel).getByTestId("breakdown-excel-ref-0").textContent).toBe("600원");
+      expect(within(panel).getByTestId("breakdown-excel-ref-1").textContent).toBe("98원");
+    });
+
+    // ★★§3 금지선의 화면판. 참고값(600+98=698)이 합계에 새면 2,137 → 2,835가 된다.
+    //   이 단언이 없으면 「참고값을 합계에 더하는」 변이가 초록으로 살아남는다.
+    it("★합계는 std_cost 그대로다 — 참고값을 더하지 않는다(계약 §3 금지선)", async () => {
+      const panel = await openRecipeDetail();
+      expect(within(panel).getByTestId("breakdown-total-ex").textContent).toBe("2,137원");
+      expect(within(panel).getByTestId("breakdown-total-inc").textContent).toBe("2,350.7원");
+      // 참고값을 더한 값이 화면 어디에도 없다.
+      expect(within(panel).queryByText("2,835원")).toBeNull();
+      expect(within(panel).queryByText("3,118.5원")).toBeNull();
+    });
+
+    it("참고값 열엔 합계가 «없다»고 말한다 — 빈 칸이면 「깜빡 잊었나」와 구별이 안 된다", async () => {
+      const panel = await openRecipeDetail();
+      expect(within(panel).getByTestId("breakdown-excel-ref-total").textContent).toBe("합계 없음");
+      const note = within(panel).getByTestId("breakdown-excel-ref-note");
+      expect(note.textContent).toContain("단가가 아니다");
+      expect(note.textContent).toContain("합계에 들어가지 않는다");
+    });
+
+    // ★채택 «전» 상태 — 단가가 없고 참고값만 있는 라인. prod의 다수파(128/129)가 이 모양이다.
+    //   순수 컴포넌트를 직접 렌더하는 이 파일의 기존 관례를 따른다.
+    it("채택 전 라인: 참고값은 보이는데 금액·합계는 여전히 「—」다", () => {
+      render(
+        <StandardBreakdown
+          standard={{
+            computable: false,
+            std_cost_ex_vat: null,
+            std_cost_inc_vat: null,
+            reason: "단가 없음 (1건: 지문방지필름 TPU 3매 · 필름 (bar))",
+            unresolved: ["지문방지필름 TPU 3매 · 필름 (bar)"],
+            partial_ex_vat: "0",
+            partial_inc_vat: "0",
+            line_count: 1,
+            lines: [
+              {
+                label: "지문방지필름 TPU 3매 · 필름 (bar)",
+                quantity: "3",
+                unit_price_ex_vat: null,
+                unit_price_inc_vat: null,
+                amount_ex_vat: null,
+                amount_inc_vat: null,
+                price_status: "missing",
+                inc_derived: false,
+                price_source: null,
+                price_note: null,
+                material_id: 21,
+                usable: false,
+                excel_ref_price: "600.00",
+              },
+            ],
+          }}
+        />,
+      );
+      // 참고값은 보인다 — 「단가 없음」만 말하면 사람은 채택이라는 길을 못 본다.
+      expect(screen.getByTestId("breakdown-excel-ref-0").textContent).toBe("600원");
+      // ★그런데 합계는 여전히 «없음»이다. 참고값이 부분합·표준원가로 새면 §3 위반이다.
+      expect(screen.getByTestId("breakdown-total-ex").textContent).toBe("—");
+      expect(screen.getByTestId("breakdown-total-inc").textContent).toBe("—");
+      expect(screen.queryByText("1,800원")).toBeNull();   // 600 × 3 이 금액 칸에 새면 안 된다
+      // ★기존 자백 문구는 그대로 살아 있다(지우지 않는다).
+      expect(screen.getByText(/부분합/)).toBeTruthy();
+      expect(screen.getByText(/표준원가가 아니다/)).toBeTruthy();
+    });
+  });
+
+  describe("★F·G: 최초 진입 깜빡임 · 0건일 때 오른쪽 문구", () => {
+    // ⚠️**F는 jsdom에서 원리적으로 못 잰다.** `useEffect`↔`useLayoutEffect`의 차이는
+    //    «브라우저 페인트 전인가»인데 jsdom은 페인트를 하지 않고, RTL의 `act`가 passive
+    //    effect까지 flush하므로 두 경우의 «최종 상태»가 같다. 아래는 그 최종 상태 —
+    //    즉 「도착하면 안내문이 아니라 상세 패널이다」 — 만 지킨다. 1프레임 깜빡임의
+    //    판정은 배포 후 라이브 화면 몫이다.
+    it("F(부분): 레시피 탭 최초 진입의 «최종» 상태는 안내문이 아니라 상세 패널이다", async () => {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      expect(await screen.findByTestId("recipe-detail-panel")).toBeTruthy();
+      expect(screen.queryByTestId("recipe-detail-placeholder")).toBeNull();
+    });
+
+    it("G: 레시피가 아예 없으면 오른쪽이 「고를 것이 없다」고 말한다 — 「고른다」가 아니다", async () => {
+      vi.mocked(fetchCostRecipes).mockResolvedValue({ items: [] });
+      try {
+        await renderApp();
+        await screen.findByRole("heading", { name: /원가/ });
+        fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+
+        const placeholder = await screen.findByTestId("recipe-detail-placeholder");
+        expect(placeholder.textContent).toContain("고를 레시피가 없다");
+        // ★고를 것이 없는데 「고른다」고 하면 안 된다(적대 리뷰 1R P2-3).
+        expect(placeholder.textContent).not.toBe("왼쪽에서 레시피를 고른다.");
+      } finally {
+        vi.mocked(fetchCostRecipes).mockResolvedValue({
+          items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+        });
+      }
+    });
+
+    // ★필터가 «전부» 걸러낸 0건은 전체 App 경로로 못 만든다(폼팩터 목록이 늘 현재 제품에
+    //   속한 것만이라 — 위 P2-A와 같은 사정). 그래서 순수 함수로 그 분기를 잡는다.
+    it("G(순수): 필터 0건과 데이터 0건은 «다른 문장»이다 — 처분이 다르기 때문이다", () => {
+      expect(recipePlaceholderText(2, 4)).toBe("왼쪽에서 레시피를 고른다.");
+      expect(recipePlaceholderText(0, 4)).toContain("필터가 전부 걸러냈다");
+      expect(recipePlaceholderText(0, 0)).toContain("엑셀 2종을 올리면");
+      expect(recipePlaceholderText(0, 4)).not.toBe(recipePlaceholderText(0, 0));
+    });
   });
 });
 // ★다른 라우트에서 같은 단언을 반복하지 않는다: 메뉴는 `Layout`이 라우트와 무관하게 그리므로

@@ -351,6 +351,38 @@ def test_cleaning_kit_excel_label_is_unconfirmed(client):
 
 
 # ══════════════════════════════════════════════════════════════════
+# N5 (2026-08-23) — 엑셀 참고값이 **응답에 실린다**
+#
+# ★발견: `recipe_parser.py`가 참고값을 「화면에 보이기만 하고」라고 적어 뒀는데, 실제로는
+#   **어느 응답에도 안 실려** 프론트의 `grep excel_ref`가 0건이었다. prod 실측(2026-08-23)
+#   단가 보유 종 **1/129** vs 참고값 보유 종 **128/129**인데 화면은 전 종에 대해
+#   「원장 연결 또는 수동 입력 필요」라고만 말했다 — 할 일이 셋인데 둘만 제시했고, 빠진
+#   셋째(채택)가 가장 싼 길이었다. **백엔드만 아는 사실은 없는 것과 같다.**
+# ══════════════════════════════════════════════════════════════════
+def test_material_payload_carries_the_excel_reference_price(client):
+    mid = _kit_material_id(client)
+    # 이 종엔 원래 참고값이 없다 — 「없으면 None」이 먼저 참이어야 한다(0으로 안 접는다).
+    assert client.get(f"/api/cost/materials/{mid}").json()["excel_ref_price"] is None
+
+    with client.testing_session() as s:
+        s.query(CostMaterial).filter(CostMaterial.id == mid).one().excel_ref_price = D("168")
+        s.commit()
+
+    body = client.get(f"/api/cost/materials/{mid}").json()
+    assert body["excel_ref_price"] == "168.00"
+    # ★★참고값이 «단가 자리»에 앉으면 그게 계약 §3 위반이다 — 실려 오되 섞이지 않는다.
+    assert body["latest_price_ex_vat"] is None
+    assert body["latest_price_inc_vat"] is None
+    assert body["latest_price_source"] is None
+    assert body["lot_count"] == 0
+    assert body["prices"] == []
+
+    # 목록 경로도 같은 칸을 낸다 — 상세만 고치고 목록을 잊는 것이 흔한 반쪽 배선이다.
+    listed = {m["id"]: m for m in client.get("/api/cost/materials").json()["items"]}
+    assert listed[mid]["excel_ref_price"] == "168.00"
+
+
+# ══════════════════════════════════════════════════════════════════
 # 설정 — 「법정 기본값」과 「우리 신고값」은 다른 사실이다 (계약 §9-1)
 # ══════════════════════════════════════════════════════════════════
 def test_valuation_method_is_reported_as_unconfirmed(client):

@@ -5289,6 +5289,13 @@ export interface CostMaterial {
   category: string | null;
   status: "unconfirmed" | "approved";
   excel_label: string | null;
+  /** ★엑셀 원가 정본의 **참고값** — 단가가 «아니다»(계약 §3 금지선).
+   *
+   * prod 실측(2026-08-23): 단가 보유 종 **1/129** vs 참고값 보유 종 **128/129**. 이 칸이
+   * 응답에 없던 동안 화면은 「원장 연결 또는 수동 입력 필요」라고만 말해 **가장 싼 길
+   * (레시피 탭의 「채택」)을 감추고 사람을 더 비싼 일로 보냈다.**
+   * ★`latest_price_*`와 절대 안 섞는다 — 참고값이 단가 자리에 앉으면 그게 §3 위반이다. */
+  excel_ref_price: string | null;
   match_rule: string | null;
   form_factor: string | null;
   part: string | null;
@@ -5446,6 +5453,9 @@ export interface CostStandardLine {
   price_note: string | null;
   material_id: number | null;
   usable: boolean;
+  /** ★엑셀 참고값 — **채택 전이라 단가가 아니다.** 합계(`std_cost_*`·`partial_*`)엔
+   * 절대 안 들어간다(계약 §3 금지선). 화면은 별도 열로 그리되 합계에서 뺀다. */
+  excel_ref_price: string | null;
 }
 
 /** ★`std_cost_*`가 `null`인 것과 `"0"`인 것은 다르다 — `reason`이 왜 없는지 말한다(§2-7). */
