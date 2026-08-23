@@ -215,7 +215,9 @@ def test_unresolved_price_is_none_not_zero():
     assert out.std_cost_ex_vat is None      # 0이 아니다
     assert out.unresolved == ("B",)
     assert out.partial_ex_vat == D("100.00")   # 부분합은 «부분»이라는 이름으로만 존재한다
-    assert "미확정" in out.reason
+    # ★사유는 «무엇이 없는지»를 말한다. 사유별로 나뉘어 나오므로 「미확정 N건」처럼 뭉치지
+    #   않는다 — 처분이 사유마다 다르기 때문이다(적대 리뷰 1R P1-1).
+    assert "단가 없음" in out.reason and "B" in out.reason
 
 
 def test_empty_recipe_is_not_zero_cost():
@@ -401,3 +403,116 @@ def test_cost_price_is_never_written(client):
     with client.testing_session() as s:
         after = {pm.internal_sku: pm.cost_price for pm in s.query(ProductMaster).all()}
     assert after == before
+
+
+# ──────────────────────────────────────────────
+# 3. 종 승인 게이트 — 적대 리뷰 1R P1-1이 연 구멍
+# ──────────────────────────────────────────────
+# 초판은 이 가드에 테스트가 **0건**이었다(변이 M9 SURVIVED). 그리고 가드가 도는 방식 자체가
+# 틀렸다 — 단가가 실재하는데도 값을 버리고 `unconfirmed`로 보고해, 화면이 「단가 미확정」이라
+# 말하며 178.78원을 「—」로 감췄다. **사유가 틀리면 사람이 틀린 일을 한다**(이미 있는 단가를
+# 입력하러 간다). 아래 3건이 그 두 가지를 한꺼번에 못 박는다.
+def _recipe_with_priced_material(client, *, material_status: str):
+    """단가가 «실재하는» 종 1개짜리 레시피를 세운다. `adopt` 경로를 안 탄다 — 그 경로만
+    테스트하면 종 승인 게이트가 영영 안 밟힌다(그게 초판의 구멍이었다)."""
+
+    from datetime import date
+
+    from app.models import CostMaterial, CostMaterialPrice, CostRecipe, CostRecipeLine
+
+    with client.testing_session() as s:
+        m = CostMaterial(name="cleaning kit", status=material_status, category="부자재")
+        m.prices.append(
+            CostMaterialPrice(
+                source="manual",
+                unit_price_ex_vat=D("178.78"),
+                unit_price_inc_vat=D("196.66"),
+                effective_date=date(2026, 7, 23),
+            )
+        )
+        s.add(m)
+        s.flush()
+        r = CostRecipe(product_name="원장파생 제품", form_factor="bar",
+                       status="draft", source="manual")
+        s.add(r)
+        s.flush()
+        s.add(CostRecipeLine(recipe_id=r.id, material_id=m.id, quantity=D("1")))
+        s.commit()
+        return r.id
+
+
+def test_unapproved_material_blocks_computation(client):
+    """★미승인 종의 단가는 계산에 안 쓴다 — 이 가드가 사라지면 이 테스트가 죽어야 한다(M9)."""
+
+    rid = _recipe_with_priced_material(client, material_status="unconfirmed")
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    std = client.get(f"/api/cost/recipes/{rid}").json()["standard"]
+    assert std["computable"] is False
+    assert std["std_cost_inc_vat"] is None
+
+
+def test_unapproved_material_says_the_right_reason(client):
+    """★사유가 「단가 없음」이면 안 된다 — 단가는 **있다**. 사람을 틀린 일로 보내면 안 된다."""
+
+    rid = _recipe_with_priced_material(client, material_status="unconfirmed")
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    std = client.get(f"/api/cost/recipes/{rid}").json()["standard"]
+
+    line = std["lines"][0]
+    assert line["price_status"] == "material_unapproved"
+    # ★실재하는 값을 감추지 않는다
+    assert line["unit_price_ex_vat"] == "178.78"
+    # ★무엇을 해야 하는지까지 말한다
+    assert "부자재 종 미승인" in std["reason"]
+    assert "승인" in std["reason"]
+    assert "단가 없음" not in std["reason"]
+
+
+def test_approving_the_material_unblocks_computation(client):
+    """승인하면 막힘이 풀린다 — 화면이 시킨 일이 실제로 통해야 한다."""
+
+    rid = _recipe_with_priced_material(client, material_status="approved")
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    std = client.get(f"/api/cost/recipes/{rid}").json()["standard"]
+    assert std["computable"] is True
+    assert std["std_cost_inc_vat"] == "196.66"
+
+
+def test_missing_price_is_not_reported_as_unapproved(client):
+    """★단가가 아예 없으면 「승인하라」고 시키면 안 된다 — 승인할 값이 없다."""
+
+    from app.models import CostMaterial, CostRecipe, CostRecipeLine
+
+    with client.testing_session() as s:
+        m = CostMaterial(name="단가없는종", status="unconfirmed", category="부자재")
+        s.add(m)
+        s.flush()
+        r = CostRecipe(product_name="P", form_factor="bar", status="draft", source="manual")
+        s.add(r)
+        s.flush()
+        s.add(CostRecipeLine(recipe_id=r.id, material_id=m.id, quantity=D("1")))
+        s.commit()
+        rid = r.id
+
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    std = client.get(f"/api/cost/recipes/{rid}").json()["standard"]
+    assert std["lines"][0]["price_status"] == "missing"
+    assert "단가 없음" in std["reason"]
+    assert "부자재 종 미승인" not in std["reason"]
+
+
+def test_column_roles_are_classified():
+    """열 역할 분류를 못 박는다 — 초판은 이 불변식을 주석으로만 주장했다(적대 리뷰 1R M10).
+
+    ★현재는 `qty`와 `derived`가 둘 다 라인 생성에서 건너뛰어져 순서를 바꿔도 «결과»가 같다.
+    그래서 결과만 보는 테스트로는 이 분류를 지킬 수 없다 — 분류를 **직접** 단언한다.
+    """
+
+    from app.services.cost_menu.recipe_parser import _classify_columns
+
+    header = (None, None, None, None, "내부\n매입", "내부\n필름", "내부\n필름*매입", "패키지")
+    roles = {(c.label, c.role, c.part) for c in _classify_columns(header, start=4)}
+    assert ("내부 매입", "qty", "내부") in roles
+    assert ("내부 필름", "price", "내부") in roles
+    assert ("내부 필름*매입", "derived", "내부") in roles      # ★유도값은 수량이 아니다
+    assert ("패키지", "flat", None) in roles

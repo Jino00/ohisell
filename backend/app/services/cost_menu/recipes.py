@@ -302,9 +302,13 @@ def import_drafts(
                 material = materials.get(line.key.display_name)
                 if material is None:
                     continue
-                db.add(
+                # ★`db.add(CostRecipeLine(recipe_id=...))`가 아니라 **관계에 붙인다**
+                #   (적대 리뷰 1R P2-1 채택). 지금은 이 뒤에서 `recipe.lines`를 다시 안 읽어
+                #   무해하지만, **바로 이 모양이 이번 슬라이스에서 실제 결함을 냈다**
+                #   (`adopt_excel_prices`가 낡은 `material.prices`로 계산해 보드만 빈 칸).
+                #   같은 결함을 두 번 봤으면 «그 자리»가 아니라 «그 모양»을 고친다.
+                recipe.lines.append(
                     CostRecipeLine(
-                        recipe_id=recipe.id,
                         material_id=material.id,
                         quantity=line.quantity,
                         note=f"원가표 열 「{line.source_column}」",
@@ -448,14 +452,31 @@ def _line_inputs(recipe: CostRecipe) -> list[SC.RecipeLineInput]:
             )
             continue
         price, status = _latest_price(material)
-        # ★미승인 종의 단가는 쓰지 않는다(계약 §2-2) — 추론을 확인분으로 만들지 않는다.
+        # ★미승인 종의 단가는 쓰지 않는다(`CostMaterial` docstring · 계약 §2-2) — 추론을
+        #   확인분으로 만들지 않는다.
+        #
+        # ★그러나 «못 쓴다»와 «없다»는 다르다(적대 리뷰 1R P1-1). 원장에서 온 178.78원이
+        #   버젓이 있는데 초판은 그 값을 **버리고** `unconfirmed`로 보고했고, 그래서 화면이
+        #   「단가 미확정」이라 말하며 실재하는 값을 「—」로 감췄다 — Jino를 **이미 있는 단가를
+        #   입력하러** 보내는 문장이었다. 이제 값은 그대로 실어 보내고 상태만 바꾼다:
+        #   화면이 「단가는 있다, 부자재 탭에서 승인」이라고 옳게 말할 수 있게.
         if material.status != "approved":
             out.append(
                 SC.RecipeLineInput(
                     label=material.name,
                     quantity=line.quantity,
-                    price_status=LC.STATUS_UNCONFIRMED,
+                    unit_price_ex_vat=price.unit_price_ex_vat if price else None,
+                    unit_price_inc_vat=price.unit_price_inc_vat if price else None,
+                    price_status=(
+                        SC.STATUS_MATERIAL_UNAPPROVED
+                        if price is not None
+                        # 단가 자체가 없으면 «미승인»이 아니라 그냥 «없음»이다 — 승인하라고
+                        # 시켜 봐야 승인할 값이 없다. 그 경우 원래 사유를 그대로 보고한다.
+                        else status
+                    ),
                     material_id=material.id,
+                    price_source=price.source if price else None,
+                    price_note=price.note if price else None,
                 )
             )
             continue

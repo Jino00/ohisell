@@ -47,14 +47,49 @@ VAT_MULTIPLIER = Decimal("1.1")  # D-NAO-150 규약 — 실제 세액이 아니�
 _ZERO = Decimal("0")
 _CENT = Decimal("0.01")
 
-# 단가를 못 쓰는 사유. `ledger_check`의 6값 중 «최신 자격을 잃은» 것들을 그대로 계승한다 —
-# 새 어휘를 만들면 화면이 두 벌의 사유를 설명해야 한다.
-PriceStatus = Literal["ok", "manual", "missing", "unconfirmed", "changed", "item_mismatch"]
+# 단가를 못 쓰는 사유. `ledger_check`의 6값을 그대로 계승하고 **하나만 더한다** — 새 어휘는
+# 화면이 설명할 사유를 늘리므로 함부로 만들지 않는다. 그런데 아래 하나는 만들 수밖에 없었다
+# (적대 리뷰 1R P1-1).
+#
+# ★왜 `unconfirmed`로 접으면 안 되나 (실측 2026-08-23):
+#   원장의 `unconfirmed`는 «수입건 확정이 풀려 원장이 단가를 지웠다» = **값이 없다.**
+#   「종이 아직 승인 안 됐다」는 **값이 있는데 못 쓰는 것**이다. 둘을 한 단어로 부르면 화면이
+#   「단가 미확정」이라 말하면서 실재하는 178.78원을 「—」로 감춘다. 그러면 Jino는
+#   **이미 있는 단가를 입력하러 간다.** 사유가 틀리면 사람이 틀린 일을 한다.
+PriceStatus = Literal[
+    "ok", "manual", "missing", "unconfirmed", "changed", "item_mismatch",
+    "material_unapproved",
+]
+
+#: 종이 승인되지 않아 못 쓰는 상태 — **단가는 실재한다.** 화면은 그 값을 보여주되 합계엔 안 넣는다.
+STATUS_MATERIAL_UNAPPROVED = "material_unapproved"
 
 #: 이 상태의 단가는 계산에 쓰지 않는다. `ok`·`manual`만 쓴다.
 UNUSABLE_STATUSES: frozenset[str] = frozenset(
-    {"missing", "unconfirmed", "changed", "item_mismatch"}
+    {"missing", "unconfirmed", "changed", "item_mismatch", STATUS_MATERIAL_UNAPPROVED}
 )
+
+#: 사유별 «사람이 읽고 움직일 수 있는» 문장. ★상태 이름만으로는 사람이 무엇을 해야 할지 모르고,
+#: 움직일 수 없는 자백은 자백이 아니라 장식이다.
+UNUSABLE_REASON_TEXT: dict[str, str] = {
+    "missing": "단가 없음",
+    "unconfirmed": "수입건 확정 해제 — 원장이 단가를 지웠다",
+    "changed": "원장이 재확정돼 값이 달라졌다 — 부자재 탭에서 「갱신」",
+    "item_mismatch": "연결된 원장 라인이 다른 품목이 됐다 — 해제 후 재연결",
+    STATUS_MATERIAL_UNAPPROVED: "부자재 종 미승인 — 단가는 있다, 부자재 탭에서 「승인」",
+}
+
+
+def unusable_summary(labels_by_status: dict[str, list[str]]) -> str:
+    """사유별로 묶어 한 문장으로. 「미확정 N건」처럼 뭉치지 않는다 — 처분이 사유마다 다르다."""
+
+    parts: list[str] = []
+    for status, labels in sorted(labels_by_status.items()):
+        text = UNUSABLE_REASON_TEXT.get(status, status)
+        shown = ", ".join(labels[:3])
+        more = f" 외 {len(labels) - 3}건" if len(labels) > 3 else ""
+        parts.append(f"{text} ({len(labels)}건: {shown}{more})")
+    return " · ".join(parts)
 
 
 def _round(value: Decimal) -> Decimal:
@@ -205,15 +240,19 @@ def compute_standard_cost(lines: Iterable[RecipeLineInput]) -> StandardCostResul
     unresolved = tuple(ln.label for ln in resolved if not ln.usable)
 
     if unresolved:
-        shown = ", ".join(unresolved[:5])
-        more = f" 외 {len(unresolved) - 5}건" if len(unresolved) > 5 else ""
+        # ★사유별로 나눠 말한다. 「미확정 N건」으로 뭉치면 처분이 서로 다른 것들이 한 문장에
+        #   섞여, 사람이 무엇을 해야 하는지 알 수 없다(적대 리뷰 1R P1-1).
+        by_status: dict[str, list[str]] = {}
+        for ln in resolved:
+            if not ln.usable:
+                by_status.setdefault(ln.price_status, []).append(ln.label)
         return StandardCostResult(
             computable=False,
             std_cost_ex_vat=None,
             std_cost_inc_vat=None,
             lines=resolved,
             unresolved=unresolved,
-            reason=f"단가 미확정 {len(unresolved)}건 — {shown}{more}",
+            reason=unusable_summary(by_status),
             partial_ex_vat=partial_ex,
             partial_inc_vat=partial_inc,
         )

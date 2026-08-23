@@ -462,6 +462,22 @@ export function uncomputedReason(row: CostBoardRow): string | null {
   return row.reason ?? "계산 안 됨 — 사유 미상";
 }
 
+/** 단가 상태 → 사람 말. ★상태 이름(`material_unapproved`)을 그대로 그리면 사람은
+ * 무엇을 해야 할지 모른다 — 움직일 수 없는 자백은 자백이 아니라 장식이다(적대 리뷰 1R P1-1). */
+export const PRICE_STATUS_LABEL: Record<string, string> = {
+  ok: "원장",
+  manual: "수동 입력",
+  missing: "단가 없음",
+  unconfirmed: "수입건 확정 해제",
+  changed: "원장 값 달라짐 — 「갱신」",
+  item_mismatch: "품목 바뀜 — 해제 후 재연결",
+  material_unapproved: "종 미승인 — 부자재 탭에서 「승인」",
+};
+
+export function priceStatusLabel(status: string): string {
+  return PRICE_STATUS_LABEL[status] ?? status;
+}
+
 /** 매칭 근거 한 줄. 제안이지 확정이 아님을 문장이 스스로 말한다. */
 export function matchReasonText(match: CostRecipeMatch | null): string {
   if (!match || !match.match_reason) return "매칭 근거 없음";
@@ -653,7 +669,7 @@ export function StandardBreakdown({ standard }: { standard: CostStandard }) {
                 {ln.usable ? (
                   <span className="text-gray-500">{ln.price_source ?? ln.price_status}</span>
                 ) : (
-                  <span className="text-amber-700">{ln.price_status}</span>
+                  <span className="text-amber-700">{priceStatusLabel(ln.price_status)}</span>
                 )}
               </td>
             </tr>
