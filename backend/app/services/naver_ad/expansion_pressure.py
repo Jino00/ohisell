@@ -158,7 +158,7 @@ def judge_campaign_pressure(db: Session, campaign_id: str, *, today: date) -> di
                 "확장 보류(fail-closed)"
             ),
         }
-    factor = Decimal(str(factor_info["factor"]))
+    factor = Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
 
     # ③ 갭 게이트 — gave_score 재사용으로 roas_ratio(=보정ROAS/BEP) 산출(중복 공식 금지).
     gamma = _gamma_for(db, campaign_id)

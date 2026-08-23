@@ -276,7 +276,7 @@ def allocate_expansion(
     # 이지만, 폴백 대비 명시적으로 확인한다. 부재면 factor=None → 전 그룹 campaign_prior 상속.
     factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
     factor = (
-        Decimal(str(factor_info["factor"]))
+        Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
         if factor_info.get("source") == "actual_revenue_ratio" else None
     )
 

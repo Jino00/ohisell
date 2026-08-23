@@ -26,6 +26,7 @@ import {
   LedgerMaterialLines,
   MaterialList,
   MaterialPriceHistory,
+  StandardBreakdown,
   ValuationBadge,
   excelLabelText,
   formatCostWon,
@@ -40,6 +41,7 @@ import type {
   CostLedgerMaterialLine,
   CostMaterial,
   CostSetting,
+  CostStandard,
 } from "../lib/api";
 
 afterEach(cleanup);
@@ -546,5 +548,52 @@ describe("★원장 라인 목록 — 확정이 풀린 건도 사라지지 않�
   it("확정 상태면 그 경고를 안 그린다", () => {
     render(<LedgerMaterialLines rows={[ledgerRow()]} materials={[KIT]} onLink={() => {}} />);
     expect(screen.queryByText(/확정 해제됨/)).toBeNull();
+  });
+});
+
+// ── S2 (적대 리뷰 1R P1-1) — 「못 쓴다」의 사유가 사람 말로 화면에 닿는가 ──
+//
+// 초판은 단가가 178.78원으로 실재하는데도 「단가 미확정」이라 말하고 값을 「—」로 감췄다.
+// 사유가 틀리면 사람이 틀린 일을 한다(이미 있는 단가를 입력하러 간다). 아래가 그 자리를 지킨다.
+describe("표준원가 계산 내역 — 못 쓰는 사유가 사람 말이 된다", () => {
+  const UNAPPROVED: CostStandard = {
+    computable: false,
+    std_cost_ex_vat: null,
+    std_cost_inc_vat: null,
+    reason: "부자재 종 미승인 — 단가는 있다, 부자재 탭에서 「승인」 (1건: cleaning kit)",
+    unresolved: ["cleaning kit"],
+    partial_ex_vat: "0",
+    partial_inc_vat: "0",
+    line_count: 1,
+    lines: [
+      {
+        label: "cleaning kit",
+        quantity: "1",
+        unit_price_ex_vat: "178.78",
+        unit_price_inc_vat: "196.66",
+        amount_ex_vat: null,
+        amount_inc_vat: null,
+        price_status: "material_unapproved",
+        inc_derived: false,
+        price_source: "ledger",
+        price_note: null,
+        material_id: 1,
+        usable: false,
+      },
+    ],
+  };
+
+  it("상태 이름이 아니라 «무엇을 해야 하는지»가 보인다", () => {
+    render(<StandardBreakdown standard={UNAPPROVED} />);
+    expect(screen.getByText(/종 미승인 — 부자재 탭에서 「승인」/)).toBeTruthy();
+    // 원시 상태 문자열이 그대로 새어 나오면 안 된다
+    expect(screen.queryByText("material_unapproved")).toBeNull();
+  });
+
+  it("★실재하는 단가를 감추지 않는다 — 178.78원이 보인다", () => {
+    render(<StandardBreakdown standard={UNAPPROVED} />);
+    expect(screen.getByText("178.78원")).toBeTruthy();
+    // 합계는 «없음»이다 — 부분합을 표준원가로 그리지 않는다
+    expect(screen.getByText(/부분합/)).toBeTruthy();
   });
 });

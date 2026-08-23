@@ -4531,6 +4531,14 @@ class CostMaterial(Base):
         String(12), nullable=False, default="unconfirmed", server_default="unconfirmed"
     )
     excel_label: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # ★★**참고값이지 단가가 아니다** (계약 §3 금지선, S2 신설).
+    #   원가 정본 엑셀에 적혀 있던 숫자를 «그대로 보여주기 위해» 보관한다. 이 값은
+    #   `cost_material_price` 행이 **아니므로** 표준원가 계산에 절대 쓰이지 않는다 —
+    #   계산이 읽는 것은 오직 단가 행(`ledger` 파생 또는 Jino가 입력·승인한 `manual`)뿐이다.
+    #   Jino가 화면에서 「엑셀 참고값 채택」을 누르면 **그때** 이 값이 `manual` 단가 행으로
+    #   복사되고, 그 행의 `note`에 출처가 남는다. 그것이 「Jino가 입력·승인한 값」의 경로다.
+    #   ⚠️이 컬럼을 계산 경로에서 읽는 코드가 생기면 그 순간 금지선을 넘는 것이다.
+    excel_ref_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
     # 원장 품목명 매칭 힌트. **제안까지고 확정은 사람이다**(계약 §5-2).
     match_rule: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     form_factor: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
@@ -4692,6 +4700,11 @@ class CostRecipeLine(Base):
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     recipe: Mapped[CostRecipe] = relationship(back_populates="lines")
+    # ★S2 신설 — 컬럼이 아니라 «관계»다(마이그레이션 대상 아님). 표준원가 계산이 라인마다
+    #   종의 단가 이력을 봐야 하는데, FK만 있고 관계가 없으면 N+1 쿼리이거나 수동 조인이다.
+    #   `back_populates`를 걸지 않는 이유: `CostMaterial` 쪽에서 「나를 쓰는 레시피 라인들」을
+    #   보는 소비처가 아직 없고, 없는 방향을 미리 만들면 삭제 규칙(RESTRICT)과 얽힌다.
+    material: Mapped[Optional[CostMaterial]] = relationship(lazy="selectin")
 
 
 class CostRecipeLink(Base):

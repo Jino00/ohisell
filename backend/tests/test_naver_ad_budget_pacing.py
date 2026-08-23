@@ -401,7 +401,7 @@ def test_A1_restore_api_failure_keeps_base_and_candidate_until_retry_succeeds(db
     d2 = datetime(2026, 7, 27, 0, 5)
     result = _new_result()
     with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
-                      return_value={"factor": Decimal("1")}), \
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1")}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
                       side_effect=RuntimeError("network")), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
@@ -427,7 +427,7 @@ def test_A1_restore_api_failure_keeps_base_and_candidate_until_retry_succeeds(db
     )
     result = _new_result()
     with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
-                      return_value={"factor": Decimal("1")}), \
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1")}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
                       return_value={"dailyBudget": 150_000, "sharedBudgetId": None}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
@@ -453,7 +453,7 @@ def test_A3_cooldown_blocked_restore_retries_successfully_next_hour(db):
     t1 = datetime(2026, 7, 27, 0, 20)
     result = _new_result()
     with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
-                      return_value={"factor": Decimal("1")}), \
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1")}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
                       return_value={"dailyBudget": 150_000, "sharedBudgetId": None}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
@@ -474,7 +474,7 @@ def test_A3_cooldown_blocked_restore_retries_successfully_next_hour(db):
     )
     result = _new_result()
     with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
-                      return_value={"factor": Decimal("1")}), \
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1")}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
                       return_value={"dailyBudget": 150_000, "sharedBudgetId": None}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
@@ -840,7 +840,7 @@ def test_real_guardrail_blocks_raise_when_campaign_has_no_conversion(db):
     _seed_guardrail_window(db, conv_amt=0)
     result = _new_result()
     with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
-                      return_value={"factor": Decimal("1")}), \
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1")}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
                       return_value={"dailyBudget": 100_000, "sharedBudgetId": None}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
@@ -861,7 +861,7 @@ def test_real_guardrail_blocks_raise_when_roas_below_target(db):
     _seed_guardrail_window(db, conv_amt=100_000)  # ROAS 1.0
     result = _new_result()
     with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
-                      return_value={"factor": Decimal("1")}), \
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1")}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
                       return_value={"dailyBudget": 100_000, "sharedBudgetId": None}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
@@ -884,7 +884,7 @@ def test_real_write_records_budget_up_pacing_action(db):
     )
     result = _new_result()
     with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
-                      return_value={"factor": Decimal("1")}), \
+                      return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1")}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
                       return_value={"dailyBudget": 100_000, "sharedBudgetId": None}), \
          patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
