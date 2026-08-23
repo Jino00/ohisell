@@ -40,6 +40,20 @@ const n = (v: unknown): number => Number(v ?? 0) || 0;
  */
 const wonR = (v: unknown): string => won(Math.round(n(v)));
 
+/** 차감 항목이 **순이익에 미치는 영향**을 부호와 함께 그린다.
+ *
+ * ★왜 하드코딩 `−`를 쓰면 안 되나(완료 QA가 라이브에서 잡았다, 2026-08-23):
+ *   종전엔 `−{wonR(ac.payable_vat)}`처럼 마이너스를 **글자로 박아** 뒀는데, 30일 창의
+ *   `payable_vat`는 실제로 **−50,119원**(부가세 환급)이었다. 그래서 화면에 `−-50,119원`이
+ *   떴다 — 부호가 둘이고, 하나만 남겼어도 **방향이 거꾸로**였을 값이다.
+ * ★차감액 `v`가 이익에 주는 영향은 `−v`다. 그러니 부호를 «찍지» 말고 «계산»해야 한다.
+ */
+function impact(v: string | null): string {
+  if (v == null) return NO_DATA;
+  const x = -Math.round(n(v));
+  return `${x < 0 ? "−" : x > 0 ? "+" : ""}${won(Math.abs(x))}`;
+}
+
 /** 값이 «없다»와 «0이다»를 가른다 — null은 0으로 그리지 않는다(계약 §3 추정 금지). */
 function cell(v: string | null): string {
   return v == null ? NO_DATA : wonR(v);
@@ -225,14 +239,14 @@ export default function RocketGrowthPnl() {
             <tbody>
               <tr className="border-t">
                 <td className="px-3 py-2">보관비·반품비 (기간비용 일할)</td>
-                <td className="text-right px-3 py-2">−{wonR((ac.period_fees))}</td>
+                <td className="text-right px-3 py-2">{impact(ac.period_fees)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">
                   판매일에 안 붙인다 — 매출 0인 주기에도 발생하는 재고 보유 비용이다(계약 §8-5).
                 </td>
               </tr>
               <tr className="border-t">
                 <td className="px-3 py-2">납부세액</td>
-                <td className="text-right px-3 py-2">−{wonR((ac.payable_vat))}</td>
+                <td className="text-right px-3 py-2">{impact(ac.payable_vat)}</td>
                 <td className="px-3 py-2 text-xs text-gray-500">계정 단위라 상품 행에 안 붙인다.</td>
               </tr>
               {n(ac.revenue_axis_gap) !== 0 && (
@@ -247,7 +261,7 @@ export default function RocketGrowthPnl() {
               {n(ac.fee_axis_fallback_gap) !== 0 && (
                 <tr className="border-t">
                   <td className="px-3 py-2">원장 축 폴백 잔여</td>
-                  <td className="text-right px-3 py-2">−{wonR((ac.fee_axis_fallback_gap))}</td>
+                  <td className="text-right px-3 py-2">{impact(ac.fee_axis_fallback_gap)}</td>
                   <td className="px-3 py-2 text-xs text-gray-500">
                     이 창은 판매일 축을 못 내 원장 축으로 물러섰다 — 옵션별로 못 가르는 몫이다.
                   </td>
