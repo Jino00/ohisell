@@ -24,6 +24,14 @@ const h = vi.hoisted(() => ({
   statusFor: null as null | ((nth: number) => unknown),
 }));
 
+// ★전역 fetch를 막는다(2026-08-23 적대 리뷰 P2-2). `refreshAdCostNow`의 실패 분기가
+//   `loadAdCookieStatus()`를 await 하는데 그 함수는 api 모듈이 아니라 **날 fetch**를 쓴다
+//   (`CoupangOps.tsx:260`). 모킹하지 않으면 가짜 타이머 아래에서 «실제 네트워크 거부가
+//   언제 도착하느냐»에 따라 문구 세팅 시점이 갈려 이 가드가 **플레이키**해진다 —
+//   실측 3회 중 2회 실패(리뷰어 관측). 플레이키한 표면 가드는 없는 것보다 나쁘다:
+//   표면이 끊겨도 「어쩌다 초록」이면 아무도 안 운다.
+vi.stubGlobal("fetch", async () => ({ ok: false, status: 503, json: async () => ({}) }));
+
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   let n = 0;
