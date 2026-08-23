@@ -13,6 +13,7 @@
 #   점추정으로 되돌아간다(D-NAO-204 `response_model` 키 삭제 사고와 같은 자리).
 from datetime import date
 from decimal import Decimal
+import pathlib
 
 import pytest
 
@@ -194,3 +195,101 @@ def test_explicit_ends_override_the_derived_ones():
     got = _sim(10, Decimal("1"), correction_factor_low=Decimal("1"),
                correction_factor_high=Decimal("3"))
     assert got["economic_ceiling_high"] > got["economic_ceiling_low"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R에서 «생존»한 변이 둘을 죽이는 가드
+#   M7 = 실쓰기 하한 배선 7줄을 전부 되돌려도 전건이 초록이었다
+#   M8 = build_diagnosis 응답의 구간 배선(`_factor_payload`)을 끊어도 전건이 초록이었다
+#   ⇒ 이 PR의 «실제 동작 변화»가 걸린 두 자리를 아무 테스트도 안 지키고 있었다.
+#      그 구멍으로 P1-2(서보 상한이 하한으로 안 바뀜)가 실제로 빠져나갔다.
+# ══════════════════════════════════════════════════════════════════
+_WIDE = {"factor": Decimal("2"), "factor_low": Decimal("1"), "factor_high": Decimal("2"),
+         "factor_point": Decimal("2"), "source": "actual_revenue_ratio",
+         "window_from": "2026-07-25", "window_to": "2026-08-23"}
+
+
+def test_build_diagnosis_response_carries_the_interval(board_spy, monkeypatch):
+    """M8 상환 — Harness 출력이 구간 키를 «끝까지» 들고 나가는가.
+
+    `_factor_payload`를 격리 호출로만 검사하면 「Harness가 그걸 쓰는가」는 아무도 안 본다
+    (전역 §2: 격리 성공은 필요조건이지 충분조건이 아니다). 키가 빠지면 화면은 점추정으로
+    «되돌아가는» 게 아니라 `factor_low.toFixed`에서 TypeError로 **보드가 통째 백지**가 된다
+    — D-NAO-204(`response_model`이 배너 키를 삭제)와 같은 자리다.
+    """
+    out = diagnosis.build_diagnosis(None, date(2026, 8, 9), date(2026, 8, 23))
+    cf = out["correction_factor"]
+    for key in ("factor", "factor_low", "factor_high", "factor_point"):
+        assert key in cf, f"응답에서 {key}가 사라지면 진단 보드가 백지가 된다"
+        assert isinstance(cf[key], float)
+
+
+def test_build_diagnosis_error_branch_also_carries_the_interval(board_spy, monkeypatch):
+    """BEP/목표ROAS 산출 불가로 조기 반환하는 가지도 같은 계약을 지킨다."""
+    monkeypatch.setattr(diagnosis.campaign_target_resolver,
+                        "account_default_bep_roas", lambda db: None)
+    out = diagnosis.build_diagnosis(None, date(2026, 8, 9), date(2026, 8, 23))
+    assert out["boards"] is None
+    for key in ("factor", "factor_low", "factor_high", "factor_point"):
+        assert key in out["correction_factor"]
+
+
+def test_execution_guard_uses_the_lower_end(monkeypatch):
+    """M7 상환 — 증액 가드의 `roas_corrected`가 «하한» 기준인가.
+
+    기존 테스트는 전부 `factor=1`(구간이 한 점으로 접힘) 픽스처라 상한/하한을 구별할 수
+    없었다. 여기서는 하한 1 · 상한 2로 벌려 두 끝을 갈라낸다.
+    """
+    from app.services.naver_ad import naver_execution_harness as harness
+    src = pathlib.Path(harness.__file__).read_text()
+    hits = [ln for ln in src.splitlines() if 'context["roas_corrected"]' in ln]
+    assert len(hits) == 3, f"증액 가드 주입 지점이 3곳이어야 한다(실제 {len(hits)})"
+    for ln in hits:
+        assert 'correction["factor_low"]' in ln, (
+            "증액 가드가 상한을 쓰면 「실쓰기 크기만 하한」(D-NAO-231)이 깨진다: " + ln.strip()
+        )
+
+
+def test_expansion_and_settlement_gates_use_the_lower_end():
+    """M7 상환 — 확장 배분·진입 게이트 4곳이 하한을 쓰는가(census 93 §3 실쓰기 행)."""
+    targets = {
+        "expansion_allocator.py": 1,
+        "expansion_pressure.py": 1,
+        "auto_operator.py": 2,   # _settlement_roas_status(UP 거부권) · 심층확장 진입
+    }
+    base = pathlib.Path(diagnosis.__file__).parent
+    for fname, expect in targets.items():
+        src = (base / fname).read_text()
+        n = src.count('factor_info["factor_low"]')
+        assert n == expect, f"{fname}: 하한 배선이 {expect}곳이어야 한다(실제 {n})"
+
+
+def test_servo_ceiling_uses_the_lower_end():
+    """★적대 리뷰 1R P1-2 상환 — 시간당 서보의 «실입찰 크기» 상한이 하한을 쓰는가.
+
+    방향(up/down)은 밴드 관제(`_judge_hourly`)가 이미 정했고 계수와 무관하다. 그러니 이
+    자리에서 계수가 정하는 것은 오직 «얼마나 올리는가»이고, 그게 D-NAO-231이 「하한」으로
+    못 박은 층이다. 상한을 쓰면 하한이 정당화하는 값보다 높은 입찰까지 올라간다
+    (라이브 계수 1.3133 기준 1030원 → 1350원, +31%).
+    """
+    src = pathlib.Path(diagnosis.__file__).parent.joinpath("auto_operator.py").read_text()
+    assert 'servo_correction_factor_low = Decimal(str(_cf["factor_low"]))' in src
+    assert 'servo_correction_factor = Decimal(str(_cf["factor_high"]))' in src
+    # 경제성 상한 호출은 하한을, estimate 직행 스텝은 두 끝을 다 받아야 한다.
+    assert "servo_agg=servo_agg, correction_factor=servo_correction_factor_low," in src
+    assert "correction_factor_low=servo_correction_factor_low," in src
+
+
+def test_simulate_bid_direction_is_unchanged_when_only_the_floor_is_handed_down():
+    """★서보 수정의 함정 가드 — 하한 «하나만» 넘기면 direction이 바뀐다.
+
+    `simulate_bid`에 하한만 주면 내부 유도가 `cf_high = max(1, 하한) = 1`이 되어 상향
+    판정이 사라진다(= 「액셀 판정 불변」 위반). 그래서 서보는 **두 끝을 다** 넘긴다.
+    """
+    both = _sim(10, Decimal("1"), correction_factor_low=Decimal("1"),
+                correction_factor_high=Decimal("2"))
+    floor_only = _sim(10, Decimal("1"))  # 하한만 넘긴 것과 동형(상한이 1로 접힘)
+    assert both["direction_high"] == "up"
+    assert both["economic_ceiling_high"] > floor_only["economic_ceiling_high"], (
+        "두 끝을 안 넘기면 상한이 1로 접혀 direction 판정 재료가 달라진다"
+    )

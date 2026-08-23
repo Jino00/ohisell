@@ -179,8 +179,9 @@ export default function NaverAdDiagnosisBoard() {
               </div>
               <div className="text-[11px] text-gray-400 mt-1 leading-snug">
                 하한=보정 없음 · 상한=채널매출÷광고전환매출(광고 귀속 조인 없음 ={" "}
-                <span className="text-gray-500">100% 견인 가정</span>). 브레이크(정지·하향)는 상한,
-                액셀(확장·상향·재개)은 하한으로 판정.
+                <span className="text-gray-500">100% 견인 가정</span>).{" "}
+                <span className="text-gray-500">아래 보드의 후보 «선정»은 전부 상한</span>이고(액셀
+                판정 불변), 하한은 실제 쓰기의 «크기»에만 쓴다 — 입찰 크기·증액 가드·확장 배분.
               </div>
             </div>
             <div className="bg-white rounded-lg border border-gray-200 p-3">

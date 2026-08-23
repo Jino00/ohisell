@@ -85,15 +85,23 @@ describe("D-NAO-21 보정계수 카드 — 구간 자 표면(D-NAO-230 §5-5)", 
     expect(await screen.findByText(/100% 견인 가정/)).toBeTruthy();
   });
 
-  it("어느 끝이 어느 판정에 쓰이는지 화면이 말한다", async () => {
+  // ★적대 리뷰 1R P1-1 상환 — 이 단언이 초판엔 「액셀은 하한으로 판정」이었는데, 그건
+  //   Jino 결정(D-NAO-231)으로 **폐기된 초판 배정**이었다. 화면이 배포되는 동작과 정반대를
+  //   말하고 있었고 테스트가 그 거짓을 «단언»하고 있었다. 지금 단언은 실배선과 같다:
+  //   보드 선정 = 전부 상한(`test_no_board_ever_receives_the_lower_end`가 백엔드에서 강제),
+  //   하한 = 실쓰기 크기 층만.
+  it("어느 끝이 어느 층에 쓰이는지 화면이 «실제 배선대로» 말한다", async () => {
     h.data = diagnosis({ factor: 1.3133, factor_low: 1.0, factor_high: 1.3133, factor_point: 1.3133 });
     render(
       <MemoryRouter>
         <NaverAdDiagnosisBoard />
       </MemoryRouter>,
     );
-    const note = await screen.findByText(/브레이크\(정지·하향\)는 상한/);
-    expect(note.textContent).toMatch(/액셀\(확장·상향·재개\)은 하한/);
+    const note = await screen.findByText(/후보 «선정»은 전부 상한/);
+    const text = note.parentElement?.textContent ?? "";
+    expect(text).toMatch(/하한은 실제 쓰기의 «크기»에만 쓴다/);
+    // 폐기된 초판 문구가 되살아나면 실패한다.
+    expect(text).not.toMatch(/액셀\(확장·상향·재개\)은 하한으로 판정/);
   });
 
   it("점추정 원값도 함께 보인다 — 구간이 어디서 왔는지 감사할 수 있어야 한다", async () => {

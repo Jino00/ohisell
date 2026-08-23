@@ -3069,11 +3069,15 @@ export interface NaverAdDiagnosisBoards {
 export interface NaverAdDiagnosis {
   window: { date_from: string; date_to: string };
   correction_factor: {
-    /** 상한(=브레이크 판정이 쓰는 끝). 하위호환 키 — 점추정이 아니다(D-NAO-230). */
+    /** 상한. 하위호환 키 — 점추정이 아니다(D-NAO-230). */
     factor: number;
-    /** D-NAO-230 안3 «구간 자»: 하한 = 액셀(확장·상향·재개) 판정이 쓰는 끝. */
+    /**
+     * D-NAO-230 안3 «구간 자»의 하한. **D-NAO-231: 후보 «선정»에는 안 쓴다** —
+     * 실제 쓰기의 «크기»를 정하는 층만 쓴다(입찰 크기·증액 가드·확장 배분).
+     * 이 응답의 보드는 전부 상한으로 뽑힌 것이다.
+     */
     factor_low: number;
-    /** 상한 = 브레이크(정지·차단·하향) 판정이 쓰는 끝. */
+    /** 상한 = **모든 보드 판정(브레이크·액셀 양쪽)**이 쓰는 끝. */
     factor_high: number;
     /** 보정 전 점추정 원값(감사·병기용). */
     factor_point: number;
