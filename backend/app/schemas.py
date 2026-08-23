@@ -320,6 +320,72 @@ class DashboardKPI(BaseModel):
     net_floor_ad: str = "0"           # 손익을 못 잰 채 광고비만 반영된 금액
 
 
+class KpiEvidenceRow(BaseModel):
+    """근거 페이지의 채널 1줄 — 카드 숫자를 이 행들이 합쳐 만든다.
+
+    ★`deductions`의 값이 **None이면 「0원」이 아니라 「모른다」**이다(RG·로켓1P는 분해 항목을
+      원래 다 갖고 있지 않다). 화면은 이 둘을 반드시 다르게 그려야 한다 — 0으로 그리면
+      「원가 0원」이라는 거짓말이 되고, 그게 순이익을 부풀려 보이게 한 실제 결함 모양이다.
+    """
+    channel_id: Optional[int] = None
+    channel_name: str = ""
+    company: Optional[str] = None
+    label: str = ""
+    revenue: str
+    product_revenue: Optional[str] = None
+    shipping_revenue: Optional[str] = None
+    deductions: dict[str, Optional[str]]
+    missing: list[str] = []
+    net_profit: Optional[str] = None
+    net_scope: Optional[str] = None
+    net_floor_ad: str = "0"
+    net_basis_revenue: str = "0"
+    unmapped_revenue: Optional[str] = None
+    residual: Optional[str] = None
+    explains_net: bool = False
+    order_count: int = 0
+    counted_in_order_card: bool = True
+    revenue_basis: Optional[str] = None
+
+
+class KpiEvidenceTotals(BaseModel):
+    revenue: str
+    net_profit: str
+    basis_revenue: str
+    floor_ad: str
+    profit_rate: str
+    order_count: int
+    residual: str
+    unmeasured_revenue: str
+
+
+class KpiEvidenceChecks(BaseModel):
+    revenue_matches: bool
+    net_matches: bool
+    order_count_matches: bool
+    net_fully_explained: bool
+
+
+class KpiEvidence(BaseModel):
+    """`GET /dashboard/kpi/evidence` 응답 — KPI 카드 4칸의 근거 한 벌.
+
+    ★여기 칸을 지우면 화면의 검산·자백이 **조용히** 사라진다(교훈 #321·#223: 서비스층은
+      정직하게 계산했는데 `response_model`이 HTTP 경계에서 키를 지워 배너가 통째로 숨었다).
+      필드를 빼기 전에 `frontend/src/pages/KpiEvidence.tsx`를 볼 것.
+    """
+    date_from: str
+    date_to: str
+    rocket_basis: str
+    rows: list[KpiEvidenceRow]
+    deduction_keys: list[str]
+    deduction_totals: dict[str, str]
+    deduction_unknown_rows: dict[str, int]
+    totals: KpiEvidenceTotals
+    checks: KpiEvidenceChecks
+    order_count_excluded: int = 0
+    has_floor: bool = False
+
+
 class GroupedSummaryRow(BaseModel):
     kind: str  # total | company | leaf
     company: Optional[str]

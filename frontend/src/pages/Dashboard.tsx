@@ -1,5 +1,6 @@
 // Dashboard.tsx — 대시보드 페이지 (Sprint 3)
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import {
   ComposedChart,
   Bar,
@@ -25,6 +26,7 @@ import {
   type GroupedTrendPoint,
   type ProductRanking,
   type RocketBasis,
+  type KpiMetric,
 } from "../lib/api";
 import { netScopeNote, unmappedNote } from "../lib/netScope";
 import { rgFeeFactsFromRow, rgFeeNote } from "../lib/rgSettlementAxis";
@@ -200,6 +202,59 @@ function getDefaultDateRange() {
   return quickRange(1);
 }
 
+/** URL에 실린 조회 조건 → 대시보드 초기값. 없거나 이상하면 기본값을 쓴다.
+ *
+ * ★왜 필요한가: 근거 페이지의 「돌아가기」는 조건을 쿼리스트링에 싣고 온다. 대시보드가 그걸
+ *   안 읽으면 돌아온 화면이 **어제로 리셋**되어, 사용자가 방금 본 근거와 다른 창을 보게 된다.
+ *   조건을 못 믿을 값(형식이 다른 날짜, 모르는 축)으로 받으면 **조용히 기본값**으로 간다 —
+ *   근거 화면과 갈라지느니 「기본 창」이라고 화면이 말하는 편이 낫다.
+ */
+export function conditionsFromSearch(
+  search: string,
+  defaults: { from: string; to: string },
+): { from: string; to: string; basis: RocketBasis } {
+  const p = new URLSearchParams(search);
+  const iso = (v: string | null) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+  const basis = p.get("rocket_basis");
+  return {
+    from: iso(p.get("date_from")) ?? defaults.from,
+    to: iso(p.get("date_to")) ?? defaults.to,
+    basis: basis === "sales" || basis === "settlement" ? basis : "settlement",
+  };
+}
+
+/** KPI 카드 — **누르면 근거 페이지로 간다**(계약 CONTRACT_kpi_evidence_page.md).
+ *
+ *  ★카드를 `<Link>`로 감싸는 것 자체가 이 기능의 «표면»이다. 여기가 `<div>`로 되돌아가면
+ *    백엔드 근거 API가 아무리 정확해도 사용자는 근거에 **닿을 수 없다**.
+ */
+function KpiCard({
+  metric,
+  to,
+  label,
+  children,
+}: {
+  metric: KpiMetric;
+  to: string;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Link
+      to={to}
+      data-metric={metric}
+      aria-label={`${label} 근거 보기`}
+      className="bg-white border rounded-lg p-4 block hover:border-blue-400 hover:shadow-sm transition-colors"
+    >
+      <div className="flex items-baseline justify-between">
+        <div className="text-sm text-gray-500">{label}</div>
+        <span className="text-xs text-blue-600">근거 &rarr;</span>
+      </div>
+      {children}
+    </Link>
+  );
+}
+
 function ChangeIndicator({ value }: { value: number | null | undefined }) {
   if (value == null || isNaN(value)) return <span className="text-xs text-gray-400">--</span>;
   if (value > 0) return <span className="text-xs text-green-600">&#9650; {value.toFixed(1)}%</span>;
@@ -358,12 +413,14 @@ function ChannelTrendChart({
 
 export default function Dashboard() {
   const defaults = getDefaultDateRange();
+  // 근거 페이지에서 돌아왔으면 그때의 조회 조건을 그대로 이어받는다(계약 §4 A5).
+  const initial = conditionsFromSearch(useLocation().search, defaults);
   const [period, setPeriod] = useState<PeriodType>("daily");
   // 로켓배송 1P 매출 축. 기본은 계산서(회계 정본) — 바꾸면 로켓 leaf 매출이 크게 달라진다
   // (실측 2026-08-04: 계산서 1,578,000 vs 판매 3,885,820). 두 축은 택일이며 합산하지 않는다.
-  const [rocketBasis, setRocketBasis] = useState<RocketBasis>("settlement");
-  const [dateFrom, setDateFrom] = useState(defaults.from);
-  const [dateTo, setDateTo] = useState(defaults.to);
+  const [rocketBasis, setRocketBasis] = useState<RocketBasis>(initial.basis);
+  const [dateFrom, setDateFrom] = useState(initial.from);
+  const [dateTo, setDateTo] = useState(initial.to);
 
   const [kpi, setKpi] = useState<KpiData | null>(null);
   const [trend, setTrend] = useState<TrendItem[]>([]);
@@ -382,6 +439,15 @@ export default function Dashboard() {
   //   **틀린 축의 숫자를 맞다고 믿게 된다.**
   //   세대 카운터로 막는다: 응답이 도착했을 때 내가 최신 요청이 아니면 결과를 **버린다**.
   const fetchGen = useRef(0);
+
+  // 카드 → 근거 페이지 링크. **지금 화면의 조회 조건을 그대로 싣는다** — 안 실으면 근거가
+  // 카드와 다른 창을 말하게 되고, 그건 근거가 아니라 두 번째 숫자가 된다.
+  const evidenceHref = useCallback(
+    (metric: KpiMetric) =>
+      `/kpi-evidence?metric=${metric}&date_from=${dateFrom}&date_to=${dateTo}` +
+      `&rocket_basis=${rocketBasis}`,
+    [dateFrom, dateTo, rocketBasis],
+  );
 
   const fetchAll = useCallback(async () => {
     const gen = ++fetchGen.current;
@@ -721,13 +787,11 @@ export default function Dashboard() {
         </div>
       ) : kpi ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
-          <div className="bg-white border rounded-lg p-4">
-            <div className="text-sm text-gray-500">총 매출</div>
+          <KpiCard metric="revenue" to={evidenceHref("revenue")} label="총 매출">
             <div className="text-xl font-bold text-blue-600">{formatKRW(kpi.total_revenue)}원</div>
             <ChangeIndicator value={kpi.revenue_change_pct} />
-          </div>
-          <div className="bg-white border rounded-lg p-4">
-            <div className="text-sm text-gray-500">순이익</div>
+          </KpiCard>
+          <KpiCard metric="net_profit" to={evidenceHref("net_profit")} label="순이익">
             <div className={`text-xl font-bold ${kpi.net_profit >= 0 ? "text-green-600" : "text-red-600"}`}>
               {formatKRW(kpi.net_profit)}원
             </div>
@@ -741,19 +805,17 @@ export default function Dashboard() {
             ) : (
               <ChangeIndicator value={kpi.profit_change_pct} />
             )}
-          </div>
-          <div className="bg-white border rounded-lg p-4">
-            <div className="text-sm text-gray-500">이익률</div>
+          </KpiCard>
+          <KpiCard metric="profit_rate" to={evidenceHref("profit_rate")} label="이익률">
             <div className={`text-xl font-bold ${profitRateColor(kpi.profit_rate)}`}>
               {kpi.profit_rate.toFixed(1)}%
             </div>
             <div className="text-xs text-gray-400">순이익 / 손익을 잰 매출</div>
-          </div>
-          <div className="bg-white border rounded-lg p-4">
-            <div className="text-sm text-gray-500">주문 건수</div>
+          </KpiCard>
+          <KpiCard metric="order_count" to={evidenceHref("order_count")} label="주문 건수">
             <div className="text-xl font-bold text-gray-900">{formatKRW(kpi.order_count)}건</div>
             <div className="text-xs text-gray-400">조회 기간 합산</div>
-          </div>
+          </KpiCard>
         </div>
       ) : null}
 

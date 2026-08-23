@@ -488,6 +488,73 @@ export interface KpiData extends Record<string, unknown> {
  */
 export type NetScope = "full" | "ad_only" | "partial";
 
+// ── KPI 카드 근거 (계약 CONTRACT_kpi_evidence_page.md, 2026-08-23) ──────────────
+// ★`deductions`의 값이 **null이면 「0원」이 아니라 「모른다」**이다 — RG·로켓1P 행은 분해
+//   항목을 원래 다 갖고 있지 않다. 화면은 이 둘을 반드시 다르게 그려야 한다(0으로 그리면
+//   「원가 0원」이라는 거짓말이 되고, 그게 순이익을 부풀려 보이게 한 실제 결함 모양이다).
+export type KpiMetric = "revenue" | "net_profit" | "profit_rate" | "order_count";
+
+export interface KpiEvidenceRow extends Record<string, unknown> {
+  channel_id: number | null;
+  channel_name: string;
+  company: string | null;
+  label: string;
+  revenue: string;
+  product_revenue: string | null;
+  shipping_revenue: string | null;
+  deductions: Record<string, string | null>;
+  missing: string[];
+  net_profit: string | null;
+  net_scope: NetScope | null;
+  net_floor_ad: string;
+  net_basis_revenue: string;
+  unmapped_revenue: string | null;
+  residual: string | null;
+  explains_net: boolean;
+  order_count: number;
+  counted_in_order_card: boolean;
+  revenue_basis: string | null;
+}
+
+export interface KpiEvidence extends Record<string, unknown> {
+  date_from: string;
+  date_to: string;
+  rocket_basis: RocketBasis;
+  rows: KpiEvidenceRow[];
+  deduction_keys: string[];
+  deduction_totals: Record<string, string>;
+  deduction_unknown_rows: Record<string, number>;
+  totals: {
+    revenue: string;
+    net_profit: string;
+    basis_revenue: string;
+    floor_ad: string;
+    profit_rate: string;
+    order_count: number;
+    residual: string;
+    unmeasured_revenue: string;
+  };
+  checks: {
+    revenue_matches: boolean;
+    net_matches: boolean;
+    order_count_matches: boolean;
+    net_fully_explained: boolean;
+  };
+  order_count_excluded: number;
+  has_floor: boolean;
+}
+
+export function fetchKpiEvidence(
+  dateFrom: string,
+  dateTo: string,
+  rocketBasis: RocketBasis,
+): Promise<KpiEvidence> {
+  return fetchApi<KpiEvidence>(
+    `/api/dashboard/kpi/evidence?date_from=${dateFrom}&date_to=${dateTo}` +
+      `&rocket_basis=${rocketBasis}`,
+  );
+}
+
 // 회사 > leaf 계층 그룹 요약 (kind: total | company | leaf)
 export interface GroupedSummaryRow extends Record<string, unknown> {
   kind: string;

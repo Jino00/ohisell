@@ -23,9 +23,11 @@ from app.schemas import (
     DashboardKPI,
     GroupedSummaryRow,
     GroupedTrendPoint,
+    KpiEvidence,
     ProductProfitRow,
     TrendPoint,
 )
+from app.services.kpi_evidence import build_kpi_evidence
 from app.services.coupang.rg_channel_pnl import compute_rg_summary_row
 from app.services.coupang.rg_net_revenue import split_wing_ad_spend
 from app.services.coupang.rocket_1p_channel_pnl import (
@@ -344,6 +346,50 @@ def dashboard_kpi(
                 pass
 
 
+@router.get("/kpi/evidence", response_model=KpiEvidence)
+def dashboard_kpi_evidence(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    rocket_basis: str = Query(BASIS_SETTLEMENT),
+    db: Session = Depends(get_db),
+):
+    """KPI 카드 4칸의 **근거** — 채널별 구성 + 검산식 (계약 CONTRACT_kpi_evidence_page.md).
+
+    ★`dashboard_kpi`와 **같은 두 줄**(`_channel_rows` → `_kpi_totals`)을 쓴다. 근거용으로
+      다시 계산하지 않는다 — 경로가 둘이면 언젠가 갈라지고, 카드와 다른 숫자를 말하는
+      근거는 근거가 아니다(D-22 실사고).
+    ★여기서 «안 하는 것»: 전기 대비 변화율은 근거 대상이 아니라 계산하지 않는다(창이 둘이
+      되면 화면이 어느 창의 근거인지 말할 수 없다).
+    """
+    df, dt = _default_dates(date_from, date_to, "daily")
+    basis = normalize_basis(rocket_basis)
+    _sync_orders_recent(db)
+    _sync_ad_costs_for_period(db, df, dt)
+    ad_db = _resolve_ad_db()
+
+    try:
+        ch = rocket_1p_channel(db)
+        rocket_id = ch.id if ch else None
+
+        rows = _channel_rows(db, ad_db, df, dt, basis)
+        totals = _kpi_totals(db, rows, rocket_id)
+        payload = build_kpi_evidence(
+            rows, totals, rocket_id, get_channel_company_map(db)
+        )
+        return KpiEvidence(
+            date_from=df.isoformat(),
+            date_to=dt.isoformat(),
+            rocket_basis=basis,
+            **payload,
+        )
+    finally:
+        if ad_db is not None:
+            try:
+                ad_db.close()
+            except Exception:
+                pass
+
+
 # ──────────────────────────────────────────────
 # 로켓배송 1P 병합 (트랙: 쿠팡 손익 정합)
 # ──────────────────────────────────────────────
@@ -429,12 +475,20 @@ def _merge_rg_summary(db: Session, rows: list[dict], df, dt) -> list[dict]:
             row_3p = next((r for r in out if r["channel_id"] == ch_3p.id), None)
             if row_3p is not None:
                 row_3p["ad_spend"] = str(Decimal(row_3p["ad_spend"]) + ad["p3"])
+                input_vat = ad["p3"] * Decimal("10") / Decimal("110")
                 if row_3p.get("net_profit") is not None:
                     # 광고비가 늘면 순이익이 그만큼 줄고, 매입세액도 그만큼 는다.
                     row_3p["net_profit"] = str(
-                        Decimal(row_3p["net_profit"])
-                        - ad["p3"]
-                        + ad["p3"] * Decimal("10") / Decimal("110")
+                        Decimal(row_3p["net_profit"]) - ad["p3"] + input_vat
+                    )
+                # ★자백 칸도 같이 움직여야 한다(적대 리뷰 1R P1-4). 종전엔 `net_profit`만 고치고
+                #   `payable_vat`은 병합 전 값 그대로 뒀다 — 근거 화면이 「이 행이 실제로 뺀
+                #   부가세」라며 **광고비 매입세액만큼 큰 값**을 보이고, 그 차액이 잔차로 떠서
+                #   「설명 못 한 돈」에 **틀린 이름**이 붙었다(쿠팡 3P 광고가 도는 날 상시 재현).
+                #   카드 4값은 안 바뀐다 — `net_profit`은 위에서 이미 같은 값으로 조정돼 있다.
+                if row_3p.get("payable_vat") is not None:
+                    row_3p["payable_vat"] = str(
+                        Decimal(row_3p["payable_vat"]) - input_vat
                     )
             else:
                 out.append(_ad_only_row(ch_3p, ad["p3"]))
