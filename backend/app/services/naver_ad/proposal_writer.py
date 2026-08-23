@@ -289,8 +289,13 @@ def _bid_proposal(
     D-NAO-236이 그 불변식을 깼다 — 게이트(상한)가 up이라 판정하면 하한의 경제성 상한이 0이어도
     up이 살아남는다. 그러자 이 줄이 **액셀 판정을 「제외 키워드」로 뒤집었다**(재현: rpc=100·
     current_bid=70·구간[0.6,1.2] → `direction=up`인데 `proposal_type=negative_keyword`,
-    `target_bid=None`). 즉 D-NAO-236이 살리려던 저가 대역(대략 `current_bid ≲ 110원`,
-    SHOPPING 최소입찰 50원 포함)이 hold로 사라지는 대신 **죽은 제외 제안으로 바뀔 뿐**이었다.
+    `target_bid=None`). 즉 D-NAO-236이 살리려던 저가 대역이 hold로 사라지는 대신 **죽은 제외
+    제안으로 바뀔 뿐**이었다. ★대역 실측(2R, 유효 입찰가 70~5,000원 × rpc·target_roas·rank_bid
+    스윕): 운영 구간 [0.827, 1.3318]에서 `current_bid` **70~100원**, 위 재현 구간 [0.6, 1.2]에서
+    70~120원. (초판이 「≲110원, SHOPPING 최소입찰 50원 포함」이라 적은 것은 두 구간을 섞고 grain을
+    혼동한 것이다 — 50원은 `exploration._EXPLORATION_MIN_BID_SHOPPING`의 **adgroup** 규격이고,
+    이 격상은 `target_type=="keyword"` 전용이며 키워드 하한은 `bid_simulator._MIN_BID = 70`이라
+    `affordable_ceiling`이 70원 미만을 0으로 내린다 ⇒ 50원 쇼핑 그룹은 이 분기에 원리적으로 안 온다.)
     ⇒ 조건을 원래 의도대로 좁힌다. 넓히는 변경이 아니라 **깨진 불변식을 조건으로 되돌린 것**이다.
     """
     if sim is None:

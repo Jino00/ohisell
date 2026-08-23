@@ -456,6 +456,19 @@ ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python /tm
 
 ⇒ **하한은 이제 게이트에서 완전히 손을 뗐고 크기 층에서만 작동한다.** §9-2가 잡은 비대칭
 (액셀 −24.0% / 브레이크 0%)이 사라졌다 — 방향 분포가 양쪽에서 동일하다.
+★**적대 리뷰 1R이 이 처분에서 P1을 하나 잡았다 — 기록한다.** D-NAO-236은 「`direction=="up"`이면
+`economic_ceiling > 0`」이라는 **암묵 불변식**을 깼다(게이트가 상한이라 하한의 경제성 상한이 0이어도
+up이 산다). `proposal_writer._bid_proposal`의 「`economic_ceiling <= 0` → 제외 키워드 격상」이 그
+불변식 위에 세워져 있었고, 그래서 **액셀 판정이 「제외 키워드」 제안으로 뒤집혔다**(`target_bid=None`).
+즉 살리려던 저가 대역(운영 구간에서 `current_bid` 70~100원)이 hold로 사라지는 대신 **죽은 제외
+제안으로 바뀔 뿐**이었다. ⇒ 격상 조건을 `direction == "down"`으로 좁혀 상환(`847c9741`).
+★**내 배포 전 실측(§9-3 표)이 이걸 못 본 이유**: `bid_simulator` 반환값까지만 쟀다 — 전역 §4
+「최종 산출물까지 가는 경로를 끊는 변이」가 정확히 이 자리다(교훈 #355를 같은 세션에서 다시 밟았다).
+2R이 운영 구간 **19,320 조합 전수 스윕**으로 `up → negative_keyword` **0건**을 확인해 PASS.
+⚠️`bleeding_keywords` 보드의 `up ∧ ceiling<=0` 44건은 여전히 아무 기록 없이 `None`이 된다 —
+2R이 **pre-236에서도 동일하게 `hold → None`이었음**을 증명해 이 PR의 회귀는 아니나, 계량은
+별도 슬라이스로 이월한다.
+
 회귀 가드: `test_lowering_the_floor_no_longer_kills_the_accelerator` ·
 `test_lowering_the_floor_moves_accel_and_brake_in_a_comparable_way`(방향 분포 동일성) ·
 `test_gate_verdict_survives_when_the_floor_cannot_clear_current_bid`.
