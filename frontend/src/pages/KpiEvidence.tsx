@@ -55,10 +55,24 @@ function num(value: string | null | undefined): number {
   return value == null ? 0 : Number(value);
 }
 
-/** 검산 결과 배지 — 화면이 스스로 찍는 ✓/✗. */
-export function CheckBadge({ ok, label }: { ok: boolean; label: string }) {
+/** 검산 결과 배지 — 화면이 스스로 찍는 ✓/✗.
+ *
+ * ★`testId`는 장식이 아니라 **위치를 고정하는 손잡이**다. 화면 전체에서 "✓ 카드와 일치"를
+ *   텍스트로 찾으면 탭이 여럿일 때 «어느 탭의 배지인가»를 못 가른다 — 그래서 한 탭의 배지를
+ *   지우는 변이가 다른 탭의 배지 덕에 살아남는다. 탭마다 다른 testId를 준다.
+ */
+export function CheckBadge({
+  ok,
+  label,
+  testId,
+}: {
+  ok: boolean;
+  label: string;
+  testId?: string;
+}) {
   return (
     <span
+      data-testid={testId}
       className={`inline-flex items-center gap-1 text-xs font-medium ${
         ok ? "text-green-700" : "text-red-700"
       }`}
@@ -90,6 +104,7 @@ export function RevenueEvidence({ data }: { data: KpiEvidenceData }) {
         total={data.totals.revenue}
         totalLabel="총 매출"
         ok={data.checks.revenue_matches}
+        checkTestId="revenue-check"
       />
       <table className="w-full text-sm">
         <thead className="bg-gray-50 border-y">
@@ -141,6 +156,7 @@ export function NetProfitEvidence({ data }: { data: KpiEvidenceData }) {
         //   **매일 ✗**가 떴다 — 카드와 값이 같은데도 「불일치」라고 말하고, 그래서 진짜 불일치가
         //   생긴 날과 구별이 안 된다. 「설명 못 한 몫이 있다」는 아래 잔차 줄이 따로 말한다.
         ok={data.checks.net_matches}
+        checkTestId="net-profit-check"
       />
 
       {data.has_floor && (
@@ -214,8 +230,19 @@ export function ProfitRateEvidence({ data }: { data: KpiEvidenceData }) {
         <div className="font-mono text-sm space-y-1">
           <div>분자 · 순이익 &nbsp; <b>{won(data.totals.net_profit)}</b></div>
           <div>분모 · 손익을 잰 매출 &nbsp; <b>{won(data.totals.basis_revenue)}</b></div>
-          <div className="pt-1 border-t">
-            = <b className="text-base">{Number(data.totals.profit_rate).toFixed(1)}%</b>
+          {/* ★다른 세 탭과 **같은 자리·같은 모양**의 검산 배지(계약 §2-3).
+              여기만 빠져 있던 동안, 이익률 탭은 「분자·분모가 카드와 같은가」를 사람 눈에
+              맡기고 있었다 — 안 맞는 날 아무도 모르는 유일한 탭이었다. */}
+          <div className="flex justify-between pt-2 border-t items-center">
+            <span className="font-semibold">= 이익률</span>
+            <span className="flex items-center gap-3">
+              <b className="text-base">{Number(data.totals.profit_rate).toFixed(1)}%</b>
+              <CheckBadge
+                ok={data.checks.profit_rate_matches}
+                label={data.checks.profit_rate_matches ? "카드와 일치" : "카드와 불일치"}
+                testId="profit-rate-check"
+              />
+            </span>
           </div>
         </div>
       </div>
@@ -273,6 +300,7 @@ export function OrderCountEvidence({ data }: { data: KpiEvidenceData }) {
         totalLabel="주문 건수"
         unit="건"
         ok={data.checks.order_count_matches}
+        checkTestId="order-count-check"
       />
 
       {excluded.length > 0 && (
@@ -301,6 +329,7 @@ function Equation({
   totalLabel,
   unit,
   ok,
+  checkTestId,
 }: {
   title: string;
   first?: EqLine;
@@ -310,6 +339,7 @@ function Equation({
   totalLabel: string;
   unit?: string;
   ok: boolean;
+  checkTestId?: string;
 }) {
   const fmt = (v: string | null, u?: string) =>
     u === "건" ? `${Number(v ?? 0).toLocaleString("ko-KR")}건` : won(v);
@@ -347,7 +377,11 @@ function Equation({
           <span className="font-semibold">{totalLabel}</span>
           <span className="flex items-center gap-3">
             <b className="text-base">{fmt(total, unit)}</b>
-            <CheckBadge ok={ok} label={ok ? "카드와 일치" : "카드와 불일치"} />
+            <CheckBadge
+              ok={ok}
+              label={ok ? "카드와 일치" : "카드와 불일치"}
+              testId={checkTestId}
+            />
           </span>
         </div>
       </div>

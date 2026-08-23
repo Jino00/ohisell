@@ -106,6 +106,41 @@ def test_evidence_totals_equal_the_card_over_http(client, basis):
     assert Decimal(ev["totals"]["floor_ad"]) == Decimal(kpi["net_floor_ad"])
 
 
+@pytest.mark.parametrize("basis", ["settlement", "sales"])
+def test_profit_rate_badge_is_true_against_the_real_card(client, basis):
+    """★이익률 배지가 «카드를 실제로 본» 뒤에 참인가 (2026-08-23 — 네 칸 중 이 칸만 없었다).
+
+    서비스층 테스트는 `build_kpi_evidence`에 totals를 손으로 넘기지만, 여기선 라우터가
+    카드와 **같은 두 줄**로 만든 그 totals가 쓰인다. 두 엔드포인트의 이익률이 원 단위로
+    같은데 배지가 ✗면, 그건 판정식이 카드와 다른 눈금을 쓰고 있다는 뜻이다.
+    """
+    kpi, ev = _both(client, basis)
+    assert Decimal(ev["totals"]["profit_rate"]) == Decimal(kpi["profit_rate"])
+    assert ev["checks"]["profit_rate_matches"] is True, (
+        "카드와 값이 같은데 화면은 「불일치」라고 말한다 — 배지가 카드가 아닌 걸 보고 있다"
+    )
+
+
+def test_profit_rate_badge_goes_false_when_a_second_path_appears(client, monkeypatch):
+    """★계약 §3 금지선 1 — 근거가 카드와 «다른 경로»로 분모를 만들면 화면이 ✗를 찍어야 한다.
+
+    초판 `checks`가 죽이지 못한 변이가 정확히 이것이다(같은 payload끼리 비교하니 언제나 ✓).
+    여기선 라우터가 쓰는 `_kpi_totals`를 **두 번째 계산 경로**로 갈아치운다 — 행은 그대로인데
+    카드 쪽 분모만 달라진 날의 모양이다.
+    """
+    real = dash._kpi_totals
+
+    def second_path(db, rows, rocket_ch_id):
+        out = real(db, rows, rocket_ch_id)
+        return dict(out, basis_revenue=out["basis_revenue"] + Decimal("250000"))
+
+    monkeypatch.setattr(dash, "_kpi_totals", second_path)
+    _, ev = _both(client, "settlement")
+    assert ev["checks"]["profit_rate_matches"] is False, (
+        "분모가 행 합과 갈라졌는데 ✓ — 「카드와 일치」가 아무것도 안 보고 있다"
+    )
+
+
 def test_evidence_honours_rocket_basis(client):
     """축을 무시하면 근거가 카드와 «다른 창»을 말한다 — 두 축의 값이 실제로 갈려야 한다."""
     _, settle = _both(client, "settlement")
@@ -194,6 +229,12 @@ def test_response_keeps_every_evidence_field_over_http(client):
     assert set(ev["totals"]) == {
         "revenue", "net_profit", "basis_revenue", "floor_ad", "profit_rate",
         "order_count", "residual", "unmeasured_revenue",
+    }
+    # ★검산 칸도 집합으로 못 박는다 — 배지 하나를 응답에서 지우면 화면은 조용히 «없는 칸»을
+    #   읽고, 그 탭의 ✓/✗가 통째로 사라진다(교훈 #321의 검산판).
+    assert set(ev["checks"]) == {
+        "revenue_matches", "net_matches", "order_count_matches", "net_fully_explained",
+        "profit_rate_matches",
     }
     assert ev["has_floor"] is True, "하한이 섞였는데 배너 근거가 안 실렸다"
 
