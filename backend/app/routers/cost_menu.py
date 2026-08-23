@@ -20,12 +20,16 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from io import BytesIO
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from openpyxl import load_workbook
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.cost_menu import materials as M
+from app.services.cost_menu import recipes as R
 
 router = APIRouter(prefix="/api/cost", tags=["cost-menu"])
 
@@ -70,6 +74,12 @@ class LinkIn(BaseModel):
     """원장 라인 → 부자재 종 **사람이 하는 확정**(계약 §5-2)."""
 
     import_invoice_line_id: int
+    note: Optional[str] = None
+
+
+class AdoptIn(BaseModel):
+    """엑셀 참고값 채택 시 남길 한 줄 — 근거 보존용(선택)."""
+
     note: Optional[str] = None
 
 
@@ -195,3 +205,97 @@ def delete_price(material_id: int, price_id: int, db: Session = Depends(get_db))
 def list_settings(db: Session = Depends(get_db)):
     """설정 전건 — `confirmed=false`가 화면의 자백 배지 원료다(계약 §9-1·합격 8)."""
     return {"items": M.list_settings(db)}
+
+
+# ──────────────────────────────────────────────
+# 레시피·표준원가 (S2)
+# ──────────────────────────────────────────────
+def _sheet_rows(upload: UploadFile, wanted: str, what: str) -> list[tuple]:
+    """업로드된 .xlsx에서 시트 하나를 행 목록으로. **파일을 여는 것은 이 층의 일이다** —
+    파서는 DB도 IO도 모르는 순수 SA라 파일을 안 받는다(계약 §2-6).
+
+    ★시트 이름이 안 맞으면 **첫 시트로 넘어가지 않고 거부한다** — 엉뚱한 시트를 조용히 읽어
+    「0건 파싱됨」으로 끝나는 것이 가장 나쁜 결말이기 때문이다(사용자는 성공으로 읽는다).
+    """
+
+    try:
+        wb = load_workbook(BytesIO(upload.file.read()), read_only=True, data_only=True)
+    except Exception as exc:
+        raise HTTPException(400, detail=f"{what} 파일을 열 수 없다: {exc}")
+    try:
+        if wanted not in wb.sheetnames:
+            raise HTTPException(
+                400,
+                detail=f"{what}에 「{wanted}」 시트가 없다 (있는 시트: {', '.join(wb.sheetnames)})",
+            )
+        return list(wb[wanted].iter_rows(values_only=True))
+    finally:
+        wb.close()
+
+
+@router.post("/recipes/import")
+def import_recipes(
+    cost_file: UploadFile = File(..., description="원가 정본 — 「제품 원가표」 시트"),
+    mapping_file: UploadFile = File(..., description="매핑 정본 — 「원가 매핑」 시트"),
+    db: Session = Depends(get_db),
+):
+    """두 엑셀 → 레시피·링크 **초안**(계약 §5-3 탭2).
+
+    ★아무것도 승인하지 않는다. 단가도 만들지 않는다 — 만들어지는 것은 `draft` 레시피와
+    링크, 그리고 `unconfirmed` 부자재 종뿐이다(계약 §2-2·§3).
+    ★이미 `approved`인 레시피는 **건너뛴다** — 재수입이 승인분을 덮지 않는다.
+    """
+
+    cost_rows = _sheet_rows(cost_file, "제품 원가표", "원가 정본")
+    mapping_rows = _sheet_rows(mapping_file, "원가 매핑", "매핑 정본")
+    out = _guard(R.import_drafts, db, cost_rows, mapping_rows)
+    db.commit()
+    return out
+
+
+@router.get("/recipes")
+def list_recipes(form_factor: Optional[str] = None, db: Session = Depends(get_db)):
+    """레시피 전건 + 각각의 표준원가(계산 가능하면). 미승인은 `reason`이 왜인지 말한다."""
+    return {"items": R.list_recipes(db, form_factor=form_factor)}
+
+
+@router.get("/recipes/{recipe_id}")
+def get_recipe(recipe_id: int, db: Session = Depends(get_db)):
+    try:
+        r = R.get_recipe(db, recipe_id)
+    except M.CostMenuError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return R.recipe_payload(db, r, with_links=True)
+
+
+@router.post("/recipes/{recipe_id}/approve")
+def approve_recipe(recipe_id: int, db: Session = Depends(get_db)):
+    """Jino가 눈으로 보고 누르는 확정(계약 §2-2). 이 순간부터 표준원가가 저장된다."""
+    r = _guard(R.approve_recipe, db, recipe_id)
+    db.commit()
+    return R.recipe_payload(db, R.get_recipe(db, r.id), with_links=True)
+
+
+@router.post("/recipes/{recipe_id}/unapprove")
+def unapprove_recipe(recipe_id: int, db: Session = Depends(get_db)):
+    r = _guard(R.unapprove_recipe, db, recipe_id)
+    db.commit()
+    return R.recipe_payload(db, R.get_recipe(db, r.id), with_links=True)
+
+
+@router.post("/recipes/{recipe_id}/adopt-excel-prices")
+def adopt_excel_prices(recipe_id: int, body: AdoptIn | None = None, db: Session = Depends(get_db)):
+    """엑셀 참고값 → `manual` 단가로 **채택**(계약 §3이 허용한 유일한 유입 경로).
+
+    ★이미 단가가 있는 종은 건드리지 않는다 — 원장 파생 단가를 엑셀로 덮지 않는다(§2-1).
+    """
+    out = _guard(R.adopt_excel_prices, db, recipe_id, body.note if body else None)
+    db.commit()
+    r = R.get_recipe(db, recipe_id)
+    return {**out, "recipe": R.recipe_payload(db, r, with_links=True)}
+
+
+@router.get("/board")
+def standard_cost_board(db: Session = Depends(get_db)):
+    """표준원가 보드 — SKU별 표준원가 · 현 `cost_price` 대조 · 격차(계약 §5-3 탭3)."""
+    return R.board(db)

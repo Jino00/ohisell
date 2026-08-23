@@ -5296,3 +5296,171 @@ export function addCostManualPrice(
     body: JSON.stringify(body),
   });
 }
+
+// ══════════════════════════════════════════════════════════════════
+// 원가 메뉴 S2 — 레시피·표준원가 (D-CPP-53 / 계약 A′ §5-3 탭2·탭3)
+// ══════════════════════════════════════════════════════════════════
+
+/** 표준원가 계산 내역 한 줄 — «계산되는 방법이 나오는» 화면의 원료(계약 §7 합격 4). */
+export interface CostStandardLine {
+  label: string;
+  quantity: string | null;
+  unit_price_ex_vat: string | null;
+  unit_price_inc_vat: string | null;
+  amount_ex_vat: string | null;
+  amount_inc_vat: string | null;
+  price_status: string;
+  inc_derived: boolean;
+  price_source: string | null;
+  price_note: string | null;
+  material_id: number | null;
+  usable: boolean;
+}
+
+/** ★`std_cost_*`가 `null`인 것과 `"0"`인 것은 다르다 — `reason`이 왜 없는지 말한다(§2-7). */
+export interface CostStandard {
+  computable: boolean;
+  std_cost_ex_vat: string | null;
+  std_cost_inc_vat: string | null;
+  reason: string | null;
+  unresolved: string[];
+  partial_ex_vat: string | null;
+  partial_inc_vat: string | null;
+  line_count: number;
+  lines: CostStandardLine[];
+}
+
+/** 원가표 품목 ↔ (상품명 × 폼팩터) 매칭의 **근거**. 제안이지 확정이 아니다. */
+export interface CostRecipeMatch {
+  match_reason: string | null;
+  candidates: string[];
+  cost_price_mode: string | null;
+  cost_table_item: string | null;
+  cost_table_section: string | null;
+  excel_total_inc_vat: string | null;
+  sku_count: number | null;
+  option_count: number | null;
+}
+
+export interface CostRecipe {
+  id: number;
+  product_name: string;
+  form_factor: string | null;
+  status: string; // draft | approved
+  source: string;
+  recipe_kind: string;
+  anomaly_flag: string | null;
+  approved_at: string | null;
+  match: CostRecipeMatch | null;
+  line_count: number;
+  link_count: number;
+  standard: CostStandard;
+  links?: { internal_sku: string; status: string; source: string }[];
+}
+
+export interface CostBoardRow {
+  internal_sku: string;
+  product_name: string | null;
+  recipe_id: number;
+  recipe_product_name: string;
+  form_factor: string | null;
+  recipe_status: string;
+  link_status: string;
+  std_cost_ex_vat: string | null;
+  std_cost_inc_vat: string | null;
+  /** 현 `product_master.cost_price` — **읽기 전용 대조값**이다(계약 §3 금지선). */
+  current_cost_price: string | null;
+  gap_pct: number | null;
+  reason: string | null;
+}
+
+export interface CostBoard {
+  items: CostBoardRow[];
+  sku_count: number;
+  computed_count: number;
+  uncomputed_count: number;
+  recipe_count: number;
+  approved_recipe_count: number;
+}
+
+export interface CostImportReportRow {
+  product_name: string;
+  form_factor: string | null;
+  action: string;
+  reason: string;
+  sku_count: number;
+  line_count?: number;
+  anomaly_flag?: string | null;
+}
+
+export interface CostImportResult {
+  recipes_created: number;
+  recipes_updated: number;
+  skipped_approved: number;
+  unmatched: number;
+  materials_seen: number;
+  cost_table_recipes: number;
+  cost_table_anomalies: string[];
+  mapping_options: number;
+  mapping_anomalies: string[];
+  groups: number;
+  report: CostImportReportRow[];
+}
+
+export function fetchCostRecipes(formFactor?: string): Promise<{ items: CostRecipe[] }> {
+  const q = formFactor ? `?form_factor=${encodeURIComponent(formFactor)}` : "";
+  return fetchApi(`/api/cost/recipes${q}`);
+}
+
+export function fetchCostRecipe(recipeId: number): Promise<CostRecipe> {
+  return fetchApi(`/api/cost/recipes/${recipeId}`);
+}
+
+/** 두 엑셀 업로드 → 초안. **아무것도 승인하지 않고 단가도 만들지 않는다**(계약 §2-2·§3).
+ *
+ * ★`headers`를 **빈 객체로 덮는다** — `fetchApi`의 기본 `Content-Type: application/json`이
+ * 그대로 가면 multipart 경계(boundary)가 안 붙어 서버가 파일을 못 읽는다. */
+export function importCostRecipes(
+  costFile: File,
+  mappingFile: File,
+): Promise<CostImportResult> {
+  const form = new FormData();
+  form.append("cost_file", costFile);
+  form.append("mapping_file", mappingFile);
+  return fetchApi("/api/cost/recipes/import", {
+    method: "POST",
+    headers: {},
+    body: form,
+  });
+}
+
+/** Jino가 눈으로 보고 누르는 확정(계약 §2-2). 이 순간부터 표준원가가 저장된다. */
+export function approveCostRecipe(recipeId: number): Promise<CostRecipe> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/approve`, { method: "POST" });
+}
+
+export function unapproveCostRecipe(recipeId: number): Promise<CostRecipe> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/unapprove`, { method: "POST" });
+}
+
+/** 엑셀 참고값 → `manual` 단가로 **채택**(계약 §3이 허용한 유일한 유입 경로).
+ *
+ * ★이미 단가가 있는 종은 백엔드가 건너뛴다 — 원장 파생 단가를 엑셀로 덮지 않는다(§2-1). */
+export function adoptCostExcelPrices(
+  recipeId: number,
+  note?: string,
+): Promise<{
+  adopted: string[];
+  skipped_has_price: string[];
+  skipped_no_ref: string[];
+  recipe: CostRecipe;
+}> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/adopt-excel-prices`, {
+    method: "POST",
+    body: JSON.stringify({ note: note ?? null }),
+  });
+}
+
+export function fetchCostBoard(): Promise<CostBoard> {
+  return fetchApi("/api/cost/board");
+}

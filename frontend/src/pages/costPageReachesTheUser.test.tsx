@@ -21,11 +21,13 @@
 // 통과하므로 넷 중 어느 하나만 끊어도 죽는다. api 모듈은 모킹해 네트워크를 타지 않는다 —
 // 재는 것은 「값이 화면 픽셀이 되나」이지 서버가 아니다.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import type {
+  CostBoard,
   CostLedgerMaterialLine,
   CostMaterial,
+  CostRecipe,
   CostSetting,
 } from "../lib/api";
 
@@ -139,6 +141,125 @@ const LEDGER_ROW: CostLedgerMaterialLine = {
   },
 };
 
+// ── S2: 원가 정본 실측(2026-08-23) — 「지문방지필름 TPU 3매」 · bar · 부자재 9종 ──
+//    필름 600×3=1800 + 30 + 22 + 60 + 8 + 13 + 98 + 6 + 100 = ex 2,137 ⇒ inc **2,350.70**
+const RECIPE: CostRecipe = {
+  id: 7,
+  product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+  form_factor: "bar",
+  status: "approved",
+  source: "excel",
+  recipe_kind: "assembly",
+  anomaly_flag: null,
+  approved_at: "2026-08-23T04:00:00",
+  match: {
+    match_reason:
+      "폼팩터 bar(옵션명) × cost_price 2350.70 일치 — 원가표 「지문방지필름 TPU 3매」",
+    candidates: ["모바일 필름-아이폰,갤럭시/지문방지필름 TPU 3매"],
+    cost_price_mode: "2350.70",
+    cost_table_item: "지문방지필름 TPU 3매",
+    cost_table_section: "모바일 필름-아이폰,갤럭시",
+    excel_total_inc_vat: "2350.70",
+    sku_count: 106,
+    option_count: 107,
+  },
+  line_count: 9,
+  link_count: 106,
+  standard: {
+    computable: true,
+    std_cost_ex_vat: "2137.00",
+    std_cost_inc_vat: "2350.70",
+    reason: null,
+    unresolved: [],
+    partial_ex_vat: "2137.00",
+    partial_inc_vat: "2350.70",
+    line_count: 9,
+    lines: [
+      {
+        label: "지문방지필름 TPU 3매 · 필름 (bar)",
+        quantity: "3",
+        unit_price_ex_vat: "600.00",
+        unit_price_inc_vat: "660.00",
+        amount_ex_vat: "1800.00",
+        amount_inc_vat: "1980.00",
+        price_status: "manual",
+        inc_derived: true,
+        price_source: "manual",
+        price_note: null,
+        material_id: 21,
+        usable: true,
+      },
+      {
+        label: "패키지 (bar)",
+        quantity: "1",
+        unit_price_ex_vat: "98.00",
+        unit_price_inc_vat: "107.80",
+        amount_ex_vat: "98.00",
+        amount_inc_vat: "107.80",
+        price_status: "manual",
+        inc_derived: true,
+        price_source: "manual",
+        price_note: null,
+        material_id: 22,
+        usable: true,
+      },
+    ],
+  },
+};
+
+const BOARD: CostBoard = {
+  items: [
+    {
+      internal_sku: "OHI-0390",
+      product_name: "오하이 빛반사, 지문방지 매트 필름 3매, 아이폰에어",
+      recipe_id: 7,
+      recipe_product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+      form_factor: "bar",
+      recipe_status: "approved",
+      link_status: "approved",
+      std_cost_ex_vat: "2137.00",
+      std_cost_inc_vat: "2350.70",
+      current_cost_price: "2350.70",
+      gap_pct: 0,
+      reason: null,
+    },
+    {
+      internal_sku: "OHI-0391",
+      product_name: "오하이 빛반사, 지문방지 매트 필름 3매, 아이폰XS맥스/11프로맥스",
+      recipe_id: 7,
+      recipe_product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+      form_factor: "bar",
+      recipe_status: "approved",
+      link_status: "approved",
+      std_cost_ex_vat: "2137.00",
+      std_cost_inc_vat: "2350.70",
+      current_cost_price: "2350.70",
+      gap_pct: 0,
+      reason: null,
+    },
+    {
+      // ★미계산 행 — 빠짐없이 실리고 «왜»를 말해야 한다(계약 §2-7).
+      internal_sku: "OHI-9001",
+      product_name: "오하이 빛반사, 지문방지 매트 필름 3매, 갤럭시Z플립7",
+      recipe_id: 8,
+      recipe_product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+      form_factor: "flip",
+      recipe_status: "draft",
+      link_status: "draft",
+      std_cost_ex_vat: null,
+      std_cost_inc_vat: null,
+      current_cost_price: "3480.40",
+      gap_pct: null,
+      reason: "레시피 미승인 — 계산 안 함",
+    },
+  ],
+  sku_count: 3,
+  computed_count: 2,
+  uncomputed_count: 1,
+  recipe_count: 2,
+  approved_recipe_count: 1,
+};
+
 const SETTINGS: CostSetting[] = [
   { key: "valuation_method", value: "fifo", confirmed: false, note: null, updated_at: null },
 ];
@@ -151,6 +272,8 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCostMaterials: vi.fn(async () => ({ items: [KIT] })),
     fetchCostLedgerMaterialLines: vi.fn(async () => ({ items: [LEDGER_ROW] })),
     fetchCostSettings: vi.fn(async () => ({ items: SETTINGS })),
+    fetchCostRecipes: vi.fn(async () => ({ items: [RECIPE] })),
+    fetchCostBoard: vi.fn(async () => BOARD),
     getSchedulerHealth: vi.fn(async () => ({ healthy: true })),
     getAdCostCookieStatus: vi.fn(async () => ({})),
     getCollectionStatus: vi.fn(async () => ({ streams: [] })),
@@ -217,6 +340,54 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     const row = await screen.findByTestId("ledger-line-15");
     expect(within(row).getByText("cleaning kits")).toBeTruthy();
     expect(within(row).getByRole("button", { name: /연결/ })).toBeTruthy();
+  });
+
+  // ── S2 (계약 §7 합격 3·4) — 탭을 «사람처럼» 눌러서 연다 ──
+  //    탭 전환을 프로그램으로 흉내내지 않는다: 버튼이 사라지면 사람은 그 탭에 못 가고,
+  //    그 사실을 재는 것이 이 파일의 존재 이유다.
+  it("SUR-5: 「레시피」 탭 버튼이 있어야 사람이 승인 화면에 도달한다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    const tab = screen.getByRole("button", { name: "레시피" });
+    fireEvent.click(tab);
+    // 매칭 근거가 화면에 실제로 있어야 한다 — 「제안이지 확정이 아니다」가 보이는 자리.
+    // 목록·상세 양쪽에 나올 수 있다 — 「하나뿐」이 아니라 「있다」를 잰다.
+    expect((await screen.findAllByText(/원가표 「지문방지필름 TPU 3매」/)).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /엑셀 참고값을 단가로 채택/ })).toBeTruthy();
+  });
+
+  it("SUR-6: 계산 내역 **호출부**가 있어야 「계산되는 방법」이 펼쳐진다 (합격 4)", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    await screen.findByText(/계산 내역/);
+    // 부자재 × 수량 × 단가가 실제 픽셀이 된다
+    expect(screen.getByText("지문방지필름 TPU 3매 · 필름 (bar)")).toBeTruthy();
+    expect(screen.getByText("1,800원")).toBeTruthy();   // 600 × 3
+    // 「98원」은 단가 칸과 금액 칸 둘 다에 뜬다(수량 1) — 개수가 아니라 존재를 잰다.
+    expect(screen.getAllByText("98원").length).toBeGreaterThan(0);
+    // 합계 = 정본 대조값
+    expect(screen.getAllByText("2,350.7원").length).toBeGreaterThan(0);
+  });
+
+  it("SUR-7: 보드 **호출부**가 있어야 2,350.7이 여러 SKU에 보인다 (합격 3)", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "표준원가 보드" }));
+    expect(await screen.findByText("OHI-0390")).toBeTruthy();
+    expect(screen.getByText("OHI-0391")).toBeTruthy();
+    // ★서로 다른 SKU 2건 이상에서 **같은 값**이 관측된다
+    expect(screen.getAllByText("2,350.7원").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("SUR-8: 미계산 행이 «왜»와 함께 남는다 — 조용히 사라지면 커버리지 착시다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "표준원가 보드" }));
+    expect(await screen.findByText("OHI-9001")).toBeTruthy();
+    expect(screen.getByText(/레시피 미승인 — 계산 안 함/)).toBeTruthy();
+    // 미계산 행의 표준원가 칸은 「—」다 — 0원으로 그리면 미입력이 확정값으로 둔갑한다.
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
   });
 });
 // ★다른 라우트에서 같은 단언을 반복하지 않는다: 메뉴는 `Layout`이 라우트와 무관하게 그리므로
