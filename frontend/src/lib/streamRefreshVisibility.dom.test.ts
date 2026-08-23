@@ -93,3 +93,72 @@ describe("W5 기본 시계 — document.visibilitychange", () => {
     expect(t).toBeGreaterThan(900000); // 벽시계로는 이미 마감을 넘긴 시점이었다
   });
 });
+
+// ── 종료 보장 (2026-08-23 적대 리뷰 P1-1) ─────────────────────────────────────
+//
+// ★W5가 상한을 «깨어 있던 시간»으로 바꾸면서 **끝난다는 보장이 사라졌다**: 숨어 있는 동안
+//   `now()`와 `hiddenMs()`가 같은 속도로 자라 깨어 있던 시간이 상수로 굳는다. 탭이 끝내
+//   돌아오지 않으면 루프가 영원히 돈다(리뷰 실측: 가상 벽시계 83시간·폴 10만 회).
+//   데스크톱 Chrome 백그라운드 탭은 setTimeout을 «멈추는» 게 아니라 ~1분에 1회로 스로틀하므로
+//   그동안 6레인이 prod를 계속 두드리고, 프로미스가 정착하지 않아 패널은 「Mac이 수집 중…」에
+//   박제된다 — prod가 fresh인데 화면은 영원히 진행 중(합격 ④ 위반).
+describe("W5 종료 보장 — 숨은 채 돌아오지 않아도 반드시 끝난다", () => {
+  it("탭이 영영 안 돌아와도 절대 천장에서 정착한다", async () => {
+    let t = 0;
+    let polls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        polls += 1;
+        if (polls === 1) return S({ requested: false, attempt_count: 0 });
+        if (polls === 2) setVisibility("hidden"); // 백그라운드로 가고 돌아오지 않는다
+        if (polls > 5000) throw new Error("BAILOUT — 루프가 안 끝난다");
+        return S({ requested: true, attempt_count: 1, in_flight: true });
+      },
+      request: async () => {},
+    };
+
+    const out = await runStreamRefresh(spec, {
+      now: () => t,
+      sleep: async (ms: number) => { t += ms; },
+      pollMs: 3000,
+    });
+
+    expect(out.state).toBe("no_response");
+    expect(polls).toBeLessThan(5000);
+    // 정상 경로(깨어 있는 탭)의 T_max 600초는 넘되, 무한은 아니다.
+    expect(t).toBeGreaterThan(600000);
+    expect(t).toBeLessThanOrEqual(1800000 + 3000);
+  });
+
+  it("복귀 이벤트가 없어도 «진행 중인» hidden 구간을 계상한다", async () => {
+    // ★리뷰어 변이 M5(`hiddenMs: () => total`)가 전건 초록으로 생존했던 자리다.
+    //   숨은 채 폴이 계속 도는 동안(Chrome 스로틀) 그 시간을 계상하지 않으면, 깨어 있던 시간이
+    //   벽시계처럼 자라 T_max에서 「응답 없음」을 낸다 — 정작 그 직후 성공이 도착하는데도.
+    let t = 0;
+    let polls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        polls += 1;
+        if (polls === 1) return S({ requested: false, attempt_count: 0 });
+        if (polls === 2) setVisibility("hidden"); // 이후 계속 숨어 있다(복귀 이벤트 없음)
+        // 숨은 동안 벽시계가 폴마다 1분씩 흐른다(백그라운드 스로틀 모양).
+        if (polls >= 3) t += 60000;
+        // 벽시계 12분쯤에 Mac이 완주한다 — T_max(600초)를 이미 넘긴 시점이다.
+        if (t >= 720000) return S({ requested: false, attempt_count: 1, last_success_at: "T1" });
+        return S({ requested: true, attempt_count: 1, in_flight: true });
+      },
+      request: async () => {},
+    };
+
+    const out = await runStreamRefresh(spec, {
+      now: () => t,
+      sleep: async (ms: number) => { t += ms; },
+      pollMs: 3000,
+    });
+
+    expect(out).toEqual({ state: "done" });
+    expect(t).toBeGreaterThan(600000); // 벽시계로는 마감을 넘겼는데도 성공을 잡았다
+  });
+});

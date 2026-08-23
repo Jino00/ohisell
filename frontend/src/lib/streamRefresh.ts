@@ -193,6 +193,19 @@ export const PICKUP_TIMEOUT_MS = 90000;
 export const MAX_TRACKING_MS = 600000;
 
 /**
+ * 절대 천장 배수 — 벽시계로 `T_max × 이 값`이 지나면 화면이 숨어 있든 말든 추적을 끝낸다.
+ *
+ * ★왜 필요한가(2026-08-23 적대 리뷰 P1-1): W5가 상한을 «깨어 있던 시간»으로 바꾸면서
+ *   **종료 보장이 사라졌다**. 숨어 있는 동안 벽시계와 hidden 시간이 같이 자라 깨어 있던
+ *   시간이 상수로 굳기 때문이다. 탭이 안 돌아오면 루프가 영원히 돌고(실측: 가상 83시간),
+ *   프로미스가 정착하지 않아 패널은 「Mac이 수집 중…」에 박제된다.
+ * ★3배인 이유: 정상 경로(깨어 있는 탭)는 T_max에서 이미 끝나므로 이 값은 «비정상 경로의
+ *   상한»일 뿐이다. 너무 짧으면 잠깐 숨었다 돌아오는 흔한 경우를 잘라 W5가 무의미해지고,
+ *   너무 길면 배터리·prod 부하가 는다. T_max 600초 기준 30분.
+ */
+export const ABSOLUTE_CEILING_MULTIPLE = 3;
+
+/**
  * 폴링 루프 안 getStatus가 연속으로 실패해도 되는 횟수 상한(P1-6, 2026-08-05 적대 리뷰).
  *
  * ★왜 필요한가: 215초 폴링 창(pollMs마다 반복)은 POST 재시도 창(길어야 수십 초)보다 훨씬
@@ -330,6 +343,15 @@ export async function runStreamRefresh(
   const hiddenClock = deps.hiddenMs ? null : createHiddenClock(now);
   const hiddenMs = deps.hiddenMs ?? hiddenClock!.hiddenMs;
   const awakeElapsed = () => now() - startedAt - hiddenMs();
+  // ★절대 천장 (2026-08-23 적대 리뷰 P1-1). «깨어 있던 시간»만으로 루프를 돌리면 **끝난다는
+  //   보장이 사라진다**: 화면이 숨어 있는 동안 `now()`와 `hiddenMs()`가 같은 속도로 자라
+  //   awakeElapsed가 상수로 굳고, 탭이 끝내 돌아오지 않으면 루프가 영원히 돈다(리뷰 실측:
+  //   가상 벽시계 83시간·폴 10만 회). 데스크톱 Chrome 백그라운드 탭은 setTimeout을 «멈추는»
+  //   게 아니라 ~1분에 1회로 스로틀하므로, 그동안 6레인이 prod를 계속 두드리고 프로미스는
+  //   영영 정착하지 않아 패널이 「Mac이 수집 중…」에 고정된다 — 합격 ④에 직접 걸린다.
+  //   종전 `now() < deadline`이 갖고 있던 liveness 천장을 **복원**하는 것이지 상한을 올리는
+  //   것이 아니다(§4 금지선 무관): 정상 경로의 판정은 여전히 awakeElapsed가 한다.
+  const absoluteCeilingMs = timeoutMs * ABSOLUTE_CEILING_MULTIPLE;
   let sawFetching = false;
   let pollFailures = 0;
   // ★타임아웃 문구를 가르려면 «마지막으로 본 상태»가 필요하다(W4). 루프 안에서만 살아 있던
@@ -400,7 +422,7 @@ export async function runStreamRefresh(
   };
 
   try {
-    while (awakeElapsed() < timeoutMs) {
+    while (awakeElapsed() < timeoutMs && now() - startedAt < absoluteCeilingMs) {
       await sleep(pollMs);
 
       let st: RefreshStatusLike;
