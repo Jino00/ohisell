@@ -112,6 +112,20 @@ export default function RocketGrowthSettlement() {
 
       {err && <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm">{err}</div>}
 
+      {/* ★적대 리뷰 2R NEW P1 — 이 자리가 없으면 «아직 안 온 것»이 «아니다»로 단정된다.
+          ①②③의 칸은 전부 `data?.x`를 읽고 값이 없으면 「요율 미상」·「원가 커버리지 미달 —
+          순이익을 내지 않는다」 같은 **결론 문장**으로 떨어진다. 계정 전환 때 직전 계정의 값을
+          먼저 버리므로(1R P2-6), 그 가드가 없으면 응답이 오기 전 구간 내내 새 계정에 대해
+          그 다섯 문장이 거짓으로 뜬다 — 그 순간 ④만 「불러오는 중…」이라 정직하게 말해
+          한 화면이 스스로 비대칭이 된다.
+          ⇒ ①②③도 ④와 같은 모양으로 «아직 모른다»를 먼저 말한다. 이 사슬이 밟은
+          「모름이 0/아니다로 접히는」 자리의 여섯 번째다. */}
+      {!err && data == null ? (
+        <div className="bg-white border rounded-md p-4 text-sm text-gray-500">
+          요율·커버리지·장부대조를 불러오는 중… — <strong>«모른다»이지 «미상/미달»이 아니다.</strong>
+        </div>
+      ) : (
+        <>
       {note && (
         <div
           className="bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-900"
@@ -236,6 +250,8 @@ export default function RocketGrowthSettlement() {
           </>
         )}
       </div>
+        </>
+      )}
 
       {/* ④ 주기별 정산 내역 (계약 §1-A-3) — 종합 조망과 «같은 컴포넌트»를 재사용한다.
           위 ①②③은 «우리가 계산한 것»의 근거이고, 이 카드는 «쿠팡이 실제로 청구한 원장»이다.
@@ -247,7 +263,13 @@ export default function RocketGrowthSettlement() {
           <strong>정산주기 기준이라 부분 윈도우도 주기 전액</strong>이다 — 위 ①②③(판매일 축)과 값이
           다른 것이 정상이고, 그 차이를 재는 자리가 ③이다. (카드 헤드라인은 축을 탈 수 있어 카드
           자신이 어느 축인지 말한다.) 종합 조망의 그 카드와 <strong>같은 컴포넌트·같은 응답</strong>
-          이다(사본 아님 — 두 화면이 갈라질 수 없다).
+          이다 — 사본이 아니라서 <strong>금액이 갈라질 수 없다</strong>.
+          {/* ★2R NEW P2① — 「갈라질 수 없다」를 무조건형으로 쓰면 안 된다. 원장 row 0건일 때
+              이 화면은 아래에서 «아직 안 들어왔다»로 막는데 종합 조망은 같은 응답으로 여전히
+              「✅ 순이익 반영됨 / 정산총액 0원」을 그린다(origin/main의 기존 동작 — 이 PR이
+              만든 것이 아니다). 그러니 여기서 보증하는 것은 «금액»이지 «결손 표현»이 아니다.
+              결손 표현까지 맞추려면 가드를 공용 카드 안으로 옮겨야 하는데, 그건 종합 조망의
+              동작을 바꾸는 일이라 이 계약(§1-A-3)의 범위 밖이다 → 앵커 `## 이월`. */}
         </p>
         {ovErr ? (
           <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm">
@@ -263,7 +285,9 @@ export default function RocketGrowthSettlement() {
             이 창에 RG 정산 원장이 응답에 없다 — <strong>0원이 아니라 «없음»</strong>이다.
             갱신은 종합 조망의 「RG 정산 갱신」에서 한다(같은 데몬을 두 화면이 동시에 부르지 않게).
           </div>
-        ) : overview.rg_settlement.by_account.length === 0 ? (
+        ) : (overview.rg_settlement.by_account?.length ?? 0) === 0 ? (
+          /* `?.` — 바로 위 `rg_settlement == null`은 «죽은 분기»인 걸 알면서도 방어로 남겼는데
+             형제 필드는 크래시하는 비대칭이었다(2R NEW P2). 방어를 할 거면 같은 깊이로 한다. */
           /* ★적대 리뷰 1R P1 — 이 사슬이 밟은 「모름이 0으로 접히는」 자리의 **다섯 번째**.
              카드는 `has_data`만 보고 ✅ 녹색으로 「정산총액 0원」을 단정하는데, `has_data`는
              «판매일 축 차감액이 0이 아님»으로도 참이 된다(원장 row와 독립). 그런데 RG 정산

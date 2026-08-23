@@ -29,6 +29,8 @@ const h = vi.hoisted(() => ({
   overview: null as unknown,
   overviewFails: false,
   optionPnl: null as unknown,
+  /** 손익 조회도 매달 수 있어야 한다 — ①②③의 in-flight 구간을 재려면 필요하다(2R NEW P1). */
+  nextOptionPnl: null as null | (() => Promise<unknown>),
   /** 조회를 «매달아» 둘 수 있게 하는 손잡이 — in-flight 구간의 화면을 재려면 필요하다.
    *  null이면 즉시 resolve(기본). 함수를 넣으면 그 함수가 promise를 만든다. */
   nextOverview: null as null | (() => Promise<unknown>),
@@ -44,7 +46,8 @@ vi.mock("../lib/api", async (importOriginal) => ({
       : h.nextOverview
         ? h.nextOverview()
         : Promise.resolve(h.overview),
-  fetchRgOptionPnl: () => Promise.resolve(h.optionPnl),
+  fetchRgOptionPnl: () =>
+    h.nextOptionPnl ? h.nextOptionPnl() : Promise.resolve(h.optionPnl),
   fetchRevenueReconcile: () => Promise.reject(new Error("no reconcile in test")),
   fetchRocketOverview: () => Promise.reject(new Error("no rocket in test")),
 }));
@@ -58,6 +61,7 @@ afterEach(() => {
   cleanup();
   h.overviewFails = false;
   h.nextOverview = null;
+  h.nextOptionPnl = null;
 });
 
 /** 정산 내역이 실린 overview. 금액은 다른 픽스처와 겹치지 않는 값으로 골랐다(오탐 방지). */
@@ -271,6 +275,47 @@ describe("RocketGrowthSettlement — 계정 전환이 옛 계정의 카드를 �
     await waitFor(() => expect(screen.getByText("222,222원")).toBeTruthy());
   });
 
+  // ★2R NEW P1 — 위 P2-6 수정(`setData(null)`)이 만든 회귀. ①②③의 칸은 값이 없으면
+  //   「요율 미상」·「원가 커버리지 미달 — 순이익을 내지 않는다」 같은 **결론 문장**으로
+  //   떨어지므로, 전환 in-flight 구간 내내 새 계정에 대해 그 다섯 문장이 «거짓으로» 뜬다.
+  //   같은 순간 ④는 「불러오는 중…」이라고 정직하게 말했다 — 한 화면이 스스로 비대칭이었다.
+  //   ★리뷰어의 관측: `setData(null)` 한 줄만 빼면 다섯 문장이 전부 사라졌다(= 이 커밋이 만든 것).
+  it("전환 in-flight 구간에 ①②③이 «미상/미달»을 단정하지 않는다 — 2R NEW P1", async () => {
+    h.overview = makeOverview();
+    h.optionPnl = OPTION_PNL_BASE;
+    renderSettlement();
+    // 1단계: 정상 로딩 — 「실측」이 실제로 떠 있어야 이 테스트가 의미를 갖는다.
+    await waitFor(() => expect(screen.getByText("실측 (완결 정산주기에서 역산)")).toBeTruthy());
+
+    // 2단계: 손익 조회를 매달아 둔다.
+    let release: ((v: unknown) => void) | null = null;
+    h.nextOptionPnl = () => new Promise((res) => { release = res; });
+    fireEvent.click(screen.getByRole("button", { name: "오하이테크" }));
+
+    // ★in-flight: «모른다»라고 말해야 한다. 결론 문장은 하나도 없어야 한다.
+    await waitFor(() => expect(screen.getByText(/«모른다»이지 «미상\/미달»이 아니다/)).toBeTruthy());
+    expect(screen.queryByText(/요율 미상 — 잴 완결 주기가 없다/)).toBeNull();
+    expect(screen.queryByText(/원가 커버리지 미달/)).toBeNull();
+    expect(screen.queryByText(/순이익을 내지 않는다/)).toBeNull();
+    expect(screen.queryByText(/판매일 축을 못 냈다/)).toBeNull();
+    expect(screen.queryByText(/완결 정산주기가 없어 대조할 수 없다/)).toBeNull();
+    // 그리고 옛 계정의 「실측」도 남아 있으면 안 된다(그게 P2-6이 고친 것).
+    expect(screen.queryByText("실측 (완결 정산주기에서 역산)")).toBeNull();
+
+    // 3단계: 응답이 오면 정상 복귀 — 로딩 가드가 화면을 영구히 죽이지 않았는지.
+    release!(OPTION_PNL_BASE);
+    await waitFor(() => expect(screen.getByText("실측 (완결 정산주기에서 역산)")).toBeTruthy());
+    expect(screen.queryByText(/«모른다»이지 «미상\/미달»이 아니다/)).toBeNull();
+  });
+
+  it("손익 조회가 «실패»하면 로딩이 아니라 에러를 말한다 — 두 결손이 같은 얼굴이면 안 된다", async () => {
+    h.overview = makeOverview();
+    h.nextOptionPnl = () => Promise.reject(new Error("손익 500"));
+    renderSettlement();
+    await waitFor(() => expect(screen.getByText(/손익 500/)).toBeTruthy());
+    expect(screen.queryByText(/«모른다»이지 «미상\/미달»이 아니다/)).toBeNull();
+  });
+
   it("전환 조회가 실패하면 «못 불러왔다»로 끝난다 — 옛 값으로 되돌아가지 않는다", async () => {
     h.overview = makeOverview();
     h.optionPnl = OPTION_PNL_BASE;
@@ -482,3 +527,15 @@ describe("RocketGrowthPnl — 판매도 광고도 없는 행 접기", () => {
 //   어차피 가리므로 리셋을 통째로 지워도 초록이었다 — **주석은 무엇을 지킨다고 선언하는데
 //   실제로는 아무것도 안 지키는** 공허 단언이었다(직전 계약 3R P2와 같은 병). 진짜 위험한
 //   구간은 «성공하는 전환의 in-flight»이고, 그걸 재려면 조회를 매달아야 했다.
+//
+// ──────── 3R: 2R NEW P1(1R 수정이 만든 회귀)을 고친 뒤 주입 (기준선 22/22) ────────
+//   T1 `{!err && data == null ? (` → `{false ? (`  (로딩 가드 무력화)     → 1건 RED
+//   T2 로딩 문구 텍스트만 삭제(블록·조건은 유지)                          → 1건 RED
+//   T3 `!err &&` 제거 → 실패도 로딩 얼굴이 됨                             → 1건 RED
+//
+// ★★2R NEW P1이 이 PR의 가장 값진 기록이다: **1R 지적(P2-6)을 고친 «수단»이 회귀를 낳았다.**
+//   `setData(null)`로 옛 계정 값을 버렸더니, ①②③의 칸이 값 없음을 「요율 미상」·「원가 커버리지
+//   미달 — 순이익을 내지 않는다」 같은 **결론 문장**으로 떨어뜨렸다. 같은 순간 ④만 「불러오는
+//   중…」이라 정직하게 말해 **한 화면이 스스로 비대칭**이었다. 「모름」이 「아니다」로 접히는
+//   이 사슬의 여섯 번째 자리이고, 다섯 번째를 고치는 커밋이 여섯 번째를 만들었다 —
+//   국소 수리가 병의 «모양»을 못 없앤다는 증거를 한 PR 안에서 다시 얻었다.
