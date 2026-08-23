@@ -84,13 +84,52 @@ export interface StreamRefreshSpec {
    * 9225=오하이테크 공급자허브. (구 문구가 로켓을 9223으로 잘못 안내하고 있었다.)
    */
   windowHint?: string;
+  /**
+   * 이 레인만의 픽업 상한(ms). 없으면 공통 기본값 PICKUP_TIMEOUT_MS(90초, 계약 승인값).
+   *
+   * ★왜 레인별인가 (2026-08-23 적대 리뷰 P1-1, 저장소 출하 기본값 실측):
+   *     wing(ofix_sales·rg)   poll 15s + 쿨다운 45s → 최악 claim ~60s
+   *     ad_cost(ofix_ad)      poll 15s + 쿨다운 45s → ~60s
+   *     rocket(supplier_hub)  poll 30s, 쿨다운 없음 → ~30s
+   *     **ohitech_ad          poll 60s + 쿨다운 60s → ~120s**  ← 90초를 넘는다
+   *   `ohitech_ad_fetcher.py:1103` 쿨다운은 claim «전에» 검사하고 다음 폴 틱으로 미루므로
+   *   60+60이 그대로 더해진다. 90초로 자르면 **집힐 예정인 요청을 「Mac이 꺼졌다」고 오보**한다 —
+   *   고치려던 병을 다른 레인에서 새로 만드는 셈이다.
+   * ★이건 «전 레인 공통 상한의 단순 상향»(계약 §4 금지선)이 아니다. 상한은 그 레인 데몬의
+   *   캐던스에서 유도하고, 캐던스가 빠른 레인은 90초 그대로 둔다.
+   */
+  pickupTimeoutMs?: number;
+  /**
+   * 사람이 Mac에서 로그인하면 **데몬이 요청을 스스로 되살리는가**.
+   *
+   * ★처방이 갈리는 지점이라 spec에 둔다(2026-08-23 적대 리뷰 P1-2). 실측: 자동 재개
+   *   (`_revive_lane` → `POST …/request-refresh`)는 `wing_browser_fetcher.py:1493·1979-1985`
+   *   **한 곳에만** 있고 VS·RG 레인만 덮는다. `ohitech_ad_fetcher.py`·`ad_cost_browser_fetcher.py`
+   *   ·`rocket_supplier_fetcher.py`에는 재요청이 0건이다.
+   *   그런데 08-22 W3 이후 화면은 **6레인 전부**에 「로그인하면 자동으로 이어받습니다」라고
+   *   말했다 — 셋에겐 거짓이고, 사람은 로그인만 하고 기다리다 아무 일도 안 일어난다.
+   *   침묵보다 나쁜 실패는 **틀린 처방**이라는 이 계약의 전제가 그대로 적용되는 자리다.
+   */
+  autoResumeOnLogin?: boolean;
 }
 
 export interface RunnerDeps {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
-  /** 215초 — 데몬 로그인 대기(180s) + fetch 여유까지 커버. */
+  /**
+   * 추적 상한 T_max(기본 600초, 계약 승인값). ★종전 215초 «고정»의 대체다 — 상한 하나로는
+   * 「Mac이 안 집었다」와 「집어가서 오래 걸린다」를 가를 수 없어서, 짧게 잡으면 성공한 수집을
+   * 오보하고(2026-08-07 supplier_hub 227초 실측) 길게 잡으면 Mac이 꺼진 날 3분 넘게 침묵했다.
+   */
   timeoutMs?: number;
+  /**
+   * 픽업 상한 T_pickup(기본 90초, 계약 승인값). 이 시간까지 데몬이 요청을 집지 않으면
+   * (attempt_count가 0에 머물면) 더 기다리지 않고 **조기 정착**한다 — 그 경우에만
+   * 「Mac을 보라」가 참이고, 그 사실은 90초면 이미 안다.
+   * ★attempt_count를 **모르는** 응답(구버전·다른 표면)에서는 조기 정착하지 않는다:
+   *   없는 정보로 「Mac이 꺼졌다」고 단정하면 그게 새 오보다.
+   */
+  pickupTimeoutMs?: number;
   pollMs?: number;
   /**
    * 정착 **전**의 진행 상태 통지(선택). 결과 판정과 무관 — 화면이 "지금 어디쯤인지"를
@@ -123,6 +162,24 @@ export type RefreshPhase =
  * ★여기 한 곳에만 둔다 — 호출자가 각자 재시도를 짜면 한쪽만 고쳐진다(LESSONS #55).
  */
 export const REQUEST_RETRY_DELAYS_MS = [2000, 5000, 10000];
+
+/**
+ * 픽업 상한 T_pickup — 「데몬이 요청을 집었는가」의 답을 기다리는 시간(ms).
+ * 계약 승인값 90초(CONTRACT_collection_works_everywhere, Jino 2026-08-23).
+ *
+ * 근거: 데몬 폴링 주기가 15~60초라 정상이면 이 안에 attempt_count가 1 이상이 된다.
+ * 90초를 넘도록 0이면 Mac이 꺼졌거나 데몬이 죽은 것이고, **그때만** 「Mac을 보라」가 참이다.
+ */
+export const PICKUP_TIMEOUT_MS = 90000;
+
+/**
+ * 추적 상한 T_max — 픽업된 요청의 «화면 추적»을 접는 시간(ms). 계약 승인값 600초.
+ *
+ * ★이 값은 «수집 제한시간»이 아니다. 도달해도 Mac의 수집은 계속되고, 화면은 실패가 아니라
+ *   「백그라운드에서 계속됩니다」라고 말한다(outcomeView). 종전 215초는 이 둘을 구분하지
+ *   못해, 2026-08-07 supplier_hub 227초 회차처럼 **성공한 수집을 실패로 그렸다**.
+ */
+export const MAX_TRACKING_MS = 600000;
 
 /**
  * 폴링 루프 안 getStatus가 연속으로 실패해도 되는 횟수 상한(P1-6, 2026-08-05 적대 리뷰).
@@ -198,7 +255,9 @@ export async function runStreamRefresh(
 ): Promise<RefreshOutcome> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => Date.now());
-  const timeoutMs = deps.timeoutMs ?? 215000;
+  const timeoutMs = deps.timeoutMs ?? MAX_TRACKING_MS;
+  // 호출자 지정 > 레인 고유값 > 공통 기본값(계약 승인 90초) 순.
+  const pickupTimeoutMs = deps.pickupTimeoutMs ?? spec.pickupTimeoutMs ?? PICKUP_TIMEOUT_MS;
   const pollMs = deps.pollMs ?? 3000;
 
   const maxRetries = REQUEST_RETRY_DELAYS_MS.length;
@@ -216,7 +275,17 @@ export async function runStreamRefresh(
   await withRequestRetry(() => spec.request(), { sleep, onRetry });
   emit({ kind: "requested" });
 
-  const deadline = now() + timeoutMs;
+  // ── 2단 판정 (2026-08-23 W3, 계약 CONTRACT_collection_works_everywhere §3) ────────
+  // 종전: 상한 하나(215초). 그 한 숫자에 두 질문이 뭉쳐 있었다 —
+  //   ①「Mac이 요청을 집기는 했나」(답은 보통 30초 안에 나온다)
+  //   ②「집어간 수집이 끝났나」(로그인·옵션보고서가 끼면 수 분이 걸린다)
+  // 그래서 어느 값을 골라도 한쪽이 틀렸다: 짧으면 성공한 수집을 「응답 없음」이라 부르고
+  // (2026-08-07 supplier_hub 227초), 길면 Mac이 꺼진 날 3분 넘게 아무 말도 못 했다.
+  // ⇒ 픽업 전에는 T_pickup(90초)에서 조기 정착하고, 픽업 뒤에는 T_max(600초)까지 «추적»한다.
+  //   T_max 도달은 실패가 아니다 — 수집은 Mac에서 계속되고, 화면은 그렇게 말한다(outcomeView).
+  const startedAt = now();
+  const pickupDeadline = startedAt + pickupTimeoutMs;
+  const deadline = startedAt + timeoutMs;
   let sawFetching = false;
   let pollFailures = 0;
   // ★타임아웃 문구를 가르려면 «마지막으로 본 상태»가 필요하다(W4). 루프 안에서만 살아 있던
@@ -300,9 +369,28 @@ export async function runStreamRefresh(
     // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
     // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
     if (!st.requested) return { state: "done" };
+
+    // ★T_pickup 초과 = 「아무도 안 집었다」 조기 정착(W3). 위 정착 분기 **뒤**에 둔다 —
+    //   성공·실패가 이미 났으면 그게 이긴다. attempt_count를 모르는 응답에서는 발동하지 않는다.
+    if (
+      !sawFetching &&
+      now() >= pickupDeadline &&
+      st.requested &&
+      st.attempt_count !== undefined &&
+      st.attempt_count === 0
+    ) {
+      return {
+        state: "no_response",
+        attemptCount: 0,
+        inFlight: st.in_flight,
+        kind: st.last_error_kind,
+      };
+    }
   }
-  // ★타임아웃 = 판정 불가이지 «Mac 꺼짐»이 아니다(W4). 마지막으로 본 상태를 실어 보내
-  //   describeOutcome이 처방이 다른 세 경우를 갈라 말하게 한다.
+  // ★T_max 도달 = «추적 종료»이지 실패도 «Mac 꺼짐»도 아니다(W3·W4). 여기까지 왔다는 것은
+  //   데몬이 요청을 집었거나(sawFetching) attempt_count를 모르는 표면이라는 뜻이다 —
+  //   집지도 않은 요청은 위 T_pickup 분기가 이미 조기 정착시켰다. 마지막으로 본 상태를 실어
+  //   보내 outcomeView가 처방이 다른 경우를 갈라 말하게 한다.
   return {
     state: "no_response",
     attemptCount: lastSeen?.attempt_count,
@@ -332,17 +420,48 @@ export function isLoginRequired(
   return !!reason && reason.includes("로그인 필요");
 }
 
-/** 결과 1건을 사람이 읽는 한 줄로. 실패엔 **어느 계정인지**를 반드시 붙인다. */
-export function describeOutcome(spec: StreamRefreshSpec, outcome: RefreshOutcome | null): string {
-  if (!outcome) return `⏳ ${spec.label} 진행 중`;
-  if (outcome.state === "done") return `✅ ${spec.label} 완료`;
+/**
+ * 결과 1건의 화면 표현 — **문구의 유일한 저자**(2026-08-23 W2).
+ *
+ * 왜 문자열이 아니라 구조인가: 「전체 갱신」 패널은 아이콘·라벨·문구를 각각 다른 칸에
+ * 렌더하느라 describeOutcome(한 줄 문자열)을 못 쓰고 **자기 문구를 따로 썼다**. 그래서
+ * 2026-08-22 W4가 타임아웃을 세 경우로 가른 뒤에도 패널만 옛 한 문구
+ * 「응답 없음 — Mac이 켜져 있는지 확인하세요」에 머물렀고, 08-23 10:32 폰 화면에서
+ * **수집에 성공한 레인**에 그 오보가 떴다(수집은 10:32:54 성공, prod `fresh`).
+ * ⇒ 판정 코드가 한 곳이어야 하는 것과 같은 이유로(모듈 머리말·LESSONS #55) **처방 문구도
+ *   한 곳**이어야 한다. 라벨을 뺀 조각을 돌려주면 라벨을 따로 그리는 표면도 이걸 쓸 수 있다.
+ *
+ * tone은 의미값이다 — Tailwind 클래스는 화면 몫이다(lib이 프레젠테이션을 들고 있지 않는다).
+ */
+export type OutcomeTone = "progress" | "ok" | "warn" | "error";
+
+export interface OutcomeView {
+  icon: string;
+  /** 라벨을 뺀 «사실 + 처방» 한 줄. 계정명은 여기 남는다 — 어느 창에 로그인할지가 이 모듈의 존재 이유 절반이다. */
+  text: string;
+  tone: OutcomeTone;
+}
+
+export function outcomeView(spec: StreamRefreshSpec, outcome: RefreshOutcome | null): OutcomeView {
+  const loginView = (): OutcomeView => ({
+    icon: "🔑",
+    // ★처방은 «그 레인에 자동 재개가 배선돼 있는가»로 갈린다(2026-08-23 적대 리뷰 P1-2).
+    //   - 배선된 레인(wing: 판매분석·RG): 08-22 W3 이후 로그인만 하면 데몬이 요청을 되살린다.
+    //     「다시 누르세요」는 참이 아니고, 그 문구 탓에 사람이 로그인하고도 폰으로 돌아가 또 눌렀다.
+    //   - 배선 없는 레인(광고비·로켓광고·공급자허브): 되살리는 주체가 **없다**. 여기에
+    //     「자동으로 이어받습니다」를 쓰면 사람은 로그인만 하고 영영 기다린다 — 틀린 처방이다.
+    text: spec.autoResumeOnLogin
+      ? `${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인하면 자동으로 이어받습니다)`
+      : `${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인한 뒤 「전체 갱신」을 다시 눌러주세요 — 이 레인은 자동 재개가 없습니다)`,
+    tone: "error",
+  });
+
+  if (!outcome) return { icon: "⏳", text: "진행 중", tone: "progress" };
+  if (outcome.state === "done") return { icon: "✅", text: "완료", tone: "ok" };
   if (outcome.state === "failed") {
-    // ★문구 정정(W3): 이제 로그인만 하면 데몬이 감지해 요청을 자동으로 되살린다.
-    //   「다시 누르세요」는 더 이상 참이 아니고, 그 문구 때문에 사람이 창을 찾아 로그인하고도
-    //   또 버튼을 누르러 폰으로 돌아가야 했다.
     return isLoginRequired(outcome.reason, outcome.kind)
-      ? `🔑 ${spec.label} — ${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인하면 자동으로 이어받습니다)`
-      : `❌ ${spec.label} 실패(${outcome.reason})`;
+      ? loginView()
+      : { icon: "❌", text: `실패(${outcome.reason})`, tone: "error" };
   }
 
   // ── 타임아웃(no_response) 3분할 (2026-08-22 W4) ──────────────────────────
@@ -350,21 +469,41 @@ export function describeOutcome(spec: StreamRefreshSpec, outcome: RefreshOutcome
   // 2026-08-22 10:47 실측에서 그 문구가 떴을 때 Mac은 **켜져 있었고 수집 중이었다** —
   // 옆 레인이 로그인 대기로 폴 루프를 3분 점유해 이 요청을 늦게 집었을 뿐이다.
   // 틀린 처방("Mac을 켜세요")은 침묵보다 나은 실패가 아니다.
-  if (isLoginRequired(null, outcome.kind)) {
-    return `🔑 ${spec.label} — ${spec.account} 로그인 필요(Mac Chrome 탭에서 로그인하면 자동으로 이어받습니다)`;
-  }
+  if (isLoginRequired(null, outcome.kind)) return loginView();
   if (outcome.inFlight) {
     // Mac이 임대를 붙잡고 실제로 일하는 중 — 화면만 먼저 포기한 것이다. 실패가 아니다.
-    return `⏱️ ${spec.label} — 수집이 백그라운드에서 계속됩니다(화면 대기 시간 초과). 잠시 뒤 새로고침하세요`;
+    return {
+      icon: "⏱️",
+      text: "수집이 백그라운드에서 계속됩니다(화면 대기 시간 초과). 잠시 뒤 새로고침하세요",
+      tone: "warn",
+    };
   }
   if ((outcome.attemptCount ?? 0) === 0) {
     // 요청은 걸렸는데 아무도 claim하지 않았다 = Mac이 꺼졌거나 데몬이 죽었다.
     // 이 경우에만 「Mac을 보라」가 참이다.
     const where = spec.windowHint ? `, ${spec.windowHint} 창이 떠 있는지` : "";
-    return `⚠️ ${spec.label} — Mac이 요청을 집지 않았습니다(Mac이 켜져 있는지${where} 확인하세요)`;
+    return {
+      icon: "⚠️",
+      text: `Mac이 요청을 집지 않았습니다(Mac이 켜져 있는지${where} 확인하세요)`,
+      tone: "warn",
+    };
   }
   // 집어갔는데 정착 보고가 안 왔다 — Mac 탓으로 돌리지 않는다.
-  return `⚠️ ${spec.label} 응답 지연 — Mac이 요청을 받았으나 아직 결과가 없습니다(잠시 뒤 새로고침)`;
+  return {
+    icon: "⚠️",
+    text: "응답 지연 — Mac이 요청을 받았으나 아직 결과가 없습니다(잠시 뒤 새로고침)",
+    tone: "warn",
+  };
+}
+
+/**
+ * 결과 1건을 사람이 읽는 **한 줄**로. 실패엔 어느 계정인지가 반드시 붙는다.
+ * 라벨을 한 줄 안에 넣는 표면(커맨드센터 배너·통합 대사)이 쓴다 — 조립만 하고 문구는
+ * outcomeView가 짓는다.
+ */
+export function describeOutcome(spec: StreamRefreshSpec, outcome: RefreshOutcome | null): string {
+  const v = outcomeView(spec, outcome);
+  return `${v.icon} ${spec.label} — ${v.text}`;
 }
 
 /**
@@ -403,6 +542,9 @@ export const STREAM_SPECS: StreamRefreshSpec[] = [
     account: "오픽스(A01564720)",
     getStatus: getWingVendorSummaryRefreshStatus,
     request: requestWingVendorSummaryRefresh,
+    // wing_browser_fetcher: poll 15s + 쿨다운 45s → 최악 ~60s. 90초 기본값으로 충분.
+    // ★자동 재개 배선 있음(`_revive_lane`, wing_browser_fetcher.py:1983).
+    autoResumeOnLogin: true,
   },
   {
     key: "ofix_ad",
@@ -410,6 +552,7 @@ export const STREAM_SPECS: StreamRefreshSpec[] = [
     account: "오픽스(A01564720)",
     getStatus: getAdCostRefreshStatus,
     request: requestAdCostRefresh,
+    // ad_cost_browser_fetcher: poll 15s + 쿨다운 45s → ~60s. 자동 재개 배선 **없음**.
   },
   {
     key: "ohitech_ad",
@@ -418,6 +561,10 @@ export const STREAM_SPECS: StreamRefreshSpec[] = [
     getStatus: getOhitechAdRefreshStatus,
     request: requestOhitechAdRefresh,
     windowHint: "Chrome CDP 9224(오하이테크 광고센터)",
+    // ★이 레인만 캐던스가 느리다: ohitech_ad_fetcher poll 60s + 쿨다운 60s → 최악 ~120s.
+    //   90초로 자르면 집힐 예정인 요청을 「Mac이 꺼졌다」고 오보한다(적대 리뷰 P1-1).
+    //   (60+60)×1.5 = 180초. 자동 재개 배선 **없음**.
+    pickupTimeoutMs: 180000,
   },
   {
     key: "supplier_hub",
@@ -439,6 +586,18 @@ export const RG_STREAM_SPECS: StreamRefreshSpec[] = [
     getStatus: () => getWingRgSettlementRefreshStatus("COUPANG_WING1"),
     request: () => requestWingRgSettlementRefresh("COUPANG_WING1"),
     settleBeforeSuccess: true,
+    autoResumeOnLogin: true,
+    // ★RG 자체 캐던스는 빠르다(poll 15s·버튼은 쿨다운 면제). 그런데 같은 프로세스의 판매분석
+    //   run이 flock을 쥔 채 동기 실행되는 구간이 앞에 있어(wing_browser_fetcher.py:1797-1845),
+    //   그 run이 길면 RG claim이 그만큼 밀린다.
+    // ★근거 정정 (2026-08-23 적대 리뷰 2R): 08-22의 「약 3분 점유」를 만든 원인이던
+    //   `_LOGIN_WAIT_S = 180` 블로킹 대기는 **이미 삭제됐다**(`:1328` 주석 · 데몬 두 경로 모두
+    //   `login_wait_secs=0`). 즉 그 3분은 지금 재현되지 않는다. 남은 실제 구속은 **VS run 소요
+    //   자체**인데 그 값은 아직 실측이 없다(계약 §7 미확인 그대로).
+    //   ⇒ 180초는 «측정된 값»이 아니라 **미측정 구간에 대한 보수적 상한**이다. 오차 방향이
+    //     안전해서 유지한다: 과하면 참인 「Mac 꺼짐」을 늦게 말할 뿐 **거짓 「Mac 꺼짐」을 만들지
+    //     않는다**(그리고 이 PR 이전의 215초보다는 여전히 빠르다). VS run이 실측되면 그 값으로 좁힌다.
+    pickupTimeoutMs: 180000,
   },
   {
     key: "rg_wing2",
@@ -447,6 +606,8 @@ export const RG_STREAM_SPECS: StreamRefreshSpec[] = [
     getStatus: () => getWingRgSettlementRefreshStatus("COUPANG_WING2"),
     request: () => requestWingRgSettlementRefresh("COUPANG_WING2"),
     settleBeforeSuccess: true,
+    autoResumeOnLogin: true,
+    pickupTimeoutMs: 180000, // 위 WING1과 같은 이유(같은 프로세스·같은 flock 구조)
   },
 ];
 

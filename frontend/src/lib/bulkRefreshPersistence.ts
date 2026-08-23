@@ -13,13 +13,22 @@
 // ★오래된 결과가 영원히 남지 않도록 저장 시각(savedAt)을 같이 두고, 기본 30분이 지나면
 //   복원하지 않는다(방치된 실패가 다음 날에도 "방금 실패"처럼 보이는 걸 막는다).
 
+import type { RefreshOutcome } from "./streamRefresh";
+
+// ★정착 상태는 판정 결과(RefreshOutcome)를 **통째로** 실어 나른다(2026-08-23 W2).
+//   종전엔 done/failed/timeout 셋으로 «접어서» 저장해 attemptCount·inFlight·kind가 버려졌고,
+//   그래서 패널이 타임아웃 세 경우를 가를 재료를 갖지 못한 채 자기 문구를 지어냈다
+//   (「응답 없음 — Mac이 켜져 있는지 확인하세요」 = 08-23 10:32 폰 오보). 저장 대상은 순수
+//   데이터라 JSON 직렬화에 안전하다.
+// ★optional인 이유: 이 배포 «전»에 sessionStorage에 저장된 payload에는 이 필드가 없다.
+//   없으면 화면이 틀린 처방 대신 「상세를 모른다」고 말한다(bulkStateText 폴백).
 export type BulkQueueState =
   | { kind: "requesting"; retry: number; maxRetries: number }
   | { kind: "requested" }
   | { kind: "fetching" }
-  | { kind: "done"; at: string }
-  | { kind: "failed"; reason: string; login: boolean }
-  | { kind: "timeout" }
+  | { kind: "done"; at: string; outcome?: RefreshOutcome }
+  | { kind: "failed"; reason: string; login: boolean; outcome?: RefreshOutcome }
+  | { kind: "timeout"; outcome?: RefreshOutcome }
   /** 복원된 상태가 마지막으로 어느 진행 단계였는지 — "추적이 끊겼다"는 사실만 전달한다. */
   | { kind: "stale"; lastPhase: "requesting" | "requested" | "fetching" };
 
