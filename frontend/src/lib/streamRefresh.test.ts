@@ -735,3 +735,127 @@ describe("픽업 상한은 레인의 데몬 캐던스에서 온다", () => {
     }
   });
 });
+
+// ── W5 가시성 인지 (2026-08-23, 계약 CONTRACT_collection_works_everywhere §3·§0-C-C) ──────
+//
+// ★결함의 모양: 벽시계 마감 + setTimeout 진행 + visibility 처리 0건.
+//   폰이 잠기면 모바일 사파리가 setTimeout을 멈춘다 → `getStatus`는 한 번도 안 도는데
+//   벽시계만 흐른다 → 화면을 켜는 순간 마감이 이미 지나 있어 **얼어붙은 lastSeen**으로
+//   즉시 타임아웃을 낸다. Mac에서는 수집이 멀쩡히 끝났는데 화면만 「응답 없음」이 되는 경로다.
+//   계약이 「잠재 결함(미발동)」으로 적어 둔 자리이고, 처방은 둘이다:
+//     ① 상한을 «깨어 있던 시간»으로 잰다  ② 마감했더라도 **판정 전에 한 번 더 확인한다**
+describe("W5 — 화면이 잠겼다 돌아와도 거짓 타임아웃을 내지 않는다", () => {
+  it("마감 직후 판정 전 1회 강제 조회 — 그 사이 끝난 수집을 done으로 잡는다", async () => {
+    // 호출 순서를 못 박는다(인덱스가 한 칸만 밀려도 «강제 조회 전»에 성공을 보게 되어
+    // 테스트가 엉뚱한 이유로 통과한다 — 실제로 처음 쓴 판이 그렇게 새서 변이가 살아남았다):
+    //   1회차 = baseline · 2·3회차 = 폴(집어가서 수집 중) · 4회차 = **강제 조회**만 보는 값
+    let calls = 0;
+    let t = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        calls += 1;
+        if (calls === 1) return S({ requested: false, attempt_count: 0 });
+        if (calls <= 3) {
+          // ★점프를 «조회 도중»에 둔다: 폰이 잠긴 것은 폴 응답을 기다리는 사이다.
+          //   그래서 이 값을 받아 든 순간 이미 마감이 지나 있고, 루프는 **다시 폴하지 않고**
+          //   빠져나간다 — 이때 손에 든 것이 바로 «얼어붙은 lastSeen»이다.
+          //   (점프를 sleep 안에 두면 점프 뒤 폴이 한 번 더 돌아 이 구간이 재현되지 않는다.)
+          if (calls === 3) t += 600000;
+          return S({ requested: true, attempt_count: 1, in_flight: true });
+        }
+        // ★잠긴 동안 Mac이 완주했다. 이 값은 «판정 전 강제 조회»만이 볼 수 있다.
+        return S({ requested: false, attempt_count: 1, last_success_at: "T1" });
+      },
+      request: async () => {},
+    };
+    const out = await runStreamRefresh(spec, {
+      now: () => t,
+      sleep: async (ms: number) => { t += ms; },
+      hiddenMs: () => 0, // 보정이 없어도 강제 조회만으로 구제돼야 한다
+      pollMs: 3000,
+    });
+    expect(calls).toBe(4); // 강제 조회가 실제로 한 번 더 나갔다
+    // 강제 조회가 없으면 얼어붙은 lastSeen(in_flight)으로 no_response가 나온다.
+    expect(out).toEqual({ state: "done" });
+  });
+
+  it("숨어 있던 시간은 상한에서 뺀다 — 잠금 때문에 추적을 접지 않는다", async () => {
+    // 벽시계로는 이미 10분을 넘겼지만 그중 9분이 «숨어 있던» 시간이면 아직 추적 중이어야 한다.
+    let t = 0;
+    let hidden = 0;
+    let polls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        polls += 1;
+        if (polls === 1) return S({ requested: false, attempt_count: 0 });
+        // 세 번째 폴에서 화면이 잠겼다 돌아온다(벽시계 +15분, 그 전부가 hidden).
+        if (polls === 3) { t += 900000; hidden += 900000; }
+        if (polls >= 6) return S({ requested: false, attempt_count: 1, last_success_at: "T1" });
+        return S({ requested: true, attempt_count: 1, in_flight: true });
+      },
+      request: async () => {},
+    };
+    const out = await runStreamRefresh(spec, {
+      now: () => t,
+      sleep: async (ms: number) => { t += ms; },
+      hiddenMs: () => hidden,
+      pollMs: 3000,
+    });
+    expect(out).toEqual({ state: "done" });
+    // 벽시계로는 T_max(600초)를 훌쩍 넘겼는데도 끝까지 추적했다 — 보정이 없으면 여기서 접힌다.
+    expect(t).toBeGreaterThan(900000);
+  });
+
+  it("숨어 있던 시간은 픽업 판정에서도 빠진다 — 잠긴 동안 못 집은 것은 Mac 탓이 아니다", async () => {
+    let t = 0;
+    let hidden = 0;
+    let polls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        polls += 1;
+        if (polls === 1) return S({ requested: false, attempt_count: 0 });
+        if (polls === 2) { t += 300000; hidden += 300000; } // 5분간 잠김
+        if (polls >= 5) return S({ requested: true, attempt_count: 1, in_flight: true });
+        return S({ requested: true, attempt_count: 0 }); // 아직 아무도 안 집었다
+      },
+      request: async () => {},
+    };
+    const out = await runStreamRefresh(spec, {
+      now: () => t,
+      sleep: async (ms: number) => { t += ms; },
+      hiddenMs: () => hidden,
+      pollMs: 3000,
+    });
+    // 벽시계 5분 > T_pickup 90초지만, 그 5분은 숨어 있던 시간이라 조기 정착하지 않는다.
+    // (이 시나리오는 영원히 in_flight라 결국 T_max에서 «추적 종료»로 끝난다 — 그건 다른 판정이다.)
+    expect(out).toMatchObject({ state: "no_response", attemptCount: 1, inFlight: true });
+    expect(describeOutcome(spec, out)).not.toContain("Mac이 요청을 집지 않았습니다");
+    expect(describeOutcome(spec, out)).toContain("백그라운드에서 계속");
+  });
+
+  it("강제 조회가 실패해도 던지지 않고 마지막으로 본 상태로 판정한다", async () => {
+    let polls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        polls += 1;
+        if (polls === 1) return S({ requested: false, attempt_count: 0 });
+        if (polls > 3) throw new Error("네트워크 끊김"); // 마감 후 강제 조회가 실패
+        return S({ requested: true, attempt_count: 2, in_flight: true });
+      },
+      request: async () => {},
+    };
+    let t = 0;
+    const out = await runStreamRefresh(spec, {
+      now: () => t,
+      sleep: async (ms: number) => { t += polls >= 3 ? 600000 : ms; },
+      hiddenMs: () => 0,
+      pollMs: 3000,
+    });
+    expect(out).toMatchObject({ state: "no_response", attemptCount: 2, inFlight: true });
+    expect(describeOutcome(spec, out)).toContain("백그라운드에서 계속");
+  });
+});

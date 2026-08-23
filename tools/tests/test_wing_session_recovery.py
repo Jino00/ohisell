@@ -201,3 +201,236 @@ def test_recovery_helper_uses_shared_module():
     """복구는 공용 모듈로만 한다 — 레인별 재발명은 「한 곳만 수리」 재발의 기제였다."""
     assert "coupang_auth" in w._recover_rg_session.__code__.co_names or \
            "ensure_session" in w._recover_rg_session.__code__.co_names
+
+
+# ════════════════════════════════════════════════════════════════════
+# 4. VS(판매분석) 경로 — 계약 W1의 «나머지 절반» (2026-08-23 라이브 실사고)
+# ════════════════════════════════════════════════════════════════════
+#
+# ★왜 뒤늦게 생겼나: 계약 W1 원문은 *"WING1·WING2 계정별, **VS·RG 양 경로**의 로그아웃 확증
+#   지점"*에 배선하라고 적었는데 **RG 절반만 구현된 채 W1이 완료로 표시**됐다. 잡은 것은
+#   테스트도 리뷰도 아니고 **Jino가 폰에서 누른 버튼**이었다 — 17:09 한 회차 안에서
+#     17:09:12  VS(판매분석) → 사람 호출
+#     17:10:26  RG(정산)     → 자동 재로그인으로 복구, 사람 개입 0
+#   같은 계정·같은 Keychain 항목인데 한 레인만 사람을 불렀고, 그 하나 때문에 합격 ①이 미달이었다.
+
+def test_recover_vs_passes_login_id_from_config(spy_ensure):
+    """②Keychain층의 입력은 config의 wing_login_id다 — RG와 같은 계약."""
+    cfg = {"account_key": "COUPANG_WING1", "vendor_id": "A01564720", "wing_login_id": "ofixohi"}
+    assert w._recover_vs_session(object(), cfg) == coupang_auth.OK
+    assert spy_ensure["login_id"] == "ofixohi"
+
+
+def test_recover_vs_labels_the_lane_and_account(spy_ensure):
+    """알림·로그에 **어느 계정의 어느 레인**인지 실린다 — RG와 VS가 같은 계정에 둘 다 있다."""
+    w._recover_vs_session(object(), {"account_key": "COUPANG_WING1", "vendor_id": "A01564720",
+                                     "wing_login_id": "x"})
+    label = spy_ensure["label"]
+    assert "COUPANG_WING1" in label and "A01564720" in label
+    assert "판매분석" in label, "RG와 구분되는 레인 이름이 없으면 알림만 보고는 어디를 볼지 모른다"
+
+
+def test_recover_vs_predicate_rejects_its_own_sso_url(spy_ensure):
+    """넘긴 is_landed가 넘긴 sso_url을 착지로 인정하면 coupang_auth가 즉시 죽는다(모듈 계약)."""
+    w._recover_vs_session(object(), {"wing_login_id": "x"})
+    assert spy_ensure["is_landed"](spy_ensure["sso_url"]) is False
+
+
+def test_recover_vs_predicate_requires_the_mobile_origin(spy_ensure):
+    """★호스트는 파싱해서 비교해야 한다 — m-wing이 wing을 **포함**한다(2026-08-03 실사고).
+
+    VS는 m-wing(모바일), RG는 wing(데스크톱)이다. 부분문자열로 비교하면 RG 착지를 VS 복구의
+    성공으로 오인해 «복구했다는데 계속 실패»가 된다.
+    """
+    w._recover_vs_session(object(), {"wing_login_id": "x"})
+    landed = spy_ensure["is_landed"]
+    assert landed("https://m-wing.coupang.com/tenants/business-insight/sales-analysis") is True
+    assert landed("https://wing.coupang.com/tenants/settlement/list") is False
+
+
+def test_recover_vs_passes_app_probe_as_verify(spy_ensure):
+    """verify(앱 프로브)가 넘어가는가 — RG에서 적대 리뷰 P2-1이 유일 생존 변이로 잡아낸 자리."""
+    w._recover_vs_session(object(), {"wing_login_id": "x"})
+    assert callable(spy_ensure.get("verify")), "verify(앱 프로브)가 coupang_auth로 안 넘어간다"
+
+
+def test_vs_lane_calls_recovery_before_giving_up():
+    """★배선 절단 감지 — VS 경로가 «사람을 부르기 전에» 자동 복구를 시도하는가.
+
+    이 단언이 빨간 것은 2026-08-23 17:09:12 상태(같은 회차에 RG는 스스로 복구하는데
+    VS만 사람을 부름)로의 회귀를 뜻한다. 함수가 있어도 아무도 안 부르면 없는 것과 같다.
+    """
+    # 길목은 두 칸이다: _do_run → _vs_recover_and_refetch → _recover_vs_session.
+    # 어느 칸이 끊겨도 라이브는 「사람을 부르고 끝」으로 돌아가므로 둘 다 단언한다.
+    assert "_vs_recover_and_refetch" in w._do_run.__code__.co_names, (
+        "_do_run이 자동 복구 헬퍼를 부르지 않는다 — VS 자동 복구 배선이 끊겼다."
+    )
+    assert "_recover_vs_session" in w._vs_recover_and_refetch.__code__.co_names, (
+        "헬퍼가 _recover_vs_session을 부르지 않는다 — coupang_auth에 닿지 않는다."
+    )
+
+
+def test_both_vs_entrypoints_route_through_the_choke_point():
+    """★위 단언의 전제 — VS 진입점이 전부 `_do_run`을 지나는가.
+
+    데몬 경로를 다른 함수로 갈라내면 위 단언은 초록인 채 라이브만 옛 동작으로 돌아간다.
+    """
+    import types
+
+    def _refs(code, name, seen=None):
+        seen = seen if seen is not None else set()
+        if id(code) in seen:
+            return False
+        seen.add(id(code))
+        if name in code.co_names:
+            return True
+        return any(_refs(c, name, seen) for c in code.co_consts
+                   if isinstance(c, types.CodeType))
+
+    daemon = getattr(w, "cmd_poll", None)
+    assert daemon is not None, "폴 데몬 진입점을 못 찾았다"
+    assert _refs(daemon.__code__, "_do_run"), "데몬 VS 경로가 길목을 우회한다"
+
+
+def test_vs_recover_reconfirms_with_a_real_fetch(monkeypatch):
+    """★복구 «선언»을 그대로 믿지 않고 실제 fetch로 재확증하는가.
+
+    인라인이던 시절 「재확증을 지우고 선언만 믿기」 변이가 전건 초록으로 살아남았다.
+    선언만 믿으면 「복구했다는데 다음 층이 이유 없이 실패」가 되고, 사람은 로그인할 기회조차
+    못 얻은 채 회차만 태운다(2026-08-03 침묵 사고와 같은 형태).
+    """
+    calls = []
+    monkeypatch.setattr(w, "_recover_vs_session", lambda *a, **k: coupang_auth.OK)
+    monkeypatch.setattr(w, "_fetch_vendor_summary",
+                        lambda *a, **k: calls.append(k) or {"status": 200, "body": "{}"})
+
+    out = w._vs_recover_and_refetch(object(), {"wing_login_id": "x"}, None)
+    assert calls, "복구 선언 뒤 재fetch를 안 했다 — 앱이 실제로 응답하는지가 유일한 증거다"
+    assert out == {"status": 200, "body": "{}"}
+
+
+def test_vs_recover_returns_none_when_recovery_failed(monkeypatch):
+    """복구가 안 됐으면 재fetch로 회차를 태우지 않고 사람 경로로 넘긴다."""
+    calls = []
+    monkeypatch.setattr(w, "_recover_vs_session", lambda *a, **k: coupang_auth.LOGIN_REQUIRED)
+    monkeypatch.setattr(w, "_fetch_vendor_summary", lambda *a, **k: calls.append(k))
+
+    assert w._vs_recover_and_refetch(object(), {"wing_login_id": "x"}, None) is None
+    assert not calls, "복구 실패인데 재fetch를 했다 — 헛된 왕복이고 사람 호출만 늦어진다"
+
+
+def test_vs_lane_routes_through_the_recover_and_refetch_helper():
+    """★배선 절단 감지 — `_do_run`이 그 헬퍼를 실제로 부르는가(위 두 단언의 전제)."""
+    assert "_vs_recover_and_refetch" in w._do_run.__code__.co_names, (
+        "_do_run이 _vs_recover_and_refetch를 부르지 않는다 — VS 자동 복구 배선이 끊겼다."
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 5. verify 프로브가 «실제로 돌아가는가» — 라이브에서만 드러난 결함 (2026-08-23 17:25:38)
+# ════════════════════════════════════════════════════════════════════
+#
+# ★사고: VS 자동 복구의 verify가 `_fetch_vendor_summary(..., retries=0)`을 불렀는데
+#   `for attempt in range(1, 0+1)`이 한 번도 안 돌아 `raise last_exc`에 None이 실렸다 →
+#   `raise None` → **TypeError**. coupang_auth가 그걸 「세션 검사 오류」로 삼켜 복구를
+#   **실패로 오판**했다. 그날 수집이 살아난 건 전혀 다른 경로(로그인 회복 워치의 자동 재개)
+#   덕이었고, 내 verify는 한 번도 참을 말한 적이 없다.
+# ★기존 테스트 전건이 초록이었다 — spy가 `verify`가 **callable인지**만 봤기 때문이다.
+#   「호출 가능하다」와 「호출하면 답을 준다」는 다르다.
+
+class _StubPage:
+    """브라우저 없이 fetch 경로를 태우는 최소 스텁."""
+
+    def __init__(self, url="https://m-wing.coupang.com/tenants/business-insight/sales-analysis",
+                 body='{"saleSummaryByDate": []}'):
+        self.url = url
+        self._body = body
+
+    def goto(self, *a, **k):
+        return None
+
+    def wait_for_timeout(self, *a, **k):
+        return None
+
+    def evaluate(self, *a, **k):
+        return {"status": 200, "body": self._body}
+
+
+def test_fetch_vendor_summary_rejects_zero_retries():
+    """★`retries=0`은 조용한 함정(raise None)이 아니라 **시끄러운 거절**이어야 한다."""
+    with pytest.raises(ValueError, match="1 이상"):
+        w._fetch_vendor_summary(_StubPage(), {}, retries=0)
+
+
+def test_vs_verify_probe_actually_returns_a_verdict(spy_ensure):
+    """★verify를 «호출해 본다» — callable인지만 보면 17:25:38 사고를 못 잡는다.
+
+    복구 직후 앱이 정상 응답하면 True, 로그아웃 상태면 False. 어느 쪽이든 **예외를 던지면
+    안 된다** — 던지면 coupang_auth가 그걸 삼켜 «복구 실패»로 오판한다.
+    """
+    w._recover_vs_session(_StubPage(), {"wing_login_id": "x"})
+    verify = spy_ensure["verify"]
+    assert verify() is True, "정상 응답인데 verify가 참을 말하지 않는다"
+
+
+def test_vs_verify_probe_says_false_when_logged_out(spy_ensure, monkeypatch):
+    """로그아웃 URL이면 False다 — 예외가 아니라 «아직 복구 안 됨»으로 답한다."""
+    monkeypatch.setattr(w, "_is_logged_out", lambda url: True)
+    w._recover_vs_session(_StubPage(), {"wing_login_id": "x"})
+    assert spy_ensure["verify"]() is False
+
+
+# ════════════════════════════════════════════════════════════════════
+# 6. 적대 리뷰 P2 채택분 (2026-08-23 PR #360 1R) — 생존 변이 3종이 가리킨 구멍
+# ════════════════════════════════════════════════════════════════════
+
+def test_vs_recovery_result_reaches_the_run(caplog):
+    """★P2-2 — 복구 성공이 «회차의 결과»로 실려야 한다(그래야 push가 가고 폰 패널이 ✅다).
+
+    생존 변이(M5)의 라이브 모습이 최악이다: 로그는 「자동 재로그인으로 세션 복구」라 말하는데
+    결과가 안 실려 push가 안 가고 **폰 패널엔 ❌ 「로그인 필요」**가 뜬다. 로그와 화면이
+    서로 다른 말을 하는 상태 — 이 계약이 없애려는 «틀린 처방»의 가장 나쁜 형태다.
+    """
+    ok = {"status": 200, "body": '{"saleSummaryByDate": []}'}
+    with caplog.at_level(logging.INFO):
+        res, login_needed, keep_open = w._vs_apply_recovery(ok)
+    assert res is ok, "복구 결과가 회차 결과로 안 실린다 — push 경로가 통째로 끊긴다"
+    assert login_needed is False and keep_open is False, "복구했는데 사람을 부른다"
+    assert any("사람 개입 없이" in r.getMessage() for r in caplog.records)
+
+
+def test_vs_recovery_failure_falls_back_to_a_human(caplog):
+    """복구를 선언했는데 재fetch가 실패하면 **정직하게** 사람 경로로 넘긴다(창도 남긴다)."""
+    bad = {"status": 401, "body": "signin"}
+    with caplog.at_level(logging.WARNING):
+        res, login_needed, keep_open = w._vs_apply_recovery(bad)
+    assert res is bad and login_needed is True and keep_open is True
+    assert any("재fetch가 실패" in r.getMessage() for r in caplog.records), \
+        "사유가 로그에 안 남으면 합격 ③의 「정직하게 남는다」가 깨진다"
+
+
+def test_recover_vs_warns_when_login_id_missing(spy_ensure, caplog):
+    """★P2-4 — VS도 login_id 부재를 «경고»한다(RG엔 있는데 VS엔 없던 가드).
+
+    모듈이 조용히 폴백하므로 로그마저 침묵하면 배선해 두고도 「고쳤는데 안 되는」 상태를
+    아무도 모른다. Wing은 ①SSO가 원리적으로 무효라 login_id 없음 = 자동 복구 전면 무력화다.
+    """
+    with caplog.at_level(logging.WARNING):
+        w._recover_vs_session(object(), {"account_key": "COUPANG_WING1"})
+    assert any("wing_login_id" in r.getMessage() for r in caplog.records), \
+        "VS의 login_id 없음이 로그에 안 남는다"
+
+
+def test_rg_verify_probe_actually_returns_a_verdict(spy_ensure, monkeypatch):
+    """★P2-3 — RG의 verify도 «불러 본다». 지금까지 `callable()`만 봐서 같은 구멍이 남아 있었다.
+
+    17:25:38 사고(VS verify가 호출 시 TypeError)와 **정확히 같은 종류**의 결함을 RG에서는
+    아무도 못 잡는 상태였다 — 리뷰어가 `_rg_session_ok(page, 0)`으로 바꿔도 전건 초록이었다.
+    「호출 가능하다」와 「호출하면 답을 준다」는 다르다.
+    """
+    monkeypatch.setattr(w, "_rg_session_probe", lambda page: (w._PROBE_OK, "ok"))
+    w._recover_rg_session(object(), {"wing_login_id": "x"})
+    assert spy_ensure["verify"]() is True, "RG verify가 호출에 답을 못 한다"
+
+    monkeypatch.setattr(w, "_rg_session_probe", lambda page: (w._PROBE_AUTH, "로그아웃"))
+    assert spy_ensure["verify"]() is False, "로그아웃인데 참을 말한다"
