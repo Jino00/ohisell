@@ -29,6 +29,9 @@ const h = vi.hoisted(() => ({
   overview: null as unknown,
   overviewFails: false,
   optionPnl: null as unknown,
+  /** 조회를 «매달아» 둘 수 있게 하는 손잡이 — in-flight 구간의 화면을 재려면 필요하다.
+   *  null이면 즉시 resolve(기본). 함수를 넣으면 그 함수가 promise를 만든다. */
+  nextOverview: null as null | (() => Promise<unknown>),
 }));
 
 vi.mock("../lib/api", async (importOriginal) => ({
@@ -36,7 +39,11 @@ vi.mock("../lib/api", async (importOriginal) => ({
   syncRealtime: () => Promise.resolve(),
   fetchApi: () => Promise.resolve([]),
   fetchCommandCenter: () =>
-    h.overviewFails ? Promise.reject(new Error("백엔드 500")) : Promise.resolve(h.overview),
+    h.overviewFails
+      ? Promise.reject(new Error("백엔드 500"))
+      : h.nextOverview
+        ? h.nextOverview()
+        : Promise.resolve(h.overview),
   fetchRgOptionPnl: () => Promise.resolve(h.optionPnl),
   fetchRevenueReconcile: () => Promise.reject(new Error("no reconcile in test")),
   fetchRocketOverview: () => Promise.reject(new Error("no rocket in test")),
@@ -50,6 +57,7 @@ import type { OverviewResponse, RgOptionPnlResponse } from "../lib/api";
 afterEach(() => {
   cleanup();
   h.overviewFails = false;
+  h.nextOverview = null;
 });
 
 /** 정산 내역이 실린 overview. 금액은 다른 픽스처와 겹치지 않는 값으로 골랐다(오탐 방지). */
@@ -234,23 +242,44 @@ describe("RocketGrowthSettlement — 주기별 정산 내역 카드 재사용 (�
   });
 });
 
-// ★1R P2-4가 잡은 «공허 단언» — 「실패하면 옛 값이 남지 않는다」를 단언한다면서 정작 그
-//   케이스에서 overview가 한 번도 채워진 적이 없었다. 진짜로 재려면 **성공 → 실패**로 가야 한다.
-//   1R P2-6(계정 전환 시 직전 계정 카드가 남는다)도 같은 자리에서 함께 잡힌다.
-describe("RocketGrowthSettlement — 실패·계정 전환이 옛 값을 남기지 않는다 (1R P2-4·P2-6)", () => {
-  it("성공해서 카드가 뜬 뒤 계정을 바꿔 실패하면, 옛 계정의 카드가 «사라진다»", async () => {
+// ★1R P2-4·P2-6. 초판 테스트는 **공허했다**: 「실패하면 옛 값이 남지 않는다」를 단언했지만
+//   실패 경로에선 `ovErr` 분기가 먼저 걸려 카드를 어차피 가리므로, 리셋을 통째로 지워도
+//   초록이었다(변이 N5 생존으로 실측). 진짜 위험은 **성공하는 계정 전환의 in-flight 구간**이다 —
+//   그 사이 화면은 «다른 법인»의 정산 카드를 계정키까지 달고 그대로 보인다.
+//   그래서 조회를 매달아 두고 그 구간의 DOM을 직접 잰다.
+describe("RocketGrowthSettlement — 계정 전환이 옛 계정의 카드를 남기지 않는다 (1R P2-6)", () => {
+  it("전환 조회가 끝나기 전, 직전 계정의 금액·계정키가 «화면에 없다»", async () => {
     h.overview = makeOverview();
     h.optionPnl = OPTION_PNL_BASE;
     renderSettlement();
     // 1단계: 오픽스로 성공 — 카드가 실제로 떠 있어야 이 테스트가 의미를 갖는다.
     await waitFor(() => expect(screen.getByText("222,222원")).toBeTruthy());
-    // 2단계: 다음 조회는 실패한다.
+    expect(screen.getByText("COUPANG_WING1")).toBeTruthy();
+
+    // 2단계: 다음 조회를 «매달아» 둔다(응답이 아직 안 온 상태를 만든다).
+    let release: ((v: unknown) => void) | null = null;
+    h.nextOverview = () => new Promise((res) => { release = res; });
+    fireEvent.click(screen.getByRole("button", { name: "오하이테크" }));
+
+    // ★in-flight 구간: 「불러오는 중…」이어야 하고, 옛 계정의 값이 남아 있으면 안 된다.
+    await waitFor(() => expect(screen.getByText("불러오는 중…")).toBeTruthy());
+    expect(screen.queryByText("222,222원")).toBeNull();
+    expect(screen.queryByText("COUPANG_WING1")).toBeNull();
+
+    // 3단계: 응답이 오면 다시 정상으로 — 리셋이 화면을 영구히 죽이지 않았는지 확인한다.
+    release!(makeOverview());
+    await waitFor(() => expect(screen.getByText("222,222원")).toBeTruthy());
+  });
+
+  it("전환 조회가 실패하면 «못 불러왔다»로 끝난다 — 옛 값으로 되돌아가지 않는다", async () => {
+    h.overview = makeOverview();
+    h.optionPnl = OPTION_PNL_BASE;
+    renderSettlement();
+    await waitFor(() => expect(screen.getByText("222,222원")).toBeTruthy());
     h.overviewFails = true;
     fireEvent.click(screen.getByRole("button", { name: "오하이테크" }));
     await waitFor(() => expect(screen.getByText(/정산 내역을 못 불러왔다/)).toBeTruthy());
-    // ★옛 계정의 금액·계정키가 남아 있으면 안 된다.
     expect(screen.queryByText("222,222원")).toBeNull();
-    expect(screen.queryByText("COUPANG_WING1")).toBeNull();
   });
 });
 
@@ -439,3 +468,17 @@ describe("RocketGrowthPnl — 판매도 광고도 없는 행 접기", () => {
 // ★ⓓ가 이 파일의 «최종 표면까지 가는 경로를 끊는» 변이다(전역 §4). 정의를 공용 모듈로 옮긴
 //   리팩터는 타입체크·기존 테스트가 전부 초록인 채로 «원자리 렌더를 지워도» 통과할 수 있다 —
 //   종합 조망을 실제로 마운트해 카드 문자열과 갱신 버튼을 함께 보는 단언만이 그걸 잡는다.
+//
+// ──────── 2R: 적대 리뷰 1R 지적을 고친 뒤 추가 주입 (기준선 20/20) ────────
+//   N1 `by_account.length === 0 ? (` → `false ? (`   (1R P1 가드 제거)    → 1건 RED
+//   N2 헤드라인 부호 반전 `d < 0 ? "+" : "−"` 뒤집기  (1R P2-1)           → 1건 RED
+//   N3 축 배너 분기 반전 `=== "sales_date"` → `!==`   (1R P2-2)           → 2건 RED
+//   N4 `isQuiet`에서 `n(r.ad_spend) === 0` 제거       (1R P2-3)           → 1건 RED
+//   N5 계정 전환 리셋 2곳 제거                        (1R P2-6)           → 1건 RED
+//   N5b `load` 시작 리셋 1곳만 제거                                        → 1건 RED
+//
+// ★★N5는 **초판에서 생존했다** — 그리고 그 생존이 이 파일의 가장 값진 발견이다. 초판 테스트는
+//   「실패하면 옛 값이 안 남는다」를 «실패 경로»로 쟀는데, 실패 경로는 `ovErr` 분기가 카드를
+//   어차피 가리므로 리셋을 통째로 지워도 초록이었다 — **주석은 무엇을 지킨다고 선언하는데
+//   실제로는 아무것도 안 지키는** 공허 단언이었다(직전 계약 3R P2와 같은 병). 진짜 위험한
+//   구간은 «성공하는 전환의 in-flight»이고, 그걸 재려면 조회를 매달아야 했다.
