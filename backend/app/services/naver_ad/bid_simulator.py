@@ -83,6 +83,8 @@ def simulate_bid(
     campaign_agg: dict,
     account_agg: dict,
     correction_factor: Decimal = Decimal("1"),
+    correction_factor_low: Decimal | None = None,
+    correction_factor_high: Decimal | None = None,
     estimate: dict | None = None,
     learning_state: dict | None = None,
     is_new_or_growth: bool = False,
@@ -111,22 +113,64 @@ def simulate_bid(
     """
     estimate = estimate or {}
     rpc_raw = pooled_rpc(keyword_row, group_agg, campaign_agg, account_agg)
-    rpc_corrected = (rpc_raw * correction_factor).quantize(_Q4)
-    economic_ceiling = affordable_ceiling(rpc_corrected, target_roas)
+
+    # ★D-NAO-230 안3 «구간 자» — 이 함수는 **한 값이 두 역할**을 한다(census 93 §1 7행 발견):
+    # economic_ceiling은 bid_up을 누르는 «상향 상한»이면서, 동시에 current_bid 아래로 내려가면
+    # 그 자체로 direction="down"을 **만들어내는** «브레이크»다. 그래서 「브레이크=상한·액셀=하한」
+    # 이분법을 한 값에 그대로 못 씌운다.
+    # ⇒ ★★D-NAO-231(Jino 결정 2026-08-23)의 규칙을 그대로 적용한다:
+    #   **«어느 방향인가»(선정)는 상한으로 정하고, «얼마나»(실쓰기 크기)만 하한으로 누른다.**
+    #   - direction: 상한 기준 — 오늘과 **동일한 판정**이다(액셀 판정 불변 = 금지선 2 이행).
+    #   - up 일 때 크기: 하한 상한선(rec_low) — 덜 올린다. 단 rec_low가 현재 입찰 이하면
+    #     「하한에서는 올릴 근거가 없다」는 뜻이므로 올리지 않는다(hold). 현재보다 낮은 값으로
+    #     "up" 하는 모순을 만들지 않기 위한 것이고, 이건 크기 보수화의 필연적 귀결이다.
+    #   - down 일 때 크기: 상한 상한선(rec_high) — 덜 내린다(브레이크는 상한, 안3 원문).
+    # 두 끝을 명시하지 않으면 받은 단일 계수에서 **유도**한다: 하한=min(1,cf) · 상한=max(1,cf)
+    # (`diagnosis._as_interval`과 같은 규칙 — 여러 층을 거쳐 내려오는 배관을 늘리지 않으려고
+    # 여기서 다시 편다). cf=1(기본값·보정 불가 폴백)이면 두 끝이 같아져 종전과 **완전히 동일**하다.
+    cf_low = min(Decimal("1"), correction_factor) if correction_factor_low is None else correction_factor_low
+    cf_high = max(Decimal("1"), correction_factor) if correction_factor_high is None else correction_factor_high
 
     rank_bid = estimate.get("rank_bid")
-    if rank_bid is not None:
-        recommended_bid = min(economic_ceiling, rank_bid)
-        basis = "economic_ceiling" if economic_ceiling <= rank_bid else "rank_target"
-    else:
-        recommended_bid = economic_ceiling
-        basis = "economic_ceiling_only"  # estimate 미조회 — 순위 상한 없이 경제성 상한만 적용
+
+    def _resolve(cf: Decimal) -> tuple[int, int, str]:
+        """한쪽 끝에서의 (경제성 상한, 추천입찰, 근거)."""
+        ceiling = affordable_ceiling((rpc_raw * cf).quantize(_Q4), target_roas)
+        if rank_bid is not None:
+            return ceiling, min(ceiling, rank_bid), (
+                "economic_ceiling" if ceiling <= rank_bid else "rank_target"
+            )
+        # estimate 미조회 — 순위 상한 없이 경제성 상한만 적용
+        return ceiling, ceiling, "economic_ceiling_only"
+
+    ceiling_low, rec_low, basis_low = _resolve(cf_low)
+    ceiling_high, rec_high, basis_high = _resolve(cf_high)
 
     current_bid = keyword_row.get("bid_amt")
-    if current_bid is None or recommended_bid == current_bid:
-        direction = "hold"
+
+    def _direction(rec: int) -> str:
+        if current_bid is None or rec == current_bid:
+            return "hold"
+        return "up" if rec > current_bid else "down"
+
+    dir_low, dir_high = _direction(rec_low), _direction(rec_high)
+
+    # ①방향은 상한(=현행 판정 불변)
+    direction = dir_high
+    if direction == "up":
+        # ②크기만 하한으로 누른다. 하한에서 현재 입찰을 못 넘으면 올릴 근거가 없다 → hold.
+        if rec_low > current_bid:
+            recommended_bid, economic_ceiling, basis = rec_low, ceiling_low, basis_low
+        else:
+            direction = "hold"
+            recommended_bid, economic_ceiling = current_bid, ceiling_low
+            basis = "interval_floor_blocks_up"  # 상한은 올리라 하고 하한은 아니라 한다
+    elif direction == "down":
+        recommended_bid, economic_ceiling, basis = rec_high, ceiling_high, basis_high
     else:
-        direction = "up" if recommended_bid > current_bid else "down"
+        recommended_bid, economic_ceiling, basis = rec_high, ceiling_high, basis_high
+
+    rpc_corrected = (rpc_raw * cf_low).quantize(_Q4)  # 예상매출 표기는 보수 끝(하한)으로
 
     device = estimate.get("device")
     device_note = f"기기가정={device}(지배기기)" if device else "기기가정 없음(estimate 미조회)"
@@ -159,6 +203,12 @@ def simulate_bid(
     return {
         "recommended_bid": recommended_bid,
         "economic_ceiling": economic_ceiling,
+        # D-NAO-230: 구간 양끝을 그대로 노출한다 — 「하한/상한 중 무엇이 쓰였나」를 사후에
+        # 재구성할 수 있어야 §5-6 비대칭 검사와 적대 리뷰가 가능하다.
+        "economic_ceiling_low": ceiling_low,
+        "economic_ceiling_high": ceiling_high,
+        "direction_low": dir_low,
+        "direction_high": dir_high,
         "rank_bid": rank_bid,
         "direction": direction,
         "basis": basis,

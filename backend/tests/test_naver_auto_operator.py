@@ -321,7 +321,7 @@ def test_daily_lane_bid_up_all_4_conditions_met_approved_and_executed(db):
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": current_bid}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_daily_lane(db, now=NOW)
 
@@ -382,7 +382,7 @@ def test_daily_lane_bid_up_condition4_stale_retro_asof_holds(db):
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": current_bid}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_daily_lane(db, now=NOW)
     mock_exec.assert_not_called()
@@ -414,7 +414,7 @@ def test_daily_lane_bid_up_condition4_fails_currently_bleeding(db):
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": current_bid}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_daily_lane(db, now=NOW)
     mock_exec.assert_not_called()
@@ -431,7 +431,7 @@ def test_daily_lane_bid_up_held_when_correction_factor_unavailable(db):
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": current_bid}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "unavailable",
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "unavailable",
                                      "window_revenue": 0, "window_conv_amt": 0}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_daily_lane(db, now=NOW)
@@ -461,7 +461,7 @@ def test_hourly_lane_up_held_when_correction_factor_unavailable(db):
     now_midday = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "unavailable",
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "unavailable",
                                      "window_revenue": 0, "window_conv_amt": 0}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
@@ -488,7 +488,7 @@ def test_hourly_lane_down_unaffected_by_correction_factor_unavailable(db):
     ]
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "unavailable",
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "unavailable",
                                      "window_revenue": 0, "window_conv_amt": 0}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
@@ -1163,7 +1163,7 @@ def test_hourly_lane_up_only_when_all_3_conditions_met(db):
          patch.object(auto_operator, "estimate_average_position_bid",
                        return_value=[{"nccKeywordId": "nkw-up", "position": 4, "bid": 1200}]) as mock_est, \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
@@ -1334,7 +1334,7 @@ def test_hourly_lane_snapshot_missing_holds_entire_campaign_fail_closed(db):
     now_midday = datetime(2026, 7, 20, 13, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
@@ -1393,7 +1393,7 @@ def test_hourly_lane_stale_morning_snapshot_holds_campaign(db):
     now_afternoon = datetime(2026, 7, 20, 14, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_afternoon, fetch_intraday=lambda tid, d: up_curve,
@@ -1530,7 +1530,7 @@ def test_hourly_lane_normal_pace_no_longer_blocks_up_d_nao_66(db):
          patch.object(auto_operator, "estimate_average_position_bid",
                        return_value=[{"nccKeywordId": "nkw-pace", "position": 4, "bid": 1200}]), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_minute20, fetch_intraday=lambda tid, d: curve,
@@ -1567,7 +1567,7 @@ def test_hourly_lane_up_held_when_daily_budget_exhausted(db):
     now_minute20 = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_minute20, fetch_intraday=lambda tid, d: curve,
@@ -2351,7 +2351,7 @@ def test_dl4_yesterday_leashed_healthy_unit_restarts_up_today(db):
          patch.object(auto_operator, "estimate_average_position_bid",
                        return_value=[{"nccKeywordId": "nkw-restart", "position": 4, "bid": 1200}]), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
@@ -2381,7 +2381,7 @@ def test_dl4_judge_hourly_restart_waiting_reason_when_settlement_roas_below_targ
     ]
     now_midday = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}):
         verdict = auto_operator._judge_hourly(
             db, target_type="keyword", target_id="nkw-wait", campaign_id=CAMPAIGN,
             curve=curve, now=now_midday,
@@ -2420,7 +2420,7 @@ def test_dl4_general_up_not_capped_by_learned_band_d_nao_66(db):
          patch.object(auto_operator, "estimate_average_position_bid",
                        return_value=[{"nccKeywordId": "nkw-cap", "position": 4, "bid": 1200}]), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
@@ -2458,7 +2458,7 @@ def test_dl4_general_up_proceeds_regardless_of_learned_band(db):
          patch.object(auto_operator, "estimate_average_position_bid",
                        return_value=[{"nccKeywordId": "nkw-go", "position": 4, "bid": 1200}]), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
@@ -2492,7 +2492,7 @@ def test_iu1_band_inside_healthy_unit_climbs_up_d_nao_66(db):
     # factor 0 → 정착 "명시적 미달" → GATE P2-A 정산 거부권이 발동해 이 테스트의 관심사(순위
     # 전제 폐지)가 아닌 다른 게이트를 검증하게 된다(거부권 자체는 전용 테스트가 검증).
     with patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}):
         verdict = auto_operator._judge_hourly(
             db, target_type="keyword", target_id="nkw-inertia", campaign_id=CAMPAIGN,
             curve=curve, now=now_midday,
@@ -2590,7 +2590,7 @@ def test_gate_p2a_settlement_veto_blocks_intraday_only_up(db):
     ]  # est ROAS = 6000/500=12 ≥ 2.4(장중 좋음)·CPC 83<350×2·leash 미발동(est≥bep)
     now_midday = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}):
         verdict = auto_operator._judge_hourly(
             db, target_type="keyword", target_id="nkw-veto", campaign_id=CAMPAIGN,
             curve=curve, now=now_midday,
@@ -2648,7 +2648,7 @@ def test_gate_p2a_settlement_ok_up_not_limited_by_one_step_cap(db):
         _hour(11, imp=20, clk=2, cost=35, avg_rank=3.0),
     ]  # conv_cnt 0 → intraday 불발, settle ok 단독 근거
     with patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+                       return_value={"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}):
         verdict = auto_operator._judge_hourly(
             db, target_type="keyword", target_id="nkw-settle", campaign_id=CAMPAIGN,
             curve=curve, now=now_midday,
@@ -2767,7 +2767,7 @@ def test_dl4_same_day_down_flood_leaks_up_slot_but_bid_down_stays_exempt():
 
 
 _SERVO_NOW = datetime(2026, 7, 20, 12, 20, 0)
-_SERVO_CORR = {"factor": Decimal("1"), "source": "actual_revenue_ratio"}
+_SERVO_CORR = {"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "actual_revenue_ratio"}
 
 
 def _servo_shopping_unit(db, *, campaign_type="SHOPPING", adgroup_id="grp-shop",

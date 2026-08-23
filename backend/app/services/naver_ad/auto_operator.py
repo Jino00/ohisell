@@ -430,7 +430,7 @@ def _settlement_roas_status(
             f"보정계수 unavailable(source={factor_info.get('source')!r}) — 실주문 매출 부재, "
             "보정ROAS 검증 불가(fail-closed, codex 5R[P1-1])"
         )
-    factor = factor_info["factor"]
+    factor = factor_info["factor_low"]  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
     roas_corrected = (agg["conv_amt"] / agg["cost"]) * float(factor)
     target_roas = _resolve_target_roas(db, campaign_id)
     if target_roas is None:
@@ -2330,7 +2330,7 @@ def _deep_expansion_ok(
     factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
     if factor_info.get("source") != "actual_revenue_ratio":
         return False  # 보정계수 unavailable → 무보정 추정으로 과열 진입 금지(fail-closed)
-    factor = Decimal(str(factor_info["factor"]))
+    factor = Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
     scored = gave_score.compute_gave_score(
         revenue=Decimal(agg["conv_amt"]) * factor, cost=agg["cost"], bep_roas=Decimal(str(bep_roas)),
     )

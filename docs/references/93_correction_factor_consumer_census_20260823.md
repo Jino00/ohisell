@@ -63,20 +63,65 @@ prod DB 읽기전용 실측(`ssh sellc.ohitech.co.kr "sqlite3 -readonly ...ohise
 정확한 이유를 이 census가 수치로 확인한 것**이다 — 액셀 재조정(예: target_roas 하향, 확장압력 상수 조정 등,
 이 census의 스코프 밖) 없이 안3만 배포하면 D-NAO-85가 그대로 재현된다.
 
-## §3. 안3(구간 자) 적용 명세
+## §1-B. ★전수 정정 — 초판이 놓친 소비처 5곳 (2026-08-23, 세션 39 `2a88cd92` 발견)
+
+초판 §1은 「9개 파일 전수」라고 썼으나 **`correction_factor` 호출부를 다시 grep 하자 4개 파일 5개
+호출부가 더 나왔다.** 파일 목록 자체를 다시 세지 않고 정독만 한 결과다 — 북극성 §7의 「전수 조사
+완료라고 쓰지 않는다」가 이 문서 자신에게 적용된 사례다.
+확정 명령: `grep -rn "correction_factor" --include="*.py" backend/app/ | grep -v test`
+
+| # | 좌표 | 무엇을 판정하는가 | 계수↓ 시 방향 | 배정(D-NAO-231) |
+|---|---|---|---|---|
+| 10 | `expansion_pressure.py:161` (`judge_campaign_pressure` 갭 게이트) | `corrected_revenue = conv_amt × factor` → `gave_score` → `roas_ratio`로 확장압력 배분 | **액셀 약화** | **하한** — 확장 «배분 크기» |
+| 11 | `auto_operator.py:433` (`_settlement_roas_status`, D-NAO-48 조건③) | 정착창 보정ROAS ≥ target → `ok`/`below`. `below`는 **장중 추정 UP의 거부권**. docstring 원문: *"DOWN 경로는 이 함수를 타지 않아 영향 없음"* | **액셀 약화**(UP 거부권 강화) | **하한** — 실쓰기(증액) 게이트 |
+| 12 | `auto_operator.py:2333` (`_EX_DEEP_RATIO` 진입) | `gave_score` roas_ratio ≥ 임계 → 심층 확장 진입 허용. 주석 원문: *"무보정 추정으로 과열 진입 금지(fail-closed)"* | **액셀 약화** | **하한** — 확장 «배분 크기» |
+| 13 | `diary_outcome.py:329` | 실행된 제안의 사후 채점(`roas_c`) — 살아있는 게이트 아님 | 사후채점(방향 불확정) | **해당없음(현행 유지)** — 6 `proposal_scoreboard`와 같은 프레임 |
+| 14 | `probe_revert.py:429` → `probe_signal.py:34·71` | 클릭 탐침의 유지(kept)/되돌림(reverted) 정산 판정 — 되돌림 = `bid_down` 제안 생성 | **브레이크 강화**(계수↓ → 되돌림 증가) | **상한(현행 유지)** — 브레이크는 상한 |
+
+⇒ **전수 = 13개 파일 · 24행**(초판 9파일 19행 + 5행). 초판 §2의 대칭 판정 숫자는 진단 보드 볼륨으로
+센 것이라 이 정정에 영향받지 않는다(10~14는 전부 [미실측] 계열).
+
+---
+
+## §3. 안3(구간 자) 적용 명세 — ★D-NAO-231로 개정 (2026-08-23, Jino 결정)
+
+> **개정 사유.** 초판은 「액셀 = 하한」을 **후보 선정 보드에도** 배정했다. 그 배정대로 배포하면
+> 라이브에서 **브레이크 665건 불변 · 액셀 220 → 195건(−11%)**, 즉 **비대칭이 3.02:1 → 3.41:1로
+> 벌어진다**(2026-08-23 12:5x KST 실측, 원본 universe 재구성: WEB_SITE 키워드 749행 · SHOPPING
+> adgroup 156행 · factor 1.3133). 그것이 북극성 §7의 「ROAS 방어로의 표류」이고 D-NAO-85(ROAS +7%·
+> 매출 −52%)의 볼륨판 재현이며, **계약 §6 금지선 2가 막으려던 바로 그 배포**다.
+>
+> **Jino 결정(2026-08-23) — 채택 라벨 원문: 「후보 선정은 상한·실쓰기 크기만 하한」.**
+> 즉 안3의 「액셀=하한」은 «후보 선정»이 아니라 «실쓰기의 크기»에 적용한다. 선정층(진단 보드)은
+> 전부 **상한**이고 — 이것이 곧 금지선 2가 허용한 「액셀 판정 불변」의 이행이다 — 보수화는 실제로
+> 쓰기를 만드는 층에서만 일어난다. 초판 배정은 「초판」 열에 그대로 보존한다(지우지 않는다).
+
+| 소비처 | 계층 | 끝(端) | 초판 | 근거 |
+|---|---|---|---|---|
+| 2a `bleeding_keywords` | 선정 | **상한** | 상한 | 브레이크(bid_down 후보) — 후하게 봐서 안 죽임 |
+| 2d `shopping_group_bep` | 선정 | **상한** | 상한 | 〃 |
+| 2g `shopping_pause_candidates`(lever_broken) | 선정 | **상한** | 상한 | 〃 (현재 이 경로 0건이라 즉시 영향 없음) |
+| 2b `starving_winners` | 선정 | **상한** ★변경 | 하한 | 후보 «선정»이라 판정 불변 — 실쓰기 보수화는 7·3이 한다 |
+| 2i `shopping_group_growth` | 선정 | **상한** ★변경 | 하한 | 〃 (초판대로면 이 보드에서만 21건[근사] 증발) |
+| 2f `resume_candidates` | 선정 | **상한** ★변경 | 하한 | 〃 (현재 0건) |
+| 2j `shopping_resume_candidates` | 선정 | **상한** ★변경 | 하한 | 〃 (현재 0건) |
+| 3 `naver_execution_harness`(bid_up/budget_up 가드) | 실쓰기 | **하한** | 하한 | 증액 통과 기준을 보수적으로 |
+| 4 `expansion_allocator` | 실쓰기 | **하한** | 하한 | 확장 배분 크기 |
+| 10 `expansion_pressure` | 실쓰기 | **하한** | (누락) | 확장압력 배분 크기 |
+| 11 `auto_operator._settlement_roas_status` | 실쓰기 | **하한** | (누락) | UP 거부권 — DOWN은 이 경로를 안 탄다 |
+| 12 `auto_operator` 심층확장 진입 | 실쓰기 | **하한** | (누락) | 확장 배분 크기 |
+| 14 `probe_revert` → `probe_signal` | 선정 | **상한(현행)** | (누락) | 되돌림 = 브레이크 → 상한 |
+| 7 `bid_simulator` | 겸함 | **방향=상한 · 크기=하한** ★[미상] 해소 | [미상] | ↓ 아래 |
+
+★**7 `bid_simulator`의 [미상] 해소**: 한 값(`economic_ceiling`)이 상향 상한과 하향 유발을 겸해
+이분법이 안 맞았다. D-NAO-231 규칙을 그대로 적용해 확정한다 —
+**①`direction`은 상한 기준(현행 판정 불변) ②`up`이면 크기만 하한(`rec_low`)으로 누른다
+③단 하한이 현재 입찰을 못 넘으면 「하한에서는 올릴 근거가 없다」는 뜻이므로 `hold`
+(`basis="interval_floor_blocks_up"`) ④`down`이면 상한(덜 내린다)**. 반환에
+`economic_ceiling_low/high`·`direction_low/high`를 실어 어느 끝이 쓰였는지 사후 재구성이 된다.
 
 | 소비처 | 끝(端) | 근거 |
 |---|---|---|
-| 2a `bleeding_keywords` | **상한** | 브레이크(정지→bid_down 후보) — 후하게 봐서 안 죽임 |
-| 2d `shopping_group_bep` | **상한** | 〃 |
-| 2g `shopping_pause_candidates`(lever_broken) | **상한** | 〃 (단, 현재 이 경로 자체가 0건이라 즉시 영향 없음) |
-| 2b `starving_winners` | **하한** | 액셀(육성 bid_up) — 보수적으로 |
-| 2i `shopping_group_growth` | **하한** | 〃 |
-| 2f `resume_candidates` | **하한** | 액셀(재개=지출 재개) |
-| 2j `shopping_resume_candidates` | **하한** | 〃 |
-| 3 `naver_execution_harness`(bid_up/budget_up 가드) | **하한** | 액셀 가드 — 증액 통과 기준을 보수적으로 |
-| 4 `expansion_allocator` | **하한** | 액셀(확장 배분) |
-| 7 `bid_simulator` | **[미상 — 설계질문]** | 한 값이 액셀 상한과 브레이크 유발을 동시에 함. 안3의 이분법이 이 파일엔 그대로 안 맞는다 — 다음 세션이 Jino에게 확인할 것(§4) |
 | 8 `exploration.py` | **해당없음(현행 유지)** | 이미 raw(=사실상 하한보다 보수적)를 쓰고 있어 안3 적용 대상 아님. 단 factor<1 재확정 시 재판정 필요(§1 8행) |
 | 5 `flight_loop` | **해당없음(비집행)** | 관측기 — 배포 시점에 판정 자체가 발동하지 않음. 승격되면 액셀(하한)로 분류될 성격 |
 | 6 `proposal_scoreboard` | **해당없음(사후채점)** | 안3은 살아있는 액션 게이트를 위한 규칙 — 학습신호에는 다른 프레임 필요(별도 논의) |

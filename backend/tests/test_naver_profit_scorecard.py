@@ -7,6 +7,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+from app.services.naver_ad.diagnosis import _as_interval
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -41,8 +43,13 @@ def db():
 
 
 def _fixed_factor(factor: str, source: str = "actual_revenue_ratio"):
-    """diagnosis.correction_factor를 결정적 값으로 고정(diary_reflection 테스트 관례 미러)."""
-    return lambda db, d: {"factor": Decimal(factor), "source": source}
+    """diagnosis.correction_factor를 결정적 값으로 고정(diary_reflection 테스트 관례 미러).
+
+    ★D-NAO-230: 구간 키(factor_low/high/point)를 **prod와 같은 `_as_interval`로** 만든다 —
+    손으로 dict를 짜면 픽스처가 prod 계약과 갈라져 「테스트는 통과하는데 라이브는 깨지는」
+    자리가 생긴다(교훈: 테스트 픽스처는 prod 세션과 같아야 한다).
+    """
+    return lambda db, d: _as_interval(Decimal(factor), source=source)
 
 
 def _ad_row(db, ad_date, campaign_id, adgroup_id, *, cost=0, direct=0, indirect=0,
@@ -343,3 +350,64 @@ def test_stale_campaign_outside_scope_excluded(db, monkeypatch):
 
     result = profit_scorecard.run_profit_scorecard(db, now=NOW)
     assert result["campaigns"] == 0
+
+
+# ── ★D-NAO-230 §5-7 — 총이익 구간 양끝 병기 ────────────────────────
+#
+# 계정 30일 총이익은 이 계수 하나에 «부호»가 달려 있다(계약 §1-3 실측: 보정 +5,963,568원 ↔
+# 무보정 −234,545원). 한쪽 끝만 적으면 읽는 사람이 그 사실을 알 길이 없고, M4 카나리·M5
+# 지혜 기여 판정이 부푼 자 위에서 «연달아 거짓 합격»한다(북극성 §6 M4·M5 각주).
+
+def test_profit_is_reported_at_both_ends_of_the_interval(db, monkeypatch):
+    """상한기준·하한기준 총이익이 **둘 다** 사람이 읽는 문구에 나온다.
+
+    bep=2.0 · cost=10000 · conv_amt=20000 →
+      상한(1.5): (20000×1.5)/2.0 − 10000 = +5,000원
+      하한(1.0): (20000×1.0)/2.0 − 10000 =      0원
+    """
+    _settings(db, "cmp1", auto_operate=True)
+    _campaign_name(db, "cmp1", "04.아이폰_필름")
+    _product_bep(db, "cp-1", "2.0")
+    _adgroup_product(db, "grp1", "cmp1", "cp-1")
+    _ad_row(db, YDAY, "cmp1", "grp1", cost=10000, direct=15000, indirect=5000)
+    db.commit()
+
+    monkeypatch.setattr(profit_scorecard, "correction_factor", _fixed_factor("1.5"))
+    captured = _fake_slack(monkeypatch)
+
+    result = profit_scorecard.run_profit_scorecard(db, now=NOW)
+
+    # ① 응답이 양끝을 들고 나간다 — Slack 문구만 고치면 프로그램 경로는 여전히 점추정만 본다.
+    assert result["correction_factor_low"] == 1.0
+    assert result["correction_factor_high"] == 1.5
+    assert result["total_profit_high"] == 5000
+    assert result["total_profit_low"] == 0
+
+    # ② ★표면 — Slack·일기 본문에 두 값이 **글자로** 나온다(계약 §3-6).
+    text = captured["text"]
+    assert "상한기준 +5,000원" in text
+    assert "하한기준 +0원" in text
+    assert "[1.0000~1.5000]" in text, "계수도 구간으로 표기해야 한다(카드와 같은 자릿수)"
+    entry = _observes(db)[0]
+    assert "하한기준" in entry.rationale, "일기에도 같은 문구가 남아야 사후 감사가 된다"
+
+
+def test_interval_note_carries_its_window(db, monkeypatch):
+    """계수는 창과 함께 나간다 — 롤링 창이라 어제 값이 오늘 값이 아니다(계약 §3-6·§3-7)."""
+    _settings(db, "cmp1", auto_operate=True)
+    _campaign_name(db, "cmp1", "04.아이폰_필름")
+    _product_bep(db, "cp-1", "2.0")
+    _adgroup_product(db, "grp1", "cmp1", "cp-1")
+    _ad_row(db, YDAY, "cmp1", "grp1", cost=10000, direct=15000, indirect=5000)
+    db.commit()
+
+    def _with_window(dbx, d):
+        return _as_interval(
+            Decimal("1.5"), source="actual_revenue_ratio",
+            window_from="2026-07-25", window_to="2026-08-23",
+        )
+
+    monkeypatch.setattr(profit_scorecard, "correction_factor", _with_window)
+    captured = _fake_slack(monkeypatch)
+    profit_scorecard.run_profit_scorecard(db, now=NOW)
+    assert "창 2026-07-25~2026-08-23" in captured["text"]
