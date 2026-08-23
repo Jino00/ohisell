@@ -15,7 +15,6 @@ import {
   syncRealtime,
   type OverviewResponse,
   type RevenueReconcile,
-  type RgSettlementByAccount,
   type RocketOverview,
   type RocketUnmappedItem,
   type RocketMappingItem,
@@ -31,6 +30,8 @@ import {
   RG_STREAM_SPECS,
 } from "../lib/streamRefresh";
 import type { RowNote } from "../lib/netScope";
+// RG 계정별 정산 내역 카드 — 정의는 공용 모듈에 산다(계약 §1-A-3). 화면 B가 같은 것을 쓴다.
+import { RgSettlementCard } from "../components/RgSettlementCard";
 // RG 정산공제의 축·근거 자백 — 대시보드 행과 **같은 함수**를 쓴다(두 화면이 갈라지지 않게).
 import { rgFeeFactsFromSummary, rgFeeNote } from "../lib/rgSettlementAxis";
 
@@ -719,91 +720,11 @@ export function RevenueDriftCard({
   );
 }
 
-function RgSettlementCard({
-  data,
-  onRefresh,
-  refreshing,
-  msg,
-}: {
-  data: OverviewResponse;
-  onRefresh: () => void;
-  refreshing: boolean;
-  msg: string | null;
-}) {
-  const rg = data.rg_settlement;
-  const RefreshButton = (
-    <button
-      onClick={onRefresh}
-      disabled={refreshing}
-      className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-orange-600 text-white rounded-md hover:bg-orange-700 disabled:opacity-50"
-    >
-      <span className={refreshing ? "animate-spin" : ""}>🔄</span>
-      {refreshing ? "갱신 중…" : "RG 정산 갱신"}
-    </button>
-  );
-  if (!rg) return null;
-  if (!rg.summary.has_data) {
-    return (
-      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 flex items-center justify-between">
-        <span className="text-sm text-amber-700">🚧 RG 정산 비용(미반영) — 데이터 없음</span>
-        {RefreshButton}
-      </div>
-    );
-  }
-  return (
-    <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
-      {msg && (
-        <div className="text-xs text-orange-700 bg-orange-100 rounded px-2 py-1 mb-2">{msg}</div>
-      )}
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-semibold text-orange-800">✅ RG 정산 비용 — 순이익 반영됨 (계정 단위, <span className="underline decoration-dotted">광고 제외</span> 차감)</span>
-        <div className="flex items-center gap-2">
-          {RefreshButton}
-          <span className="text-right">
-          {/* 헤드라인 = 실제 순이익 차감액 = 정산 총액 − 광고비(D-CPP-43). 부호 인식(Codex): 양수=차감(−), 음수=환급(+). */}
-          {(() => {
-            const d = Number(rg.summary.deducted ?? rg.summary.total);
-            const sign = d < 0 ? "+" : "−";
-            return <span className="text-base font-bold text-orange-900">{sign}{won(String(Math.abs(d)))}{d < 0 ? " (환급)" : ""}</span>;
-          })()}
-          <span className="block text-xs text-orange-500">정산총액 {won(rg.summary.total)} 중 광고 {won(rg.summary.ad_settlement ?? '0')}는 <b>차감 제외</b></span>
-          {/* ★이 배너가 «어느 축»의 차감인지 말한다(적대 리뷰 3R P2). 헤드라인은 실제 차감액
-              (판매일 축일 수 있다)인데 아래 계정 카드는 정산 원장 축 그대로라, 축을 안 밝히면
-              한 배너가 서로 다른 두 숫자를 근거 없이 나란히 보인다. */}
-          <span className="block text-xs text-orange-500">
-            {rg.summary.axis === "sales_date"
-              ? "헤드라인은 «판매일 축»(그 창에 판 것에 붙는 비용) · 아래 계정 카드는 «정산 원장 축»이라 값이 다를 수 있다"
-              : "«정산 인식일 축» — 정산 주기 통짜라 그 주기를 덮는 어느 하루를 물어도 같은 값이다"}
-          </span>
-          </span>
-        </div>
-      </div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-        {rg.by_account.map((a: RgSettlementByAccount) => (
-          <div key={a.account_key} className="bg-white rounded border border-orange-100 p-2 text-xs">
-            <div className="font-medium text-gray-700 mb-1">{a.account_key}</div>
-            <div className="flex justify-between"><span className="text-gray-500">판매수수료</span><span>{won(a.sale_fee)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">풀필먼트(배송·입출고·보관)</span><span>{won(a.fulfillment)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">반품비</span><span>{won(a.return_fee)}</span></div>
-            <div className="flex justify-between text-gray-400"><span>광고비<span className="text-orange-400">*</span> <span className="text-[10px]">(차감 안 함)</span></span><span className="line-through">{won(a.ad_sales)}</span></div>
-            {Number(a.other) !== 0 && (
-              <div className="flex justify-between text-red-600"><span>기타(미매핑)</span><span>{won(a.other)}</span></div>
-            )}
-            <div className="flex justify-between border-t border-orange-100 mt-1 pt-1 text-gray-400"><span>정산 총액</span><span>{won(a.total)}</span></div>
-            <div className="flex justify-between font-semibold"><span>순이익 차감액</span><span>{won(String(Number(a.total) - Number(a.ad_sales)))}</span></div>
-          </div>
-        ))}
-      </div>
-      <div className="text-xs text-orange-700 mt-2 bg-orange-100 rounded px-2 py-1">
-        정산주기 기준(부분 윈도우도 주기 전액). <b>RG 광고비 {won(rg.summary.ad_settlement ?? '0')}는 차감하지 않는다</b> — 광고센터 PA 광고비를 정산에서 «공제»하는 것이라 PA(광고비 항목)에서 이미 빠졌다(D-CPP-43).
-      </div>
-      <p className="text-xs text-orange-600 mt-2">
-        ✅ 순이익에 반영됨(계정 단위, RG 정산 총액 − 광고비, D-14/D-CPP-43).
-        <span className="text-orange-400"> *</span>1차 출처: 윙 &gt; 정산 &gt; 로켓그로스 정산현황 &gt; 「광고비 내역」 — 광고유형이 전부 <b>PA</b>이고 캠페인 이름이 광고센터와 같다. 미공제분은 다음 정산으로 이월된다.
-      </p>
-    </div>
-  );
-}
+// ★`RgSettlementCard`의 정의는 `../components/RgSettlementCard`로 나갔다 (계약 §1-A-3).
+//   RG «자기 화면»(화면 B)이 같은 컴포넌트를 재사용해야 하는데, 정의가 이 페이지 안에 갇혀
+//   있으면 재사용이 불가능하고 사본을 뜨는 수밖에 없다 — 사본은 두 화면이 갈라지는 경로다
+//   (D-CPP-47이 고친 병). **렌더 자리는 이 파일에 그대로 있다**(아래 `RgSettlementCard` 호출)
+//   — 옮긴 것은 함수의 주소이지 표면이 아니다(계약 §3 「제거·이동하지 않는다」).
 
 // S2(트랙 revenue-wing-truth, D-1/D-9 A안): 정본 매출 카드 — 닫힌 과거일 매출을 Wing 판매분석
 // GMV(net)로 표시(정본). 우리 주문기반(추정)과의 차이는 취소분(gross−net). 읽기전용 — 아래 회계

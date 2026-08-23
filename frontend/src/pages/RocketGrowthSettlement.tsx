@@ -9,9 +9,17 @@
 // ★새 계산은 0이다(계약 §3). 전부 백엔드가 이미 낸 값의 표시다.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { fetchRgOptionPnl, type RgOptionPnlResponse } from "../lib/api";
+import {
+  fetchRgOptionPnl,
+  fetchCommandCenter,
+  type RgOptionPnlResponse,
+  type OverviewResponse,
+} from "../lib/api";
 import { rgFeeNote, rgFeeFactsFromOptionPnl, RECONCILE_WARN_PCT } from "../lib/rgSettlementAxis";
 import { won, NO_DATA, isoKST, pctFromFraction } from "../lib/format";
+// ★계약 §1-A-3 — 종합 조망과 **같은 컴포넌트**다(사본이 아니다). 사본을 뜨면 같은 정산
+//   내역을 두 화면이 다른 금액으로 말하게 되고, 그게 D-CPP-47이 고친 병이다.
+import { RgSettlementCard } from "../components/RgSettlementCard";
 
 const ACCOUNTS = [
   { key: "COUPANG_WING1", label: "오픽스" },
@@ -32,15 +40,34 @@ export default function RocketGrowthSettlement() {
   const [account, setAccount] = useState<string>(ACCOUNTS[0].key);
   const [data, setData] = useState<RgOptionPnlResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // 계정별 정산 내역(계약 §1-A-3) — 종합 조망과 같은 응답·같은 컴포넌트.
+  const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [ovErr, setOvErr] = useState<string | null>(null);
 
   async function load(acc: string) {
     setErr(null);
+    const d = yesterdayKST();
+    // ★계정을 바꾸면 «직전 계정의» 값을 먼저 버린다(적대 리뷰 1R P2-6). 안 버리면 새 응답이
+    //   올 때까지 다른 법인의 정산 카드가 남는데, 카드에 `account_key`가 찍혀 있어 화면이
+    //   스스로 모순된 말을 한다(선택은 오하이테크, 카드는 COUPANG_WING1).
+    setData(null);
+    setOverview(null);
     try {
-      const d = yesterdayKST();
       setData(await fetchRgOptionPnl(acc, d, d));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       setData(null);
+    }
+    // ★두 조회를 갈라 둔다: 정산 내역이 못 와도 요율·커버리지·장부대조는 계속 뜬다.
+    //   그리고 «못 왔다»를 반드시 말한다 — `RgSettlementCard`는 데이터가 없으면 `null`을
+    //   그리므로, 실패를 그대로 두면 카드가 **소리 없이 사라져** 「정산 내역이 없다」로 읽힌다.
+    //   이 사슬이 네 번 밟은 「모름이 0/없음으로 접히는」 자리와 같은 모양이다.
+    setOvErr(null);
+    try {
+      setOverview(await fetchCommandCenter(d, d, acc));
+    } catch (e) {
+      setOvErr(e instanceof Error ? e.message : String(e));
+      setOverview(null);
     }
   }
 
@@ -85,6 +112,34 @@ export default function RocketGrowthSettlement() {
 
       {err && <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm">{err}</div>}
 
+      {/* ★적대 리뷰 2R NEW P1 — 이 자리가 없으면 «아직 안 온 것»이 «아니다»로 단정된다.
+          ①②③의 칸은 전부 `data?.x`를 읽고 값이 없으면 「요율 미상」·「원가 커버리지 미달 —
+          순이익을 내지 않는다」 같은 **결론 문장**으로 떨어진다. 계정 전환 때 직전 계정의 값을
+          먼저 버리므로(1R P2-6), 그 가드가 없으면 응답이 오기 전 구간 내내 새 계정에 대해
+          그 다섯 문장이 거짓으로 뜬다 — 그 순간 ④만 「불러오는 중…」이라 정직하게 말해
+          한 화면이 스스로 비대칭이 된다.
+          ⇒ ①②③도 ④와 같은 모양으로 «아직 모른다»를 먼저 말한다. 이 사슬이 밟은
+          「모름이 0/아니다로 접히는」 자리의 여섯 번째다. */}
+      {data == null ? (
+        <div className="bg-white border rounded-md p-4 text-sm text-gray-500">
+          {/* ★3R P2 — 초판은 `!err &&`로 «실패»를 이 가드 밖에 뒀다. 그래서 실패 얼굴은
+              여전히 ①②③을 그렸고 다섯 결론 문장을 그대로 말했다(origin/main부터의 선재 결함
+              이라 회귀는 아니었다). 실패와 로딩은 **다른 문장**이어야 하지만, 둘 다 «모름»이지
+              «미상/미달»이 아니다 — 갈라야 할 것은 얼굴이지 결론이 아니다. */}
+          {err ? (
+            <>
+              요율·커버리지·장부대조를 <strong>못 불러왔다</strong> — 위 사유 참조.{" "}
+              <strong>«미상/미달»이 아니라 «모름»이다.</strong>
+            </>
+          ) : (
+            <>
+              요율·커버리지·장부대조를 불러오는 중… —{" "}
+              <strong>«모른다»이지 «미상/미달»이 아니다.</strong>
+            </>
+          )}
+        </div>
+      ) : (
+        <>
       {note && (
         <div
           className="bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-900"
@@ -207,6 +262,62 @@ export default function RocketGrowthSettlement() {
               완결 주기가 분자·분모가 같은 기간을 가리키는 유일한 자리다.
             </p>
           </>
+        )}
+      </div>
+        </>
+      )}
+
+      {/* ④ 주기별 정산 내역 (계약 §1-A-3) — 종합 조망과 «같은 컴포넌트»를 재사용한다.
+          위 ①②③은 «우리가 계산한 것»의 근거이고, 이 카드는 «쿠팡이 실제로 청구한 원장»이다.
+          둘을 한 화면에 나란히 두는 것이 이 화면의 존재 이유다. */}
+      <div>
+        <div className="font-medium mb-2">주기별 정산 내역 (쿠팡 원장)</div>
+        <p className="text-xs text-gray-500 mb-2">
+          「어제」({yesterdayKST()})를 덮는 정산 주기의 계정별 청구 내역이다. 계정 카드의 금액은{" "}
+          <strong>정산주기 기준이라 부분 윈도우도 주기 전액</strong>이다 — 위 ①②③(판매일 축)과 값이
+          다른 것이 정상이고, 그 차이를 재는 자리가 ③이다. (카드 헤드라인은 축을 탈 수 있어 카드
+          자신이 어느 축인지 말한다.) 종합 조망의 그 카드와 <strong>같은 컴포넌트·같은 응답</strong>
+          이다 — 사본이 아니라서 <strong>금액이 갈라질 수 없다</strong>.
+          {/* ★2R NEW P2① — 「갈라질 수 없다」를 무조건형으로 쓰면 안 된다. 원장 row 0건일 때
+              이 화면은 아래에서 «아직 안 들어왔다»로 막는데 종합 조망은 같은 응답으로 여전히
+              「✅ 순이익 반영됨 / 정산총액 0원」을 그린다(origin/main의 기존 동작 — 이 PR이
+              만든 것이 아니다). 그러니 여기서 보증하는 것은 «금액»이지 «결손 표현»이 아니다.
+              결손 표현까지 맞추려면 가드를 공용 카드 안으로 옮겨야 하는데, 그건 종합 조망의
+              동작을 바꾸는 일이라 이 계약(§1-A-3)의 범위 밖이다 → 앵커 `## 이월`. */}
+        </p>
+        {ovErr ? (
+          <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm">
+            정산 내역을 못 불러왔다 — {ovErr}. <strong>못 잰 것이지 「내역이 없다」가 아니다.</strong>
+          </div>
+        ) : overview == null ? (
+          <div className="bg-white border rounded-md p-3 text-sm text-gray-500">불러오는 중…</div>
+        ) : overview.rg_settlement == null ? (
+          /* 방어용 — 현재 백엔드는 이 키를 항상 싣는다(`intelligence.py`의 단일 return).
+             그래서 «이 분기에 가드를 걸어 둔 것»만으로는 아무것도 못 막는다: 실제로 도달하는
+             결손 상태는 바로 아래 `by_account.length === 0`이다(적대 리뷰 1R P1). */
+          <div className="bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-900">
+            이 창에 RG 정산 원장이 응답에 없다 — <strong>0원이 아니라 «없음»</strong>이다.
+            갱신은 종합 조망의 「RG 정산 갱신」에서 한다(같은 데몬을 두 화면이 동시에 부르지 않게).
+          </div>
+        ) : (overview.rg_settlement.by_account?.length ?? 0) === 0 ? (
+          /* `?.` — 바로 위 `rg_settlement == null`은 «죽은 분기»인 걸 알면서도 방어로 남겼는데
+             형제 필드는 크래시하는 비대칭이었다(2R NEW P2). 방어를 할 거면 같은 깊이로 한다. */
+          /* ★적대 리뷰 1R P1 — 이 사슬이 밟은 「모름이 0으로 접히는」 자리의 **다섯 번째**.
+             카드는 `has_data`만 보고 ✅ 녹색으로 「정산총액 0원」을 단정하는데, `has_data`는
+             «판매일 축 차감액이 0이 아님»으로도 참이 된다(원장 row와 독립). 그런데 RG 정산
+             성숙도는 D+12이고 이 화면은 창을 «어제»(D-1)로 고정한다 — 즉 **어제 판매가 있고
+             원장이 아직 안 들어온 날 = 거의 매일**이 이 상태다. 그 카드는 「아래 계정 카드」를
+             가리키는 문장까지 그리는데 계정 카드가 0개다.
+             ⇒ 카드를 그리지 않고, 0원이 아니라 «아직»임을 말한다. */
+          <div className="bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-900">
+            이 창의 정산 원장엔 계정 row가 <strong>0건</strong>이다 —{" "}
+            <strong>0원이 아니라 «아직 안 들어왔다»</strong>. RG 정산은 성숙까지 <strong>D+12</strong>
+            가 걸리는데 이 화면은 「어제」를 본다. 위 ①②③(판매일 축)은 그대로 유효하다 — 그건 원장이
+            아니라 그 날 판 것에서 계산한 값이다.
+          </div>
+        ) : (
+          /* 갱신 props를 안 넘긴다 = 읽기 전용 렌더. 이유는 컴포넌트 파일 머리말 참조. */
+          <RgSettlementCard data={overview} />
         )}
       </div>
     </div>

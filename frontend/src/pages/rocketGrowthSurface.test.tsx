@@ -25,11 +25,16 @@ import { MemoryRouter } from "react-router-dom";
 const h = vi.hoisted(() => ({
   // 테스트마다 이 참조를 바꿔서 fetchRgOptionPnl이 무엇을 돌려줄지 정한다.
   response: null as unknown,
+  // 화면 B가 「주기별 정산 내역」(계약 §1-A-3)을 위해 함께 부르는 조회. 이 파일의 관심사는
+  // 아니지만 mock을 안 걸면 jsdom에서 진짜 네트워크로 나간다 — null이면 화면은 "불러오는 중…"
+  // 으로 남고, 그 자리를 실제로 검사하는 것은 `rgSettlementCardReuse.test.tsx`다.
+  overview: null as unknown,
 }));
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
   fetchRgOptionPnl: () => Promise.resolve(h.response),
+  fetchCommandCenter: () => Promise.resolve(h.overview),
 }));
 
 import RocketGrowthPnl from "./RocketGrowthPnl";
