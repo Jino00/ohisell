@@ -215,6 +215,7 @@ def _fill_predicted_clicks(
     db: Session, sims: dict[tuple[str, str], dict], call_inputs: dict[tuple[str, str], dict],
     agg: dict, correction_factor: Decimal, *, learning_state: dict | None = None,
     correction_factor_low: Decimal | None = None,
+    correction_factor_high: Decimal | None = None,
 ) -> None:
     """확정된 recommended_bid로 performance-bulk를 조회해 예측클릭을 채워 sims를 in-place 갱신.
 
@@ -264,7 +265,9 @@ def _fill_predicted_clicks(
             inputs["keyword_row"], inputs["target_roas"],
             group_agg=inputs["group_agg"], campaign_agg=inputs["campaign_agg"],
             account_agg=agg["account"], correction_factor=correction_factor,
-            correction_factor_low=correction_factor_low, estimate=estimate,
+            correction_factor_low=correction_factor_low,
+            correction_factor_high=correction_factor_high,  # ★리뷰 P1-2: 상한도 명시(유도 금지)
+            estimate=estimate,
             learning_state=learning_state, is_new_or_growth=inputs.get("is_new_or_growth", False),
         )
 
@@ -293,6 +296,7 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date, *, a
     # D-NAO-231: 두 끝을 «명시»해 내려보낸다 — `factor`(=상한)만 넘기면 simulate_bid의
     # 유도 하한이 min(1, 상한) ≡ 1.0으로 고정돼 점추정<1일 때 진짜 하한이 소실된다.
     correction_factor_low = Decimal(str(diag["correction_factor"]["factor_low"]))
+    correction_factor_high = Decimal(str(diag["correction_factor"]["factor_high"]))
     agg = agg if agg is not None else _precompute_aggregates(db, date_from, as_of)
     _target_roas_for = _make_target_roas_resolver(db, diag)
 
@@ -351,6 +355,7 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date, *, a
             keyword_row, target_roas,
             group_agg=group_agg, campaign_agg=campaign_agg, account_agg=agg["account"],
             correction_factor=correction_factor, correction_factor_low=correction_factor_low,
+            correction_factor_high=correction_factor_high,  # ★리뷰 P1-2: 상한도 명시(유도 금지)
             estimate=estimate,
         )
 
@@ -359,7 +364,8 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date, *, a
     # learning_state: estimate_calibrator(Phase 6 루프2) 편향계수 — 예측클릭 표시만 보정.
     learning_state = _read_estimate_bias_learning_state(db, growth_sweeper.WEB_SITE)
     _fill_predicted_clicks(db, bid_sims, call_inputs, agg, correction_factor,
-                           learning_state=learning_state, correction_factor_low=correction_factor_low)
+                           learning_state=learning_state, correction_factor_low=correction_factor_low,
+                           correction_factor_high=correction_factor_high)
 
     return bid_sims
 
@@ -385,6 +391,7 @@ def compute_growth_sims(
     # D-NAO-231: 두 끝을 «명시»해 내려보낸다 — `factor`(=상한)만 넘기면 simulate_bid의
     # 유도 하한이 min(1, 상한) ≡ 1.0으로 고정돼 점추정<1일 때 진짜 하한이 소실된다.
     correction_factor_low = Decimal(str(diag["correction_factor"]["factor_low"]))
+    correction_factor_high = Decimal(str(diag["correction_factor"]["factor_high"]))
     agg = agg if agg is not None else _precompute_aggregates(db, date_from, as_of, campaign_type=growth_sweeper.WEB_SITE)
     target_roas_for = _make_target_roas_resolver(db, diag)
 
@@ -429,14 +436,17 @@ def compute_growth_sims(
         sims[key] = bid_simulator.simulate_bid(
             keyword_row, target_roas, group_agg=group_agg, campaign_agg=campaign_agg,
             account_agg=agg["account"], correction_factor=correction_factor,
-            correction_factor_low=correction_factor_low, estimate=estimate,
+            correction_factor_low=correction_factor_low,
+            correction_factor_high=correction_factor_high,  # ★리뷰 P1-2: 상한도 명시(유도 금지)
+            estimate=estimate,
             is_new_or_growth=True,
         )
 
     # 2차 패스 — compute_bid_sims와 동일 공통 헬퍼(codex 회귀 이력 있는 경로, 단일 구현 재사용).
     learning_state = _read_estimate_bias_learning_state(db, growth_sweeper.WEB_SITE)
     _fill_predicted_clicks(db, sims, call_inputs, agg, correction_factor,
-                           learning_state=learning_state, correction_factor_low=correction_factor_low)
+                           learning_state=learning_state, correction_factor_low=correction_factor_low,
+                           correction_factor_high=correction_factor_high)
 
     return {"candidates": top, "sims": sims, "all_candidates": all_candidates}
 

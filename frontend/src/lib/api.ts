@@ -3164,6 +3164,10 @@ export interface NaverAdDiagnosis {
     factor_low_caveat?: string;
     /** 창 4개에서 잰 하한의 변동폭 — 「고정값이 안 흔들린다」고 말하지 않기 위해. */
     factor_low_window_spread?: string;
+    /** ★리뷰 P1-3 — 실측 기준선의 값(0.827). */
+    factor_floor?: number;
+    /** ★리뷰 P1-3 — 기준선이 구간의 «어느 끝»에 있는가. 점추정이 기준선보다 낮으면 "high"가 된다. */
+    factor_floor_end?: "low" | "high";
   };
   account_bep_roas: number | null;
   account_target_roas: number | null;

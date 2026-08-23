@@ -183,9 +183,24 @@ export default function NaverAdDiagnosisBoard() {
                   계약 §4 금지선 5: 가정(마지막터치·창·플러스스토어 처분) 병기 없이 내보내지 않는다. */}
               {data.correction_factor.factor_low_source ? (
                 <div className="text-[11px] text-gray-400 mt-1 leading-snug" data-testid="factor-low-basis">
-                  <span className="text-gray-500">하한 근거</span>: 유입경로 「광고&gt;」 5종 매출 ÷ 광고 direct 전환매출
+                  {/* ★적대 리뷰 P1-3: 실측 기준선 0.827은 «항상 하한»이 아니다 — 점추정이 그보다
+                      낮게 재확정되면 기준선이 «상한» 자리로 올라간다. 화면이 그 위치를 말해야
+                      「하한 근거」라는 이름표와 실제 값이 어긋나지 않는다. */}
+                  <span className="text-gray-500">
+                    {data.correction_factor.factor_floor_end === "high" ? "상한" : "하한"} 근거
+                  </span>
+                  {data.correction_factor.factor_floor !== undefined
+                    ? ` (실측 기준선 ×${data.correction_factor.factor_floor.toFixed(4)})`
+                    : ""}
+                  : 유입경로 「광고&gt;」 5종 매출 ÷ 광고 direct 전환매출
                   {data.correction_factor.factor_low_window ? ` (창 ${data.correction_factor.factor_low_window})` : ""} —{" "}
                   <span className="text-gray-500">마지막터치 라벨 기준</span>.{" "}
+                  {data.correction_factor.factor_floor_end === "high" && (
+                    <span className="text-gray-500">
+                      ⚠️점추정이 실측 기준선보다 낮아 기준선이 «상한» 자리에 있다 — 구간이 통째로
+                      기준선 아래로 내려갔다는 뜻이다.{" "}
+                    </span>
+                  )}
                   {data.correction_factor.factor_low_caveat}
                   {data.correction_factor.factor_low_window_spread
                     ? ` 창을 바꾸면 ${data.correction_factor.factor_low_window_spread}.`
@@ -193,7 +208,7 @@ export default function NaverAdDiagnosisBoard() {
                 </div>
               ) : (
                 <div className="text-[11px] text-gray-400 mt-1 leading-snug" data-testid="factor-low-basis">
-                  <span className="text-gray-500">하한 근거 없음</span> — 계수를 못 만들어 구간이 [1, 1]로 퇴화했다(보정 안 함).
+                  <span className="text-gray-500">실측 기준선 미적용</span> — 계수를 못 만들어 구간이 [1, 1]로 퇴화했다(보정 안 함).
                 </div>
               )}
               <div className="text-[11px] text-gray-400 mt-1 leading-snug" data-testid="factor-end-assignment">

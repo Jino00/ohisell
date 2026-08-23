@@ -209,73 +209,85 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 
 ---
 
-## §6 하한 소비처 전수 — 파일:줄 × 호출부
+## §6 소비처 전수 — 층 셋(선정 · 게이트 · 크기) × 호출부
 
-`grep -rn "factor_low" backend/app/` (테스트 제외) = **43줄**. 파일이 아니라 **호출부**로 센다.
+> **★정정 이력 (2026-08-23 23:0x KST, 적대 리뷰 P1-7 상환)** — 초판(작성 22:1x KST)은 이 절
+> 전체를 "19곳 전부 하한(`factor_low`) 소비, `0.827/1.0` 일괄 -17.3%p"로 적었다. 그 전제는
+> **"하한 소비처는 계속 하한을 쓴다"**였는데, **같은 커밋(`8963b1e1`, D-NAO-234 ⓐ, 23:45:37
+> 커밋 — 초판 작성 시각보다 늦다)이 그중 7곳을 "게이트(통과/차단)" 층으로 새로 분류해
+> **`factor_high`(상한)로 재배정**했다. 그 결과 그 7곳의 실제 변화는 초판이 적은 "-17.3%
+> 감소"가 아니라 **"+33.2% 증가"(부호가 반대)**다. 아래는 재실측(코드 직접 읽기, 2026-08-23
+> 23:1x KST)으로 다시 쓴 것 — **지우지 않고 이 각주로 오류를 보존**한다(원칙: 반증된 문장은
+> 정정 이력으로 남긴다).
 
-### 딕셔너리 원천 읽기(`["factor_low"]` 직접 접근) — **14곳**
+`grep -rn "factor_low\|factor_high" backend/app/services/naver_ad/{naver_execution_harness,expansion_pressure,expansion_allocator,auto_operator,bid_simulator}.py | grep -v "^.*: *#"` +
+커밋 `8963b1e1`(`git show 8963b1e1 --stat`, 커밋 메시지 원문)으로 확인. 커밋 메시지가 스스로
+층을 셋으로 선언한다: *"층은 셋이다(둘이 아니라): 선정=상한 · 게이트(통과/차단)=상한 ·
+크기=하한."*
 
-| # | 파일:줄 | 소비 성격 |
+### 층 A — 선정(방향 판정, `factor_high`) — 2곳
+
+| # | 파일:줄 | 역할 |
 |---|---|---|
-| 1 | `naver_execution_harness.py:926` | 증액가드(adgroup 분기) — **실쓰기** |
-| 2 | `naver_execution_harness.py:1005` | 증액가드(소재/ad 분기) — **실쓰기** |
-| 3 | `naver_execution_harness.py:1093` | 증액가드(campaign 분기) — **실쓰기** |
-| 4 | `expansion_allocator.py:279` | 확장 배분(own_ratio 게이트) — **실쓰기** |
-| 5 | `expansion_pressure.py:161` | 확장압력 게이트(fail-closed) — **실쓰기** |
-| 6 | `auto_operator.py:433` | 정착창 보정ROAS 게이트(below/ok/unknown) — **실쓰기** |
-| 7 | `auto_operator.py:2338` | P4 밴드 deep_ok 게이트 — **실쓰기** |
-| 8 | `auto_operator.py:3097` | 서보 원천(→하류 2곳: 3361, 3400) — **실쓰기** |
-| 9 | `proposal_pipeline.py:295` | bid_simulator 경유(→353) — **실쓰기** |
-| 10 | `proposal_pipeline.py:387` | bid_simulator 경유(→432) — **실쓰기** |
-| 11 | `diagnosis.py:45` | API 표면(`_factor_payload`) — 표시 |
-| 12 | `diagnosis.py:240` | accel_gate_view 관측 — **관측 전용** |
-| 13 | `profit_scorecard.py:236` | 스코어카드 하한열 — **관측 전용**(실쓰기 0, 함수 docstring 명시) |
-| 14 | `profit_scorecard.py:274` | API 응답 필드 — 관측 전용 |
+| 1 | `bid_simulator.py:169` `direction = dir_high`(`cf_high`로 판정한 `_direction(rec_high)`) | **방향**(up/down/hold) 판정 — 상한 기준, "액셀 판정 불변"(D-NAO-231) |
+| 2 | `auto_operator.py:3102` `servo_correction_factor = Decimal(str(_cf["factor_high"]))` | 서보 방향 판정 원천(하류: `_estimate_direct_step`의 `correction_factor=`) |
 
-### 하류 소비(파라미터 전달 뒤 실제 산식에 대입) — 추가 5곳
+### 층 B — 게이트(통과/차단 불리언, `factor_high`) — **7곳, D-NAO-234 ⓐ 재배정**
+
+| # | 파일:줄 | 게이트 |
+|---|---|---|
+| 3 | `naver_execution_harness.py:932` | 증액가드(adgroup 분기) `roas_corrected` — bid_up 승인/차단 |
+| 4 | `naver_execution_harness.py:1017` | 증액가드(소재/ad 분기) `roas_corrected` |
+| 5 | `naver_execution_harness.py:1106` | 증액가드(campaign 분기) `roas_corrected` |
+| 6 | `expansion_pressure.py:165` | 확장압력 갭 게이트 `corrected_revenue`(EX_PRESSURE_RATIO 통과/차단) |
+| 7 | `expansion_allocator.py:282` | 확장배분 own_ratio 제외 게이트 |
+| 8 | `auto_operator.py:436` | 정착창 보정ROAS 게이트(below/ok/unknown) |
+| 9 | `auto_operator.py:2344` | P4 밴드 deep_ok 게이트 |
+
+이 7곳은 **원래 `factor_low`를 읽던 자리였다**(초판 표의 #1~#7과 같은 자리). 코드 주석
+전부가 같은 근거를 반복한다(예 `naver_execution_harness.py:926-931`): *"증액 가드는 «얼마나
+올리나»(크기)가 아니라 «올려도 되나»(통과/차단) 판정이다 ⇒ 상한. 하한을 쓰면 하한이
+내려갈수록 차단이 늘어 브레이크가 커진다."*
+
+### 층 C — 크기(실쓰기 크기 산식, `factor_low`) — 5곳(변화 없음, 초판과 동일 분류)
 
 | # | 파일:줄 | 산식 |
 |---|---|---|
-| 15 | `bid_simulator.py:131` | `cf_low = ... correction_factor_low` → `_resolve(cf_low)`의 `economic_ceiling = affordable_ceiling(rpc_raw × cf_low, target_roas)` |
-| 16 | `auto_operator.py:3361` | `_servo_economic_ceiling(correction_factor=servo_correction_factor_low)` → `rpc_corrected = rpc_raw × correction_factor` |
-| 17 | `auto_operator.py:3400` | `_estimate_direct_step(correction_factor_low=...)` → bid_simulator.simulate_bid 재호출 |
-| 18 | `accel_gate_view.py:97` | `blocked_low = roas × factor_low < target_roas` (관측) |
-| 19 | `accel_gate_view.py:114` | `profit_low = _profit(conv, cost, factor_low, bep_roas)` (관측) |
+| 10 | `bid_simulator.py:141` | `cf_low = ... correction_factor_low` → `_resolve(cf_low)`의 `ceiling_low = affordable_ceiling(rpc_raw × cf_low, target_roas)`, up 방향일 때 `rec_low`로 크기만 누름 |
+| 11 | `bid_simulator.py:183` | `rpc_corrected = (rpc_raw × cf_low)` — 예상매출 **표기**용(보수 끝) |
+| 12 | `auto_operator.py:3103` | `servo_correction_factor_low = Decimal(str(_cf["factor_low"]))` |
+| 13 | `auto_operator.py:3367` | `_servo_economic_ceiling(correction_factor=servo_correction_factor_low)` — 서보 경제성 상한 |
+| 14 | `auto_operator.py:3406` | `_estimate_direct_step(correction_factor_low=servo_correction_factor_low, correction_factor_high=servo_correction_factor)` — 양끝 다 넘김(방향=상한/크기=하한 동시 전달) |
 
-**합계**: 원천 읽기 14 + 하류 산식 대입 5 = **실제 산식/게이트에 값이 대입되는 지점 19곳**
-(순수 파라미터 선언·재전달만 하는 배관 라인은 제외 — `bid_simulator.py:86`,
-`auto_operator.py:1646/1681/3083/3342`, `proposal_pipeline.py:217/267/353/362/432/439` 등
-10곳은 값을 만들지 않고 옮기기만 함).
+### [미상] — 분류 미확정 1곳 (리뷰 P1-1, 이 문서는 확정하지 않는다)
 
-### 1.0 → 0.827 시 눌리는 %
-
-현재 라이브 `factor_point=1.3291 > 1` ⇒ 현행 `factor_low = min(1, 1.3291) = 1.0`(전 소비처 동일
-기준선). D-NAO-234가 하한을 **점추정과 무관하게 고정 0.827**로 바꾸면, 위 19곳 모두 **선형
-비례**로 값이 줄어든다:
-
-**`0.827 / 1.0 = 0.827` → 모든 소비처에서 일괄 -17.3%p 감소.**
-
-| 메커니즘 | 눌리는 값 | 감소폭 |
+| # | 파일:줄 | 사실만 |
 |---|---|---|
-| 서보 경제성 상한(`_servo_economic_ceiling`, `bid_simulator.affordable_ceiling`의 rpc_corrected) | rpc_corrected, economic_ceiling | **-17.3%**(자체 주석: 상한 사용 시 +31%까지 벌어지는 것과 대칭 방향) |
-| 파워링크 estimate 직행 스텝의 경제성 상한(`_estimate_direct_step`→`simulate_bid`) | rec_low(economic_ceiling) | **-17.3%** |
-| 증액가드 `roas_corrected`(naver_execution_harness 3곳) | roas_corrected | **-17.3%**(target_roas 미달 판정이 더 쉽게 남 — 더 보수적) |
-| 확장압력 게이트 `corrected_revenue`(expansion_pressure) | corrected_revenue → roas_ratio | **-17.3%**(EX_PRESSURE_RATIO 통과가 더 어려워짐) |
-| 확장배분 own_ratio(expansion_allocator) | own_ratio | **-17.3%**(own_ratio<1 제외 게이트가 더 쉽게 발동) |
-| 정착창 보정ROAS 게이트(auto_operator:433) | roas_corrected | **-17.3%**("below" 판정이 더 쉽게 남) |
-| P4 deep_ok 게이트(auto_operator:2338) | scored revenue → roas_ratio | **-17.3%**(deep_ok 통과가 더 어려워짐) |
+| — | `bid_simulator.py:168-177` `interval_floor_blocks_up` | `direction="up"`인데 `rec_low`(하한 크기)가 `current_bid`를 못 넘으면 `direction`을 **"hold"로 뒤집는다**(주석 원문: `"상한은 올리라 하고 하한은 아니라 한다"`). 형태상 층C(크기) 산식이 만들어내는 결과이지만, 결과가 "방향을 뒤집는 차단"이라 층B(게이트)의 성격도 있다. **[미상]** — 하한이 내려가면 이 경로로 up 제안이 hold로 뒤집히는 차단이 넓어진다는 사실만 적는다. 층 배정은 확정하지 않는다(적대 리뷰가 이미 지적한 미해결 항목). |
 
-**게이트 통과율(불리언 판정) 자체가 몇 %p 바뀌는지는 이 문서로 못 잰다** — 입력값이 17.3%
-줄어드는 것은 확정이지만, 그로 인해 「below/ok」·「deep_ok True/False」·「own_ratio<1」 판정이
-실제로 몇 건 뒤집히는지는 **개별 대상의 현재 ROAS 분포를 대입해야** 알 수 있다(라이브 진단 보드
-재실행 필요, 이 census 범위 밖 — §8 [미상]으로 이월).
+### 관측 전용(방향·게이트·크기 어디에도 실쓰기하지 않음, 양끝 다 노출) — 4곳, 미변경
 
-**가장 크게 눌리는 곳 (자체 문서 근거로 순위화)**: `_servo_economic_ceiling`
-(`auto_operator.py:1494`, docstring이 이미 "상한 기준 +31%"를 명시해 두 끝 사이 격차가
-코드 주석에 정량화된 유일한 지점) → 다음은 naver_execution_harness의 증액가드 3곳(캠페인
-전체 bid_up 승인 여부를 좌우) → 확장 게이트 2곳(신규 확장 후보 자체를 줄임). 단, 이 순위는
-"주석에 정량 근거가 있는가"와 "적용 범위(그룹 수)"를 기준으로 한 정성적 순위이며, 절대
-영향액(원) 순위는 [미상](§8).
+`diagnosis.py:45`(API 표면 `_factor_payload`) · `diagnosis.py:240`(accel_gate_view 관측) ·
+`profit_scorecard.py:236/274`(스코어카드·API 응답, 실쓰기 0 — docstring 명시) ·
+`accel_gate_view.py:97/114`(`blocked_low`/`blocked_high`, `profit_low`/`profit_high` — 통 셋 분류용,
+§7-B와 무관하게 계속 양끝을 다 읽는다).
+
+### 실제 변화 — 층별로 다르다(부호가 갈린다)
+
+라이브 `/api/naver/ad/diagnosis`(§9 기준선, 2026-08-23 22:5x KST): `factor_low=1.0` ·
+`factor_high=1.3318`. D-NAO-234 배포 전 상태(단일 계수 시절)는 **모든 소비처가 동일하게
+`factor_low = min(1, factor_point) = 1.0`**을 썼다. 배포로 갈라지는 값은 다음과 같다:
+
+| 층 | 배포 전 | 배포 후 | 변화 | 방향 |
+|---|---|---|---|---|
+| 층 B 게이트(7곳) | 1.0 | **1.3318**(`factor_high`) | **+33.2%** | 차단이 **줄어드는** 방향(액셀 쪽) |
+| 층 C 크기(5곳) | 1.0 | **0.827**(고정 하한) | **-17.3%** | 실쓰기 크기가 **보수화**되는 방향 |
+| 층 A 선정(2곳) | `factor_high` 기준(변화 없음 — 방향 판정은 원래도 상한 유도값) | `factor_high` 고정 | 판정 로직 자체는 불변, 값만 1.3291→1.3318 수준의 소폭(창 이동) | — |
+
+**게이트 통과율(불리언 판정) 자체가 몇 %p 바뀌는지는 이 문서로 못 잰다** — 입력값이 층마다
++33.2%/-17.3%로 갈리는 것은 확정이지만, 그로 인해 「below/ok」·「deep_ok True/False」·
+「own_ratio<1」 판정이 실제로 몇 건 뒤집히는지는 **개별 대상의 현재 ROAS 분포를 대입해야**
+알 수 있다(라이브 진단 보드 재실행 필요 — §9로 이관, 계약 §6-6 범위 **안**).
 
 ---
 
@@ -311,9 +323,12 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 1. **플러스스토어 라벨의 SA 소속 여부(§7)** — 네이버 검색광고(SA) 공식 API 문서(searchad.naver.com
    개발자센터, 로그인 필요 영역 다수)에서 "매체 리포트"의 "네이버플러스스토어" 매체 코드가 있는지
    직접 대조하면 풀릴 수 있다. 이번 조회에서는 로그인 없이 닿는 공개 페이지에서 못 찾았다.
-2. **게이트 통과율 실측(§6)** — factor_low 17.3% 하락이 「below/ok」·「deep_ok」·「own_ratio<1」
-   판정을 실제로 몇 건 뒤집는지는 라이브 진단 보드를 하한=1.0과 0.827 두 값으로 각각 재실행해
-   대조해야 한다(읽기 전용 재현 가능, 이번 계약 범위 밖).
+2. **게이트 통과율 실측(§6)** — 층B(게이트) +33.2%·층C(크기) -17.3%가 「below/ok」·「deep_ok」·
+   「own_ratio<1」 판정을 실제로 몇 건 뒤집는지는 라이브 진단 보드를 배포 전/후 두 시점으로
+   재실행해 대조해야 한다(읽기 전용 재현 가능). **★정정(리뷰 P1-6)**: 초판은 이 항목을
+   "이번 계약 범위 밖"이라 적었으나 틀렸다 — 승인 계약 `docs/contracts/CONTRACT_yardstick_attribution.md`
+   §5-Q4-ⓑ·§6-6이 "배포 전후 대칭 실측 4종을 같은 PR에" 실을 것을 명시했으므로 **범위 안**이다.
+   배포 전 기준선은 §9에 박제했다 — 배포 직후 짝을 채우는 것이 다음 슬라이스다.
 3. **창 안정성의 원인(§5)** — W1→W3로 갈수록 비율이 0.829→0.886으로 오르는 이유(계절성인지,
    광고 예산 배분 변화인지, 원천 라벨 분포 변화인지)는 규명하지 않았다. §4의 라벨 분포 이동
    (플러스스토어 라벨 점증)과 시기적으로 겹치므로 상관 가능성은 있으나 인과는 확인 안 됨.
@@ -324,11 +339,56 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 
 ---
 
+## §9 ⓑ 배포 전후 대칭 실측 (계약 §6-6)
+
+★리뷰 P1-6 상환 — 초판 §8 항목2가 "이번 계약 범위 밖"이라 적었던 것을 정정한다. 승인 계약
+`docs/contracts/CONTRACT_yardstick_attribution.md` §5-Q4-ⓑ·§6-6이 "배포 전후 대칭 실측 4종을
+같은 PR에" 실을 것을 명시했으므로 **범위 안**이다. 아래 배포 전 열은 박제값(고정), 배포 후
+열은 배포 직후 같은 엔드포인트를 다시 조회해 채운다 — **지어내지 않는다.**
+
+### 배포 전 기준선 — `GET /api/naver/ad/diagnosis` (2026-08-23 22:5x KST)
+
+```
+correction_factor: factor 1.3318 · factor_low 1.0 · factor_high 1.3318 · factor_point 1.3318
+                   window 2026-07-25~2026-08-23 · window_revenue 45,945,760 · window_conv_amt 34,499,980
+accel_gate:        gate_end "factor_low" · accel_total 221 · brake_total 663
+                   survive_low 195 · survive_high 221
+                   ratio_selection 3.0 · ratio_after_gate_low 3.4 · ratio_after_gate_high 3.0
+```
+
+| 항목 | 배포 전 | 배포 후 |
+|---|---|---|
+| `factor_low` | 1.0 | `[배포 후 채움]` |
+| `factor_high` | 1.3318 | `[배포 후 채움]` |
+| `window_revenue` | 45,945,760 | `[배포 후 채움]` |
+| `window_conv_amt` | 34,499,980 | `[배포 후 채움]` |
+| `accel_total` / `brake_total` | 221 / 663 | `[배포 후 채움]` |
+| `survive_low` / `survive_high` | 195 / 221 | `[배포 후 채움]` |
+| `ratio_selection` / `ratio_after_gate_low` / `ratio_after_gate_high` | 3.0 / 3.4 / 3.0 | `[배포 후 채움]` |
+
+**창 표류 주의**: 같은 날 22:24 KST에 잰 같은 엔드포인트는 `factor 1.3314 · window_revenue
+45,932,860`이었다 — 롤링 30일 창이 조회 시각마다 재계산되므로 이 정도(소수 넷째자리·
+1만원 미만) 소폭 표류는 **정상**이다. 배포 후 대조에서 이 폭 이내의 차이를 결함으로 오독하지
+않는다. 위 22:5x 값을 이 문서의 배포 전 정본으로 고정한다.
+
+---
+
 ## 작성 자백
 
 - **직접 실측(이 세션이 실행한 명령의 출력)**: §1 4칸 전부, §3 라벨 37종표 전건, §4 월별
-  커버리지 전건, §5 창 4개 비율표 전건, §6 grep 결과·코드 인용 전부, §7 상관계수(0.589).
-- **인용(내가 실행하지 않은, 배경 세션·코드 주석·외부 문서의 원문)**: 배경 세션의 이전 조회값
-  (표에 "(배경 0.xxx)"로 병기), `auto_operator.py`/`diagnosis.py`의 docstring 원문(D-NAO-230/231
-  결정 근거), GitHub Discussion #1870의 인용문.
-- **[미상]으로 명시 유지**: §7 플러스스토어 SA 소속 여부, §8 4건 전부.
+  커버리지 전건, §5 창 4개 비율표 전건, §7 상관계수(0.589).
+- **★이번 수정(P1-6·P1-7 상환, 2026-08-23 23:1x KST)에서 직접 확인**: §6 전면 재작성 —
+  `grep -rn "factor_low\|factor_high" backend/app/services/naver_ad/{naver_execution_harness,
+  expansion_pressure,expansion_allocator,auto_operator,bid_simulator}.py`(테스트 제외)와
+  `git show 8963b1e1 --stat`(커밋 메시지 원문)을 이 세션이 직접 실행해 층 배정(선정/게이트/
+  크기)과 파일:줄을 재확인했다. `bid_simulator.py`(79-228행)·`auto_operator.py`(3085-3420행
+  발췌)·`naver_execution_harness.py`(915-940행)·`expansion_pressure.py`(150-170행)·
+  `expansion_allocator.py`(270-290행)를 전문 Read로 대조.
+- **인용(이 세션이 재실행하지 않은 값)**: §6 실제 변화표의 `factor_low=1.0/factor_high=1.3318`과
+  §9 배포 전 기준선 전체 — 위임문이 제공한 2026-08-23 22:5x KST 실측값을 그대로 옮겼다(이
+  세션이 curl을 재실행하지 않음, 롤링 창 특성상 재실행 시 값이 소폭 달라질 수 있어 지시대로
+  고정값을 인용). 배경 세션의 이전 조회값(표에 "(배경 0.xxx)"로 병기), `auto_operator.py`/
+  `diagnosis.py`의 docstring 원문(D-NAO-230/231/234 결정 근거), GitHub Discussion #1870의 인용문.
+- **[미상]으로 명시 유지**: §6 `bid_simulator.py:168-177`(`interval_floor_blocks_up`) 층 배정 —
+  리뷰 P1-1이 이미 지적한 미해결 항목이라 이번 수정도 확정하지 않았다. §7 플러스스토어 SA
+  소속 여부, §8 잔여 3건, §9 배포 후 열 4개.

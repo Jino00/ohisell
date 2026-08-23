@@ -154,6 +154,28 @@ describe("D-NAO-21 보정계수 카드 — 구간 자 표면(D-NAO-230 §5-5)", 
     expect(basis).toMatch(/0\.8289~0\.8862/);  // 「고정값이 안 흔들린다」고 말하지 않는다
   });
 
+  // ★★적대 리뷰 P1-3 — 점추정<0.827이면 기준선이 «상한» 자리로 올라간다.
+  //   초판은 그때 근거를 통째로 빠뜨려 화면이 「계수를 못 만들어 [1,1]로 퇴화」라는
+  //   거짓 문장을 그렸다(계수는 산출됐고 구간도 퇴화하지 않았는데).
+  it("기준선이 «상한» 자리로 올라가도 근거를 말하고, 그 위치를 밝힌다", async () => {
+    h.data = diagnosis({ factor: 0.827, factor_low: 0.72, factor_high: 0.827, factor_point: 0.72,
+      factor_floor: 0.827, factor_floor_end: "high",
+      factor_low_source: "inflowpath_ad_prefix_over_direct",
+      factor_low_window: "2026-07-25~2026-08-23",
+      factor_low_caveat: "마지막터치 라벨 기준.",
+      factor_low_window_spread: "0.8289~0.8862 (창 4개)" });
+    render(
+      <MemoryRouter>
+        <NaverAdDiagnosisBoard />
+      </MemoryRouter>,
+    );
+    const basis = (await screen.findByTestId("factor-low-basis")).textContent ?? "";
+    expect(basis).toMatch(/상한 근거/);          // «하한 근거»라고 말하면 값과 이름표가 어긋난다
+    expect(basis).toMatch(/광고>/);              // 근거가 살아 있다
+    expect(basis).toMatch(/기준선이 «상한» 자리에 있다/);  // 무슨 뜻인지까지 말한다
+    expect(basis).not.toMatch(/퇴화/);           // ★거짓 문장이 되살아나면 실패
+  });
+
   it("근거가 없으면 근거를 말하지 않는다 — 퇴화 구간에 없는 출처를 붙이지 않는다", async () => {
     h.data = diagnosis({
       source: "unavailable",
@@ -165,7 +187,7 @@ describe("D-NAO-21 보정계수 카드 — 구간 자 표면(D-NAO-230 §5-5)", 
       </MemoryRouter>,
     );
     const basis = (await screen.findByTestId("factor-low-basis")).textContent ?? "";
-    expect(basis).toMatch(/하한 근거 없음/);
+    expect(basis).toMatch(/실측 기준선 미적용/);
     expect(basis).not.toMatch(/광고>/);
     expect(basis).not.toMatch(/마지막터치/);
   });

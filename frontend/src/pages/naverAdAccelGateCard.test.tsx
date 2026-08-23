@@ -41,8 +41,13 @@ const EMPTY_BOARDS = {
 
 // ★라이브 실측값(2026-08-23 17:1x KST, ref 94 §5) — 픽스처가 prod 모양과 같아야 결함을 잡는다.
 const LIVE_GATE = {
-  gate_end: "factor_low",
-  gate_note: "액셀 게이트(BEP 증액금지)는 구간의 «하한»을 쓴다 — 하한은 보정을 없애 차단을 최대로 만든다.",
+  // ★★적대 리뷰 P1-4 상환 — 이 픽스처는 `gate_end: "factor_low"`였다. D-NAO-234 ⓐ로 게이트가
+  //   상한으로 재배정된 뒤 그 payload는 **prod에서 다시는 나오지 않는다.** 그래서 카드의
+  //   `gate_end === "factor_high"` 분기 — 배포 후 실제로 그려질 유일한 분기 — 가 한 번도
+  //   실행되지 않았고, 헤드라인·대칭을 옛 하드코딩으로 되돌리는 변이 2종이 전건 초록으로 생존했다.
+  //   (같은 병: n=39 P1-1 · n=40 P1-2 · 세션 37 fail-open. 「테스트 픽스처는 prod와 같아야 한다」.)
+  gate_end: "factor_high",
+  gate_note: "액셀 게이트(BEP 증액금지)는 구간의 «상한»을 쓴다 — 게이트는 «크기»가 아니라 «통과/차단»이라, 하한을 쓰면 하한이 내려갈수록 차단이 늘어 브레이크가 커진다(D-NAO-234 ⓐ). 하한은 통과한 뒤 «얼마나 쓰나»에서만 누른다.",
   window_caveat: "보드 창 기준 근사 — 실제 게이트는 as_of=D-1 창을 쓴다. 양끝의 «차이»는 정확하고 절대 건수는 근사.",
   assumption: "보정계수의 분자에 광고 귀속 조인이 없어 「채널 매출 100%를 광고가 견인」 가정과 동치다 — 그래서 총이익을 구간 양끝으로 병기한다(D-NAO-230).",
   factor_low: 1.0,
@@ -125,22 +130,41 @@ describe("액셀 게이트 카드 — 표면 요건(D-NAO-232 §4-④)", () => {
   //   ⇒ 셋 다 `card.textContent`에 숫자가 «어딘가» 있으면 만족하는 단언이라 통과했다.
   //      숫자의 **위치**를 testid로 고정한다.
   // ══════════════════════════════════════════════════════════
-  it("★M1 — 「게이트 통과」 자리에 하한 기준 값이 온다(상한이 오면 「막힌 게 없다」가 된다)", async () => {
-    await draw(LIVE_GATE);
+  it("★M1 — 「게이트 통과」 자리에 **실제 게이트가 쓰는 끝**의 값이 온다", async () => {
+    await draw(LIVE_GATE);   // gate_end="factor_high" (배포 후 prod가 내보내는 모양)
     const survive = screen.getByTestId("accel-gate-survive");
-    expect(survive.textContent).toContain("195");
-    expect(survive.textContent).not.toContain("221");
-    // ★2R 변이 N8 상환 — 반대쪽 끝(반사실) 병기를 지워도 초록이었다.
-    //   「하한이면 195, 상한이었다면 221」의 대비가 이 카드의 논지다.
+    expect(survive.textContent).toContain("221");
+    expect(survive.textContent).not.toContain("195");
+    // ★2R 변이 N8 상환 — 반대쪽 끝(반사실) 병기를 지워도 초록이었다. 대비가 이 카드의 논지다.
     const headline = screen.getByTestId("accel-gate-headline");
-    expect(headline.textContent).toContain("상한이었다면");
-    expect(headline.textContent).toContain("221");
+    expect(headline.textContent).toContain("하한이었다면");
+    expect(headline.textContent).toContain("195");
+  });
+
+  // ★★P1-4의 본체 — 카드가 `gate_end`를 **읽는가**, 아니면 한쪽 끝을 하드코딩했는가.
+  //   같은 컴포넌트에 두 payload를 먹여 «출력이 따라 바뀌는지»를 본다. 하드코딩이면 둘이 같아진다.
+  it("★게이트 끝이 바뀌면 화면도 따라 바뀐다 — 한쪽 끝을 하드코딩하면 이 테스트가 죽는다", async () => {
+    await draw({ ...LIVE_GATE, gate_end: "factor_high" });
+    const high = screen.getByTestId("accel-gate-survive").textContent;
+    const highSym = screen.getByTestId("accel-gate-symmetry").textContent;
+    cleanup();
+
+    await draw({ ...LIVE_GATE, gate_end: "factor_low" });
+    const low = screen.getByTestId("accel-gate-survive").textContent;
+    const lowSym = screen.getByTestId("accel-gate-symmetry").textContent;
+
+    expect(high).toContain("221");
+    expect(low).toContain("195");
+    expect(high).not.toEqual(low);          // 하드코딩이면 같아진다
+    expect(highSym).toContain("3.005");     // 상한 게이트 후 대칭
+    expect(lowSym).toContain("3.405");      // 하한 게이트 후 대칭
+    expect(highSym).not.toEqual(lowSym);
   });
 
   it("★M2 — 가정·자의 끝 자백 블록이 실재한다(D-NAO-230이 요구한 「가정 병기」)", async () => {
     await draw(LIVE_GATE);
     const caveats = screen.getByTestId("accel-gate-caveats");
-    expect(caveats.textContent).toContain("하한");
+    expect(caveats.textContent).toContain("상한");  // ★D-NAO-234 ⓐ로 게이트가 쓰는 끝이 바뀌었다
     expect(caveats.textContent).toContain("가정과 동치"); // 자의 분자에 광고 귀속 조인이 없다는 자백
     // 1R P2-2 — 확정값이 아니라 근사임을 화면이 자백한다
     expect(caveats.textContent).toContain("근사");

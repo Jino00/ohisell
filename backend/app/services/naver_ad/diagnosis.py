@@ -42,7 +42,14 @@ def _as_interval(point: Decimal, *, floor: Decimal = correction_interval.CORRECT
     17% 깎는」 보정이 되어 계약 §4 금지선 5를 정면으로 어긴다.
     """
     low, high = correction_interval.interval_ends(point, floor)
-    return {"factor": high, "factor_low": low, "factor_high": high, "factor_point": point, **rest}
+    return {
+        "factor": high, "factor_low": low, "factor_high": high, "factor_point": point,
+        # ★리뷰 P1-3 — 「실측 기준선이 이 구간에 쓰였는가」는 **어느 끝인지와 무관한 사실**이다.
+        #   값 비교(`factor_low == 0.827`)로 판별하면 점추정<0.827일 때 기준선이 상한으로
+        #   올라가면서 거짓이 되고, 화면이 「근거 없음」이라는 거짓 문장을 그린다.
+        "factor_floor_applied": floor != correction_interval.NO_CORRECTION,
+        **rest,
+    }
 
 
 def _factor_payload(correction: dict) -> dict:
@@ -53,8 +60,15 @@ def _factor_payload(correction: dict) -> dict:
     ★★D-NAO-234: 값만 내보내면 화면이 「0.827이 어디서 왔나」를 말할 수 없다. 계약 §4
     금지선 5(가정 병기 없이 새 표면에 내보내지 않는다)의 이행으로 근거 4종
     (`source`·`window`·`evidence`·`caveat`)과 창 변동폭을 같이 싣는다.
-    ⚠️하한 근거는 **하한이 실제로 0.827에서 온 경우에만** 싣는다. 퇴화 구간 [1,1]
-    (보정계수 산출 불가)에 근거 문구를 붙이면 화면이 없는 근거를 말하게 된다.
+    ⚠️근거는 **실측 기준선 0.827이 실제로 구간의 한쪽 끝을 이룰 때만** 싣는다. 퇴화 구간
+    [1,1](보정계수 산출 불가)에 근거 문구를 붙이면 화면이 없는 근거를 말하게 된다.
+
+    ★적대 리뷰 P1-3 상환 — 초판 조건은 `factor_low == 0.827`이었다. 그런데 점추정이 0.827
+    **아래로** 재확정되면 하한 자리는 점추정이 차지하고 0.827이 **상한**으로 올라간다
+    (`interval_ends`의 min/max 불변식). 그때 초판 조건은 거짓이 되어 근거가 통째로 빠지고,
+    화면은 「근거 없음 = 계수 산출 불가」라는 **거짓 문장**을 그렸다 — 계수는 산출됐고
+    구간도 퇴화하지 않았는데. 그래서 조건을 «기준선이 어느 끝이든 쓰였는가»로 바꾸고,
+    **어느 끝에 있는지(`factor_floor_end`)를 같이 실어** 화면이 위치를 말할 수 있게 한다.
     """
     payload = {
         **correction,
@@ -63,8 +77,11 @@ def _factor_payload(correction: dict) -> dict:
         "factor_high": float(correction["factor_high"]),
         "factor_point": float(correction["factor_point"]),
     }
-    if correction["factor_low"] == correction_interval.CORRECTION_FACTOR_FLOOR:
+    floor = correction_interval.CORRECTION_FACTOR_FLOOR
+    if correction.get("factor_floor_applied"):
         payload.update(correction_interval.floor_payload())
+        payload["factor_floor"] = float(floor)
+        payload["factor_floor_end"] = "low" if correction["factor_low"] == floor else "high"
     return payload
 
 
