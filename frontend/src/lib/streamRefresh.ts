@@ -132,6 +132,17 @@ export interface RunnerDeps {
   pickupTimeoutMs?: number;
   pollMs?: number;
   /**
+   * 지금까지 화면이 **숨어 있던** 누적 시간(ms). 상한 계산에서 이 시간을 뺀다 — 상한이 재려는
+   * 것은 «벽시계»가 아니라 «폴링이 실제로 돈 시간»이기 때문이다(2026-08-23 W5, 계약 §0-C-C).
+   *
+   * ★왜 필요한가: 폰이 잠기거나 탭이 백그라운드로 가면 모바일 사파리가 `setTimeout`을 늘리거나
+   *   멈춘다. 그동안 `getStatus`는 한 번도 안 도는데 벽시계만 흐르므로, 화면을 다시 켜는 순간
+   *   `now() >= deadline`이 즉시 참이 되어 **얼어붙은 lastSeen으로 거짓 타임아웃**을 낸다.
+   *   수집은 Mac에서 멀쩡히 끝났는데 화면만 「응답 없음」이 되는 경로다.
+   * 생략하면 `document.visibilitychange`로 자동 측정하고, DOM이 없는 환경(테스트·SSR)에서는 0이다.
+   */
+  hiddenMs?: () => number;
+  /**
    * 정착 **전**의 진행 상태 통지(선택). 결과 판정과 무관 — 화면이 "지금 어디쯤인지"를
    * 말할 수 있게 하는 통로다. 스펙별로 오므로 여러 큐를 한 패널에 세울 수 있다.
    */
@@ -244,6 +255,35 @@ export async function withRequestRetry<T>(
 }
 
 /**
+ * 화면이 숨어 있던 누적 시간을 재는 시계(2026-08-23 W5).
+ *
+ * DOM이 없는 환경(vitest node·SSR)에서는 «0을 돌려주는 시계»로 조용히 물러난다 — 없는 정보를
+ * 지어내지 않고, 그 경우 종전과 똑같이 벽시계로 잰다.
+ * ★`now`를 주입받는다: 테스트가 가상 시계를 쓰는데 여기만 `Date.now()`를 보면 두 시간축이 갈린다.
+ */
+function createHiddenClock(now: () => number): { hiddenMs: () => number; dispose: () => void } {
+  if (typeof document === "undefined" || typeof document.addEventListener !== "function") {
+    return { hiddenMs: () => 0, dispose: () => {} };
+  }
+  let total = 0;
+  let hiddenSince: number | null = document.visibilityState === "hidden" ? now() : null;
+  const onChange = () => {
+    if (document.visibilityState === "hidden") {
+      if (hiddenSince === null) hiddenSince = now();
+    } else if (hiddenSince !== null) {
+      total += now() - hiddenSince;
+      hiddenSince = null;
+    }
+  };
+  document.addEventListener("visibilitychange", onChange);
+  return {
+    // 아직 숨어 있는 중이면 그 구간도 «지금까지» 분을 더해 돌려준다(복귀 이벤트를 기다리지 않는다).
+    hiddenMs: () => total + (hiddenSince === null ? 0 : now() - hiddenSince),
+    dispose: () => document.removeEventListener("visibilitychange", onChange),
+  };
+}
+
+/**
  * 갱신 1건: 요청 → last_success_at/last_error_at 변화 폴링 → 결과 판정.
  *
  * 판정 순서를 바꾸지 말 것. 아래 분기는 전부 라이브 오보 사고의 처방이다.
@@ -284,40 +324,26 @@ export async function runStreamRefresh(
   // ⇒ 픽업 전에는 T_pickup(90초)에서 조기 정착하고, 픽업 뒤에는 T_max(600초)까지 «추적»한다.
   //   T_max 도달은 실패가 아니다 — 수집은 Mac에서 계속되고, 화면은 그렇게 말한다(outcomeView).
   const startedAt = now();
-  const pickupDeadline = startedAt + pickupTimeoutMs;
-  const deadline = startedAt + timeoutMs;
+  // ★상한은 «벽시계»가 아니라 «폴링이 실제로 돈 시간»으로 잰다(2026-08-23 W5, 계약 §0-C-C).
+  //   폰이 잠긴 동안 setTimeout이 멈추면 getStatus는 한 번도 안 도는데 벽시계만 흐른다 —
+  //   그 시간을 상한에 계상하면 화면을 켜는 순간 «폴링을 한 번도 못 해 본 채» 타임아웃이 난다.
+  const hiddenClock = deps.hiddenMs ? null : createHiddenClock(now);
+  const hiddenMs = deps.hiddenMs ?? hiddenClock!.hiddenMs;
+  const awakeElapsed = () => now() - startedAt - hiddenMs();
   let sawFetching = false;
   let pollFailures = 0;
   // ★타임아웃 문구를 가르려면 «마지막으로 본 상태»가 필요하다(W4). 루프 안에서만 살아 있던
   //   st를 밖으로 들고 나간다 — 없으면 타임아웃 시점에 우리가 아는 게 "215초 지났다"뿐이다.
   let lastSeen: RefreshStatusLike | null = null;
-  while (now() < deadline) {
-    await sleep(pollMs);
 
-    let st: RefreshStatusLike;
-    try {
-      st = await spec.getStatus();
-      lastSeen = st;
-      pollFailures = 0; // 성공하면 연속 실패 카운터를 리셋한다.
-    } catch (e) {
-      pollFailures += 1;
-      if (pollFailures >= POLL_FAILURE_LIMIT) {
-        // 연속 N회 실패 — 일시적 문제가 아니라고 보고 실패로 확정한다(무한히 삼키지 않는다).
-        return {
-          state: "failed",
-          reason: e instanceof Error ? e.message : "폴링 실패(연속 오류)",
-        };
-      }
-      continue; // 일시적 실패(찰나 502 등) — 다음 폴에서 다시 시도한다. 215초 창이 이를 흡수한다.
-    }
-
-    // Mac 데몬이 요청을 집어갔다 → "요청 전달됨"과 "실제 수집 중"을 구분해 보여준다.
-    // 판정에는 관여하지 않는다(아래 분기들은 attempt_count를 보지 않는다).
-    if (!sawFetching && st.requested && (st.attempt_count ?? 0) > 0) {
-      sawFetching = true;
-      emit({ kind: "fetching" });
-    }
-
+  /**
+   * 상태 1건에 대한 정착 판정. 정착이면 outcome, 아니면 null.
+   *
+   * ★루프에서 «추출»만 했다 — 분기 순서·조건은 한 글자도 바꾸지 않았다(위 docstring의 금지).
+   *   추출한 이유는 하나다: 마감 직후 **판정 전 강제 1회 조회**(W5)가 같은 판정을 써야 하는데,
+   *   사본을 만들면 둘 중 하나만 고쳐지는 그 병이 그대로 재발한다(LESSONS #55).
+   */
+  const settleVerdict = (st: RefreshStatusLike): RefreshOutcome | null => {
     // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
     // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
     // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
@@ -370,33 +396,86 @@ export async function runStreamRefresh(
     // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
     if (!st.requested) return { state: "done" };
 
-    // ★T_pickup 초과 = 「아무도 안 집었다」 조기 정착(W3). 위 정착 분기 **뒤**에 둔다 —
-    //   성공·실패가 이미 났으면 그게 이긴다. attempt_count를 모르는 응답에서는 발동하지 않는다.
-    if (
-      !sawFetching &&
-      now() >= pickupDeadline &&
-      st.requested &&
-      st.attempt_count !== undefined &&
-      st.attempt_count === 0
-    ) {
-      return {
-        state: "no_response",
-        attemptCount: 0,
-        inFlight: st.in_flight,
-        kind: st.last_error_kind,
-      };
-    }
-  }
-  // ★T_max 도달 = «추적 종료»이지 실패도 «Mac 꺼짐»도 아니다(W3·W4). 여기까지 왔다는 것은
-  //   데몬이 요청을 집었거나(sawFetching) attempt_count를 모르는 표면이라는 뜻이다 —
-  //   집지도 않은 요청은 위 T_pickup 분기가 이미 조기 정착시켰다. 마지막으로 본 상태를 실어
-  //   보내 outcomeView가 처방이 다른 경우를 갈라 말하게 한다.
-  return {
-    state: "no_response",
-    attemptCount: lastSeen?.attempt_count,
-    inFlight: lastSeen?.in_flight,
-    kind: lastSeen?.last_error_kind,
+    return null; // 아직 정착 안 함 — 계속 본다.
   };
+
+  try {
+    while (awakeElapsed() < timeoutMs) {
+      await sleep(pollMs);
+
+      let st: RefreshStatusLike;
+      try {
+        st = await spec.getStatus();
+        lastSeen = st;
+        pollFailures = 0; // 성공하면 연속 실패 카운터를 리셋한다.
+      } catch (e) {
+        pollFailures += 1;
+        if (pollFailures >= POLL_FAILURE_LIMIT) {
+          // 연속 N회 실패 — 일시적 문제가 아니라고 보고 실패로 확정한다(무한히 삼키지 않는다).
+          return {
+            state: "failed",
+            reason: e instanceof Error ? e.message : "폴링 실패(연속 오류)",
+          };
+        }
+        continue; // 일시적 실패(찰나 502 등) — 다음 폴에서 다시 시도한다. 폴링 창이 이를 흡수한다.
+      }
+
+      // Mac 데몬이 요청을 집어갔다 → "요청 전달됨"과 "실제 수집 중"을 구분해 보여준다.
+      // 판정에는 관여하지 않는다(정착 분기들은 attempt_count를 보지 않는다).
+      if (!sawFetching && st.requested && (st.attempt_count ?? 0) > 0) {
+        sawFetching = true;
+        emit({ kind: "fetching" });
+      }
+
+      const verdict = settleVerdict(st);
+      if (verdict) return verdict;
+
+      // ★T_pickup 초과 = 「아무도 안 집었다」 조기 정착(W3). 위 정착 판정 **뒤**에 둔다 —
+      //   성공·실패가 이미 났으면 그게 이긴다. attempt_count를 모르는 응답에서는 발동하지 않는다.
+      //   시간은 «깨어 있던» 것으로 잰다(W5) — 폰이 잠긴 동안 데몬이 못 집은 것은 데몬 탓이 아니다.
+      if (
+        !sawFetching &&
+        awakeElapsed() >= pickupTimeoutMs &&
+        st.requested &&
+        st.attempt_count !== undefined &&
+        st.attempt_count === 0
+      ) {
+        return {
+          state: "no_response",
+          attemptCount: 0,
+          inFlight: st.in_flight,
+          kind: st.last_error_kind,
+        };
+      }
+    }
+
+    // ★판정 전 강제 1회 조회 (2026-08-23 W5, 계약 §3) — 여기가 이 슬라이스의 본체다.
+    //   마감 시점의 `lastSeen`은 **마지막 폴의 값**이고, 폰이 잠겨 있었다면 그 폴은 아주 오래
+    //   전 것이다(모바일 사파리가 setTimeout을 멈춘다). 그 얼어붙은 값으로 판정하면 Mac에서
+    //   이미 끝난 수집을 「응답 없음」이라 부른다 — 계약 §0-C-C가 「잠재 결함」으로 적어 둔 자리다.
+    //   그래서 마감했다고 바로 단정하지 않고, **지금 상태를 한 번 더 확인하고** 판정한다.
+    try {
+      const st = await spec.getStatus();
+      lastSeen = st;
+      const verdict = settleVerdict(st);
+      if (verdict) return verdict;
+    } catch {
+      // 마지막 확인이 실패하면 아래에서 lastSeen으로 판정한다 — 없는 정보를 지어내지 않는다.
+    }
+
+    // ★T_max 도달 = «추적 종료»이지 실패도 «Mac 꺼짐»도 아니다(W3·W4). 여기까지 왔다는 것은
+    //   데몬이 요청을 집었거나(sawFetching) attempt_count를 모르는 표면이라는 뜻이다 —
+    //   집지도 않은 요청은 위 T_pickup 분기가 이미 조기 정착시켰다. 마지막으로 본 상태를 실어
+    //   보내 outcomeView가 처방이 다른 경우를 갈라 말하게 한다.
+    return {
+      state: "no_response",
+      attemptCount: lastSeen?.attempt_count,
+      inFlight: lastSeen?.in_flight,
+      kind: lastSeen?.last_error_kind,
+    };
+  } finally {
+    hiddenClock?.dispose(); // 리스너를 남기지 않는다 — 버튼을 여러 번 누르면 그만큼 쌓인다.
+  }
 }
 
 /**
