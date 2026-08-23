@@ -589,3 +589,26 @@ def test_status_fields_exposes_kind_for_a_missing_row(db):
     """행이 없어도 키는 있어야 한다 — 키가 사라지면 소비자가 처방을 못 고른다(교훈 #321)."""
     assert "last_error_kind" in rc.status_fields(None)
     assert rc.status_fields(None)["last_error_kind"] is None
+
+
+def test_login_required_message_states_the_fact_but_not_the_prescription(db):
+    """★백엔드는 «사실»만 적고 «처방»은 적지 않는다 (2026-08-23 적대 리뷰 P1-2·P2-3).
+
+    이 함수는 6레인 공통 경로다. 그런데 로그인 회복 후 자동 재개(`_revive_lane` →
+    request-refresh 재POST)는 `tools/wing_browser_fetcher.py`에만 있고 광고비·로켓광고·
+    공급자허브 셋에는 없다(실측). 그래서 어느 처방을 여기 박아도 **절반은 거짓말**이다:
+      「로그인 후 다시 갱신을 눌러주세요」 → 자동 재개 레인에선 헛걸음을 시킨다
+      「자동으로 이어집니다」             → 배선 없는 레인에선 영영 안 오는 것을 기다리게 한다
+    처방은 레인 spec을 아는 프론트(streamRefresh.outcomeView)가 짓는다.
+
+    ★「로그인 필요」 접두는 유지해야 한다 — kind를 모르는 구버전 프론트가 이 문자열로
+      폴백 매칭한다(streamRefresh.isLoginRequired).
+    """
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "수집 실패(rc=3)", kind=rc.KIND_LOGIN_REQUIRED)
+
+    msg = _row(db).last_error
+    assert "로그인 필요" in msg, "구버전 프론트의 폴백 매칭이 깨진다"
+    for prescription in ("눌러주세요", "누르세요", "자동으로 이어"):
+        assert prescription not in msg, f"레인마다 다른 처방을 공통 경로가 단정했다: {prescription!r}"

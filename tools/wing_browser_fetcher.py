@@ -33,6 +33,13 @@
 #    WING2→A01029796(오하이테크). rg_daily_hour은 무시됨(폐기·버튼-only), rg_min_interval_s=RG 실행 최소간격.
 #    rg_status_days=층1(계정 수수료) push 윈도우 **겸 층2 결손 조회 창**(기본 35, 백필 시 90으로 1회 실행).
 #    rg_max_targets=한 회차에 받을 결손 주기 수 상한(기본 3).
+#    ★wing_login_id (2026-08-23, W1) = 세션 자가 복구 ②Keychain층이 쓸 **로그인 ID**.
+#      WING1→"ofixohi"(오픽스 광고와 동일 ID/PW — Jino 확인 08-23 12:26) · WING2→"ohitech".
+#      비밀번호는 config에 **넣지 않는다** — macOS Keychain(서비스 `ohisell-coupang-ad`, 계정=이 ID)에서
+#      읽고 메모리에서만 쓴다. 등록은 Jino가 터미널에서 1회:
+#        security add-generic-password -U -s ohisell-coupang-ad -a <로그인ID> -w
+#      ★이 키가 **없으면 ②층이 조용히 폴백한다**(에러 아님) — 즉 "고쳤는데 안 되는" 상태가 되므로,
+#      키 없음은 복구 시도 시 경고 로그로 드러낸다(_recover_rg_session 주석 참조).
 #    ★죽은 키(설정에 남아 있어도 무시됨): rg_max_periods — 구 '최근 1주만' 상한이었고 그것이
 #      영구 공백(WING1 층2 04-20~05-03 등)의 원인이었다. 지금은 결손 주도로 고른다.
 #      rg_days — 층1/층2 통합 후 아무도 읽지 않는다.)
@@ -54,6 +61,10 @@ import signal
 import subprocess
 import sys
 import time
+
+# 세션 자가 복구 공용 구현 — install_local_runtime.sh가 coupang_auth.py도 함께 복사한다.
+# (빠지면 import 실패로 크래시 루프: LESSONS #54)
+import coupang_auth
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -2585,6 +2596,86 @@ def _rg_session_ok(page) -> bool:
     return verdict == _PROBE_OK
 
 
+# ── 세션 자가 복구 배선 (2026-08-23 · 계약 CONTRACT_collection_works_everywhere W1) ──────
+# 왜 이제야 붙나: 공용 모듈 `coupang_auth`는 2026-08-03에 **페처 4종**(오픽스 광고·오하이테크
+#   광고·로켓 공급자허브·**Wing**)을 위해 만들어졌는데 Wing만 3주간 미배선으로 남았다.
+#   2026-08-22 S1 계약이 근거 없는 금지선(「자격증명 자동 입력·자동 로그인 구현 금지(영구)」)을
+#   세워 검토 자체를 막았기 때문이다 — 그 줄은 저장소 어디에도 근거가 없었고, Jino의 실제 결정은
+#   D-7(`track_coupang-ohitech-ad.md:15`) 「Keychain 자동로그인 채택(오픽스 방식)」이며 제약은
+#   **「AI 비번 입력 금지」 하나뿐**이다(2026-08-23 12:17 Jino 재확인 "그래").
+# ★배선 근거가 된 라이브 실측 — Jino가 폰에서 누른 「전체 갱신」 **한 회차** 안에서:
+#     10:29:37  오픽스 Wing     → login_required (사람에게 "Mac Chrome에서 로그인하세요")
+#     10:30:04  오픽스 광고      → 자동 로그인 성공   ← 같은 계정(ofixohi)·같은 Keychain 항목
+#     10:30:12  오하이테크 광고   → 자동 로그인 성공
+#     10:30:18  로켓 공급자허브   → 자동 로그인 성공
+#   같은 자격증명으로 세 레인이 스스로 복구하는 27초 동안 Wing만 사람을 불렀다.
+# ★Wing 특수사항 — ①SSO 무언 재발급은 기대하지 않는다: Wing 로그인은 JSESSIONID 세션 쿠키에
+#   얹혀 있고 이 프로필의 xauth엔 KEYCLOAK_IDENTITY가 없다(위 '상주 모드' 주석의 2026-08-03 실측).
+#   그래도 ①을 **건너뛰지는 않는다** — 비번을 안 쓰는 경로가 항상 우선이라는 게 coupang_auth의
+#   계약이고 프로필 쿠키 상태는 시간에 따라 변한다. 대신 타임아웃을 짧게 줘 헛대기를 줄인다
+#   (기본 45초는 ①이 원리적으로 안 되는 레인에선 매 복구마다 그대로 손실이다).
+_RECOVER_SSO_TIMEOUT_S = 20
+
+# 로그인 클라이언트 = **오리진 루트**. keycloak이 돌아올 주소를 redirect_uri에 싣는다
+#   (`client_id=wing&redirect_uri=https%3A%2F%2Fwing.coupang.com%2F...` — _rg_off_origin 실측).
+# ★여기가 함정이다: 착지 판정(is_landed)이 이 **출발 URL**을 만족하면 coupang_auth가
+#   LandingPredicateError로 즉시 죽는다(설정 실수는 조용히 무력화되느니 시끄럽게 죽는다).
+#   그래서 _landed_on은 '인증 후에만 나오는 경로(/tenants/)'를 요구하고, 오리진 루트는 False다.
+_RG_SSO_URL = "https://wing.coupang.com/"
+
+
+def _landed_on(url: str, host: str) -> bool:
+    """`host`의 **인증 후 경로**(/tenants/)에 착지했는가. 오리진 루트는 False다(위 주석).
+
+    ★호스트는 반드시 **파싱**해서 비교한다 — 부분문자열 검사는 원리적으로 틀린다.
+      keycloak 로그인 URL은 redirect_uri 쿼리에 목적지 호스트를 통째로 싣기 때문에
+      `"wing.coupang.com" in url`은 **로그인 페이지 위에서도 참**이고, 게다가
+      "m-wing.coupang.com"이 "wing.coupang.com"을 포함한다(_rg_off_origin의 2026-08-03 실사고).
+    """
+    try:
+        parts = urlsplit(url or "")
+    except Exception:  # noqa: BLE001 — 판정 불가는 '착지 아님'(안전한 방향)
+        return False
+    return (parts.hostname or "").lower() == host and "/tenants/" in (parts.path or "")
+
+
+def _acct_label(cfg: dict) -> str:
+    """알림·로그에 쓸 계정 이름. 어느 계정이 로그인을 요구하는지 사람이 알아야 한다."""
+    key = str(cfg.get("account_key") or "WING")
+    vid = str(cfg.get("vendor_id") or "")
+    return f"{key}({vid})" if vid else key
+
+
+def _recover_rg_session(page, cfg: dict) -> str:
+    """RG(정산, wing.coupang.com 데스크톱) 세션 자가 복구. ①SSO → ②Keychain → ③알림.
+
+    반환은 coupang_auth의 3값(OK / LOGIN_REQUIRED / TWO_FACTOR)이다.
+
+    ★verify가 권위값인 이유: 이 계정의 redirect_uri는 오리진 루트일 수 있어, 실제로 복구됐는데도
+      is_landed(/tenants/ 요구)가 False로 남는 경우가 있다. 그때 URL 판정만 믿으면 **진짜 복구를
+      실패로 오판해 ②③으로 잘못 escalate**하고 사람에게 불필요한 로그인 알림이 간다.
+      `_rg_session_ok`는 앱 자신의 프로브(download-list, same-origin)라 호스트·경로 추측에
+      의존하지 않는다 — coupang_auth는 각 층 뒤에 verify를 호출해 그 결과를 우선한다.
+    """
+    login_id = cfg.get("wing_login_id")
+    if not login_id:
+        # ★조용한 폴백을 시끄럽게 만든다: login_id가 없으면 coupang_auth는 ②Keychain층을
+        #   **에러 없이** 건너뛴다(모듈 계약: "없다고 깨지지 않는다"). 그러면 배선을 해 두고도
+        #   ①만 돌다 끝나 「고쳤는데 안 되는」 상태가 되는데, 로그가 침묵하면 그걸 알 길이 없다.
+        #   이 레인은 ①이 원리적으로 무효라(위 주석) login_id 없음 = 자동 복구 전면 무력화다.
+        log.warning("RG: config에 wing_login_id가 없다 — Keychain 자동 로그인층이 통째로 "
+                    "건너뛰어진다(자동 복구가 사실상 무력). ~/.ohisell_wing*_fetcher.json 확인.")
+    return coupang_auth.ensure_session(
+        page,
+        sso_url=_RG_SSO_URL,
+        is_landed=lambda u: _landed_on(u, _RG_ORIGIN_HOST),
+        login_id=login_id,
+        label=f"{_acct_label(cfg)} 정산(RG)",
+        sso_timeout_s=_RECOVER_SSO_TIMEOUT_S,
+        verify=lambda: _rg_session_ok(page),
+    )
+
+
 def _rg_loop_should_abort(verdict: str) -> bool:
     """층2 루프를 중단할지 — **AUTH일 때만** True.
 
@@ -2685,6 +2776,24 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     #   (08-03 12:12~13:07 전 회차). 창은 열어 두므로 사람이 늦게 로그인해도
                     #   다음 재시도가 자동으로 이어받는다.
                     owner.keep_open = True    # 로그인할 창·탭이 필요 → 닫지 않음(W3)
+
+                    # ★W1(2026-08-23): 사람을 부르기 **전에** 자동 재로그인을 시도한다.
+                    #   여기가 08-23 10:29:37에 Jino의 폰으로 「Mac Chrome에서 로그인하세요」를
+                    #   보낸 바로 그 자리다. 같은 회차에 옆 레인 셋(오픽스 광고·오하이테크 광고·
+                    #   로켓 공급자허브)은 **같은 Keychain 자격증명으로 스스로 복구**했다.
+                    #   복구되면 창을 남길 이유가 없어지므로 keep_open을 되돌린다.
+                    if _recover_rg_session(page, cfg) == coupang_auth.OK:
+                        # ★복구 «선언»을 그대로 믿지 않고 앱 프로브로 재확증한다: 여기서
+                        #   확증 없이 진행하면 아래 층1이 이유 없이 실패하고, 사람은 로그인할
+                        #   기회를 못 얻은 채 회차만 태운다(2026-08-03 침묵 사고와 같은 형태).
+                        entry_verdict, entry_why = _rg_session_probe(page)
+                        if entry_verdict == _PROBE_OK:
+                            log.info("RG: 자동 재로그인으로 세션 복구 — 사람 개입 없이 수집 계속.")
+                        else:
+                            log.warning("RG: 자동 복구를 선언했으나 프로브가 %s — %s. 사람 로그인으로 폴백.",
+                                        entry_verdict, entry_why)
+
+                if entry_verdict == _PROBE_AUTH:   # 자동 복구 실패(또는 미확증) → 종전 경로
                     if login_wait_secs <= 0:
                         # ★RC_LOGIN_REQUIRED다, 1이 아니다(2026-08-22 W2). 종전엔 여기서 1을
                         #   돌려 **재시도 대상**이 됐는데, 바로 아래 status/api 경로는 같은
@@ -2700,6 +2809,9 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         return RC_LOGIN_REQUIRED
                     owner.keep_open = False   # 로그인 성공 → 평소대로 작업 후 창 닫음
                 elif entry_verdict == _PROBE_OK:
+                    # ★keep_open을 여기서 되돌린다(W1): 자동 재로그인으로 복구돼 이 가지에
+                    #   들어온 경우 위에서 True로 켜 둔 상태다. 진입부터 OK였으면 no-op이다.
+                    owner.keep_open = False
                     save()  # 세션 유효 → 회전 쿠키 보존 (CDP: no-op)
                 # UNKNOWN은 여기서 멈추지 않는다 — 바로 아래 status/api가 예산 안에서 재시도하며
                 #   진짜 로그아웃이면 거기서 AUTH가 나온다(설계된 2차 관문).
