@@ -416,7 +416,15 @@ def report_failure(
     attempt = int(row.attempt_count or 0)
     reason: str | None = None
     if kind == KIND_LOGIN_REQUIRED:
-        reason = "로그인 필요 — 재시도 안 함(로그인 후 다시 갱신을 눌러주세요)"
+        # ★「로그인 필요」 접두는 유지한다 — 프론트의 구버전 폴백(kind를 모르는 응답)이 이
+        #   문자열로 매칭한다(streamRefresh.isLoginRequired). 접두를 바꾸면 그 화면이 조용히 깨진다.
+        # ★여기서는 «사실»만 적고 «처방»은 적지 않는다(2026-08-23 적대 리뷰 P1-2).
+        #   구 문구 「로그인 후 다시 갱신을 눌러주세요」는 자동 재개가 배선된 레인에선 거짓이고,
+        #   반대로 「자동으로 이어집니다」는 배선이 없는 레인(광고비·로켓광고·공급자허브)에서
+        #   거짓이다 — `_revive_lane`은 wing_browser_fetcher에만 있다(실측).
+        #   이 함수는 **6레인 공통 경로**라 어느 처방을 써도 절반은 틀린다. 처방은 레인 spec을
+        #   아는 프론트(streamRefresh.outcomeView)가 짓는다.
+        reason = "로그인 필요 — 재시도 안 함(Mac Chrome 탭 로그인 필요)"
     elif kind == KIND_ACCESS_DENIED:
         reason = "접근 권한/구독 만료 — 재시도 안 함(구독 상태를 확인한 뒤 다시 갱신을 눌러주세요)"
     elif kind == KIND_MAPPING_BROKEN:
