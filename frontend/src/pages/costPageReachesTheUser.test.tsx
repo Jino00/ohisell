@@ -34,6 +34,16 @@ import type {
 //   «자신»을 vi.fn()으로 잡아야 한다(아래 vi.mock 팩토리에서 오버라이드).
 //   fetchCostRecipes도 테스트별로 응답을 바꿔치기하려고 함께 들여온다.
 import { approveCostRecipe, fetchCostRecipes, unapproveCostRecipe } from "../lib/api";
+// ★2R(적대 리뷰) P1-1·P1-2용 — 부자재 탭의 「+ 종 추가」·「승인」·「+ 수동 단가 입력」이
+//   실제로 그 id·이름으로 백엔드를 부르는지 재려면 이 셋도 vi.fn()으로 잡아야 한다
+//   (위 approveCostRecipe와 같은 사정 — 아래 vi.mock 팩토리에서 오버라이드).
+//   `fetchCostMaterials`는 P1-1 테스트가 「생성 뒤 재조회」를 흉내내려고 큐에 얹는다.
+import {
+  addCostManualPrice,
+  createCostMaterial,
+  fetchCostMaterials,
+  patchCostMaterial,
+} from "../lib/api";
 
 // ★P2-A용: 0건 안내 렌더 분기 «자신»을 직접 잡는다. 이 두 컴포넌트는 CostPage.tsx가
 //   「전부 순수 — props만 본다. 테스트가 직접 렌더한다」고 선언한 표시 계층이다
@@ -195,6 +205,34 @@ const JIG_NO_PART: CostMaterial = {
   latest_price_source: null,
   prices: [],
 };
+
+// ★2R P1-1용 — 「+ 종 추가」가 성공했을 때 백엔드가 실제로 돌려주는 모양을 흉내낸다.
+//   ★재현 조건 그 자체: `create_material`(백엔드)은 `name`만 세팅하므로 새 종은
+//   항상 `form_factor: null`·`part: null`이다 — 여기서도 그 사실을 지어내지 않는다.
+//   `function` 선언이라 파일 어디서 부르든(위 KIT과 같은 사정, vi.mock 팩토리 포함)
+//   안전하다.
+function createdMaterialFixture(name: string): CostMaterial {
+  return {
+    id: 9001,
+    name,
+    unit: null,
+    category: null,
+    status: "unconfirmed",
+    excel_label: null,
+    excel_ref_price: null,
+    match_rule: null,
+    form_factor: null,
+    part: null,
+    note: null,
+    lot_count: 0,
+    price_count: 0,
+    stale_count: 0,
+    latest_price_ex_vat: null,
+    latest_price_inc_vat: null,
+    latest_price_source: null,
+    prices: [],
+  };
+}
 
 const LEDGER_ROW: CostLedgerMaterialLine = {
   line_id: 15,
@@ -478,6 +516,19 @@ vi.mock("../lib/api", async (importOriginal) => {
     //   타는데, 그러면 「호출됐다/안 됐다」·「어떤 id로 불렸다」를 잴 수단이 없다.
     approveCostRecipe: vi.fn(async (id: number) => ({ ...RECIPE, id, status: "approved" })),
     unapproveCostRecipe: vi.fn(async (id: number) => ({ ...RECIPE, id, status: "draft" })),
+    // ★2R P1-1·P1-2용 — 실제 구현은 fetch를 타는데 전역 fetchSpy가 `{}`를 돌려줘
+    //   `CostMaterial` 모양이 아니다. 이 파일의 다른 쓰기 호출들과 같은 결로 값을
+    //   직접 만든다. id는 실측(prod 129종)보다 큰 값을 써서 기존 픽스처와 안 겹친다.
+    createCostMaterial: vi.fn(async ({ name }: { name: string }) => createdMaterialFixture(name)),
+    patchCostMaterial: vi.fn(async (id: number, body: Record<string, unknown>) => ({
+      ...KIT,
+      id,
+      ...body,
+    })),
+    addCostManualPrice: vi.fn(async (materialId: number) => ({
+      price_id: 9999,
+      material: { ...KIT, id: materialId },
+    })),
     // ★「보존」테스트가 재조회를 일으키는 트리거로 쓴다 — 실제 구현은 fetch를 타는데
     //   그러면 전역 fetchSpy가 `{}`를 돌려줘 `out.skipped_has_price.length`에서
     //   TypeError가 나 load()가 아예 안 불린다. 이 파일의 다른 쓰기 호출들과 같은 결로
@@ -1599,6 +1650,242 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       // ★이미 단가가 있는 종은 «대조값»이라고 말한다 — 채택이 안 건드리기 때문이다.
       expect(excelRefNoteText({ excel_ref_price: "600.00", price_count: 2 })).toContain("대조값");
       expect(excelRefNoteText({ excel_ref_price: null, price_count: 0 })).toBeNull();
+    });
+  });
+
+  // ── 적대 리뷰 2R P1-1 채택 (2026-08-23) ────────────────────────────────────
+  // 재현(리뷰어): 필터를 건 상태에서 「+ 종 추가」를 누르면 초록 「추가됨」이 뜨는데
+  // 새 종이 화면 어디에도 없다. 원인은 `materials.py:create_material`이 `name`만
+  // 세팅해 새 종은 항상 `form_factor: null`·`part: null`(sentinel `__none__`)이라
+  // 필터가 걸려 있으면 반드시 걸러진다는 것 — 백엔드는 이번 범위 밖이라 고치지
+  // 않는다(위임문 경계). 대신 **성공했을 때만** ①필터를 해제하고 ②새 종을 선택하고
+  // ③왜 해제했는지 화면이 말한다. 이 수정은 리뷰어가 P2-3으로 올린 것도 같이
+  // 닫는다(필터가 없어도 새 종이 선택된다 — 사람이 다시 찾아 누르지 않게).
+  describe("★결함 수리 — 필터가 걸린 채 종을 추가해도 그 종이 화면에 닿는다 (적대 리뷰 2R P1-1)", () => {
+    afterEach(() => {
+      vi.mocked(createCostMaterial).mockClear();
+      vi.mocked(fetchCostMaterials).mockResolvedValue({
+        items: [KIT, FILM_WITH_REF, JIG_NO_PART],
+      });
+    });
+
+    it("필터가 걸려 있으면: 추가 성공 → 필터가 풀리고 새 종이 목록·상세 패널에 뜬다", async () => {
+      await openMaterialsTab();
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } });
+      // 필터가 실제로 걸렸다는 대조군 — KIT(form_factor null)이 화면에서 사라진다.
+      expect(screen.queryByTestId(`material-${KIT.id}`)).toBeNull();
+      await screen.findByTestId("material-filter-summary");
+
+      // ★다음 load()가 새 종을 포함한 목록을 돌려주게 한다 — 실제 백엔드라면 생성 직후
+      //   재조회에 새 행이 있는 것과 같다. createCostMaterial 자체가 돌려주는 모양과
+      //   `fetchCostMaterials`가 다음에 돌려주는 모양을 일부러 같게 맞춘다(교훈:
+      //   테스트 픽스처는 producer 실산출과 갈라지면 안 된다).
+      vi.mocked(fetchCostMaterials).mockResolvedValueOnce({
+        items: [KIT, FILM_WITH_REF, JIG_NO_PART, createdMaterialFixture("새로만든종")],
+      });
+      const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("새로만든종");
+      fireEvent.click(screen.getByRole("button", { name: "+ 종 추가" }));
+      promptSpy.mockRestore();
+
+      await waitFor(() => {
+        expect(vi.mocked(createCostMaterial)).toHaveBeenCalledWith({ name: "새로만든종" });
+      });
+
+      // ★사람이 보는 결과 — 성공 메시지가 «필터를 해제했다»는 사실을 실제로 말한다.
+      const toast = await screen.findByText(/^「새로만든종」 추가됨/);
+      expect(toast.textContent).toContain("필터를 해제");
+
+      // ★핵심 단언 — 새 종이 목록에 «실제로» 있다(리뷰어가 재현한 결함의 정반대).
+      expect(await screen.findByTestId("material-9001")).toBeTruthy();
+      expect(screen.getByText("새로만든종")).toBeTruthy();
+      // 필터가 실제로 풀렸다 — 필터 요약 줄이 사라진다.
+      expect(screen.queryByTestId("material-filter-summary")).toBeNull();
+      // KIT(필터 밖이었던 종)도 다시 보인다 — 필터가 «전체»로 돌아갔다는 대조군.
+      expect(screen.getByTestId(`material-${KIT.id}`)).toBeTruthy();
+      // 새 종이 «선택»돼 있다 — 상세 패널이 그 종을 가리킨다(P2-3도 같이 닫는다).
+      expect(
+        screen.getByRole("heading", { name: "「새로만든종」 단가 이력" }),
+      ).toBeTruthy();
+    });
+
+    it("필터가 없으면: 추가 성공 메시지에 「필터를 해제」가 없다 — 안 한 일을 했다고 말하지 않는다", async () => {
+      await openMaterialsTab();
+      expect(screen.queryByTestId("material-filter-summary")).toBeNull();
+
+      vi.mocked(fetchCostMaterials).mockResolvedValueOnce({
+        items: [KIT, FILM_WITH_REF, JIG_NO_PART, createdMaterialFixture("필터없이추가")],
+      });
+      const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("필터없이추가");
+      fireEvent.click(screen.getByRole("button", { name: "+ 종 추가" }));
+      promptSpy.mockRestore();
+
+      const toast = await screen.findByText(/^「필터없이추가」 추가됨/);
+      expect(toast.textContent).not.toContain("필터를 해제");
+      // P2-3 — 필터가 없어도 새 종이 선택된다(다시 찾아 누르지 않게).
+      expect(
+        screen.getByRole("heading", { name: "「필터없이추가」 단가 이력" }),
+      ).toBeTruthy();
+    });
+
+    it("실패하면 아무것도 안 건드린다 — 필터·선택은 그대로다", async () => {
+      await openMaterialsTab();
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } });
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      expect(
+        await screen.findByRole("heading", {
+          name: "「지문방지필름 TPU 3매 · 필름 (bar)」 단가 이력",
+        }),
+      ).toBeTruthy();
+
+      vi.mocked(createCostMaterial).mockRejectedValueOnce(new Error("이미 등록돼 있다"));
+      const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("실패할이름");
+      fireEvent.click(screen.getByRole("button", { name: "+ 종 추가" }));
+      promptSpy.mockRestore();
+
+      await screen.findByText("이미 등록돼 있다");
+      // 필터·선택 둘 다 그대로다 — 실패는 아무것도 안 건드리지 않는다(하지 않는다).
+      expect(screen.getByTestId("material-filter-summary")).toBeTruthy();
+      expect(screen.queryByTestId(`material-${KIT.id}`)).toBeNull();
+      expect(
+        screen.getByRole("heading", { name: "「지문방지필름 TPU 3매 · 필름 (bar)」 단가 이력" }),
+      ).toBeTruthy();
+    });
+  });
+
+  // ── 적대 리뷰 2R P1-2 채택 (2026-08-23) ────────────────────────────────────
+  // M20(승인 버튼 텍스트→{null})·M23(<MaterialList> 호출부의 onApprove 배선 제거)·
+  // M22(「+ 수동 단가 입력」 버튼 제거)가 767건 전부 초록으로 살아남았다. 직전 라운드의
+  // P1(레시피 「승인」 버튼 절단)과 같은 모양인데 «부자재 탭»만 안 지켜지고 있었다 —
+  // `lotCountText`가 화면에서 사람을 그 버튼으로 보내는데(`원장 연결 또는 수동 입력
+  // 필요`), 그 버튼이 사라져도 스위트는 조용했다.
+  describe("★결함 수리 — 부자재 탭 조작 버튼의 표면을 붙든다 (적대 리뷰 2R P1-2)", () => {
+    afterEach(() => {
+      vi.mocked(patchCostMaterial).mockClear();
+      vi.mocked(addCostManualPrice).mockClear();
+    });
+
+    // M20·M23을 죽인다 — 버튼 텍스트가 사라지거나 onApprove 배선이 빠지면 이 단언이 운다.
+    it("미승인 종 — 목록 줄에 「승인」 버튼이 있고 누르면 그 종 id로 patchCostMaterial({status:'approved'})가 불린다", async () => {
+      await openMaterialsTab();
+      const row = screen.getByTestId(`material-${FILM_WITH_REF.id}`);
+      const approveBtn = within(row).getByRole("button", { name: "승인" }) as HTMLButtonElement;
+      expect(approveBtn.disabled).toBe(false);
+
+      fireEvent.click(approveBtn);
+
+      await waitFor(() => {
+        expect(vi.mocked(patchCostMaterial)).toHaveBeenCalledWith(FILM_WITH_REF.id, {
+          status: "approved",
+        });
+      });
+    });
+
+    // ★반대 방향 — 코드를 먼저 확인했다: `MaterialList`는
+    //   `onApprove && m.status !== "approved"`일 때만 버튼을 그린다. 이미 승인된 종엔
+    //   버튼이 없어야 한다는 것을 «실제 동작»으로 확인한다(없는 것을 있다고 단언하지 않는다).
+    //   기존 픽스처(KIT·FILM_WITH_REF·JIG_NO_PART) 셋 다 status가 "unconfirmed"라
+    //   순수 컴포넌트를 직접 렌더해 재현한다.
+    it("이미 승인된 종 — 목록 줄에 「승인」 버튼이 없다", () => {
+      render(
+        <MaterialList
+          materials={[{ ...FILM_WITH_REF, status: "approved" }]}
+          selectedId={null}
+          onSelect={() => {}}
+          onApprove={() => {}}
+        />,
+      );
+      const row = screen.getByTestId(`material-${FILM_WITH_REF.id}`);
+      expect(within(row).queryByRole("button", { name: "승인" })).toBeNull();
+    });
+
+    // M22를 죽인다. ★안내 문구(③)와 버튼의 실재를 «한 테스트에서 함께» 잰다 —
+    //   문구가 가리키는 대상이 실제로 있는지를 같이 재면, 둘 중 하나가 사라질 때 운다.
+    it("「+ 수동 단가 입력」 버튼이 실재하고, 안내 문구(③)가 가리키는 대상과 일치한다 — 누르면 그 종 id로 addCostManualPrice가 불린다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      const note = await screen.findByTestId("material-excel-ref-note");
+      expect(note.textContent).toContain("③「+ 수동 단가 입력」");
+
+      // ★버튼이 «실재»한다 — 안내가 가리키는 대상이 화면에 없으면 그 자체가 거짓말이다.
+      const manualBtn = screen.getByRole("button", {
+        name: "+ 수동 단가 입력",
+      }) as HTMLButtonElement;
+      expect(manualBtn.disabled).toBe(false);
+
+      const promptSpy = vi
+        .spyOn(window, "prompt")
+        .mockReturnValueOnce("1000")
+        .mockReturnValueOnce("조아테크");
+      fireEvent.click(manualBtn);
+      promptSpy.mockRestore();
+
+      await waitFor(() => {
+        expect(vi.mocked(addCostManualPrice)).toHaveBeenCalledWith(FILM_WITH_REF.id, {
+          unit_price_ex_vat: "1000",
+          supplier: "조아테크",
+        });
+      });
+    });
+  });
+
+  // ── 적대 리뷰 2R P2-1 채택 (2026-08-23) ────────────────────────────────────
+  // M16(부자재 `selected`를 `filteredMaterials` 대신 `materials`에서 찾음)이
+  // SURVIVED — `useLayoutEffect`가 페인트 전에 selectedId를 filteredMaterials 안으로
+  // 동기화하므로 라이브로 관측 가능한 차이는 못 만든다(리뷰어 판정, 그래서 P2다).
+  // 그래도 레시피 쪽엔 이미 있는 «필터 밖 선택을 안 붙든다·재조회해도 유지된다» 성질을
+  // 부자재 쪽에도 같은 깊이로 재둔다 — 커밋 주석이 명시한 방어층이 조용히 사라지는
+  // 것까지는 훅이 못 잡아도, 그 방어층이 지키려는 «화면에 보이는 결과»는 이 테스트가
+  // 지킨다.
+  describe("★부자재 선택 규율 — 필터 밖 종을 붙들지 않는다 (적대 리뷰 2R P2-1)", () => {
+    it("필터 밖으로 나간 선택은 상세 패널에서 더 이상 렌더되지 않는다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      expect(
+        await screen.findByRole("heading", {
+          name: "「지문방지필름 TPU 3매 · 필름 (bar)」 단가 이력",
+        }),
+      ).toBeTruthy();
+
+      // KIT 쪽(form_factor: null → sentinel `__none__`)으로 필터 — FILM_WITH_REF는
+      // 밖으로 밀려난다.
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "__none__" } });
+
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("heading", {
+            name: "「지문방지필름 TPU 3매 · 필름 (bar)」 단가 이력",
+          }),
+        ).toBeNull();
+      });
+      // ★왼쪽 목록에서도 사라진다 — 필터가 실제로 걸렸다는 대조군.
+      expect(screen.queryByTestId(`material-${FILM_WITH_REF.id}`)).toBeNull();
+    });
+
+    it("보존: 필터를 건 상태에서 재조회(승인 등)가 일어나도 «두 번째로 고른» 종이 계속 선택돼 있다", async () => {
+      await openMaterialsTab();
+      const formSelect = screen.getByTestId("material-product-select") as HTMLSelectElement;
+      fireEvent.change(formSelect, { target: { value: "bar" } }); // FILM_WITH_REF·JIG_NO_PART만 남는다
+
+      // 필터 안의 «두 번째» 항목을 사람이 직접 고른다 — 「사람이 고른 항목을 지키는 것」과
+      // 「무조건 첫 항목으로 스냅하는 것」이 다른 결과를 내게 하는 것이 이 가드의 요점이다.
+      fireEvent.click(screen.getByTestId(`material-${JIG_NO_PART.id}`));
+      expect(
+        await screen.findByRole("heading", { name: "「부착 지그 (bar)」 단가 이력" }),
+      ).toBeTruthy();
+
+      // 재조회를 일으킨다 — 선택 안 한 다른 종(FILM_WITH_REF)의 「승인」을 누른다.
+      fireEvent.click(
+        within(screen.getByTestId(`material-${FILM_WITH_REF.id}`)).getByRole("button", {
+          name: "승인",
+        }),
+      );
+      await screen.findByText("「지문방지필름 TPU 3매 · 필름 (bar)」 승인됨");
+
+      // 선택은 여전히 JIG_NO_PART다 — 필터의 첫 항목(FILM_WITH_REF)으로 스냅되지 않았다.
+      expect(screen.getByRole("heading", { name: "「부착 지그 (bar)」 단가 이력" })).toBeTruthy();
     });
   });
 

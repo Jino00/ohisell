@@ -1699,6 +1699,40 @@ export default function CostPage() {
     }
   }
 
+  // ★P1-1 수정(적대 리뷰 2R) — 필터가 걸린 채 종을 추가하면 새 종은 늘 필터 밖에
+  //   떨어진다. `create_material`(백엔드)이 `name`만 세팅해 `form_factor`·`part`가
+  //   항상 `null`이기 때문이다 — 이건 이번 범위 밖이라 고치지 않는다(위임문 경계).
+  //   대신 **성공했을 때만** ①필터를 해제하고 ②새로 만든 종을 선택하고 ③왜
+  //   해제했는지 화면이 말한다. 실패·취소 시엔 아무것도 건드리지 않는다.
+  //   ★필터가 애초에 안 걸려 있었으면 「필터를 해제했다」는 거짓말을 붙이지 않는다 —
+  //   `hadFilter`로 문구 자체를 가른다.
+  //   ★P2-3도 같이 닫는다 — 필터가 없어도 새로 만든 종을 항상 선택한다(사람이 방금
+  //   만든 종을 다시 찾아 누르지 않게).
+  async function handleAddMaterial(name: string) {
+    const hadFilter = materialForm !== null || materialPart !== null;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const created = await createCostMaterial({ name });
+      await load();
+      if (hadFilter) {
+        setMaterialForm(null);
+        setMaterialPart(null);
+      }
+      setSelectedId(created.id);
+      setMsg(
+        hadFilter
+          ? `「${name}」 추가됨 — 새 종은 폼팩터·부품이 비어 있어 지금 건 필터 밖이다. 필터를 해제하고 방금 만든 종을 선택했다.`
+          : `「${name}」 추가됨`,
+      );
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="p-6 max-w-[96rem]">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1762,7 +1796,7 @@ export default function CostPage() {
                 onClick={() => {
                   const name = window.prompt("새 부자재 종 이름");
                   if (!name) return;
-                  void run(() => createCostMaterial({ name }), `「${name}」 추가됨`);
+                  void handleAddMaterial(name);
                 }}
               >
                 + 종 추가
