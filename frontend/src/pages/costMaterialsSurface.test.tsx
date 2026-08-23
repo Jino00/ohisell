@@ -68,6 +68,9 @@ const KIT: CostMaterial = {
   category: "부자재",
   status: "unconfirmed",
   excel_label: null,
+  // ★cleaning kit은 **엑셀 대응 항목이 없는 유일한 종**이다(`excel_label: null`과 같은
+  //   사실의 다른 면) — 그래서 참고값도 없다. prod 실측 2026-08-23: 참고값 보유 128/129.
+  excel_ref_price: null,
   match_rule: "cleaning kit",
   form_factor: null,
   part: null,
@@ -212,11 +215,11 @@ describe("materialStatusLabel / lotCountText / excelLabelText — 자백 문구"
   });
 
   it("★로트 수를 말한다 — 표본 부족을 숨기지 않는다(계약 §9-5)", () => {
-    expect(lotCountText({ lot_count: 2, price_count: 2, stale_count: 0 })).toBe("로트 2건");
-    expect(lotCountText({ lot_count: 2, price_count: 3, stale_count: 0 })).toBe(
+    expect(lotCountText({ lot_count: 2, price_count: 2, stale_count: 0 }, false)).toBe("로트 2건");
+    expect(lotCountText({ lot_count: 2, price_count: 3, stale_count: 0 }, false)).toBe(
       "로트 2건 · 수동 1건",
     );
-    expect(lotCountText({ lot_count: 0, price_count: 0, stale_count: 0 })).toContain("단가 없음");
+    expect(lotCountText({ lot_count: 0, price_count: 0, stale_count: 0 }, false)).toContain("단가 없음");
   });
 
   it("★엑셀 대응이 비면 「미확정」이라고 자백한다 (FE-6 · 계약 §9-3)", () => {
@@ -258,7 +261,7 @@ describe("valuationBadgeText — `confirmed`를 «읽는다»", () => {
 // ════════════════════════ 실제 렌더 ════════════════════════
 describe("★합격 1의 표면 — 로트별 단가 2건이 화면에 그려진다", () => {
   it("두 로트의 단가·통관일·수입건이 나란히, 서로 다른 값으로 보인다 (FE-1 변이가 여기서 죽는다)", () => {
-    render(<MaterialPriceHistory material={KIT} />);
+    render(<MaterialPriceHistory material={KIT} imported />);
 
     // 8/18 로트 — prod 실측 190.82 / 209.90
     const aug = screen.getByTestId("price-row-11");
@@ -279,13 +282,13 @@ describe("★합격 1의 표면 — 로트별 단가 2건이 화면에 그려진
   });
 
   it("★단가 이력이 없으면 「0원」이 아니라 「빈 칸」이라고 말한다", () => {
-    render(<MaterialPriceHistory material={EMPTY_KIT} />);
+    render(<MaterialPriceHistory material={EMPTY_KIT} imported />);
     expect(screen.getByText(/단가 이력이 없다/)).toBeTruthy();
     expect(screen.queryByText("0원")).toBeNull();
   });
 
   it("출처가 원장인지 수동인지 화면이 말한다", () => {
-    render(<MaterialPriceHistory material={KIT} />);
+    render(<MaterialPriceHistory material={KIT} imported />);
     expect(screen.getAllByText("원장(로트)").length).toBe(2);
   });
 });
@@ -293,7 +296,7 @@ describe("★합격 1의 표면 — 로트별 단가 2건이 화면에 그려진
 describe("부자재 목록 — 미확인 상태와 최신 단가가 보인다", () => {
   it("미승인 종에 「미확인」 배지가 그려진다", () => {
     render(
-      <MaterialList materials={[KIT]} selectedId={1} onSelect={() => {}} />,
+      <MaterialList materials={[KIT]} selectedId={1} onSelect={() => {}} importedIds={new Set()} />,
     );
     const row = screen.getByTestId("material-1");
     expect(within(row).getByText("cleaning kit")).toBeTruthy();
@@ -304,7 +307,7 @@ describe("부자재 목록 — 미확인 상태와 최신 단가가 보인다", 
 
   it("★단가가 없는 종은 「—」로 보인다 — 0원으로 보이면 안 된다", () => {
     render(
-      <MaterialList materials={[EMPTY_KIT]} selectedId={1} onSelect={() => {}} />,
+      <MaterialList materials={[EMPTY_KIT]} selectedId={1} onSelect={() => {}} importedIds={new Set()} />,
     );
     expect(screen.getByTestId("material-1-latest").textContent).toBe("—");
     const row = screen.getByTestId("material-1");
@@ -417,10 +420,10 @@ describe("평가방법 배지 — 시스템이 스스로 미확인을 자백한�
 // 사람이 읽을 수 있게 내놓는지가 여기서 결정된다.
 describe("lotCountText / latestPriceNote — 「왜 최신 단가가 비었나」를 말한다", () => {
   it("★어긋난 연결을 따로 센다 — 침묵하면 「단가가 왜 없지?」가 결함 조사로 번진다", () => {
-    expect(lotCountText({ lot_count: 1, price_count: 2, stale_count: 1 })).toContain(
+    expect(lotCountText({ lot_count: 1, price_count: 2, stale_count: 1 }, false)).toContain(
       "원장과 어긋난 연결 1건",
     );
-    expect(lotCountText({ lot_count: 1, price_count: 3, stale_count: 1 })).toContain("수동 1건");
+    expect(lotCountText({ lot_count: 1, price_count: 3, stale_count: 1 }, false)).toContain("수동 1건");
   });
 
   it("★전부 어긋나면 「최신 단가 없음」의 이유를 말한다 (0원이 아니라 «근거가 없다»)", () => {
@@ -450,7 +453,7 @@ describe("★MaterialPriceHistory — 어긋난 행이 «스스로 자백»한�
       detail: "수입건이 확정 상태가 아니다(status=draft) — 원장은 그때 단가를 지웠다.",
       refreshable: false,
     });
-    render(<MaterialPriceHistory material={m} />);
+    render(<MaterialPriceHistory material={m} imported />);
     const cell = screen.getByTestId("price-check-11");
     expect(within(cell).getByText(/수입건 확정 해제됨/)).toBeTruthy();
     expect(within(cell).getByText(/원장은 그때 단가를 지웠다/)).toBeTruthy();
@@ -467,7 +470,7 @@ describe("★MaterialPriceHistory — 어긋난 행이 «스스로 자백»한�
       refreshable: true,
       ledger_unit_price_ex_vat: "198.91",
     });
-    render(<MaterialPriceHistory material={m} onRefresh={onRefresh} />);
+    render(<MaterialPriceHistory material={m} onRefresh={onRefresh} imported />);
     const cell = screen.getByTestId("price-check-11");
     expect(within(cell).getByText(/원장 값이 달라졌다/)).toBeTruthy();
     expect(within(cell).getByText(/198.91원/)).toBeTruthy();
@@ -483,7 +486,7 @@ describe("★MaterialPriceHistory — 어긋난 행이 «스스로 자백»한�
       detail: "이 단가가 나온 원장 라인이 지금은 없다 — 해제하고 다시 연결한다.",
       refreshable: false,
     });
-    render(<MaterialPriceHistory material={m} onRefresh={() => {}} onDelete={() => {}} />);
+    render(<MaterialPriceHistory material={m} onRefresh={() => {}} onDelete={() => {}} imported />);
     expect(within(screen.getByTestId("price-check-11")).getByText(/원장 라인 없음/)).toBeTruthy();
     const row = screen.getByTestId("price-row-11");
     expect(within(row).queryByRole("button", { name: "갱신" })).toBeNull();
@@ -498,7 +501,7 @@ describe("★MaterialPriceHistory — 어긋난 행이 «스스로 자백»한�
         "연결 당시 품목은 「cleaning kits」인데 지금 그 라인은 「Glass_iP12promax」이다 — id가 재사용됐다.",
       refreshable: false,
     });
-    render(<MaterialPriceHistory material={m} onRefresh={() => {}} />);
+    render(<MaterialPriceHistory material={m} onRefresh={() => {}} imported />);
     const cell = screen.getByTestId("price-check-11");
     expect(within(cell).getByText(/다른 품목을 가리킨다/)).toBeTruthy();
     expect(within(cell).getByText(/Glass_iP12promax/)).toBeTruthy();
@@ -508,7 +511,7 @@ describe("★MaterialPriceHistory — 어긋난 행이 «스스로 자백»한�
   });
 
   it("정상 행엔 경고가 없다 — 늘 노란 화면은 아무것도 못 말한다", () => {
-    render(<MaterialPriceHistory material={KIT} />);
+    render(<MaterialPriceHistory material={KIT} imported />);
     expect(screen.queryByText(/⚠/)).toBeNull();
     expect(within(screen.getByTestId("price-check-11")).getByText("원장과 일치")).toBeTruthy();
   });
@@ -579,6 +582,8 @@ describe("표준원가 계산 내역 — 못 쓰는 사유가 사람 말이 된�
         price_note: null,
         material_id: 1,
         usable: false,
+        // cleaning kit엔 엑셀 대응 항목이 없다 → 참고값도 없다(위 KIT과 같은 사실).
+        excel_ref_price: null,
       },
     ],
   };

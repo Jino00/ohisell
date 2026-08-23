@@ -611,7 +611,8 @@ def test_servo_passes_both_ends_to_the_simulator(monkeypatch):
     #   (auto_operator.py:1666)이므로 estimate 조회가 그대로 돌다 실패했고, simulate_bid까지
     #   **한 번도 도달하지 못했다.** 그 결과 아래 `if seen:`이 늘 거짓이 되어 단언 2개가 통째로
     #   실행되지 않았고, 상한 전달을 하한으로 바꿔치는 변이(N2f)가 36 passed로 살아남았다.
-    #   ⇒ 교훈 #353 「공허한 단언」의 세 번째 얼굴. 이번엔 «겹친 픽스처»가 아니라 «안 불린 spy»다.
+    #   ⇒ 교훈 #354 「공허한 단언」의 세 번째 얼굴. 이번엔 «겹친 픽스처»가 아니라 «안 불린 spy»다.
+    #   (#354는 재번호분 — 초판은 #353이었으나 병행 세션이 origin/main에 먼저 붙였다.)
     #   패치 이름을 실제 호출부에 맞추고, 아래 `if seen:` 탈출구를 **없앤다** — 도달 자체를 단언한다.
     monkeypatch.setattr(ao, "_fetch_estimate_rank_bid", lambda *a, **k: (1000, "test-stub"))
 

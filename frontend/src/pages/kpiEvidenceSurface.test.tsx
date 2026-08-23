@@ -103,6 +103,7 @@ function evidence(over: Record<string, unknown> = {}) {
     checks: {
       revenue_matches: true, net_matches: true,
       order_count_matches: true, net_fully_explained: true,
+      profit_rate_matches: true,
     },
     order_count_excluded: 31,
     has_floor: true,
@@ -207,7 +208,10 @@ describe("순이익 근거", () => {
 
   it("M4 — 합계가 카드와 어긋나면 화면이 ✗를 찍는다", async () => {
     h.evidence = evidence({
-      checks: { revenue_matches: true, net_matches: false, order_count_matches: true, net_fully_explained: true },
+      checks: {
+        revenue_matches: true, net_matches: false, order_count_matches: true,
+        net_fully_explained: true, profit_rate_matches: true,
+      },
     });
     renderEvidence("net_profit");
     await waitFor(() => expect(screen.getByText(/✗ 카드와 불일치/)).toBeTruthy());
@@ -279,6 +283,7 @@ describe("모르는 항목", () => {
       checks: {
         revenue_matches: true, net_matches: true,
         order_count_matches: true, net_fully_explained: false,
+        profit_rate_matches: true,
       },
     });
     renderEvidence("net_profit");
@@ -299,6 +304,49 @@ describe("이익률 근거", () => {
     const note = screen.getByText(/분모는 총 매출이 아닙니다/);
     expect(note.parentElement?.textContent).toContain("570,000원");
     expect(note.parentElement?.textContent).toContain("원가를 몰라 손익을 못 잰 매출");
+  });
+
+  it("M9 — 이익률에도 「카드와 일치」 ✓ 배지가 뜬다 (네 칸 중 이 칸만 빠져 있었다)", async () => {
+    // ★2026-08-23 이전엔 이익률 탭만 배지가 없었다. 다른 세 탭은 화면이 스스로 ✓/✗를 찍는데
+    //   이 탭만 「분자·분모가 카드와 같은가」를 **사람 눈에 맡기고** 있었다 — 안 맞는 날
+    //   아무도 모르는 유일한 탭이었다(계약 §2-3과 어긋난 비대칭).
+    h.evidence = evidence();
+    renderEvidence("profit_rate");
+    // testId로 «이 탭의 그 자리»를 고정한다 — 텍스트로만 찾으면 다른 탭 배지에 가려진다.
+    const badge = await screen.findByTestId("profit-rate-check");
+    expect(badge.textContent).toContain("✓ 카드와 일치");
+    // 배지 옆에 비율 자체가 같이 있어야 «무엇이 일치하는지»를 말한다
+    expect(badge.parentElement?.textContent).toContain("-18.7%");
+    expect(screen.getByText("= 이익률")).toBeTruthy();
+  });
+
+  it("M9 — 분모·비율이 카드와 어긋나면 이익률 탭이 ✗를 찍는다", async () => {
+    h.evidence = evidence({
+      checks: {
+        revenue_matches: true, net_matches: true, order_count_matches: true,
+        net_fully_explained: true, profit_rate_matches: false,
+      },
+    });
+    renderEvidence("profit_rate");
+    const badge = await screen.findByTestId("profit-rate-check");
+    expect(badge.textContent).toContain("✗ 카드와 불일치");
+  });
+
+  it("네 탭의 배지가 «각자» 있다 — 한 탭을 지워도 다른 탭 배지가 덮어 주지 않는다", async () => {
+    // 텍스트 검색만 쓰면 「어느 탭 배지든 하나만 있으면 초록」이 되어, 한 탭의 렌더를
+    // 끊는 변이가 살아남는다. 탭별 testId가 그 구멍을 막는다.
+    for (const [metric, testId] of [
+      ["revenue", "revenue-check"],
+      ["net_profit", "net-profit-check"],
+      ["profit_rate", "profit-rate-check"],
+      ["order_count", "order-count-check"],
+    ] as const) {
+      cleanup();
+      h.evidence = evidence();
+      renderEvidence(metric);
+      const badge = await screen.findByTestId(testId);
+      expect(badge.textContent, `${metric} 탭에 검산 배지가 없다`).toContain("✓");
+    }
   });
 
   it("분모와 총매출이 같으면 그 경고를 띄우지 않는다", async () => {

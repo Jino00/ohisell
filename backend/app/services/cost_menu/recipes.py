@@ -477,6 +477,9 @@ def _line_inputs(recipe: CostRecipe) -> list[SC.RecipeLineInput]:
                     material_id=material.id,
                     price_source=price.source if price else None,
                     price_note=price.note if price else None,
+                    # ★참고값은 «단가 자리»가 아니라 자기 칸으로 간다 — 화면이 「채택 전」이라고
+                    #   말할 원료다. 합계엔 절대 안 들어간다(계약 §3 · SC 모듈 주석).
+                    excel_ref_price=material.excel_ref_price,
                 )
             )
             continue
@@ -490,6 +493,7 @@ def _line_inputs(recipe: CostRecipe) -> list[SC.RecipeLineInput]:
                 material_id=material.id,
                 price_source=price.source if price else None,
                 price_note=price.note if price else None,
+                excel_ref_price=material.excel_ref_price,
             )
         )
     return out
@@ -660,6 +664,9 @@ def standard_payload(result: SC.StandardCostResult) -> dict:
                 "price_note": ln.price_note,
                 "material_id": ln.material_id,
                 "usable": ln.usable,
+                # ★「엑셀 참고값(채택 전)」 열의 원료 — **단가가 아니다.** `std_cost_*`·
+                #   `partial_*` 어디에도 안 더해진다(SC.StandardCostLine.usable 주석).
+                "excel_ref_price": _d(ln.excel_ref_price),
             }
             for ln in result.lines
         ],
