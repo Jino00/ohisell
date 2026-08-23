@@ -1,5 +1,21 @@
 # 트랙: 쿠팡 RG 재고·발송 관제 (Replenishment)
 
+<!-- TRACK-CONTRACT v1 -->
+목표: "API로 연결하자. 창고보관료가 있기때문에 약 2~3일치의 재고만 보관하고 싶어. 그리고, 주말, 주중, 휴일등의 변수도 있기 때문에, 이런것들은 너가 계속 발전해나가면서 세분화시켜줘" / "각 아이템별 우리 사무실에서 발송 후 도착 및 판매시작 기간을 예측해서 매일매일 발송해야 하는 갯수와 발송 일자를 알려주면 … 매일매일 언제 발송해야 하는지, 몇개를 발송해야 하는지 알 수 있지 않을까?" (Jino 원문 — 본문 `## 사용자 원문 인용`에서 복사, 발명 아님)
+안함:
+- S9(sba_forecaster)·S10(newsvendor) 예측 타워 — D-17로 **보류**(예측가능 9옵션/857=1.05%, ROI 부족). 재개 트리거는 `GET /demand-class` summary.by_bucket 증가. → 소관: 본 트랙(보류 상태 유지)
+- 1P·Wing·스마트스토어 재고, 자사창고 원장, 공급업체 발주 수량, 이카운트(ERP) 연동 → 소관: `docs/contracts/CONTRACT_inventory_unified.md`(초안, Jino 승인 대기 · 신설 제안 트랙 `track_inventory-management.md`)
+- 1P 발주서·정산 정합 → 소관: `docs/tracks/active/track_coupang-rocket-1p.md`
+- 2P 손익 정합(판매일 축) → 소관: `docs/tracks/active/track_coupang-2p-parity.md`
+- 원가·매입단가 정본 → 소관: `docs/tracks/active/track_cost-truth-ledger.md`
+합격: (정본 = D-18 「"RG 완료" 정의 확정」의 **완료 게이트 3개** 원문 — 이 트랙이 스스로 정한 완료 정의다. 발명·자리표시자 없음)
+- [x] ① UI 정합(S6.5) — 로켓그로스 탭에 `발송중·유효재고` 컬럼 + `fresh`(쿠키 신선도) 배지. Jino가 "왜 이 수량인지(현재고+발송중)"를 화면에서 추적 가능. 증거: 2026-06-19 적대검증 GATE PASS + prod 라이브 self-verify
+- [x] ② P4 백테스트 — 과거 N일 발송추천 재현→실제 판매 대조→fill-rate·과잉재고일수 산출. 증거: 2026-06-19 plan-eng-review PASS + 적대검증 GATE PASS + prod 라이브 self-verify
+- [x] ③ 정직성 회귀 — 9옵션 confidence 정확 + 848 insufficient_data 정직 유지(라이브 회귀 0). 증거: 2026-06-19
+상태: 🔧 Maintenance — **N/M=3/3이나 `completed/` 이동은 D-18이 명시적으로 보류**했다("`completed/` 이동은 S9/S10 보류 표기 때문에 보류하고 maintenance(데이터 대기)로 유지"). ⇒ 3/3은 트랙 종결이 아니라 **D-18이 정의한 실용적 완료**다. 종결 QA·`completed/` 이동은 D-17 재개 여부가 정리된 뒤의 별건이며 **자동 발동 대상이 아니다**(2026-08-22 헤더 부착 시 명시).
+확인: 2026-08-22 23:52 KST [5ede76fe] — **진전 없음(체크박스 변화 0/3→3/3 불변, 참조만).** 이 세션의 유일한 트랙 변경은 계약 헤더 lazy 부착이며 목표·합격 M항목은 전부 본문 원문 복사다(발명 0). 세션의 실제 작업은 **신규 트랙 제안** — Jino가 `/inventory` 1P 탭 placeholder를 보고 *"재고 관리가 전혀 안되고 있네"*(08-21 22:36) → D-19가 약속한 「1P·Wing 향후 입주」 이행 요구. 범위(채널 4개+자사창고+ERP)가 이 트랙의 상위 집합이라 `track_inventory-management.md` 신설 제안, 계약 초안 `docs/contracts/CONTRACT_inventory_unified.md`·기획 `docs/PLAN_inventory-unified-management.md`(둘 다 Jino 승인 대기). 이 트랙의 엔진 5종은 재작성이 아니라 **부품으로 소비**한다. ⚠️함께 발견: 이 트랙 「핵심 리스크」(*"쿠키 만료 시 입고 동기화 중단 → 선검증 1순위"*)가 **실현된 채 방치** — `COUPANG_WING1` red(last_success 2026-06-21)·`COUPANG_WING2` red(2026-06-10) → 「발송중」 전건 0, `coupang_rg_inbound` 마지막 shipment 2026-06-17. 원인은 `scheduler_health.py:152` `WATCHDOG_COOKIES` 미등재 + RG 재고·입고 신선도 규칙 부재라 **감시 밖**이었다(2026-08-21 22:39 KST 실측 · 계약 미승인이라 수리 안 함, 기록만).
+<!-- /TRACK-CONTRACT -->
+
 > 시작일: 2026-06-05 · 상태: 🟢 Active → 🔧 Maintenance (2026-06-19, D-18 3/3 충족 = 실용적 완료. 신규코딩0·데이터 자동고도화. S9/S10 D-17 보류라 completed/ 미이동)
 > 단일 진실 원천. 이 트랙을 무시·변형해서 진행하지 말 것. 변경은 Jino 승인 후 D-N으로 기록.
 
