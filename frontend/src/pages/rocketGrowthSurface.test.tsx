@@ -203,6 +203,54 @@ describe("RocketGrowthPnl — 보존식 블록 (변이③)", () => {
     await waitFor(() => expect(screen.getByText("테스트 상품 A")).toBeTruthy());
     expect(screen.queryByText(/대시보드 RG 행과/)).toBeNull();
   });
+
+  // ★적대 리뷰 1R P1-1이 잡은 자리 — 이 두 케이스가 없어서 결함이 통과했다.
+  //   백엔드는 원가 게이트 미달 창에서 다섯 칸을 «전부» null로 낸다(rg_daily_pnl.py:196,248).
+  //   그런데 화면은 앞의 두 칸만 가드가 빠져 「0원」으로 덮고 있었다 — 「모름」과 「0」이 같은
+  //   얼굴이 되는 자리다. 값 비교로는 안 잡힌다(0도 «있을 수 있는 값»이라서). 그러니
+  //   **null일 때 「0원」이 «없어야» 한다**를 직접 단언한다.
+  it("원가 게이트 미달 창(전 칸 null)에서 보존식이 「0원」이 아니라 「—」로 뜬다 — 1R P1-1", async () => {
+    h.response = {
+      ...BASE,
+      cost_trustworthy: false,
+      conservation: {
+        options_net_sum: null as unknown as string,
+        account_common_sum: null as unknown as string,
+        computed_total_net: null,
+        reference_net: null,
+        diff: null,
+        ok: false,
+      },
+    };
+    renderPnl();
+    // ★「상품 행 소계」는 표의 소계 행에도 있다 — 보존식 줄만 집으려면 「계정 공통」과 함께 본다
+    //   (바로 위 두 테스트와 같은 셀렉터).
+    const line = await waitFor(() =>
+      screen.getByText((c) => c.includes("상품 행 소계") && c.includes("계정 공통")),
+    );
+    // ★부정 단언만 두면 문구가 바뀌는 순간 소리 없이 참이 된다(직전 계약 3R P2).
+    //   그래서 «있어야 할 것»(— 다섯 개)과 «없어야 할 것»(0원)을 함께 단언한다.
+    expect(line.textContent).toContain("상품 행 소계");
+    expect(line.textContent).not.toContain("0원");
+    expect((line.textContent ?? "").match(/—/g) ?? []).toHaveLength(5);
+  });
+
+  // ★적대 리뷰 1R 변이 B — 이 렌더 블록을 지웠는데 25건이 전부 그린이었다(생존).
+  //   vendor_id를 못 찾으면 광고비가 0으로 내려오는데, 그게 「0원이다」인지 「모른다」인지를
+  //   말하는 유일한 칸이 이것이다. 사라지면 화면이 0원을 «단정»한다.
+  it("ad_spend_warning이 있으면 화면이 「광고비 미상」을 말한다 — 1R 변이 B 생존분", async () => {
+    h.response = { ...BASE, ad_spend_warning: "vendor_id를 못 찾았다" };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText(/광고비 미상/)).toBeTruthy());
+    expect(screen.getByText(/vendor_id를 못 찾았다/)).toBeTruthy();
+  });
+
+  it("ad_spend_warning이 없으면 그 배너가 «안» 뜬다 — 공허 단언 방지 짝", async () => {
+    h.response = BASE;
+    renderPnl();
+    await waitFor(() => expect(screen.getByText("테스트 상품 A")).toBeTruthy());
+    expect(screen.queryByText(/광고비 미상/)).toBeNull();
+  });
 });
 
 // ════════════════════════ 화면 B: RocketGrowthSettlement ════════════════════════

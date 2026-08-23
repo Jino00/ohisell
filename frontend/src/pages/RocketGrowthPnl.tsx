@@ -258,13 +258,16 @@ export default function RocketGrowthPnl() {
           <div className="font-medium">
             {cons.ok ? "✅ 대시보드 RG 행과 일치" : "⚠️ 대시보드 RG 행과 어긋남"}
           </div>
+          {/* ★다섯 칸 전부 `cell()`을 쓴다 — 적대 리뷰 1R P1: 앞의 두 칸만 가드가 빠져 있었고,
+              원가 게이트가 미달인 창(백엔드가 정직하게 null을 내는 창)에서 화면이 «0원»으로
+              덮었다. 「모름」과 「0」이 같은 얼굴이 되는 자리는 이 저장소가 반복해 다친 곳이다. */}
           <div className="mt-1">
-            상품 행 소계 {won(n(cons.options_net_sum))} + 계정 공통 {won(n(cons.account_common_sum))} ={" "}
-            <strong>{cons.computed_total_net == null ? NO_DATA : won(n(cons.computed_total_net))}</strong>
+            상품 행 소계 {cell(cons.options_net_sum)} + 계정 공통 {cell(cons.account_common_sum)} ={" "}
+            <strong>{cell(cons.computed_total_net)}</strong>
             {" / 대시보드 "}
-            {cons.reference_net == null ? NO_DATA : won(n(cons.reference_net))}
+            {cell(cons.reference_net)}
             {" / 차이 "}
-            <strong>{cons.diff == null ? NO_DATA : won(n(cons.diff))}</strong>
+            <strong>{cell(cons.diff)}</strong>
           </div>
         </div>
       )}
