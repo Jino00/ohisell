@@ -1660,7 +1660,49 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(screen.getByText(/단가 이력이 없다/).textContent).toContain("원장 부자재 라인");
     });
 
-    it("★목록 줄의 수입 판별이 «양방향»으로 배선돼 있다 (1R ML15)", () => {
+    it("★★목록 «호출부»가 실제로 importedIds를 넘긴다 — 앱 경로로 잰다 (2R ML15)", async () => {
+      // ★2R 정정: 아래 순수 렌더 테스트는 «컴포넌트 계약»만 잠근다. `CostPage`의 호출부를
+      //   `importedIds={new Set()}`로 바꾸는 변이는 그 테스트가 원리적으로 못 잡는다 —
+      //   이 파일 머리말의 SUR-1/SUR-2와 **같은 모양의 구멍**이다.
+      //   앱 픽스처의 유일한 수입 종 KIT은 `price_count=2`라 `lotCountText`의 imported
+      //   분기(=`price_count===0`)에 아예 안 들어간다. 그래서 **단가 0건 수입 종**을 만든다.
+      vi.mocked(fetchCostLedgerMaterialLines).mockResolvedValue({
+        items: [
+          LEDGER_ROW,
+          {
+            ...LEDGER_ROW,
+            line_id: 41,
+            item_name: "부착 지그 원자재",
+            suggestion: { ...LEDGER_ROW.suggestion, line_id: 41, material_id: JIG_NO_PART.id },
+          },
+        ],
+      });
+      await openMaterialsTab();
+      const row = await screen.findByTestId(`material-${JIG_NO_PART.id}`);
+      // JIG는 단가 0건 «수입» 종이 됐다 — 목록 줄이 수입 종 문구를 써야 한다.
+      expect(row.textContent).toContain("엑셀 참고값");
+      expect(row.textContent).not.toContain("엑셀 단가(미확정)");
+      // 대조군 — 같은 화면의 비수입 종은 여전히 비수입 문구다(둘이 갈리는 것이 요점이다).
+      expect(screen.getByTestId(`material-${FILM_WITH_REF.id}`).textContent).toContain(
+        "엑셀 단가(미확정)",
+      );
+    });
+
+    it("★비수입 종이 단가를 «가진» 뒤에도 엑셀이 정본이다 (2R N1 — 분기가 안 잠겨 있었다)", () => {
+      const note = excelRefNoteText({ excel_ref_price: "600.00", price_count: 2 }, false);
+      expect(note).toContain("정본");
+      // ★수입 종의 「대조값」 문구로 돌아가면 안 된다 — 그게 1R P2-1 결함이다.
+      expect(note).not.toContain("대조값");
+      // ★「이 값이 그대로 들어갔다」고 단언하지 않는다 — 수동 정정분이 있을 수 있다.
+      expect(note).not.toContain("이미 단가로 들어가 있다");
+      expect(note).toContain("아래 표에서 확인");
+      // 대조군 — 수입 종은 여전히 대조값이다.
+      expect(excelRefNoteText({ excel_ref_price: "600.00", price_count: 2 }, true)).toContain(
+        "대조값",
+      );
+    });
+
+    it("★목록 줄의 수입 판별이 «양방향»으로 배선돼 있다 (1R ML15 — 컴포넌트 계약)", () => {
       // 단가가 0건인 «수입» 종이 픽스처에 없어서 이 방향이 통째로 안 잠겨 있었다.
       const importedNoPrice = { ...FILM_WITH_REF, id: 77, name: "수입 부자재 (단가 없음)" };
       render(
