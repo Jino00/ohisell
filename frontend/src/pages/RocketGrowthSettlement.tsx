@@ -9,9 +9,17 @@
 // ★새 계산은 0이다(계약 §3). 전부 백엔드가 이미 낸 값의 표시다.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { fetchRgOptionPnl, type RgOptionPnlResponse } from "../lib/api";
+import {
+  fetchRgOptionPnl,
+  fetchCommandCenter,
+  type RgOptionPnlResponse,
+  type OverviewResponse,
+} from "../lib/api";
 import { rgFeeNote, rgFeeFactsFromOptionPnl, RECONCILE_WARN_PCT } from "../lib/rgSettlementAxis";
 import { won, NO_DATA, isoKST, pctFromFraction } from "../lib/format";
+// ★계약 §1-A-3 — 종합 조망과 **같은 컴포넌트**다(사본이 아니다). 사본을 뜨면 같은 정산
+//   내역을 두 화면이 다른 금액으로 말하게 되고, 그게 D-CPP-47이 고친 병이다.
+import { RgSettlementCard } from "../components/RgSettlementCard";
 
 const ACCOUNTS = [
   { key: "COUPANG_WING1", label: "오픽스" },
@@ -32,15 +40,29 @@ export default function RocketGrowthSettlement() {
   const [account, setAccount] = useState<string>(ACCOUNTS[0].key);
   const [data, setData] = useState<RgOptionPnlResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // 계정별 정산 내역(계약 §1-A-3) — 종합 조망과 같은 응답·같은 컴포넌트.
+  const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [ovErr, setOvErr] = useState<string | null>(null);
 
   async function load(acc: string) {
     setErr(null);
+    const d = yesterdayKST();
     try {
-      const d = yesterdayKST();
       setData(await fetchRgOptionPnl(acc, d, d));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       setData(null);
+    }
+    // ★두 조회를 갈라 둔다: 정산 내역이 못 와도 요율·커버리지·장부대조는 계속 뜬다.
+    //   그리고 «못 왔다»를 반드시 말한다 — `RgSettlementCard`는 데이터가 없으면 `null`을
+    //   그리므로, 실패를 그대로 두면 카드가 **소리 없이 사라져** 「정산 내역이 없다」로 읽힌다.
+    //   이 사슬이 네 번 밟은 「모름이 0/없음으로 접히는」 자리와 같은 모양이다.
+    setOvErr(null);
+    try {
+      setOverview(await fetchCommandCenter(d, d, acc));
+    } catch (e) {
+      setOvErr(e instanceof Error ? e.message : String(e));
+      setOverview(null);
     }
   }
 
@@ -207,6 +229,34 @@ export default function RocketGrowthSettlement() {
               완결 주기가 분자·분모가 같은 기간을 가리키는 유일한 자리다.
             </p>
           </>
+        )}
+      </div>
+
+      {/* ④ 주기별 정산 내역 (계약 §1-A-3) — 종합 조망과 «같은 컴포넌트»를 재사용한다.
+          위 ①②③은 «우리가 계산한 것»의 근거이고, 이 카드는 «쿠팡이 실제로 청구한 원장»이다.
+          둘을 한 화면에 나란히 두는 것이 이 화면의 존재 이유다. */}
+      <div>
+        <div className="font-medium mb-2">주기별 정산 내역 (쿠팡 원장)</div>
+        <p className="text-xs text-gray-500 mb-2">
+          「어제」({yesterdayKST()})를 덮는 정산 주기의 계정별 청구 내역이다. <strong>정산주기
+          기준이라 부분 윈도우도 주기 전액</strong>을 보인다 — 위 ①②③(판매일 축)과 값이 다른 것이
+          정상이고, 그 차이를 재는 자리가 ③이다. 종합 조망의 그 카드와 <strong>같은 컴포넌트·같은
+          응답</strong>이다(사본 아님 — 두 화면이 갈라질 수 없다).
+        </p>
+        {ovErr ? (
+          <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm">
+            정산 내역을 못 불러왔다 — {ovErr}. <strong>못 잰 것이지 「내역이 없다」가 아니다.</strong>
+          </div>
+        ) : overview == null ? (
+          <div className="bg-white border rounded-md p-3 text-sm text-gray-500">불러오는 중…</div>
+        ) : overview.rg_settlement == null ? (
+          <div className="bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-900">
+            이 창에 RG 정산 원장이 응답에 없다 — <strong>0원이 아니라 «없음»</strong>이다.
+            갱신은 종합 조망의 「RG 정산 갱신」에서 한다(같은 데몬을 두 화면이 동시에 부르지 않게).
+          </div>
+        ) : (
+          /* 갱신 props를 안 넘긴다 = 읽기 전용 렌더. 이유는 컴포넌트 파일 머리말 참조. */
+          <RgSettlementCard data={overview} />
         )}
       </div>
     </div>
