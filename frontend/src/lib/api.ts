@@ -3192,7 +3192,10 @@ export interface NaverAdAccelGateBucket {
 }
 
 export interface NaverAdAccelGate {
-  /** 실제 게이트가 읽는 끝. 현재 'factor_low' — 하한은 보정을 없애 차단을 최대로 만든다. */
+  /** 실제 게이트가 읽는 끝. 현재 'factor_high' — D-NAO-234 ⓐ로 «게이트 층»(통과/차단)이
+   *  상한으로 옮겨졌다. 하한은 «크기 층»(얼마나 쓰나)만 쓴다. 값을 코드에 박지 말고 이 필드를
+   *  읽어라 — 화면이 배포 동작과 반대를 말하는 재발을 그렇게 막는다(1R P1-3·2R P2-C).
+   *  ★이 주석은 3R P2-4 상환이다: D-NAO-232 시절 문구('factor_low')가 그대로 남아 있었다. */
   gate_end: string;
   gate_note: string;
   /** 보드 창 기준 근사라는 자백 — 화면이 확정값처럼 보이면 안 된다(적대 리뷰 1R P2-2). */

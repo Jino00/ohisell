@@ -287,7 +287,9 @@ export default function NaverAdDiagnosisBoard() {
                 로 잰다.
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                {/* ★3R P2-1 — 행 «이름»이 gate_end를 따라가는지 테스트가 볼 수 있게 자리를 고정한다.
+                    testid가 없어서, 행 이름을 옛 고정 문구로 되돌려도 전건 초록이었다(생존 변이 C6). */}
+                <table className="w-full text-sm" data-testid="accel-gate-buckets">
                   <thead>
                     <tr className="text-xs text-gray-500">
                       <th className="text-left font-normal pb-1">구간</th>

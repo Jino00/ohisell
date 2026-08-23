@@ -169,6 +169,23 @@ describe("액셀 게이트 카드 — 표면 요건(D-NAO-232 §4-④)", () => {
     expect(lowAfter).toBe("3.405:1");
   });
 
+  it("★3R P2-1 — 「하한에서만 차단」 행 «이름»도 gate_end를 따라간다(옛 고정 문구로 되돌리면 죽는다)", async () => {
+    // 3R이 잡은 유일한 생존 표면 변이(C6): 이 PR은 «게이트 끝을 따라 문구가 바뀌어야 한다»를
+    // 세 자리(헤드라인·대칭·행 이름)에 심었는데 앞 둘만 테스트가 있었다. 행 이름을 옛 고정
+    // 문구로 되돌려도 23 passed로 전건 초록이었다 — 그러면 헤드라인은 「통과 221건」이라 말하고
+    // 같은 카드의 행은 「현행 게이트가 죽이는 것」이라 말해 **한 카드가 자기 자신과 모순**한다.
+    await draw({ ...LIVE_GATE, gate_end: "factor_high" });
+    const highRows = screen.getByTestId("accel-gate-buckets").textContent ?? "";
+    cleanup();
+
+    await draw({ ...LIVE_GATE, gate_end: "factor_low" });
+    const lowRows = screen.getByTestId("accel-gate-buckets").textContent ?? "";
+
+    expect(highRows).toContain("통과시키는 것");   // 게이트가 상한 → 하한이었다면 죽었을 건
+    expect(lowRows).toContain("죽이는 것");        // 게이트가 하한 → 현행이 실제로 죽이는 건
+    expect(highRows).not.toEqual(lowRows);         // 고정 문구면 같아진다
+  });
+
   it("★M2 — 가정·자의 끝 자백 블록이 실재한다(D-NAO-230이 요구한 「가정 병기」)", async () => {
     await draw(LIVE_GATE);
     const caveats = screen.getByTestId("accel-gate-caveats");

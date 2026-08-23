@@ -257,7 +257,9 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 | 11 | `bid_simulator.py:183` | `rpc_corrected = (rpc_raw × cf_low)` — 예상매출 **표기**용(보수 끝) |
 | 12 | `auto_operator.py:3108` | `servo_correction_factor_low = Decimal(str(_cf["factor_low"]))` |
 | 13 | `auto_operator.py:3372` | `_servo_economic_ceiling(correction_factor=servo_correction_factor_low)` — 서보 경제성 상한 |
-| 14 | `auto_operator.py:3408` | `_estimate_direct_step(correction_factor_low=servo_correction_factor_low, correction_factor_high=servo_correction_factor)` — 양끝 다 넘김(방향=상한/크기=하한 동시 전달) |
+| 14 | `auto_operator.py:3407` (kwarg 3411·3412) | `_estimate_direct_step(correction_factor_low=servo_correction_factor_low, correction_factor_high=servo_correction_factor)` — 양끝 다 넘김(방향=상한/크기=하한 동시 전달) |
+
+> ★3R P2-3 상환 — 이 행의 좌표는 두 번 틀렸다. 초판 `3406`, 1R 상환 `3408` 둘 다 호출부도 kwarg 줄도 아니다(3408은 `db, keyword_id=…`). 실제 호출부는 **3407**, 인용된 두 kwarg는 **3411·3412**다. 같은 표의 나머지 4행(3107·2349·3108·3372)은 `sed -n` 실측으로 정확하다. 좌표를 «세어서» 적지 말고 실측하라는 뜻이다.
 
 ### [미상] — 분류 미확정 1곳 (리뷰 P1-1, 이 문서는 확정하지 않는다)
 
@@ -373,6 +375,58 @@ accel_gate:        gate_end "factor_low" · accel_total 221 · brake_total 663
 
 ---
 
+### ★§9-2 합격기준 6의 빈 칸을 채운다 — 「하한만 내려서 주는 방향」인지 **건수·금액으로** (2026-08-24 00:4x KST, n=43 실측)
+
+계약 §6-6은 *"액셀 후보·게이트 통과 건수가 «하한만 내려서 주는» 방향이 아님을 **수치로** 보임"*을
+요구한다. n=42는 이 자리를 **비운 채** 닫았다(HANDOFF §5-A가 부채로 기록: `bid_simulator`의
+`interval_floor_blocks_up`으로 **사라지는 액셀 제안 건수가 어디에도 세어져 있지 않다**). 그 칸을 잰다.
+
+**측정 방법 (읽기 전용·prod 현행 배포 코드)**: 새 코드를 배포하지 않고 잴 수 있다 —
+`interval_floor_blocks_up` 분기와 `diag["correction_factor"]["factor_low"]` 소비 경로는
+**D-NAO-231로 이미 배포돼 있고**, D-NAO-234가 바꾸는 것은 그 자리에 들어가는 «값»뿐이기
+때문이다. 그러니 `diagnosis.build_diagnosis()`가 만든 diag의 `factor_low`만 1.0 / 0.827로
+갈아끼워 `proposal_pipeline.compute_bid_sims()`를 두 번 돌리면 차이가 그대로 나온다.
+DB는 `sqlite:///file:…?mode=ro&uri=true`로 열었다(쓰기 원천 차단, prod 앱·크론 무접촉).
+창 2026-08-09~2026-08-23(`run_daily` 기본 `lookback_days=15`와 동일), 후보 **884건**(양쪽 동일).
+
+| | A. 하한 **1.0** (현행 prod) | B. 하한 **0.827** (D-NAO-234) | Δ |
+|---|---|---|---|
+| **액셀** `direction="up"` 건수 | 296 | 225 | **−71 (−24.0%)** |
+| **액셀** 증액 총액 (Σ추천−Σ현재) | +244,730원 | +169,610원 | **−75,120원 (−30.7%)** |
+| **브레이크** `direction="down"` 건수 | 531 | 531 | **0** |
+| **브레이크** 감액 총액 | −282,870원 | −282,870원 | **0원 (완전 불변)** |
+| `basis="interval_floor_blocks_up"` | 51 | 122 | **+71** |
+| `direction="hold"` | 57 | 128 | +71 |
+
+`up → hold`로 뒤집힌 개별 대상 **71건 전건**이 `hold/interval_floor_blocks_up`이다(전수 목록 확보).
+
+**★왜 한쪽만 움직이나 — 코드 구조가 그렇다.** `bid_simulator.py`의 `direction == "down"` 분기는
+`rec_high`·`ceiling_high`, 즉 **상한만** 쓴다. **하한은 브레이크 경로에 아예 들어가지 않는다.**
+그러므로 하한 인하의 효과는 산술적으로 **100% 액셀 억제 쪽**이다.
+
+**★그리고 이 자리는 층 배정이 어긋나 있다.** `bid_simulator.py:155~166`의 자기 주석이 증거다 —
+`# ①방향은 상한(=현행 판정 불변)` 다음에 `# ②크기만 하한으로 누른다`라고 써 놓고, 그 ②가
+`direction = "hold"`로 **①을 뒤집는다**. D-NAO-234 ⓐ가 세운 정의(§6 층 셋 표)는
+「게이트 = 통과/차단 = **상한**」/「크기 = 얼마나 = **하한**」인데, 이 자리는 **크기 층이 통과/차단을
+결정**한다 — 71건에서. 즉 `interval_floor_blocks_up`은 **파일 위치로는 크기 층이지만 묻는 질문으로는
+게이트**다. §6 층 셋 표는 이 항목을 파일 위치로 층C(크기)에 배정했다.
+
+**이 문서는 처분을 지정하지 않는다.** 동작 변경은 D-NAO-231을 되돌리는 것이라 전역 §1 승인 지점 ①
+(Jino)이다. 여기서는 **숫자와 구조 사실만** 박제한다 — 1R P1-1이 「동작 안 바꿈」으로 처분했을 때
+없었던 것이 바로 이 숫자다.
+
+**⓵ 상쇄 여부**: ⓐ 게이트 재배정은 「하한 때문에 게이트가 *더* 조여지는 것」을 막는 방어일 뿐
+**오늘의 prod 대비 액셀을 추가하지 않는다**(재배정 후 게이트는 상한 = 오늘과 동일 동작). 따라서
+오늘 대비 순효과는 위 표 그대로다.
+
+**재현 명령** (읽기 전용):
+```
+scp measure_floor_blocks.py sellc.ohitech.co.kr:/tmp/
+ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python /tmp/measure_floor_blocks.py"
+```
+
+---
+
 ## 작성 자백
 
 - **직접 실측(이 세션이 실행한 명령의 출력)**: §1 4칸 전부, §3 라벨 37종표 전건, §4 월별
@@ -384,6 +438,11 @@ accel_gate:        gate_end "factor_low" · accel_total 221 · brake_total 663
   크기)과 파일:줄을 재확인했다. `bid_simulator.py`(79-228행)·`auto_operator.py`(3085-3420행
   발췌)·`naver_execution_harness.py`(915-940행)·`expansion_pressure.py`(150-170행)·
   `expansion_allocator.py`(270-290행)를 전문 Read로 대조.
+- **★n=43이 직접 실측(2026-08-24 00:4x KST)**: **§9-2 전체** — `measure_floor_blocks.py`·
+  `measure_magnitude.py`를 prod에 올려 `mode=ro` URI로 두 번씩 실행한 출력. 건수·금액·
+  `basis` 분포·뒤집힌 71건 목록 전부 그 출력이다. `bid_simulator.py:150~190`은 prod 배포본을
+  `sed -n`으로 직접 읽어 「down 분기가 상한만 쓴다」를 확인했다. prod 쓰기 0건(임시 스크립트는
+  `/tmp`, 세션 종료 시 삭제).
 - **인용(이 세션이 재실행하지 않은 값)**: §6 실제 변화표의 `factor_low=1.0/factor_high=1.3318`과
   §9 배포 전 기준선 전체 — 위임문이 제공한 2026-08-23 22:5x KST 실측값을 그대로 옮겼다(이
   세션이 curl을 재실행하지 않음, 롤링 창 특성상 재실행 시 값이 소폭 달라질 수 있어 지시대로

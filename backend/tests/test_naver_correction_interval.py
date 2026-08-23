@@ -606,24 +606,31 @@ def test_servo_passes_both_ends_to_the_simulator(monkeypatch):
     monkeypatch.setattr(ao, "_settlement_agg",
                         lambda *a, **k: {"clk": 10, "conv_amt": 1000, "cost": 100})
     monkeypatch.setattr(ao, "_resolve_target_roas", lambda *a, **k: 2.0)
-    monkeypatch.setattr(ao, "_estimate_rank_bid", lambda *a, **k: 1000, raising=False)
+    # ★3R P2-2 상환 — 초판은 **존재하지 않는 이름** `_estimate_rank_bid`를 `raising=False`로
+    #   패치해 사실상 아무것도 안 했다. 실제 호출부는 `_fetch_estimate_rank_bid`
+    #   (auto_operator.py:1666)이므로 estimate 조회가 그대로 돌다 실패했고, simulate_bid까지
+    #   **한 번도 도달하지 못했다.** 그 결과 아래 `if seen:`이 늘 거짓이 되어 단언 2개가 통째로
+    #   실행되지 않았고, 상한 전달을 하한으로 바꿔치는 변이(N2f)가 36 passed로 살아남았다.
+    #   ⇒ 교훈 #353 「공허한 단언」의 세 번째 얼굴. 이번엔 «겹친 픽스처»가 아니라 «안 불린 spy»다.
+    #   패치 이름을 실제 호출부에 맞추고, 아래 `if seen:` 탈출구를 **없앤다** — 도달 자체를 단언한다.
+    monkeypatch.setattr(ao, "_fetch_estimate_rank_bid", lambda *a, **k: (1000, "test-stub"))
 
-    try:
-        ao._estimate_direct_step(
-            None, keyword_id="k1", campaign_id="cmp1", current_bid=100, weighted_rank=Decimal("3"),
-            servo_agg={"group": {}, "campaign": {}, "account": {"clk": 1, "conv_amt": 1}},
-            correction_factor=Decimal("2.0"), window_from=date(2026, 8, 1), window_to=date(2026, 8, 22),
-            cache={}, counter={}, correction_factor_low=Decimal("0.5"),
-            correction_factor_high=Decimal("2.0"),
-        )
-    except Exception:
-        pass  # estimate 조회 등 하위 경로는 관심사가 아니다 — 넘어간 인자만 본다
+    ao._estimate_direct_step(
+        None, keyword_id="k1", campaign_id="cmp1", current_bid=100, weighted_rank=Decimal("3"),
+        servo_agg={"group": {}, "campaign": {}, "account": {"clk": 1, "conv_amt": 1}},
+        correction_factor=Decimal("2.0"), window_from=date(2026, 8, 1), window_to=date(2026, 8, 22),
+        cache={}, counter={}, correction_factor_low=Decimal("0.5"),
+        correction_factor_high=Decimal("2.0"),
+    )
 
-    if seen:  # simulate_bid까지 도달한 경우에만 단언(도달 못 하면 아래 소스 저지선이 받는다)
-        assert seen.get("correction_factor_low") == Decimal("0.5")
-        assert seen.get("correction_factor_high") == Decimal("2.0"), (
-            "상한을 안 넘기면 simulate_bid가 max(1.0, cf)로 유도해 구간 밖 값을 쓴다"
-        )
+    assert seen, (
+        "simulate_bid에 도달하지 못했다 — spy가 안 불렸으면 아래 단언은 «검사»가 아니라 장식이다. "
+        "이 단언이 없으면 조용히 통과하는 것이 초판의 결함이었다(3R P2-2)."
+    )
+    assert seen.get("correction_factor_low") == Decimal("0.5")
+    assert seen.get("correction_factor_high") == Decimal("2.0"), (
+        "상한을 안 넘기면 simulate_bid가 max(1.0, cf)로 유도해 구간 밖 값을 쓴다"
+    )
 
 
 def test_every_live_simulate_bid_call_site_passes_both_ends():
