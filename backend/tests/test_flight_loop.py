@@ -244,7 +244,7 @@ def test_flight_loop_projection_preserves_roas_ratio(db, monkeypatch):
     from app.services.naver_ad import flight_loop as fl
     monkeypatch.setattr(
         fl, "compute_correction_factor",
-        lambda db_, date_to: {"factor": Decimal("1"), "source": "test"},
+        lambda db_, date_to: {"factor": Decimal("1"), "factor_low": Decimal("1"), "factor_high": Decimal("1"), "factor_point": Decimal("1"), "source": "test"},
     )
     db.add(NaverCampaignSettings(campaign_id="cmp-roas", optimizer="ours"))
     db.add(NaverEntity(
