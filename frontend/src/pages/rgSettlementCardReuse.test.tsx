@@ -188,6 +188,41 @@ describe("RocketGrowthSettlement — 주기별 정산 내역 카드 재사용 (�
     expect(screen.getByText("판매수수료 요율의 출처")).toBeTruthy();
   });
 
+  // ★적대 리뷰 1R P1 — 이 사슬이 밟은 「모름이 0으로 접히는」 자리의 **다섯 번째**.
+  //   `has_data`는 «판매일 축 차감액이 0이 아님»으로도 참이 되어(원장 row와 독립) 계정 카드가
+  //   0개인데 ✅ 녹색으로 「정산총액 0원」을 단정했다. RG 정산 성숙도 D+12 · 이 화면은 「어제」
+  //   고정 ⇒ **거의 매일**이 이 상태다. 초판은 가드를 «백엔드가 결코 내지 않는» 분기
+  //   (rg_settlement == null)에 걸어 둬서 아무것도 못 막았다.
+  it("원장 계정 row가 0건이면 «0원»이 아니라 «아직 안 들어왔다»고 말한다 — 1R P1", async () => {
+    h.overview = {
+      ...(makeOverview() as unknown as Record<string, unknown>),
+      rg_settlement: {
+        summary: {
+          total: "0", has_data: true, note: "",
+          deducted: "4550", axis: "sales_date", ad_settlement: "0",
+        },
+        by_account: [],
+      },
+    } as unknown as OverviewResponse;
+    h.optionPnl = OPTION_PNL_BASE;
+    renderSettlement();
+    await waitFor(() => expect(screen.getByText(/아직 안 들어왔다/)).toBeTruthy());
+    expect(screen.getByText(/D\+12/)).toBeTruthy();
+    // ★있어야 할 것과 «없어야 할 것»을 함께 — 옛 결함의 서명은 초록 카드와 「정산총액 0원」이다.
+    expect(screen.queryByText(/RG 정산 비용 — 순이익 반영됨/)).toBeNull();
+    expect(screen.queryByText(/정산총액 0원/)).toBeNull();
+    // 그리고 위 ①②③은 살아 있어야 한다 — 원장이 비었다고 판매일 축까지 죽이면 안 된다.
+    expect(screen.getByText("판매수수료 요율의 출처")).toBeTruthy();
+  });
+
+  it("계정 row가 있으면 그 자백이 «안» 뜬다 — 공허 단언 방지 짝", async () => {
+    h.overview = makeOverview();
+    h.optionPnl = OPTION_PNL_BASE;
+    renderSettlement();
+    await waitFor(() => expect(screen.getByText(/RG 정산 비용 — 순이익 반영됨/)).toBeTruthy());
+    expect(screen.queryByText(/아직 안 들어왔다/)).toBeNull();
+  });
+
   it("응답에 rg_settlement가 없으면 «0원이 아니라 없음»이라고 말한다 (변이ⓒ)", async () => {
     h.overview = makeOverview(false);
     h.optionPnl = OPTION_PNL_BASE;
@@ -196,6 +231,26 @@ describe("RocketGrowthSettlement — 주기별 정산 내역 카드 재사용 (�
     expect(screen.queryByText(/RG 정산 비용 — 순이익 반영됨/)).toBeNull();
     // 「0원」을 단정하는 옛 결함의 서명이 없어야 한다.
     expect(screen.queryByText("0원")).toBeNull();
+  });
+});
+
+// ★1R P2-4가 잡은 «공허 단언» — 「실패하면 옛 값이 남지 않는다」를 단언한다면서 정작 그
+//   케이스에서 overview가 한 번도 채워진 적이 없었다. 진짜로 재려면 **성공 → 실패**로 가야 한다.
+//   1R P2-6(계정 전환 시 직전 계정 카드가 남는다)도 같은 자리에서 함께 잡힌다.
+describe("RocketGrowthSettlement — 실패·계정 전환이 옛 값을 남기지 않는다 (1R P2-4·P2-6)", () => {
+  it("성공해서 카드가 뜬 뒤 계정을 바꿔 실패하면, 옛 계정의 카드가 «사라진다»", async () => {
+    h.overview = makeOverview();
+    h.optionPnl = OPTION_PNL_BASE;
+    renderSettlement();
+    // 1단계: 오픽스로 성공 — 카드가 실제로 떠 있어야 이 테스트가 의미를 갖는다.
+    await waitFor(() => expect(screen.getByText("222,222원")).toBeTruthy());
+    // 2단계: 다음 조회는 실패한다.
+    h.overviewFails = true;
+    fireEvent.click(screen.getByRole("button", { name: "오하이테크" }));
+    await waitFor(() => expect(screen.getByText(/정산 내역을 못 불러왔다/)).toBeTruthy());
+    // ★옛 계정의 금액·계정키가 남아 있으면 안 된다.
+    expect(screen.queryByText("222,222원")).toBeNull();
+    expect(screen.queryByText("COUPANG_WING1")).toBeNull();
   });
 });
 
@@ -210,6 +265,39 @@ describe("CommandCenter — RgSettlementCard 원자리가 그대로다 (계약 �
     // ★정의를 공용 모듈로 옮긴 것이 «이사»가 아니라 «재사용»임을 이 단언이 지킨다:
     //   원자리는 갱신 버튼까지 종전 그대로여야 한다.
     expect(screen.getByRole("button", { name: /RG 정산 갱신/ })).toBeTruthy();
+  });
+
+  // ★1R P2-1·P2-2 — 이 두 분기는 «옮기기 전에도» 아무 테스트가 안 지키고 있었다. 계약 §4 ⓖ가
+  //   재는 것이 「종전대로 렌더된다」이므로, 추출 리팩터가 조용히 뒤집어도 아무도 모르는 상태를
+  //   그대로 두면 ⓖ를 잴 수단이 없다. 추출한 김에 두 분기를 못 박는다.
+  it("차감액이 음수면 «+»와 「(환급)」이 뜬다 — 부호를 찍지 말고 계산해야 하는 자리 (P2-1)", async () => {
+    const ov = makeOverview() as unknown as Record<string, unknown>;
+    (ov.rg_settlement as { summary: Record<string, unknown> }).summary.deducted = "-777777";
+    h.overview = ov as unknown as OverviewResponse;
+    render(<CommandCenter />);
+    await waitFor(() => expect(screen.getByText(/\(환급\)/)).toBeTruthy());
+    expect(screen.getByText(/^\+777,777원/)).toBeTruthy();
+    expect(screen.queryByText(/^−777,777원/)).toBeNull();
+  });
+
+  it("axis=sales_date면 헤드라인 축 문구가 «판매일 축»으로 바뀐다 (P2-2)", async () => {
+    const ov = makeOverview() as unknown as Record<string, unknown>;
+    (ov.rg_settlement as { summary: Record<string, unknown> }).summary.axis = "sales_date";
+    h.overview = ov as unknown as OverviewResponse;
+    render(<CommandCenter />);
+    await waitFor(() =>
+      expect(screen.getByText(/헤드라인은 «판매일 축»/)).toBeTruthy(),
+    );
+    expect(screen.queryByText(/«정산 인식일 축» — 정산 주기 통짜라/)).toBeNull();
+  });
+
+  it("axis=recognition_date면 «정산 인식일 축»으로 뜬다 — 두 분기가 같은 얼굴이면 안 된다 (P2-2 짝)", async () => {
+    h.overview = makeOverview(); // 픽스처 기본이 recognition_date다
+    render(<CommandCenter />);
+    await waitFor(() =>
+      expect(screen.getByText(/«정산 인식일 축» — 정산 주기 통짜라/)).toBeTruthy(),
+    );
+    expect(screen.queryByText(/헤드라인은 «판매일 축»/)).toBeNull();
   });
 });
 
@@ -292,6 +380,23 @@ describe("RocketGrowthPnl — 판매도 광고도 없는 행 접기", () => {
     };
     renderPnl();
     await waitFor(() => expect(screen.getByText("반품난 상품")).toBeTruthy());
+    expect(screen.queryByText("조용한 상품 1")).toBeNull();
+    expect(foldRow().textContent).toContain("1개");
+  });
+
+  // ★1R P2-3 — `isQuiet`의 `ad_spend` 조건을 지워도 초록이었다. 백엔드가 **명시적으로 만드는**
+  //   행이다(`rg_daily_pnl.py`: 광고비만 있는 옵션도 행으로 낸다). 접히면 손익 화면에서 가장
+  //   봐야 할 행(안 팔리면서 광고비만 태우는 옵션)이 사라진다 — 접기가 «은폐»가 되는 자리다.
+  it("판매 0 · 매출 0인데 광고비가 있으면 접지 않는다 — 안 팔리며 돈만 쓰는 행이다 (P2-3)", async () => {
+    h.optionPnl = {
+      ...OPTION_PNL_BASE,
+      options: [
+        opt({ vendor_item_id: "V-ADONLY", name: "광고만 태운 상품", ad_spend: "5000", net_profit: "-5000" }),
+        opt({ vendor_item_id: "V-QUIET-1", name: "조용한 상품 1" }),
+      ],
+    };
+    renderPnl();
+    await waitFor(() => expect(screen.getByText("광고만 태운 상품")).toBeTruthy());
     expect(screen.queryByText("조용한 상품 1")).toBeNull();
     expect(foldRow().textContent).toContain("1개");
   });
