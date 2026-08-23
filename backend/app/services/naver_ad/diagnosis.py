@@ -10,42 +10,79 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.services.naver_ad import account_diagnosis as diag
-from app.services.naver_ad import accel_gate_view, campaign_target_resolver, metrics_aggregator
+from app.services.naver_ad import (
+    accel_gate_view,
+    campaign_target_resolver,
+    correction_interval,
+    metrics_aggregator,
+)
 from app.services.naver_ad.actual_revenue import naver_order_revenue
 
 _CORRECTION_LOOKBACK_DAYS = 30  # D-NAO-21: 계정 보정계수 산출 창(30일 고정)
 
 
-def _as_interval(point: Decimal, **rest) -> dict:
-    """점추정 하나를 안3 «구간 자»로 펼친다 (D-NAO-230).
+def _as_interval(point: Decimal, *, floor: Decimal = correction_interval.CORRECTION_FACTOR_FLOOR, **rest) -> dict:
+    """점추정 하나를 안3 «구간 자»로 펼친다 (D-NAO-230 · 끝값은 D-NAO-234).
 
-    하한 = min(1, 점추정) · 상한 = max(1, 점추정). 1.0은 「보정 없음」(네이버 convAmt를
-    그대로 믿는 것)이고, 그것도 하나의 가정이므로 구간의 한쪽 끝일 뿐이다(계약 §4 안3 ④).
-    min/max로 감싸는 이유: 점추정이 1 미만으로 재확정되어도 「하한이 항상 상향(액셀) 쪽
-    보수값, 상한이 항상 하향(브레이크) 쪽 보수값」이라는 불변식이 깨지지 않게 하기 위해서다.
+    유도식 자체는 `correction_interval.interval_ends`가 정본이다 — **하한 상수와 유도식을
+    이 파일에 다시 적지 않는다.** 예전엔 같은 식이 `bid_simulator`에도 복사돼 있어서,
+    한쪽만 고치면 다른 경로가 옛 하한으로 계속 도는 구조였다.
 
-    `factor`(기존 키)는 **상한**으로 둔다 — 라이브 점추정이 1보다 커서(1.31) 상한 == 현행값이라,
-    **명시적으로 `factor_low`를 고른 소비처만** 동작이 바뀐다(그 목록은 D-NAO-231 결정대로
-    「실쓰기의 크기」 층뿐이다 — `build_diagnosis` docstring 참조).
+    하한 = min(floor, 점추정) · 상한 = max(floor, 점추정).
+    ★**floor는 D-NAO-234로 1.0 → 0.827이 됐다.** 옛 1.0은 「보정 없음」이라는 가정을 하한이라
+    부른 것이었고, inflowPath 실측(ref 95)이 그보다 낮은 정합 측정 0.827을 주면서
+    「하한 1.0은 보수적이지 않다」가 확정됐다. 상한의 정의(채널 전체 ÷ (direct+indirect) =
+    100% 견인 가정의 상계)는 **그대로**다 — 안A는 분자의 정의가 아니라 구간의 끝값을 바꾼다.
+
+    `factor`(기존 키)는 **상한**으로 둔다 — 명시적으로 `factor_low`를 고른 소비처만 동작이
+    바뀐다(그 목록은 `build_diagnosis` docstring 참조).
+
+    ⚠️보정계수 산출 불가(`source="unavailable"`)일 때는 호출자가 `floor=NO_CORRECTION`을
+    넘겨 **퇴화 구간 [1, 1]**을 만든다 — 근거가 없는데 0.827을 씌우면 「근거 없이 매출을
+    17% 깎는」 보정이 되어 계약 §4 금지선 5를 정면으로 어긴다.
     """
-    low = min(Decimal("1"), point)
-    high = max(Decimal("1"), point)
-    return {"factor": high, "factor_low": low, "factor_high": high, "factor_point": point, **rest}
+    low, high = correction_interval.interval_ends(point, floor)
+    return {
+        "factor": high, "factor_low": low, "factor_high": high, "factor_point": point,
+        # ★리뷰 P1-3 — 「실측 기준선이 이 구간에 쓰였는가」는 **어느 끝인지와 무관한 사실**이다.
+        #   값 비교(`factor_low == 0.827`)로 판별하면 점추정<0.827일 때 기준선이 상한으로
+        #   올라가면서 거짓이 되고, 화면이 「근거 없음」이라는 거짓 문장을 그린다.
+        "factor_floor_applied": floor != correction_interval.NO_CORRECTION,
+        **rest,
+    }
 
 
 def _factor_payload(correction: dict) -> dict:
-    """API 응답용 — 구간 양끝을 float로 펼친다 (D-NAO-230 표면 계약, 계약 §5-5).
+    """API 응답용 — 구간 양끝을 float로 펼치고 **하한의 근거**를 같이 싣는다.
 
     ★`factor` 하나만 내보내면 화면이 다시 점추정으로 돌아간다 — 「구간 양끝 병기」가
     이 계약의 표면 요건이므로 세 값(하한·상한·점추정)을 **전부** 내보낸다.
+    ★★D-NAO-234: 값만 내보내면 화면이 「0.827이 어디서 왔나」를 말할 수 없다. 계약 §4
+    금지선 5(가정 병기 없이 새 표면에 내보내지 않는다)의 이행으로 근거 4종
+    (`source`·`window`·`evidence`·`caveat`)과 창 변동폭을 같이 싣는다.
+    ⚠️근거는 **실측 기준선 0.827이 실제로 구간의 한쪽 끝을 이룰 때만** 싣는다. 퇴화 구간
+    [1,1](보정계수 산출 불가)에 근거 문구를 붙이면 화면이 없는 근거를 말하게 된다.
+
+    ★적대 리뷰 P1-3 상환 — 초판 조건은 `factor_low == 0.827`이었다. 그런데 점추정이 0.827
+    **아래로** 재확정되면 하한 자리는 점추정이 차지하고 0.827이 **상한**으로 올라간다
+    (`interval_ends`의 min/max 불변식). 그때 초판 조건은 거짓이 되어 근거가 통째로 빠지고,
+    화면은 「근거 없음 = 계수 산출 불가」라는 **거짓 문장**을 그렸다 — 계수는 산출됐고
+    구간도 퇴화하지 않았는데. 그래서 조건을 «기준선이 어느 끝이든 쓰였는가»로 바꾸고,
+    **어느 끝에 있는지(`factor_floor_end`)를 같이 실어** 화면이 위치를 말할 수 있게 한다.
     """
-    return {
+    payload = {
         **correction,
         "factor": float(correction["factor"]),
         "factor_low": float(correction["factor_low"]),
         "factor_high": float(correction["factor_high"]),
         "factor_point": float(correction["factor_point"]),
     }
+    floor = correction_interval.CORRECTION_FACTOR_FLOOR
+    if correction.get("factor_floor_applied"):
+        payload.update(correction_interval.floor_payload())
+        payload["factor_floor"] = float(floor)
+        payload["factor_floor_end"] = "low" if correction["factor_low"] == floor else "high"
+    return payload
 
 
 def correction_factor(db: Session, date_to: date) -> dict:
@@ -73,17 +110,44 @@ def correction_factor(db: Session, date_to: date) -> dict:
     보정계수 산출 로직을 공유해야 판정 기준이 어긋나지 않는다(공개 함수로 승격, 원래
     비공개였음).
 
-    반환 키(D-NAO-230에서 확장, 기존 `factor`는 하위호환 유지):
+    반환 키(D-NAO-230 확장 · **끝 배정은 D-NAO-234에서 개정**, 기존 `factor`는 하위호환 유지):
       factor      — 상한(하위호환 키). 기존 소비처가 그대로 쓰면 현행 동작.
-      factor_high — 상한. **모든 «후보 선정» 판정**(브레이크·액셀 양쪽)이 쓴다 — D-NAO-231.
-      factor_low  — 하한. **«실쓰기의 크기»를 정하는 층만** 쓴다: 입찰 크기(`bid_simulator`),
-                    증액 가드(`naver_execution_harness`), 확장 배분(`expansion_allocator`·
-                    `expansion_pressure`), 진입 게이트(`auto_operator`).
+      factor_high — 상한. **«후보 선정» + «통과/차단 게이트» 전부**가 쓴다.
+      factor_low  — 하한. **«실쓰기의 크기»를 정하는 연속값 산식만** 쓴다.
       factor_point— 보정 전 점추정 원값(표면 병기·감사용).
+
+    ★★**층은 셋이다 — 둘이 아니라**(D-NAO-234 ⓐ, 계약 §5-Q4):
+
+      | 층 | 질문 | 끝 | 소비처 |
+      |---|---|---|---|
+      | 선정 | 이 대상을 후보에 넣나 | **상한** | 진단 보드 6종(D-NAO-231) |
+      | **게이트** | 통과시키나 차단하나 | **상한** | 증액 가드(`naver_execution_harness` ×3) · 확장압력 갭 게이트(`expansion_pressure`) · 확장배분 own_ratio 제외(`expansion_allocator`) · 정착창 below/ok(`auto_operator`) · deep_ok(`auto_operator`) · ★**입찰 방향 판정(`bid_simulator`의 `direction`)** — D-NAO-236에서 옮김 |
+      | 크기 | 얼마나 쓰나 | **하한** | 입찰 **크기**(`bid_simulator`의 `recommended_bid`) · 서보 경제성 상한(`auto_operator._servo_economic_ceiling`) · estimate 직행 스텝 |
+
+    ★★**D-NAO-236 (Jino 결정 2026-08-24) — 층은 «파일 위치»가 아니라 «묻는 질문»으로 배정한다.**
+    D-NAO-234 ⓐ가 위 표를 세울 때 `bid_simulator`를 통째로 크기 층에 넣었는데, 그 안에는
+    **질문이 다른 코드가 섞여 있었다**: `direction`(올리나 마나 = 게이트)과 `recommended_bid`
+    (얼마나 = 크기). 크기 층 코드가 게이트 판정을 **뒤집고** 있었고, 그래서 하한을 0.827로
+    내리자 **액셀 제안 296→225건(−24.0%)·증액 총액 −30.7%인데 브레이크는 531건·−282,870원으로
+    완전 불변**이었다(n=43 prod 실측, ref 95 §9-2). 대칭이 한쪽으로만 깨진 것이다.
+    ⇒ 방향은 게이트 층(상한)으로 옮기고, 하한은 크기만 누른다. 구간이 현재 입찰을 가로지르면
+    방향을 유지한 채 **최소 한 틱**만 올린다(`basis="interval_floor_min_step"`).
+
+    D-NAO-231은 «선정»과 «크기» 둘로만 갈랐고, 그 사이의 **«게이트»에 배정이 없었다.**
+    배정이 없으니 게이트들은 옛 코드대로 하한을 계속 썼고 — 하한은 게이트에서 «보수적
+    크기»가 아니라 **차단 증가**로 뒤집힌다. ref 94 §6 실측이 그 구멍을 수치로 잡았다:
+    액셀 221→195건(−26) · 대칭 3.005:1 → **3.405:1**. 그래서 D-NAO-234가 하한을 0.827로
+    내리면서 **같은 배포에서** 게이트 층을 상한으로 재배정한다 — 이 재배정 없이 하한만
+    내리는 것이 계약 §4 금지선 2가 금지하는 「자 교정 단독 배포」다.
     """
     earliest_real = diag.earliest_real_data_date(db, date_to, _CORRECTION_LOOKBACK_DAYS)
     if earliest_real is None:
-        return _as_interval(Decimal("1"), source="unavailable", window_revenue=0, window_conv_amt=0)
+        # ⚠️퇴화 구간 [1,1] — 실주문 매출이 아예 없어 계수를 못 만들면 **하한의 근거도 없다.**
+        # 여기에 D-NAO-234의 0.827을 씌우면 근거 없이 매출을 17% 깎는 보정이 된다(금지선 5).
+        return _as_interval(
+            Decimal("1"), floor=correction_interval.NO_CORRECTION,
+            source="unavailable", window_revenue=0, window_conv_amt=0,
+        )
 
     date_from = earliest_real
     revenue = naver_order_revenue(db, date_from, date_to)["revenue"]
@@ -91,7 +155,8 @@ def correction_factor(db: Session, date_to: date) -> dict:
     naver_conv_amt = totals["conv_amt"]
     if not naver_conv_amt:
         return _as_interval(
-            Decimal("1"), source="unavailable", window_revenue=revenue, window_conv_amt=0,
+            Decimal("1"), floor=correction_interval.NO_CORRECTION,  # 같은 이유 — 퇴화 구간
+            source="unavailable", window_revenue=revenue, window_conv_amt=0,
         )
     factor = (Decimal(revenue) / Decimal(naver_conv_amt)).quantize(Decimal("0.0001"))
     return _as_interval(

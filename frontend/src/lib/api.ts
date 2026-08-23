@@ -3155,6 +3155,21 @@ export interface NaverAdDiagnosis {
     window_to?: string;
     window_revenue?: number;
     window_conv_amt?: number;
+    /** ★D-NAO-234 — 하한의 근거. 하한이 실제로 실측값(0.827)일 때만 실린다.
+     *  퇴화 구간 [1,1](보정계수 산출 불가)에는 **안 실린다** — 없는 근거를 화면이 말하지 않게. */
+    factor_low_source?: string;
+    /** 하한을 잰 창(KST). 계수는 창 없이 말하지 않는다(계약 §3-5). */
+    factor_low_window?: string;
+    /** 재현 문서 경로. */
+    factor_low_evidence?: string;
+    /** 하한에 붙박인 [미상] — 플러스스토어 라벨의 SA 소속 미확정(포함 시 1.067). */
+    factor_low_caveat?: string;
+    /** 창 4개에서 잰 하한의 변동폭 — 「고정값이 안 흔들린다」고 말하지 않기 위해. */
+    factor_low_window_spread?: string;
+    /** ★리뷰 P1-3 — 실측 기준선의 값(0.827). */
+    factor_floor?: number;
+    /** ★리뷰 P1-3 — 기준선이 구간의 «어느 끝»에 있는가. 점추정이 기준선보다 낮으면 "high"가 된다. */
+    factor_floor_end?: "low" | "high";
   };
   account_bep_roas: number | null;
   account_target_roas: number | null;
@@ -3179,7 +3194,10 @@ export interface NaverAdAccelGateBucket {
 }
 
 export interface NaverAdAccelGate {
-  /** 실제 게이트가 읽는 끝. 현재 'factor_low' — 하한은 보정을 없애 차단을 최대로 만든다. */
+  /** 실제 게이트가 읽는 끝. 현재 'factor_high' — D-NAO-234 ⓐ로 «게이트 층»(통과/차단)이
+   *  상한으로 옮겨졌다. 하한은 «크기 층»(얼마나 쓰나)만 쓴다. 값을 코드에 박지 말고 이 필드를
+   *  읽어라 — 화면이 배포 동작과 반대를 말하는 재발을 그렇게 막는다(1R P1-3·2R P2-C).
+   *  ★이 주석은 3R P2-4 상환이다: D-NAO-232 시절 문구('factor_low')가 그대로 남아 있었다. */
   gate_end: string;
   gate_note: string;
   /** 보드 창 기준 근사라는 자백 — 화면이 확정값처럼 보이면 안 된다(적대 리뷰 1R P2-2). */

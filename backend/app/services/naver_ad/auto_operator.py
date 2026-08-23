@@ -430,7 +430,10 @@ def _settlement_roas_status(
             f"보정계수 unavailable(source={factor_info.get('source')!r}) — 실주문 매출 부재, "
             "보정ROAS 검증 불가(fail-closed, codex 5R[P1-1])"
         )
-    factor = factor_info["factor_low"]  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+    # ★★D-NAO-234 ⓐ(계약 §5-Q4): 정착창 보정ROAS 검증은 below/ok를 가르는 **판정**이지
+    # 크기가 아니다 ⇒ **상한**. 하한을 쓰면 하한이 내려갈수록 "below"가 더 쉽게 나
+    # 재개·진입이 막힌다 — 액셀이 주는 방향(ref 94 §6, 금지선 2).
+    factor = factor_info["factor_high"]
     roas_corrected = (agg["conv_amt"] / agg["cost"]) * float(factor)
     target_roas = _resolve_target_roas(db, campaign_id)
     if target_roas is None:
@@ -1644,6 +1647,7 @@ def _estimate_direct_step(
     db: Session, *, keyword_id: str, campaign_id: str, current_bid: int, weighted_rank,
     servo_agg: dict, correction_factor: Decimal, window_from: date, window_to: date,
     cache: dict, counter: dict, correction_factor_low: Decimal | None = None,
+    correction_factor_high: Decimal | None = None,
 ) -> dict:
     """파워링크 estimate 직행 스텝(PLAN §2 R2) — 목표순위(현재−1)로 estimate 필요입찰을 받아
     bid_simulator.simulate_bid의 min(경제성 상한, rank_bid)로 최종 목표가를 낸다.
@@ -1679,6 +1683,10 @@ def _estimate_direct_step(
         keyword_row, Decimal(str(target_roas)),
         group_agg=group_agg, campaign_agg=campaign_agg, account_agg=servo_agg["account"],
         correction_factor=correction_factor, correction_factor_low=correction_factor_low,
+        # ★적대 리뷰 P1-2 상환 — 상한도 **명시**해 넘긴다. 안 넘기면 simulate_bid가
+        # `max(1.0, cf)`로 유도하는데, D-NAO-234로 하한이 0.827이 된 뒤엔 점추정<1일 때
+        # 그 유도값 1.0이 **선언된 구간 [0.827, p] 바깥**이라 direction·basis가 달라진다.
+        correction_factor_high=correction_factor_high,
         estimate={"rank_bid": rank_bid},
     )
     target_bid = sim["recommended_bid"]  # min(경제성 상한, estimate rank_bid)
@@ -2335,7 +2343,10 @@ def _deep_expansion_ok(
     factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
     if factor_info.get("source") != "actual_revenue_ratio":
         return False  # 보정계수 unavailable → 무보정 추정으로 과열 진입 금지(fail-closed)
-    factor = Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+    # ★★D-NAO-234 ⓐ(계약 §5-Q4): deep_ok는 «심층 확장에 넣나 마나»의 불리언 게이트다 ⇒ **상한**.
+    # 하한을 쓰면 하한이 내려갈수록 _EX_DEEP_RATIO 통과가 어려워져 심층 확장이 줄어든다
+    # — 액셀이 주는 방향(ref 94 §6, 금지선 2).
+    factor = Decimal(str(factor_info["factor_high"]))
     scored = gave_score.compute_gave_score(
         revenue=Decimal(agg["conv_amt"]) * factor, cost=agg["cost"], bep_roas=Decimal(str(bep_roas)),
     )
@@ -3398,6 +3409,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         weighted_rank=verdict.get("weighted_rank"), servo_agg=servo_agg,
                         correction_factor=servo_correction_factor,
                         correction_factor_low=servo_correction_factor_low,
+                        correction_factor_high=servo_correction_factor,
                         window_from=window_from, window_to=window_to,
                         cache=estimate_cache, counter=estimate_counter,
                     )

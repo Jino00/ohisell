@@ -143,10 +143,17 @@ def test_재료가_없으면_None이지_0이_아니다(boards, target, bep):
 
 
 def test_게이트가_읽는_끝이_페이로드에_명시된다():
-    """화면이 실제 동작과 다른 것을 그리면 안 된다 — 세션 39 적대 리뷰 P1-1이 그 사고였다."""
+    """화면이 실제 동작과 다른 것을 그리면 안 된다 — 세션 39 적대 리뷰 P1-1이 그 사고였다.
+
+    ★★D-NAO-234 ⓐ로 **끝이 뒤집혔다**: 게이트는 «크기»가 아니라 «통과/차단»이므로 상한을 쓴다.
+    이 값과 `GATE_NOTE` 문구와 실제 실행 게이트(`naver_execution_harness`)가 **셋 다 같아야**
+    한다 — 셋 중 하나만 뒤처지면 화면이 배포 동작과 반대인 문장을 말한다(n=39 P1-1·n=40 P1-2).
+    """
     out = _build(_boards(starving=[_row(3.0)]))
-    assert out["gate_end"] == "factor_low"
+    assert out["gate_end"] == "factor_high"
     assert out["factor_low"] == LOW and out["factor_high"] == HIGH
+    assert "상한" in out["gate_note"], "설명 문구가 gate_end와 반대를 말하면 안 된다"
+    assert "하한을 쓰면" in out["gate_note"], "왜 상한인지(차단 증가)까지 화면이 말해야 한다"
 
 
 # ══════════════════════════════════════════════════════════════════

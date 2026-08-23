@@ -158,7 +158,11 @@ def judge_campaign_pressure(db: Session, campaign_id: str, *, today: date) -> di
                 "확장 보류(fail-closed)"
             ),
         }
-    factor = Decimal(str(factor_info["factor_low"]))  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+    # ★★D-NAO-234 ⓐ(계약 §5-Q4): 이 갭 게이트는 «확장할까 말까»(통과/차단)이지 «얼마나
+    # 확장하나»(크기)가 아니다 ⇒ **상한**. 하한을 쓰면 하한이 내려갈수록 EX_PRESSURE_RATIO
+    # 통과가 어려워져 **신규 확장 후보 자체가 줄어든다** — 액셀이 주는 방향이라
+    # 하한 인하와 같은 배포에 이 재배정이 없으면 계약 §4 금지선 2 위반이다(ref 94 §6).
+    factor = Decimal(str(factor_info["factor_high"]))
 
     # ③ 갭 게이트 — gave_score 재사용으로 roas_ratio(=보정ROAS/BEP) 산출(중복 공식 금지).
     gamma = _gamma_for(db, campaign_id)

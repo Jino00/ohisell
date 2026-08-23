@@ -2,23 +2,34 @@
 #
 # 계약: docs/PLAN_naver-profit-yardstick-review.md (승인됨) · 전수표: docs/references/93_*.md
 #
-# ## 이 파일이 지키는 약속 셋
-# ①`correction_factor`는 점추정 하나가 아니라 **구간**을 준다(하한=min(1,p) · 상한=max(1,p)).
-# ②**D-NAO-231(Jino 결정 2026-08-23)**: 「액셀=하한」은 «후보 선정»이 아니라 «실쓰기의 크기»에
-#   적용한다 ⇒ 진단 보드는 **전부 상한**이고, 하한은 실쓰기 층만 쓴다. 이걸 어기면 라이브에서
-#   액셀 후보가 220→195건으로 줄어 브레이크 편중이 3.02:1 → 3.41:1로 벌어진다(실측 2026-08-23)
-#   — 그게 북극성 §7의 「ROAS 방어로의 표류」이자 D-NAO-85(ROAS +7%·매출 −52%)의 볼륨판 재현이고,
-#   계약 §6 금지선 2가 막으려던 바로 그 배포다.
+# ## 이 파일이 지키는 약속 넷
+# ①`correction_factor`는 점추정 하나가 아니라 **구간**을 준다.
+#   ★★**끝값은 D-NAO-234(Jino 결정 2026-08-23)로 개정됐다** — 하한 = `min(0.827, p)`.
+#   옛 하한 1.0은 「보정 없음」을 하한이라 부른 것이지 근거가 아니었고, inflowPath 실측
+#   (ref 95: 「광고>」5종 매출 ÷ direct 전환매출 = 0.8289)이 그보다 낮은 **정합한 측정**을
+#   주면서 「하한 1.0은 보수적이지 않다」가 확정됐다.
+# ②**층은 셋이다 — 둘이 아니다**(D-NAO-234 ⓐ가 D-NAO-231을 개정):
+#     선정=상한 · **게이트(통과/차단)=상한** · 크기=하한.
+#   D-NAO-231은 «선정»과 «크기» 둘로만 갈랐고 그 사이 «게이트»에 배정이 없었다. 배정이 없으니
+#   게이트들이 옛 코드대로 하한을 계속 썼고, 게이트에서 하한은 «보수적 크기»가 아니라
+#   **차단 증가**로 뒤집힌다 — ref 94 §6 실측: 액셀 221→195건 · 대칭 3.005:1 → 3.405:1.
+#   그게 북극성 §7의 「ROAS 방어로의 표류」이자 D-NAO-85(ROAS +7%·매출 −52%)의 볼륨판이다.
 # ③응답이 구간 양끝을 **끝까지 들고 나간다**(표면 계약 §5-5) — 키가 하나라도 빠지면 화면이
 #   점추정으로 되돌아간다(D-NAO-204 `response_model` 키 삭제 사고와 같은 자리).
-from datetime import date
+# ④★**하한의 유도식은 한 곳에만 있다**(`correction_interval`) — 예전엔 `diagnosis`와
+#   `bid_simulator` 두 곳에 복사돼 있어서, 상수를 한쪽만 바꾸면 다른 경로가 옛 하한으로
+#   계속 돌면서 테스트는 양쪽 다 초록이 된다.
+import ast
+from datetime import date, datetime
 from decimal import Decimal
 import pathlib
 
 import pytest
 
-from app.services.naver_ad import bid_simulator, diagnosis
+from app.services.naver_ad import bid_simulator, correction_interval, diagnosis
 from app.services.naver_ad.diagnosis import _as_interval, _factor_payload
+
+FLOOR = correction_interval.CORRECTION_FACTOR_FLOOR  # 0.827 (D-NAO-234)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -27,9 +38,9 @@ from app.services.naver_ad.diagnosis import _as_interval, _factor_payload
 @pytest.mark.parametrize(
     "point,expect_low,expect_high",
     [
-        ("1.3133", "1", "1.3133"),   # 라이브 방향(계수>1): 하한이 「보정 없음」
-        ("1", "1", "1"),             # 폴백: 구간이 한 점으로 접힌다 = 종전과 동일
-        ("0.72", "0.72", "1"),       # ★계수<1로 재확정돼도 «하한=상향 쪽 보수값» 불변식 유지
+        ("1.3133", "0.827", "1.3133"),  # 라이브 방향(계수>1): 하한 = inflowPath 실측(D-NAO-234)
+        ("1", "0.827", "1"),            # ★옛 「1이면 한 점으로 접힘」은 더 이상 참이 아니다
+        ("0.72", "0.72", "0.827"),      # ★계수<0.827로 재확정돼도 «하한=상향 쪽 보수값» 불변식 유지
     ],
 )
 def test_interval_endpoints(point, expect_low, expect_high):
@@ -41,11 +52,64 @@ def test_interval_endpoints(point, expect_low, expect_high):
     assert got["factor_low"] <= got["factor_high"]
 
 
+def test_the_floor_is_the_inflowpath_measurement_not_no_correction():
+    """★D-NAO-234의 본체 — 하한이 「보정 없음(1.0)」이 아니라 **실측값**인가.
+
+    이 단언이 없으면 하한을 슬그머니 1.0으로 되돌려도 위 파라미터 테스트만 고치면 초록이
+    된다. 값과 «그 값이 무엇인가»를 따로 못 박는다.
+    """
+    assert FLOOR == Decimal("0.827")
+    assert FLOOR < correction_interval.NO_CORRECTION, (
+        "하한이 「보정 없음」보다 크면 그건 하한이 아니다 — 실측이 반증한 바로 그 상태다"
+    )
+    assert _as_interval(Decimal("1.3291"))["factor_low"] == FLOOR
+
+
 def test_interval_never_inverts_for_any_point():
     """어떤 점추정이 와도 하한 ≤ 상한이고 점추정은 구간 안에 있다."""
     for p in ["0.01", "0.5", "0.999", "1", "1.001", "2.6", "10"]:
         iv = _as_interval(Decimal(p))
         assert iv["factor_low"] <= iv["factor_point"] <= iv["factor_high"]
+
+
+def test_unavailable_correction_degenerates_to_no_correction_not_to_the_floor(monkeypatch):
+    """★★근거가 없으면 하한도 없다 — 계약 §4 금지선 5.
+
+    실주문 매출이 없어 계수를 못 만드는 경우까지 0.827을 씌우면, 아무 근거 없이 매출을
+    17.3% 깎는 보정이 전 소비처에 걸린다. 그때는 구간이 **[1, 1]로 퇴화**해야 한다.
+    """
+    monkeypatch.setattr(diagnosis.diag, "earliest_real_data_date", lambda *a, **k: None)
+    out = diagnosis.correction_factor(None, date(2026, 8, 23))
+    assert out["source"] == "unavailable"
+    assert out["factor_low"] == Decimal("1") and out["factor_high"] == Decimal("1"), (
+        "근거 없는 하한을 씌우면 안 된다"
+    )
+    assert "factor_low_source" not in _factor_payload(out), (
+        "없는 근거를 화면이 말하게 하면 안 된다"
+    )
+
+
+def test_the_floor_formula_lives_in_exactly_one_place():
+    """★유도식이 두 곳에 복사돼 있으면 한쪽만 고쳐도 테스트가 전부 초록이다(교훈 #348의 값 버전).
+
+    `diagnosis`도 `bid_simulator`도 자기 파일에 하한 상수·유도식을 다시 적지 않는다.
+    """
+    base = pathlib.Path(diagnosis.__file__).parent
+    for fname in ("diagnosis.py", "bid_simulator.py"):
+        src = (base / fname).read_text()
+        # 주석·docstring은 「왜 0.827인가」를 **설명해야** 하므로 문자열 스캔으로는 못 가른다.
+        # ast로 파싱해 docstring을 걷어낸 뒤 **실행되는 코드**만 본다.
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    body.pop(0)
+        code = ast.unparse(tree)
+        assert "min(Decimal('1')" not in code, f"{fname}에 하한 유도식이 복사돼 있다"
+        assert "0.827" not in code, f"{fname}에 하한 상수가 복사돼 있다 — 정본은 correction_interval"
+        assert "correction_interval" in code, f"{fname}이 하한 정본을 안 쓴다"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -56,8 +120,25 @@ def test_factor_payload_carries_every_end_as_float():
     for key in ("factor", "factor_low", "factor_high", "factor_point"):
         assert key in payload, f"{key}가 응답에서 사라지면 화면이 점추정으로 되돌아간다"
         assert isinstance(payload[key], float)
-    assert payload["factor_low"] == 1.0
+    assert payload["factor_low"] == pytest.approx(0.827)
     assert payload["factor_high"] == pytest.approx(1.3133)
+
+
+def test_payload_carries_the_basis_of_the_floor_not_just_its_value():
+    """★D-NAO-234 표면 요건 — 값만 내보내면 화면이 「0.827이 어디서 왔나」를 못 말한다.
+
+    계약 §4 금지선 5: 가정(마지막터치·창·플러스스토어 처분) 병기 없이 새 표면에
+    내보내지 않는다. 근거 문자열이 사라지는 변이를 이 단언이 잡는다.
+    """
+    payload = _factor_payload(_as_interval(Decimal("1.3291"), source="actual_revenue_ratio"))
+    for key in ("factor_low_source", "factor_low_window", "factor_low_evidence",
+                "factor_low_caveat", "factor_low_window_spread"):
+        assert payload.get(key), f"{key}가 없으면 화면이 근거 없는 숫자를 그린다"
+    assert "2026-07-25" in payload["factor_low_window"], "계수는 창과 함께 말한다(계약 §3-5)"
+    assert "플러스스토어" in payload["factor_low_caveat"], (
+        "하한에 붙박인 [미상]을 화면이 말해야 한다 — 포함하면 1.067로 올라간다"
+    )
+    assert "95_inflowpath" in payload["factor_low_evidence"], "재현 문서 좌표가 실려야 한다"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -164,8 +245,18 @@ def test_up_uses_the_lower_end_for_size():
     assert got["economic_ceiling_low"] < got["economic_ceiling_high"], "구간이 접히면 시험이 헛돈다"
 
 
-def test_up_becomes_hold_when_the_floor_cannot_clear_current_bid():
-    """상한은 올리라 하고 하한은 아니라 하면 → 올리지 않는다(현재보다 낮은 값으로 up 금지)."""
+def test_gate_verdict_survives_when_the_floor_cannot_clear_current_bid():
+    """★D-NAO-236 — 구간이 현재 입찰을 «가로지를» 때 게이트 판정은 살아남는다.
+
+    이전 판(D-NAO-231/234)은 여기서 `direction`을 hold로 **뒤집었다**
+    (`basis="interval_floor_blocks_up"`). 그 한 줄이 D-NAO-234의 하한 인하(1.0→0.827) 때
+    **액셀 제안 296→225건(−24.0%)·증액 총액 −30.7%**를 만들었고, 같은 변화에서 브레이크는
+    **531건·−282,870원으로 완전 불변**이었다(n=43 prod 실측 — ref 95 §9-2). 즉 하한 인하의
+    효과가 100% 액셀 억제 쪽으로만 갔다 = 계약 §4 금지선 2(액셀·브레이크 대칭) 위반.
+
+    ⇒ 방향은 게이트 층(상한)이 정하고 **어떤 층도 뒤집지 않는다.** 하한은 크기만 누른다 —
+      구간이 현재를 가로지르면 **최소 한 틱**(10원)만 올리고 상한 추천값으로 캡을 씌운다.
+    """
     high = bid_simulator.affordable_ceiling(
         (bid_simulator.pooled_rpc({"clk": 100, "conv_amt": 300_000}, {"clk": 100, "conv_amt": 300_000},
                                   {"clk": 100, "conv_amt": 300_000}, {"clk": 100, "conv_amt": 300_000})
@@ -178,9 +269,20 @@ def test_up_becomes_hold_when_the_floor_cannot_clear_current_bid():
     current = (low + high) // 2  # 하한 위, 상한 아래
     got = _sim(current, Decimal("1.5"))
     assert got["direction_high"] == "up" and got["direction_low"] == "down"
-    assert got["direction"] == "hold"
-    assert got["basis"] == "interval_floor_blocks_up"
-    assert got["recommended_bid"] == current, "hold는 현재 입찰을 그대로 둔다"
+    # ①게이트 판정이 살아남는다 — 크기 층이 뒤집지 못한다
+    assert got["direction"] == "up", (
+        "게이트(상한)가 up이라 했으면 up이다. hold로 뒤집히면 D-NAO-236 이전으로 회귀한 것이고, "
+        "그 회귀는 하한을 내릴 때마다 액셀을 조용히 없앤다(실측 −24.0%)."
+    )
+    assert got["basis"] == "interval_floor_min_step"
+    # ②크기는 «가능한 최소 인상» — 한 틱 위, 단 상한 추천값을 못 넘는다
+    assert got["recommended_bid"] == min(got["rank_bid"] or high, current + 10), (
+        "구간이 현재를 가로지를 때의 크기는 min(상한 추천값, 현재+10원)이다"
+    )
+    assert got["recommended_bid"] > current, "up이라고 해 놓고 안 올리면 방향과 크기가 모순이다"
+    # ③보수 끝을 그대로 보고한다 — 추천값이 이를 «넘을 수 있다»는 사실이 사후 재구성돼야 한다
+    assert got["economic_ceiling"] == got["economic_ceiling_low"]
+    assert got["direction_low"] == "down", "구간이 가로지른다는 사실 자체가 반환에 남아 있다"
 
 
 def test_down_uses_the_upper_end_so_the_brake_is_gentler():
@@ -237,34 +339,89 @@ def test_build_diagnosis_error_branch_also_carries_the_interval(board_spy, monke
         assert isinstance(out["correction_factor"][key], float)
 
 
-def test_execution_guard_uses_the_lower_end(monkeypatch):
-    """M7 상환 — 증액 가드의 `roas_corrected`가 «하한» 기준인가.
+@pytest.mark.parametrize("target_type", ["keyword", "campaign"])
+def test_execution_guard_gate_uses_the_upper_end_at_runtime(monkeypatch, target_type):
+    """★★D-NAO-234 ⓐ — 증액 가드의 `roas_corrected`가 «상한» 기준인가. **실행해서** 잰다.
 
-    기존 테스트는 전부 `factor=1`(구간이 한 점으로 접힘) 픽스처라 상한/하한을 구별할 수
-    없었다. 여기서는 하한 1 · 상한 2로 벌려 두 끝을 갈라낸다.
+    ⚠️이 테스트는 원래 **소스 grep**이었다(줄에 `factor_low`가 있나만 봤다). 직전 세션
+    적대 리뷰 P2-a가 「소스 grep은 런타임을 검사하지 않는다」고 지적했고, 실제로 ref 94에서
+    **배선 절단 변이가 grep 테스트를 통과한 채 생존**했다. 그래서 두 끝을 벌린 픽스처로
+    `_build_guardrail_context`를 **호출**해 나온 값을 단언한다.
+
+    증액 가드는 «얼마나 올리나»가 아니라 «올려도 되나»를 가르는 게이트다 ⇒ 상한.
+    하한을 쓰면 하한이 내려갈수록 target_roas 미달 판정이 늘어 **차단이 증가**한다.
     """
     from app.services.naver_ad import naver_execution_harness as harness
-    src = pathlib.Path(harness.__file__).read_text()
-    hits = [ln for ln in src.splitlines() if 'context["roas_corrected"]' in ln]
-    assert len(hits) == 3, f"증액 가드 주입 지점이 3곳이어야 한다(실제 {len(hits)})"
-    for ln in hits:
-        assert 'correction["factor_low"]' in ln, (
-            "증액 가드가 상한을 쓰면 「실쓰기 크기만 하한」(D-NAO-231)이 깨진다: " + ln.strip()
+
+    agg = {"cost": 1_000_000, "conv_amt": 2_000_000}  # roas_naver = 2.0
+    low, high = Decimal("0.5"), Decimal("2.0")  # 두 끝을 크게 벌려 어느 쪽을 썼는지 갈라낸다
+    monkeypatch.setattr(harness, "compute_correction_factor",
+                        lambda *a, **k: {"factor_low": low, "factor_high": high, "factor": high})
+    monkeypatch.setattr(harness.account_diagnosis, "keyword_window_agg", lambda *a, **k: agg)
+    monkeypatch.setattr(harness.account_diagnosis, "campaign_window_agg", lambda *a, **k: agg)
+    monkeypatch.setattr(harness.account_diagnosis, "adgroup_window_agg", lambda *a, **k: agg)
+    monkeypatch.setattr(harness.naver_sa_writer, "get_keyword", lambda *a, **k: {"bidAmt": 100})
+    monkeypatch.setattr(harness.naver_sa_writer, "get_campaign", lambda *a, **k: {"dailyBudget": 100})
+    monkeypatch.setattr(harness, "_resolve_target_roas_float", lambda *a, **k: 1.9)
+    monkeypatch.setattr(harness, "_latest_hourly_snapshot_fields", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(harness, "compute_change_cadence", lambda *a, **k: (None, 0))
+    monkeypatch.setattr(harness.guardrail_params, "get_params", lambda *a, **k: {})
+
+    class _P:
+        target_type = None
+        target_id = "t1"
+        campaign_id = "c1"
+        adgroup_id = "g1"
+        proposal_type = "bid_up"
+        approval_source = "console"   # is_auto_exec 판별용(사람 승인 경로)
+        id = 1
+        status = "pending"
+    p = _P()
+    p.target_type = target_type
+
+    ctx = harness._build_guardrail_context(None, p, datetime(2026, 8, 23, 12, 0))
+    assert ctx["roas_corrected"] == pytest.approx(2.0 * float(high)), (
+        "게이트가 하한을 쓰면 하한이 내려갈수록 차단이 늘어 브레이크가 커진다(D-NAO-234 ⓐ) — "
+        f"관측 {ctx['roas_corrected']}"
+    )
+    assert ctx["roas_corrected"] != pytest.approx(2.0 * float(low)), "하한을 쓰고 있다"
+
+
+def test_no_boolean_gate_reads_the_lower_end_anywhere():
+    """★★D-NAO-234 ⓐ — «게이트» 층에 하한이 한 곳도 남아 있으면 안 된다.
+
+    D-NAO-231이 «선정»·«크기» 둘로만 갈랐을 때 그 사이의 «게이트»에 배정이 없었고, 배정이
+    없으니 게이트들이 옛 하한을 계속 썼다. 그 구멍이 ref 94 §6에서 액셀 −26건·대칭
+    3.005→3.405:1로 실측됐다. 새 게이트가 하한을 집어 들면 **같은 구멍이 다시 열린다**.
+
+    ⚠️이 단언은 소스 스캔이다 — 위의 런타임 spy를 «대체»하는 게 아니라, 런타임 spy가 못 도는
+    나머지 게이트에 대한 **회귀 저지선**이다. 새 게이트를 추가하면서 하한을 집으면 여기서 걸린다.
+    """
+    base = pathlib.Path(diagnosis.__file__).parent
+    gate_files = ("expansion_allocator.py", "expansion_pressure.py", "auto_operator.py",
+                  "naver_execution_harness.py")
+    for fname in gate_files:
+        src = (base / fname).read_text()
+        offenders = [
+            ln.strip() for ln in src.splitlines()
+            if ('factor_info["factor_low"]' in ln or 'correction["factor_low"]' in ln)
+            and not ln.strip().startswith("#")
+        ]
+        assert offenders == [], (
+            f"{fname}: 게이트가 하한을 직접 읽고 있다 — 하한은 «크기» 산식에만 쓴다: {offenders}"
         )
 
 
-def test_expansion_and_settlement_gates_use_the_lower_end():
-    """M7 상환 — 확장 배분·진입 게이트 4곳이 하한을 쓰는가(census 93 §3 실쓰기 행)."""
-    targets = {
-        "expansion_allocator.py": 1,
-        "expansion_pressure.py": 1,
-        "auto_operator.py": 2,   # _settlement_roas_status(UP 거부권) · 심층확장 진입
-    }
-    base = pathlib.Path(diagnosis.__file__).parent
-    for fname, expect in targets.items():
-        src = (base / fname).read_text()
-        n = src.count('factor_info["factor_low"]')
-        assert n == expect, f"{fname}: 하한 배선이 {expect}곳이어야 한다(실제 {n})"
+def test_size_layer_still_uses_the_lower_end():
+    """★반대쪽 저지선 — ⓐ 재배정이 «크기» 층까지 상한으로 밀어버리면 안 된다.
+
+    게이트를 상한으로 옮기는 변경이 과하게 번지면 서보 경제성 상한까지 상한이 되어
+    입찰이 +31%(1,030→1,350원) 뛴다. 크기 층은 하한 그대로여야 한다.
+    """
+    src = pathlib.Path(diagnosis.__file__).parent.joinpath("auto_operator.py").read_text()
+    assert 'servo_correction_factor_low = Decimal(str(_cf["factor_low"]))' in src, (
+        "서보 «크기»는 하한이다 — 상한으로 바뀌면 실입찰이 +31% 튄다"
+    )
 
 
 def test_servo_ceiling_uses_the_lower_end():
@@ -296,3 +453,416 @@ def test_simulate_bid_direction_is_unchanged_when_only_the_floor_is_handed_down(
     assert both["economic_ceiling_high"] > floor_only["economic_ceiling_high"], (
         "두 끝을 안 넘기면 상한이 1로 접혀 direction 판정 재료가 달라진다"
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 P1-5 상환 — 게이트 4곳의 «런타임» 커버리지
+#
+# ⚠️왜 필요한가: 기존 저지선은 `'factor_info["factor_low"]'` **문자열**만 세는 소스 스캔이었다.
+#   리뷰어가 `expansion_pressure`를 `factor_info.get("factor_low")`로 바꾸자 **전체 스위트가
+#   기준선과 완전히 동일하게 통과했다**(변이 B18 생존). 문자열이 아니라 «실행된 값»을 잰다.
+#   런타임 커버리지가 있던 곳은 `naver_execution_harness` 3곳뿐이었고, 이 PR이 새로 뒤집은
+#   나머지 4곳은 0이었다.
+# ══════════════════════════════════════════════════════════════════
+_WIDE = {"factor_low": Decimal("0.5"), "factor_high": Decimal("2.0"),
+         "factor": Decimal("2.0"), "factor_point": Decimal("2.0"),
+         "source": "actual_revenue_ratio", "factor_floor_applied": True}
+
+
+def _spy_correction(monkeypatch, module):
+    """구간을 크게 벌린 계수를 주입하고, 그 모듈이 «어느 끝을 집었는지» 값으로 갈라낸다."""
+    monkeypatch.setattr(module.diagnosis, "correction_factor", lambda *a, **k: dict(_WIDE))
+
+
+def test_expansion_pressure_gate_uses_the_upper_end_at_runtime(monkeypatch):
+    """확장압력 갭 게이트 — corrected_revenue가 상한(×2.0) 기준인가. 실행해서 잰다."""
+    from app.services.naver_ad import expansion_pressure as ep
+
+    _spy_correction(monkeypatch, ep)
+    monkeypatch.setattr(ep, "_settlement_window", lambda today: (date(2026, 8, 1), date(2026, 8, 22)))
+    monkeypatch.setattr(ep, "_campaign_settlement_agg",
+                        lambda *a, **k: {"cost": 1_000_000, "conv_amt": 1_000_000, "clk": 500})
+    monkeypatch.setattr(ep, "_resolve_campaign_bep_roas", lambda *a, **k: Decimal("2.0"))
+    monkeypatch.setattr(ep, "_gamma_for", lambda *a, **k: Decimal("1"))
+
+    seen = {}
+    real = ep.gave_score.compute_gave_score
+
+    def _spy(**kw):
+        seen["revenue"] = kw["revenue"]
+        return real(**kw)
+
+    monkeypatch.setattr(ep.gave_score, "compute_gave_score", _spy)
+    ep.judge_campaign_pressure(None, "cmp1", today=date(2026, 8, 23))
+
+    assert seen["revenue"] == Decimal("1000000") * _WIDE["factor_high"], (
+        f"확장압력 게이트가 상한을 안 쓴다 — 관측 {seen['revenue']}"
+    )
+    assert seen["revenue"] != Decimal("1000000") * _WIDE["factor_low"]
+
+
+def test_settlement_roas_gate_uses_the_upper_end_at_runtime(monkeypatch):
+    """정착창 below/ok 판정 — 상한 기준이면 ok, 하한 기준이면 below가 되는 픽스처로 가른다."""
+    from app.services.naver_ad import auto_operator as ao
+
+    _spy_correction(monkeypatch, ao)
+    monkeypatch.setattr(ao, "_settlement_window", lambda today: (date(2026, 8, 1), date(2026, 8, 22)))
+    monkeypatch.setattr(ao, "_settlement_agg",
+                        lambda *a, **k: {"cost": 1_000_000, "conv_amt": 1_000_000, "clk": 500})
+    monkeypatch.setattr(ao, "_resolve_target_roas", lambda *a, **k: 1.5)
+
+    # roas_naver = 1.0 → 상한(×2.0)=2.0 ≥ 1.5 = ok / 하한(×0.5)=0.5 < 1.5 = below
+    status, reason = ao._settlement_roas_status(
+        None, target_type="adgroup", target_id="g1", campaign_id="cmp1", today=date(2026, 8, 23),
+    )
+    assert status == "ok", f"게이트가 하한을 쓰면 below로 뒤집혀 재개·진입이 막힌다 — {status} / {reason}"
+
+
+def test_deep_expansion_gate_uses_the_upper_end_at_runtime(monkeypatch):
+    """deep_ok — 상한이면 통과, 하한이면 차단되는 픽스처."""
+    from app.services.naver_ad import auto_operator as ao
+
+    _spy_correction(monkeypatch, ao)
+    monkeypatch.setattr(ao, "_settlement_window", lambda today: (date(2026, 8, 1), date(2026, 8, 22)))
+    monkeypatch.setattr(ao, "_settlement_agg",
+                        lambda *a, **k: {"cost": 1_000_000, "conv_amt": 1_000_000, "clk": 500})
+    seen = {}
+    real = ao.gave_score.compute_gave_score
+
+    def _spy(**kw):
+        seen["revenue"] = kw["revenue"]
+        return real(**kw)
+
+    monkeypatch.setattr(ao.gave_score, "compute_gave_score", _spy)
+    monkeypatch.setattr(ao.exploration, "resolve_exploration_bep_roas", lambda *a, **k: Decimal("2.0"))
+    ao._deep_expansion_ok(None, "cmp1", "g1", date(2026, 8, 23), 500, {"adgroup:g1": 1.0})
+    assert seen.get("revenue") == Decimal("1000000") * _WIDE["factor_high"], (
+        f"deep_ok가 상한을 안 쓴다 — 관측 {seen.get('revenue')}"
+    )
+
+
+def test_expansion_allocator_gate_uses_the_upper_end_at_runtime(monkeypatch):
+    """확장배분 own_ratio 제외 게이트 — 상한 기준인가."""
+    from app.services.naver_ad import expansion_allocator as ea
+
+    _spy_correction(monkeypatch, ea)
+    monkeypatch.setattr(ea, "_active_shopping_adgroups", lambda *a, **k: [])
+    seen = {}
+    real_dec = ea.Decimal
+
+    # factor를 만들 때 어느 키를 읽었는지 확인 — dict 접근을 감시한다.
+    class _Watch(dict):
+        def __getitem__(self, k):
+            seen.setdefault("keys", []).append(k)
+            return super().__getitem__(k)
+
+    monkeypatch.setattr(ea.diagnosis, "correction_factor", lambda *a, **k: _Watch(_WIDE))
+    monkeypatch.setattr(ea.ctr_alert, "detect_ctr_alerts", lambda *a, **k: {"alerts": []})
+    monkeypatch.setattr(ea, "_settlement_window", lambda today: (date(2026, 8, 1), date(2026, 8, 22)))
+    try:
+        ea.allocate_expansion(None, "cmp1", today=date(2026, 8, 23),
+                              pressure={"expansion_mode": True, "bep_roas": "2.0"})
+    except Exception:
+        pass  # 하위 경로는 이 테스트의 관심사가 아니다 — 계수 키 선택만 본다
+    assert "factor_high" in seen.get("keys", []), f"확장배분이 상한을 안 읽는다 — {seen.get('keys')}"
+    assert "factor_low" not in seen.get("keys", []), "확장배분이 아직 하한을 읽는다"
+    assert real_dec is Decimal
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 P1-3 상환 — 기준선이 «상한» 자리로 올라가도 근거가 살아 있어야 한다
+# ══════════════════════════════════════════════════════════════════
+def test_basis_survives_when_the_floor_becomes_the_upper_end():
+    """점추정 < 0.827이면 기준선이 상한 자리로 올라간다 — 그때도 근거는 실려야 한다.
+
+    초판은 `factor_low == 0.827`로 판별해서 이 경우 근거가 통째로 빠졌고, 화면은
+    「근거 없음 = 계수 산출 불가」라는 **거짓 문장**을 그렸다(계수는 산출됐고 구간도
+    [1,1]이 아닌데). 게다가 그 상태로 0.827이 **근거 병기 0**으로 표면에 나가
+    계약 §4 금지선 5를 정면으로 어겼다.
+    """
+    payload = _factor_payload(_as_interval(Decimal("0.72"), source="actual_revenue_ratio"))
+    assert payload["factor_low"] == pytest.approx(0.72)
+    assert payload["factor_high"] == pytest.approx(0.827)
+    assert payload.get("factor_low_source"), "기준선이 상한 자리여도 근거는 살아 있어야 한다"
+    assert payload["factor_floor_end"] == "high", "화면이 «어느 끝인지»를 말할 수 있어야 한다"
+    assert payload["factor_floor"] == pytest.approx(0.827)
+
+
+def test_floor_end_is_low_in_the_normal_direction():
+    """라이브 방향(점추정>0.827)에서는 기준선이 하한 자리다."""
+    payload = _factor_payload(_as_interval(Decimal("1.3291"), source="actual_revenue_ratio"))
+    assert payload["factor_floor_end"] == "low"
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 P1-2 상환 — 라이브 경로가 «두 끝을 다» 명시해 넘기는가 (런타임 spy)
+#
+# ⚠️초판 주석은 「라이브 3곳은 두 끝을 다 명시해 넘긴다」고 단언했는데 실측은 **0곳**이었다.
+#   그래서 상한이 항상 `max(1.0, cf)`로 유도됐고, 하한이 0.827로 내려간 뒤엔 점추정<1일 때
+#   그 유도값(1.0)이 **선언된 구간 밖**이라 direction·basis·economic_ceiling이 달라진다.
+#   소스 grep이 아니라 «실제로 넘어온 인자»를 본다 — 배선 절단 변이를 잡기 위해서다.
+# ══════════════════════════════════════════════════════════════════
+def test_derived_upper_end_can_escape_the_declared_interval_so_callers_must_pass_it():
+    """왜 명시가 필요한지 — 유도에 맡기면 구간 밖 값이 쓰인다는 사실 자체를 못 박는다."""
+    iv = _as_interval(Decimal("0.9"), source="actual_revenue_ratio")
+    assert iv["factor_high"] == Decimal("0.9")
+    derived_low, derived_high = correction_interval.interval_ends(
+        iv["factor_high"], correction_interval.NO_CORRECTION,
+    )
+    assert derived_high == Decimal("1"), "유도 상한은 1.0으로 접힌다"
+    assert derived_high > iv["factor_high"], (
+        "즉 유도값이 선언된 구간 [0.827, 0.9] 바깥이다 — 그래서 호출자가 명시해야 한다"
+    )
+
+
+def test_servo_passes_both_ends_to_the_simulator(monkeypatch):
+    """서보 실입찰 레인이 simulate_bid에 두 끝을 다 넘기는가 — 인자를 가로채 본다."""
+    from app.services.naver_ad import auto_operator as ao
+
+    seen = {}
+    monkeypatch.setattr(ao.bid_simulator, "simulate_bid",
+                        lambda *a, **kw: seen.update(kw) or {"recommended_bid": None,
+                                                             "economic_ceiling": 0})
+    monkeypatch.setattr(ao, "_resolve_adgroup_id", lambda *a, **k: "g1")
+    monkeypatch.setattr(ao, "_settlement_agg",
+                        lambda *a, **k: {"clk": 10, "conv_amt": 1000, "cost": 100})
+    monkeypatch.setattr(ao, "_resolve_target_roas", lambda *a, **k: 2.0)
+    # ★3R P2-2 상환 — 초판은 **존재하지 않는 이름** `_estimate_rank_bid`를 `raising=False`로
+    #   패치해 사실상 아무것도 안 했다. 실제 호출부는 `_fetch_estimate_rank_bid`
+    #   (auto_operator.py:1666)이므로 estimate 조회가 그대로 돌다 실패했고, simulate_bid까지
+    #   **한 번도 도달하지 못했다.** 그 결과 아래 `if seen:`이 늘 거짓이 되어 단언 2개가 통째로
+    #   실행되지 않았고, 상한 전달을 하한으로 바꿔치는 변이(N2f)가 36 passed로 살아남았다.
+    #   ⇒ 교훈 #354 「공허한 단언」의 세 번째 얼굴. 이번엔 «겹친 픽스처»가 아니라 «안 불린 spy»다.
+    #   (#354는 재번호분 — 초판은 #353이었으나 병행 세션이 origin/main에 먼저 붙였다.)
+    #   패치 이름을 실제 호출부에 맞추고, 아래 `if seen:` 탈출구를 **없앤다** — 도달 자체를 단언한다.
+    monkeypatch.setattr(ao, "_fetch_estimate_rank_bid", lambda *a, **k: (1000, "test-stub"))
+
+    ao._estimate_direct_step(
+        None, keyword_id="k1", campaign_id="cmp1", current_bid=100, weighted_rank=Decimal("3"),
+        servo_agg={"group": {}, "campaign": {}, "account": {"clk": 1, "conv_amt": 1}},
+        correction_factor=Decimal("2.0"), window_from=date(2026, 8, 1), window_to=date(2026, 8, 22),
+        cache={}, counter={}, correction_factor_low=Decimal("0.5"),
+        correction_factor_high=Decimal("2.0"),
+    )
+
+    assert seen, (
+        "simulate_bid에 도달하지 못했다 — spy가 안 불렸으면 아래 단언은 «검사»가 아니라 장식이다. "
+        "이 단언이 없으면 조용히 통과하는 것이 초판의 결함이었다(3R P2-2)."
+    )
+    assert seen.get("correction_factor_low") == Decimal("0.5")
+    assert seen.get("correction_factor_high") == Decimal("2.0"), (
+        "상한을 안 넘기면 simulate_bid가 max(1.0, cf)로 유도해 구간 밖 값을 쓴다"
+    )
+
+
+def test_every_live_simulate_bid_call_site_passes_both_ends():
+    """★배선 저지선 — 라이브 호출부가 `correction_factor_high=`를 실제로 넘기는가.
+
+    (런타임 spy가 닿지 못하는 호출부까지 덮는 회귀 저지선이다. P1-5의 교훈대로 이것만으로는
+    부족하므로 위 spy와 «둘 다» 둔다.)
+
+    ★2R P2-B 상환 — 초판은 `n_high >= n_low - 1`이라 **파일당 배선 1곳 절단**을 통과시켰다
+    (변이 N1·N2가 full suite 기준선과 완전히 동일하게 초록으로 생존). 개수 여유를 없애고
+    **`simulate_bid(` 호출부를 ast로 하나씩 세어** 두 끝이 다 넘어가는지 본다.
+    """
+    base = pathlib.Path(diagnosis.__file__).parent
+    missing = []
+    for fname in ("proposal_pipeline.py", "auto_operator.py"):
+        tree = ast.parse((base / fname).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            # ★변이 N2가 이 자리에서 생존했다 — 서보는 `simulate_bid`를 **직접** 부르지 않고
+            #   `_estimate_direct_step`을 거쳐 전달한다. 호출부를 한 함수 이름으로만 세면
+            #   그 경유 배선을 끊어도 전건 초록이다(「전수에서 세야 하는 건 호출부」의 재현).
+            if name not in ("simulate_bid", "_estimate_direct_step"):
+                continue
+            kw = {k.arg for k in node.keywords if k.arg}
+            if not {"correction_factor_low", "correction_factor_high"} <= kw:
+                missing.append(f"{fname}:{node.lineno} (넘긴 것: {sorted(kw & {'correction_factor', 'correction_factor_low', 'correction_factor_high'})})")
+    assert missing == [], (
+        "simulate_bid 호출부가 두 끝을 다 안 넘긴다 — 안 넘긴 끝은 max(1.0, cf)로 유도돼 "
+        f"선언된 구간 밖 값이 쓰인다: {missing}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★★D-NAO-236 — 하한을 내려도 «액셀 제안 자체»는 안 죽는다
+#
+# 이 자리는 적대 리뷰 P1-1이 지목했고, n=43이 prod에서 수치로 잰 뒤 Jino가 처분한 곳이다.
+#
+#   [옛 동작] 상한이 "up"이라 판정해도, 하한 기준 추천값이 현재 입찰을 못 넘으면
+#            `direction="hold"`(`basis="interval_floor_blocks_up"`)로 **뒤집었다.**
+#   [실측]   하한 1.0 → 0.827에서 (창 08-09~23·후보 884건, ref 95 §9-2)
+#              액셀 up   296 → 225건 (−71건, −24.0%) · 증액 총액 −30.7%
+#              브레이크 down 531 → 531건 (0)         · 감액 총액 **0원 불변**
+#            브레이크가 안 움직인 이유는 `down` 분기가 상한만 쓰기 때문이다 — 하한은
+#            브레이크 경로에 아예 안 들어간다. ⇒ 하한 인하 = 100% 액셀 억제.
+#   [처분]   D-NAO-236(Jino 2026-08-24) — «게이트=상한»은 어떤 층도 뒤집지 못한다.
+#            구간이 현재 입찰을 가로지르면 방향을 유지한 채 **최소 한 틱**만 올린다.
+#
+# 아래 테스트는 그 «비대칭이 사라졌음»을 못 박는다. 옛 동작으로 되돌리면 죽는다.
+# ══════════════════════════════════════════════════════════════════
+def test_lowering_the_floor_no_longer_kills_the_accelerator():
+    """★D-NAO-236 — 같은 키워드가 하한 1.0에서도 0.827에서도 «up»으로 살아남는다."""
+    kw = {"clk": 200, "conv_amt": 400_000, "bid_amt": 900}
+    agg = {"clk": 1000, "conv_amt": 2_000_000}
+
+    def _run(low):
+        return bid_simulator.simulate_bid(
+            kw, Decimal("2.0"), group_agg=agg, campaign_agg=agg, account_agg=agg,
+            correction_factor=Decimal("1.3318"), correction_factor_low=Decimal(low),
+            correction_factor_high=Decimal("1.3318"),
+        )
+
+    before, after = _run("1"), _run("0.827")
+    assert before["direction"] == "up", "옛 하한에서 증액 제안이 살아 있었다"
+    assert after["direction"] == "up", (
+        "★새 하한에서도 살아 있어야 한다 — 여기가 hold로 뒤집히면 D-NAO-236 이전으로 회귀한 "
+        "것이고, prod에서 액셀 71건(−24.0%)이 조용히 사라진다"
+    )
+    assert after["basis"] == "interval_floor_min_step", (
+        "차단이 아니라 «최소 인상»으로 처리됐다는 사실에 이름이 붙어 있어야 세어진다"
+    )
+    assert after["recommended_bid"] > kw["bid_amt"], "up이면 실제로 올라가야 한다"
+    assert after["recommended_bid"] <= before["recommended_bid"], (
+        "★그래도 하한은 «크기»를 누른다 — 새 하한의 추천값이 옛 하한보다 크면 "
+        "보수화가 통째로 사라진 것이다(반대 방향 회귀)"
+    )
+    assert before["direction_high"] == after["direction_high"] == "up", (
+        "★상한 판정(=«선정»)은 양쪽에서 불변이어야 한다 — 그게 D-NAO-231의 「액셀 판정 불변」이다"
+    )
+
+
+def test_lowering_the_floor_moves_accel_and_brake_in_a_comparable_way():
+    """★금지선 2의 회귀 가드 — 하한 인하가 «액셀만» 죽이는 모양으로 되돌아가면 죽는다.
+
+    n=43 실측이 잡은 병은 「액셀 −24%, 브레이크 0%」였다. 그 병의 본질은 «액셀이 hold로
+    사라진다»이므로, 여기서는 **하한을 내려도 방향 분포가 안 바뀐다**를 못 박는다.
+    (크기는 줄어도 된다 — 그게 크기 층의 일이다.)
+    """
+    agg = {"clk": 1000, "conv_amt": 2_000_000}
+    # 현재 입찰을 넓게 훑어 «구간이 가로지르는» 구간을 포함시킨다
+    bids = [200, 400, 600, 800, 900, 1000, 1200, 1500, 2000, 3000]
+
+    def _dirs(low):
+        out = []
+        for b in bids:
+            got = bid_simulator.simulate_bid(
+                {"clk": 200, "conv_amt": 400_000, "bid_amt": b}, Decimal("2.0"),
+                group_agg=agg, campaign_agg=agg, account_agg=agg,
+                correction_factor=Decimal("1.3318"), correction_factor_low=Decimal(low),
+                correction_factor_high=Decimal("1.3318"),
+            )
+            out.append((got["direction"], got["basis"]))
+        return out
+
+    before, after = _dirs("1"), _dirs("0.827")
+    assert [d for d, _ in before] == [d for d, _ in after], (
+        "★하한을 내렸는데 방향 분포가 바뀌었다 = 하한이 «게이트»로 새고 있다. "
+        f"하한 1.0: {before} / 하한 0.827: {after}"
+    )
+    # ★적대 리뷰 P2-4 상환 — 픽스처의 «적합성»을 단언한다. 초판은 `before.count("up") > 0`만
+    #   요구해서 「구간이 가로지르는」 케이스를 한 번도 안 밟는 픽스처(bids=[200])로 줄여도
+    #   통과했다 — 그러면 이 가드는 자기가 겨냥한 자리를 실제로는 안 지나면서 초록이 된다
+    #   (교훈 #354 「공허한 단언」이 픽스처 «퇴화»의 얼굴로 재발한 것).
+    assert any(d == "up" for d, _ in before), "픽스처 전제: 액셀 후보가 실제로 있어야 한다"
+    assert any(b == "interval_floor_min_step" for _, b in after), (
+        "픽스처 전제: «구간이 현재 입찰을 가로지르는» 케이스를 최소 1건 밟아야 이 가드가 "
+        "D-NAO-236의 자리를 실제로 지킨다 — 안 밟으면 항진명제다"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★★D-NAO-236 적대 리뷰 P1-1 상환 — 액셀이 «제안까지» 살아서 도달하는가
+#
+# 리뷰어가 잡은 것: D-NAO-236이 「up이면 economic_ceiling > 0」이라는 **암묵 불변식**을 깼는데
+# (게이트가 상한이라 하한 경제성 상한이 0이어도 up이 산다), `proposal_writer._bid_proposal`의
+# `economic_ceiling <= 0 → negative_keyword` 격상이 그 불변식 위에 세워져 있었다. 그래서
+# **액셀 판정이 「제외 키워드」 제안으로 뒤집혔다** — 저가 대역(대략 current_bid ≲ 110원,
+# SHOPPING 최소입찰 50원 포함)에서 D-NAO-236이 살리려던 건이 hold로 사라지는 대신
+# **죽은 제외 제안으로 바뀔 뿐**이었다.
+#
+# ★이 자리를 아래 세 테스트가 지킨다. 위의 D-NAO-236 테스트 3종은 `bid_simulator` 반환값만
+#   보므로 **이 결함을 원리적으로 못 잡는다** — 전역 §4 「최종 산출물까지 가는 경로를 끊는
+#   변이」가 정확히 이 모양이다(교훈 #355).
+# ══════════════════════════════════════════════════════════════════
+def _sim_with_zero_floor_ceiling():
+    """구간이 현재 입찰을 가로지르면서 «하한 경제성 상한이 0»인 sim을 만든다."""
+    from app.services.naver_ad import bid_simulator as bs
+    agg = {"clk": 1000, "conv_amt": 100_000}  # rpc = 100
+    return bs.simulate_bid(
+        {"clk": 1000, "conv_amt": 100_000, "bid_amt": 70}, Decimal("1"),
+        group_agg=agg, campaign_agg=agg, account_agg=agg,
+        correction_factor=Decimal("0.9"),
+        correction_factor_low=Decimal("0.6"), correction_factor_high=Decimal("1.2"),
+    )
+
+
+def test_accelerator_reaches_the_proposal_even_when_the_floor_ceiling_is_zero():
+    """★액셀이 «제안까지» 산다 — 제외 키워드로 뒤집히지 않는다(D-NAO-236 P1-1)."""
+    from app.services.naver_ad import proposal_writer as pw
+
+    sim = _sim_with_zero_floor_ceiling()
+    # 픽스처 전제를 단언한다 — 이게 없으면 조건이 안 걸린 채 초록이 난다(교훈 #354)
+    assert sim["direction"] == "up", "픽스처 전제: 게이트가 up이라 판정해야 한다"
+    assert sim["economic_ceiling"] <= 0, "픽스처 전제: 하한 경제성 상한이 0이어야 이 결함이 걸린다"
+    assert sim["basis"] == "interval_floor_min_step", "픽스처 전제: 새 분기를 밟아야 한다"
+
+    got = pw._bid_proposal(
+        {"roas_corrected": 1.0, "cost": 1000, "clk": 10}, sim, "cmp-1", "kw-1",
+        target_type="keyword", target_label={"source": "test", "target_roas": 1.0},
+        board_name="starving_winners",
+    )
+    assert got is not None, "액셀 후보가 통째로 사라지면 안 된다"
+    assert got["proposal_type"] == "bid_up", (
+        "★게이트가 up이라 한 건이 negative_keyword로 나가면 액셀 판정이 브레이크 액션으로 "
+        "뒤집힌 것이다 — D-NAO-236이 살리려던 바로 그 건을 다른 방식으로 죽인다"
+    )
+    assert got["target_bid"] == sim["recommended_bid"], (
+        "negative_keyword로 격상되면 target_bid가 None이 된다 — 실행자가 읽을 값이 사라진다"
+    )
+
+
+def test_negative_keyword_escalation_still_fires_for_the_down_case_it_was_built_for():
+    """★반대편 회귀 가드 — 격상을 좁혔다고 «원래 하던 일»까지 없애면 안 된다."""
+    from app.services.naver_ad import proposal_writer as pw
+
+    sim = {"direction": "down", "economic_ceiling": 0, "recommended_bid": 0,
+           "basis": "economic_ceiling", "current_bid": 500,
+           "expected_effect_text": "t", "capability_flags": {}, "rank_bid": None}
+    got = pw._bid_proposal(
+        {"roas_corrected": 0.2, "cost": 50_000, "clk": 100}, sim, "cmp-1", "kw-1",
+        target_type="keyword", target_label={"source": "test", "target_roas": 2.0},
+        board_name="bleeding_losers",
+    )
+    assert got is not None and got["proposal_type"] == "negative_keyword", (
+        "수익성 있는 입찰가가 아예 없는 down 건은 여전히 제외 키워드로 격상돼야 한다"
+    )
+    assert got["target_bid"] is None, "제외 격상엔 입찰 목표가 없다"
+
+
+def test_escalation_is_not_reachable_from_the_up_direction_at_all():
+    """★불변식을 «조건»으로 못 박는다 — 어떤 입찰가에서도 up이 제외로 뒤집히지 않는다."""
+    from app.services.naver_ad import bid_simulator as bs, proposal_writer as pw
+    agg = {"clk": 1000, "conv_amt": 100_000}
+    flipped = []
+    for bid in (10, 30, 50, 60, 70, 80, 90, 100, 110, 130, 200, 500):
+        sim = bs.simulate_bid(
+            {"clk": 1000, "conv_amt": 100_000, "bid_amt": bid}, Decimal("1"),
+            group_agg=agg, campaign_agg=agg, account_agg=agg,
+            correction_factor=Decimal("0.9"),
+            correction_factor_low=Decimal("0.6"), correction_factor_high=Decimal("1.2"),
+        )
+        if sim["direction"] != "up":
+            continue
+        got = pw._bid_proposal(
+            {"roas_corrected": 1.0, "cost": 1000, "clk": 10}, sim, "cmp-1", f"kw-{bid}",
+            target_type="keyword", target_label={"source": "test", "target_roas": 1.0},
+            board_name="starving_winners",
+        )
+        if got is not None and got["proposal_type"] != "bid_up":
+            flipped.append((bid, sim["economic_ceiling"], got["proposal_type"]))
+    assert flipped == [], f"up인데 bid_up이 아닌 제안이 나왔다: {flipped}"

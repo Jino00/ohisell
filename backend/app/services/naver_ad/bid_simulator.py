@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
 
+from app.services.naver_ad import correction_interval
 from app.services.naver_ad.account_diagnosis import LOW_CLICK_THRESHOLD
 
 _Q4 = Decimal("0.0001")
@@ -121,15 +122,26 @@ def simulate_bid(
     # ⇒ ★★D-NAO-231(Jino 결정 2026-08-23)의 규칙을 그대로 적용한다:
     #   **«어느 방향인가»(선정)는 상한으로 정하고, «얼마나»(실쓰기 크기)만 하한으로 누른다.**
     #   - direction: 상한 기준 — 오늘과 **동일한 판정**이다(액셀 판정 불변 = 금지선 2 이행).
-    #   - up 일 때 크기: 하한 상한선(rec_low) — 덜 올린다. 단 rec_low가 현재 입찰 이하면
-    #     「하한에서는 올릴 근거가 없다」는 뜻이므로 올리지 않는다(hold). 현재보다 낮은 값으로
-    #     "up" 하는 모순을 만들지 않기 위한 것이고, 이건 크기 보수화의 필연적 귀결이다.
+    #   - up 일 때 크기: 하한 상한선(rec_low) — 덜 올린다. rec_low가 현재 입찰 이하면
+    #     구간이 현재 입찰을 **가로지르는** 것이고, 그때는 **방향을 뒤집지 않고**(D-NAO-236)
+    #     크기만 최소 한 틱으로 눌러 두 층을 동시에 만족시킨다. 아래 ★D-NAO-236 주석 참조.
+    #     ⚠️2026-08-24 이전 판은 여기서 hold로 뒤집었다(`basis="interval_floor_blocks_up"`) —
+    #       그게 하한 인하 시 액셀 24%를 조용히 없앤 자리다.
     #   - down 일 때 크기: 상한 상한선(rec_high) — 덜 내린다(브레이크는 상한, 안3 원문).
-    # 두 끝을 명시하지 않으면 받은 단일 계수에서 **유도**한다: 하한=min(1,cf) · 상한=max(1,cf)
-    # (`diagnosis._as_interval`과 같은 규칙 — 여러 층을 거쳐 내려오는 배관을 늘리지 않으려고
-    # 여기서 다시 편다). cf=1(기본값·보정 불가 폴백)이면 두 끝이 같아져 종전과 **완전히 동일**하다.
-    cf_low = min(Decimal("1"), correction_factor) if correction_factor_low is None else correction_factor_low
-    cf_high = max(Decimal("1"), correction_factor) if correction_factor_high is None else correction_factor_high
+    # 두 끝을 명시하지 않으면 받은 단일 계수에서 **유도**한다.
+    # ★★D-NAO-234: 유도식은 `correction_interval.interval_ends`가 정본이다 — 예전엔 같은 식이
+    # 여기와 `diagnosis._as_interval` **두 곳**에 복사돼 있었고, 그 상태로 하한 상수를 한쪽만
+    # 바꾸면 이 경로는 옛 하한으로 계속 돌면서 테스트는 양쪽 다 초록이 된다.
+    # ⚠️단 이 폴백은 **근거가 안 실려 온 경로**다 — 그래서 D-NAO-234의 0.827이 아니라
+    # `NO_CORRECTION`(=1.0)을 기준점으로 쓴다. 0.827은 ref 95 창의 실측이고, 그 근거를 아는 것은
+    # `diagnosis.correction_factor` 하나뿐이다. 근거 없이 여기서 17% 깎으면 금지선 5 위반이다.
+    # ⇒ **라이브 경로 3곳(proposal_pipeline ×2 · auto_operator 서보)은 두 끝을 다 명시해 넘긴다**
+    #   (그 배선은 소스 grep이 아니라 spy 테스트가 지킨다 — ref 94에서 배선 절단 변이가 생존했다).
+    _derived_low, _derived_high = correction_interval.interval_ends(
+        correction_factor, correction_interval.NO_CORRECTION,
+    )
+    cf_low = _derived_low if correction_factor_low is None else correction_factor_low
+    cf_high = _derived_high if correction_factor_high is None else correction_factor_high
 
     rank_bid = estimate.get("rank_bid")
 
@@ -155,16 +167,44 @@ def simulate_bid(
 
     dir_low, dir_high = _direction(rec_low), _direction(rec_high)
 
-    # ①방향은 상한(=현행 판정 불변)
+    # ★★D-NAO-236 (Jino 결정 2026-08-24) — «게이트»는 상한이 정하고 **어떤 층도 뒤집지 않는다.**
+    #
+    # 무엇이 바뀌었나: 이전 판은 ②(크기 층)가 `direction = "hold"`로 ①(게이트 층)을 **뒤집었다**
+    # (`basis="interval_floor_blocks_up"`). 그 결과 D-NAO-234가 하한을 1.0→0.827로 내리자
+    # **액셀 제안의 24%가 조용히 사라졌다** — n=43 prod 실측(ref 95 §9-2, 창 08-09~23·후보 884건):
+    #     액셀 up 296건 → 225건 (−71건) · 증액 총액 +244,730원 → +169,610원 (−30.7%)
+    #     브레이크 down 531건 → 531건 (0) · 감액 총액 −282,870원 → −282,870원 (**완전 불변**)
+    # 브레이크가 1원도 안 움직인 이유는 아래 `down` 분기가 `rec_high`/`ceiling_high`, 즉 **상한만**
+    # 쓰기 때문이다 — 하한은 브레이크 경로에 아예 들어가지 않는다. 그래서 하한 인하의 효과는
+    # 산술적으로 **100% 액셀 억제 쪽**이었고, 이는 계약 §4 금지선 2(액셀·브레이크 대칭)와
+    # 정면으로 부딪혔다. 이 트랙의 상습 실패 모드가 정확히 그 모양이다(D-NAO-85: ROAS +7%·매출 −52%).
+    #
+    # ★진단은 「값이 틀렸다」가 아니라 «층 배정이 어긋났다»였다: D-NAO-234 ⓐ가 세운 정의는
+    #   선정=상한 / **게이트(통과·차단)=상한** / 크기(얼마나)=하한 인데, 이 자리는 파일 위치가
+    #   `bid_simulator`(크기 층)라는 이유로 층C에 배정돼 있었다. 그러나 **묻는 질문이 곧 층**이고
+    #   이 코드가 묻던 것은 「올리나 마나」 — 즉 게이트다. 층을 «파일 위치»가 아니라 «질문»으로
+    #   배정한다.
+    #
+    # 두 층을 동시에 만족시키는 법: 게이트(상한)가 「올려도 된다」 했으므로 **up을 유지**하고,
+    # 크기(하한)가 「많이는 아니다」 했으므로 **가능한 최소 인상**(한 틱)만 한다. 상한 추천값을
+    # 넘지 않도록 캡을 씌운다 — 즉 `min(rec_high, current + 10원)`.
+    # ⚠️이 분기의 추천값은 **하한의 경제성 상한(ceiling_low)을 넘을 수 있다.** 그건 은폐할 사실이
+    #   아니라 이 결정의 내용이다: 하한 경제성으로는 정당화되지 않지만 상한 게이트가 통과시킨
+    #   구간이고, 구간이 현재 입찰을 **가로지른다**는 뜻이다. `economic_ceiling`은 보수 끝
+    #   (`ceiling_low`)을 그대로 실어 그 사실이 사후에 재구성되게 둔다(`direction_low`도 함께).
+    #
+    # ①게이트 층 — 방향은 상한이 정한다. 아래 어느 분기도 이 값을 뒤집지 않는다.
     direction = dir_high
     if direction == "up":
-        # ②크기만 하한으로 누른다. 하한에서 현재 입찰을 못 넘으면 올릴 근거가 없다 → hold.
+        # ②크기 층 — «얼마나»만 하한으로 누른다. 방향은 안 건드린다.
         if rec_low > current_bid:
             recommended_bid, economic_ceiling, basis = rec_low, ceiling_low, basis_low
         else:
-            direction = "hold"
-            recommended_bid, economic_ceiling = current_bid, ceiling_low
-            basis = "interval_floor_blocks_up"  # 상한은 올리라 하고 하한은 아니라 한다
+            # 하한이 현재 입찰을 못 넘는다 = 구간이 현재 입찰을 가로지른다.
+            # 예전엔 여기서 hold로 뒤집었다(액셀 소멸). 이제는 **최소 한 틱**만 올린다.
+            recommended_bid = min(rec_high, current_bid + _BID_INCREMENT)
+            economic_ceiling = ceiling_low  # 보수 끝을 그대로 보고한다(추천값이 이를 넘을 수 있다)
+            basis = "interval_floor_min_step"
     elif direction == "down":
         recommended_bid, economic_ceiling, basis = rec_high, ceiling_high, basis_high
     else:

@@ -923,7 +923,13 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
             if agg["cost"] > 0:
                 correction = compute_correction_factor(db, as_of)
                 roas_naver = agg["conv_amt"] / agg["cost"]
-                context["roas_corrected"] = roas_naver * float(correction["factor_low"])  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+                # ★★D-NAO-234 ⓐ(계약 §5-Q4): 증액 가드는 «얼마나 올리나»(크기)가 아니라
+                # «올려도 되나»(통과/차단) 판정이다 ⇒ **상한**. 하한을 쓰면 하한이 내려갈수록
+                # 차단이 늘어 브레이크가 커진다 — D-NAO-231이 「선정=상한·크기=하한」으로 갈랐을 때
+                # «게이트»라는 셋째 층에 배정이 없었고(ref 94 §6), 그 구멍으로 액셀 221→195건·
+                # 대칭 3.005→3.405:1이 새고 있었다. 하한을 0.827로 내리는 배포에서 이 재배정을
+                # 같이 하지 않으면 계약 §4 금지선 2(하한 단독 배포 금지) 위반이다.
+                context["roas_corrected"] = roas_naver * float(correction["factor_high"])
                 context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
             context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
             context["cost_today"], context["daily_budget"] = _latest_hourly_snapshot_fields(
@@ -1002,7 +1008,13 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
             if agg["cost"] > 0:
                 correction = compute_correction_factor(db, as_of)
                 roas_naver = agg["conv_amt"] / agg["cost"]
-                context["roas_corrected"] = roas_naver * float(correction["factor_low"])  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+                # ★★D-NAO-234 ⓐ(계약 §5-Q4): 증액 가드는 «얼마나 올리나»(크기)가 아니라
+                # «올려도 되나»(통과/차단) 판정이다 ⇒ **상한**. 하한을 쓰면 하한이 내려갈수록
+                # 차단이 늘어 브레이크가 커진다 — D-NAO-231이 「선정=상한·크기=하한」으로 갈랐을 때
+                # «게이트»라는 셋째 층에 배정이 없었고(ref 94 §6), 그 구멍으로 액셀 221→195건·
+                # 대칭 3.005→3.405:1이 새고 있었다. 하한을 0.827로 내리는 배포에서 이 재배정을
+                # 같이 하지 않으면 계약 §4 금지선 2(하한 단독 배포 금지) 위반이다.
+                context["roas_corrected"] = roas_naver * float(correction["factor_high"])
                 context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
             context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
             context["cost_today"], context["daily_budget"] = _latest_hourly_snapshot_fields(
@@ -1090,7 +1102,8 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
     if agg["cost"] > 0:
         correction = compute_correction_factor(db, as_of)
         roas_naver = agg["conv_amt"] / agg["cost"]
-        context["roas_corrected"] = roas_naver * float(correction["factor_low"])  # D-NAO-230: 액셀 게이트 → 구간 하한(census 93 §3)
+        # ★★D-NAO-234 ⓐ — 위 두 분기와 같은 이유: 증액 가드는 «통과/차단»이므로 **상한**.
+        context["roas_corrected"] = roas_naver * float(correction["factor_high"])
         context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
 
     context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
