@@ -209,6 +209,38 @@ describe("RocketGrowthPnl — 보존식 블록 (변이③)", () => {
   //   그런데 화면은 앞의 두 칸만 가드가 빠져 「0원」으로 덮고 있었다 — 「모름」과 「0」이 같은
   //   얼굴이 되는 자리다. 값 비교로는 안 잡힌다(0도 «있을 수 있는 값»이라서). 그러니
   //   **null일 때 「0원」이 «없어야» 한다**를 직접 단언한다.
+  // ★완료 QA가 잡은 «네 번째» 발현 — 표 하단 「상품 행 소계」와 보존식 박스의 같은 라벨이
+  //   한 화면에서 다른 숫자를 말했다. 화면이 `rows.reduce(...)`로 «직접 더하는» 두 번째
+  //   진실의 원천을 갖고 있었고, 원장 축 폴백 창에선 전 행 net_profit이 null이라 0으로 접혔다.
+  //   ⇒ 원천을 하나로(백엔드 `conservation.options_net_sum`) 줄였다.
+  it("원장 축 폴백 창에서 표 하단 소계가 보존식 박스와 «같은 숫자»다 — 완료 QA 지적", async () => {
+    h.response = {
+      ...BASE,
+      commission_axis: "recognition_date",
+      fee_trustworthy: false,
+      // 폴백 창: 개별 행은 net_profit을 못 낸다(null)지만 백엔드는 소계를 안다.
+      options: BASE.options.map((o) => ({
+        ...o, fee_logistics: null, fee_sale_fee: null, fee_total: null, net_profit: null,
+      })),
+      conservation: { ...BASE.conservation, options_net_sum: "1915331", ok: true },
+    };
+    renderPnl();
+    // 보존식 줄과 표 하단 소계가 «둘 다» 1,915,331원이어야 한다.
+    const line = await waitFor(() =>
+      screen.getByText((c) => c.includes("상품 행 소계") && c.includes("계정 공통")),
+    );
+    expect(line.textContent).toContain("1,915,331원");
+    // 표 하단 소계 «행»도 같은 숫자여야 한다 — 두 원천이 갈라지면 여기서 깨진다.
+    const subtotalRow = screen
+      .getAllByText("상품 행 소계")
+      .map((el) => el.closest("tr"))
+      .find((tr): tr is HTMLTableRowElement => tr != null);
+    expect(subtotalRow).toBeTruthy();
+    expect(subtotalRow?.textContent).toContain("1,915,331원");
+    // ★그리고 옛 결함의 서명(0원 소계)이 «없어야» 한다.
+    expect(subtotalRow?.textContent).not.toContain("0원");
+  });
+
   // ★라이브가 잡은 세 번째 발현(2026-08-23, 08-22 창) — 배지가 「모름」을 「어긋남」으로
   //   단정했다. 백엔드는 `ok: null`을 정직하게 내는데 프론트가 `cons.ok ? A : B`로 써서
   //   null이 falsy로 접혔다. 「모름」과 「아니다」는 다른 말이다.
