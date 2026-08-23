@@ -324,3 +324,57 @@ def test_vs_lane_routes_through_the_recover_and_refetch_helper():
     assert "_vs_recover_and_refetch" in w._do_run.__code__.co_names, (
         "_do_run이 _vs_recover_and_refetch를 부르지 않는다 — VS 자동 복구 배선이 끊겼다."
     )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 5. verify 프로브가 «실제로 돌아가는가» — 라이브에서만 드러난 결함 (2026-08-23 17:25:38)
+# ════════════════════════════════════════════════════════════════════
+#
+# ★사고: VS 자동 복구의 verify가 `_fetch_vendor_summary(..., retries=0)`을 불렀는데
+#   `for attempt in range(1, 0+1)`이 한 번도 안 돌아 `raise last_exc`에 None이 실렸다 →
+#   `raise None` → **TypeError**. coupang_auth가 그걸 「세션 검사 오류」로 삼켜 복구를
+#   **실패로 오판**했다. 그날 수집이 살아난 건 전혀 다른 경로(로그인 회복 워치의 자동 재개)
+#   덕이었고, 내 verify는 한 번도 참을 말한 적이 없다.
+# ★기존 테스트 전건이 초록이었다 — spy가 `verify`가 **callable인지**만 봤기 때문이다.
+#   「호출 가능하다」와 「호출하면 답을 준다」는 다르다.
+
+class _StubPage:
+    """브라우저 없이 fetch 경로를 태우는 최소 스텁."""
+
+    def __init__(self, url="https://m-wing.coupang.com/tenants/business-insight/sales-analysis",
+                 body='{"saleSummaryByDate": []}'):
+        self.url = url
+        self._body = body
+
+    def goto(self, *a, **k):
+        return None
+
+    def wait_for_timeout(self, *a, **k):
+        return None
+
+    def evaluate(self, *a, **k):
+        return {"status": 200, "body": self._body}
+
+
+def test_fetch_vendor_summary_rejects_zero_retries():
+    """★`retries=0`은 조용한 함정(raise None)이 아니라 **시끄러운 거절**이어야 한다."""
+    with pytest.raises(ValueError, match="1 이상"):
+        w._fetch_vendor_summary(_StubPage(), {}, retries=0)
+
+
+def test_vs_verify_probe_actually_returns_a_verdict(spy_ensure):
+    """★verify를 «호출해 본다» — callable인지만 보면 17:25:38 사고를 못 잡는다.
+
+    복구 직후 앱이 정상 응답하면 True, 로그아웃 상태면 False. 어느 쪽이든 **예외를 던지면
+    안 된다** — 던지면 coupang_auth가 그걸 삼켜 «복구 실패»로 오판한다.
+    """
+    w._recover_vs_session(_StubPage(), {"wing_login_id": "x"})
+    verify = spy_ensure["verify"]
+    assert verify() is True, "정상 응답인데 verify가 참을 말하지 않는다"
+
+
+def test_vs_verify_probe_says_false_when_logged_out(spy_ensure, monkeypatch):
+    """로그아웃 URL이면 False다 — 예외가 아니라 «아직 복구 안 됨»으로 답한다."""
+    monkeypatch.setattr(w, "_is_logged_out", lambda url: True)
+    w._recover_vs_session(_StubPage(), {"wing_login_id": "x"})
+    assert spy_ensure["verify"]() is False

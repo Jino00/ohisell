@@ -880,7 +880,16 @@ def _fetch_vendor_summary(page, cfg: dict, retries: int = 2, window: tuple | Non
     """판매분석 페이지 이동 후 same-origin vendor-summary fetch. 반환: res dict 또는 None(로그아웃).
 
     window=None이면 가장 최근 청크(_vs_payload 기본).
+
+    ★retries는 «시도 횟수»이고 1 이상이어야 한다(2026-08-23 라이브 사고). 0을 주면
+      `for attempt in range(1, 1)`이 **한 번도 안 돌아** 아래 `raise last_exc`에 None이 실리고
+      `raise None` → **TypeError**가 난다. 실제로 VS 자동 복구의 verify가 `retries=0`을 넘겨
+      「세션 검사 오류(자동 로그인 후): TypeError」로 죽었고 복구가 실패로 «오판»됐다
+      (17:25:38 실측 — 수집이 살아난 건 별개 경로(로그인 회복 워치)의 덕이었다).
+      조용한 함정을 남기지 않고 여기서 시끄럽게 거절한다.
     """
+    if retries < 1:
+        raise ValueError(f"_fetch_vendor_summary(retries={retries}) — 시도 횟수는 1 이상이어야 한다")
     page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
     page.wait_for_timeout(3000)  # Cloudflare/Akamai JS 챌린지·세션 안정화
     if _is_logged_out(page.url):
@@ -2723,7 +2732,9 @@ def _recover_vs_session(page, cfg: dict, window: tuple | None = None) -> str:
         login_id=login_id,
         label=f"{_acct_label(cfg)} 판매분석(VS)",
         sso_timeout_s=_RECOVER_SSO_TIMEOUT_S,
-        verify=lambda: _is_success(_fetch_vendor_summary(page, cfg, retries=0, window=window)),
+        # ★retries=1 = «한 번만 시도»(0이 아니다 — 0은 raise None 함정이다, 위 사고 참조).
+        #   여기서의 실패는 재시도할 실패가 아니라 «아직 복구 안 됨»이라 1회면 족하다.
+        verify=lambda: _is_success(_fetch_vendor_summary(page, cfg, retries=1, window=window)),
     )
 
 
