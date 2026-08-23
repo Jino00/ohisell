@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlalchemy import (
     JSON, BigInteger, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer,
-    LargeBinary, Numeric, String, Text, UniqueConstraint, event, func, text,
+    LargeBinary, Numeric, String, Text, UniqueConstraint, event, false, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -4483,3 +4483,315 @@ class ImportDocument(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     shipment: Mapped[ImportShipment] = relationship(back_populates="documents")
+
+
+# ──────────────────────────────────────────────
+# 원가 메뉴 · 표준원가 (구성 × 로트 실적) — D-CPP-53 / 계약 docs/PLAN_cost-menu-standard-cost.md
+#
+# ★이 일곱 테이블은 **순수 추가**다. `product_master.cost_price`와 그 소비처를 한 줄도
+#   건드리지 않는다(계약 §3 금지선) — A′는 읽고 대조만 하고, 덮어쓰기는 계약 C 몫이다.
+#
+# ★S1(이 슬라이스)이 실제로 쓰는 것은 `cost_material` · `cost_material_price` ·
+#   `cost_setting` 셋이다. 나머지 넷(레시피·링크·표준원가)은 **스키마만 먼저 선다** —
+#   계약 §6이 「테이블 + 마이그」를 S1에 몰아둔 이유는 DB 스키마 변경이 배포 순서를
+#   강제하는 유일한 변경이라(`--migrate`), 슬라이스마다 마이그를 내보내면 그 순서 사고의
+#   표면이 세 배가 되기 때문이다.
+#
+# ★미입력·미승인은 «없음»(NULL)이다 — 0으로 채우지 않는다(계약 §2-7). `cost_price`가
+#   NOT NULL default 0이라 「0인가 미입력인가」를 못 가리는 것이 기존 스키마의 결함이고,
+#   그걸 새 층에서 재생산하면 이 층을 만들 이유가 없다.
+# ──────────────────────────────────────────────
+class CostMaterial(Base):
+    """부자재·구성요소 **1종**. grain = 「물건 한 종류」.
+
+    ★`form_factor`·`part`는 **분류·필터용이지 단가 축이 아니다**(계약 §5-1 ★원단 결정).
+    단가가 다른 원단은 «같은 물건의 다른 값»이 아니라 **다른 재단 규격의 다른 물건**이라
+    별도 종으로 등록한다(플립 내부 원단 600 / 폴드 내부 원단 1,000 / 트라이폴드 1,800).
+    두 필드를 단가 축으로 두면 `cost_material_price`의 grain이 «관측 1건»에서 벗어나
+    한 종 아래 서로 다른 물건의 값이 섞인다.
+
+    ★`status`는 `unconfirmed` / `approved` 둘뿐이다. **미승인 종의 단가는 표준원가 계산에
+    쓰지 않는다**(계약 §2-2) — 추론을 확인분과 동일시한 것이 08-10 71건 사고다(교훈 #204).
+
+    ★`excel_label`은 **참고 라벨일 뿐 키가 아니다.** cleaning kit는 원가 정본 엑셀에 대응
+    항목이 없음이 실측으로 확인됐고(계약 §9-3), 그래도 단가는 원장에서 살기 때문에
+    「엑셀 대응 불명」이 계산을 막지 않는다.
+    """
+
+    __tablename__ = "cost_material"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # ★이름이 곧 매칭이 닿는 자리다(계약 §5-1 ★원단 결정 ③) — 그래서 유일하다.
+    #   같은 이름 두 종이 서면 「어느 쪽에 단가가 붙었나」를 화면이 못 말한다.
+    name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    unit: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # ea / 매 / m 등
+    # 부자재 / 원단 / 패키지 / finished_goods(매입 완제품 — 계약 §5-1 ★매입품 결정) 등
+    category: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="unconfirmed", server_default="unconfirmed"
+    )
+    excel_label: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # 원장 품목명 매칭 힌트. **제안까지고 확정은 사람이다**(계약 §5-2).
+    match_rule: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    form_factor: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    part: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)  # 내부/외부/후면/힌지
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    prices: Mapped[list[CostMaterialPrice]] = relationship(
+        back_populates="material", cascade="all, delete-orphan"
+    )
+
+
+class CostMaterialPrice(Base):
+    """단가 **관측 1건**. grain = 「어느 종의 값을, 어느 로트/입력에서 봤나」.
+
+    ★출처는 두 경로뿐이다(계약 §4 채택안): `ledger`(계약 B 원장의 확정 라인에서 파생) ·
+    `manual`(Jino가 화면에서 입력·확인한 값). **엑셀에서 단가가 자동 유입되는 경로는 없다**
+    (계약 §3 금지선) — 엑셀 하드코딩 계수는 실측으로 반증됐고(평균 +7.3% 과소, ref 92),
+    사람이 옮기는 경로가 08-07·08-10 사고 그 자체다.
+
+    ★단가 두 값을 **연결 시점에 확정 저장**한다(계약 B 원칙 계승). 원장 라인의 값을 그대로
+    복사한다 — 여기서 다시 산술하지 않는다. 원장이 재계산되면(reopen→confirm) 이 행은
+    «그때 본 값»으로 남는다: 근거 보존이 이 테이블의 존재 이유다.
+
+    ★`supplier`가 종이 아니라 **단가 행**에 붙는 이유(계약 §5-1 ★공급처): 같은 부자재를
+    여러 곳에서 살 수 있고, 「이 단가가 어디서 산 값인가」를 단가 행이 못 말하면 추적이
+    끊긴다. `note` 자유 텍스트로 흡수하지 않는 것은 공급처별 필터·대조가 구조로 가능해야
+    하기 때문이다. FK·공급처 마스터는 만들지 않는다(문자열 하나).
+    """
+
+    __tablename__ = "cost_material_price"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_id: Mapped[int] = mapped_column(
+        ForeignKey("cost_material.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source: Mapped[str] = mapped_column(String(10), nullable=False)  # ledger / manual
+    # ledger일 때만 채워진다. FK는 걸되 원장 라인이 지워지면 단가 행도 같이 간다 —
+    # 근거가 사라진 파생값이 남는 것이 stale 증거의 정의다.
+    # ⚠**FK 선언만으로는 안 지켜진다**(적대 리뷰 1R P1-1 실증): 이 앱의 SQLite 연결에
+    #   `PRAGMA foreign_keys=ON`이 없어 CASCADE가 강제되지 않고 단가 행이 **고아로 남는다.**
+    #   전역 PRAGMA는 저장소 전체에 영향을 주므로 이번 슬라이스에서 켜지 않고(계약 §9-10 이월),
+    #   대신 조회 시점 재검사가 고아를 「원장 라인 없음」으로 **표면화**한다.
+    import_invoice_line_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("import_invoice_line.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    supplier: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # ★**저장 시점의 원장 신원 스냅샷** (적대 리뷰 1R P1-2). FK를 걸지 않는다 — 관계가 아니라
+    #   «그때 무엇을 보고 복사했나»의 증거이고, 원장이 바뀌어도 따라 바뀌면 안 된다.
+    #   `import_invoice_line_id`만으로는 부족하다: 계약 B `_replace_lines`가 라인을 지우고
+    #   다시 넣으면 **SQLite rowid가 재사용**돼 같은 id가 다른 품목을 가리킨다(실증됨).
+    #   재검사(`services/cost_menu/ledger_check.py`)가 대조하는 «왼쪽»이 이 두 칸이다.
+    linked_item_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    linked_shipment_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # ★nullable이다 — 「단가를 아직 모른다」와 「0원이다」는 다른 사실이다(계약 §2-7).
+    unit_price_ex_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    unit_price_inc_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    effective_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 통관일/입력일
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    material: Mapped[CostMaterial] = relationship(back_populates="prices")
+    # ★로트 좌표(HBL·통관일)가 화면에서 한 번에 보이게 하는 조인. `back_populates`를 걸지
+    #   않는다 — `ImportInvoiceLine`(계약 B 소유)에 필드를 더하는 것은 «순수 추가»가 아니고,
+    #   이 방향의 읽기만 있으면 충분하기 때문이다.
+    invoice_line: Mapped[Optional[ImportInvoiceLine]] = relationship("ImportInvoiceLine")
+
+    __table_args__ = (
+        # ★한 원장 라인이 한 종에 두 번 붙지 않는다. SQL에서 NULL은 서로 같지 않으므로
+        #   `manual` 행(라인 id가 NULL)은 이 제약에 걸리지 않는다 — 수동 입력은 여러 번 가능하다.
+        UniqueConstraint(
+            "material_id", "import_invoice_line_id", name="uq_cost_material_price_ledger_line"
+        ),
+    )
+
+
+class CostRecipe(Base):
+    """구성 헤더 — grain은 **「상품명 × 폼팩터」**다(계약 §0-B, Jino가 키를 바꿨다).
+
+    ★왜 SKU가 아닌가: Jino 원문 *"상품명이 같으면 들어가는 부품도 같거든"* — 승인 대상이
+    944 옵션에서 88 상품명 × 폼팩터로 줄고, 승인된 원가가 상품명→옵션→채널 코드 매핑을 타고
+    채널 코드 2,638개까지 전파된다. 폼팩터가 별도 축인 이유도 Jino 원문이다:
+    *"플립, 폴드 제품은 하나의 상품명에서 단가가 달라져"*.
+
+    ★`form_factor`는 조립형에 필수이고 **수입 완제품·매입품은 «없음»(NULL)**이다 —
+    0이나 자리표시자로 채우지 않는다(계약 §2-7).
+
+    ★`recipe_kind`는 두 값뿐이다(`assembly` / `imported_goods`). 매입 완제품 32건도
+    `assembly` **라인 1줄**로 표현한다(계약 §5-1 ★매입품 결정) — 산술이 Σ의 퇴화형이라
+    판정 분기가 실재하지 않기 때문이다. kind 값은 **산술이 실제로 갈릴 때만** 늘린다.
+
+    ⚠️ S1은 이 테이블을 **만들기만** 한다. 파싱·승인·계산은 S2·S3다.
+    """
+
+    __tablename__ = "cost_recipe"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_name: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
+    form_factor: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="draft", server_default="draft"
+    )
+    source: Mapped[str] = mapped_column(  # excel / manual
+        String(10), nullable=False, default="manual", server_default="manual"
+    )
+    recipe_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="assembly", server_default="assembly"
+    )
+    # 파싱 이상(계약 §9-4·§9-9)을 초안에 실어 승인 단계에서 사람이 처분한다 — 자동 판정 금지.
+    anomaly_flag: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    lines: Mapped[list[CostRecipeLine]] = relationship(
+        back_populates="recipe", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        # ⚠️ SQL에서 NULL끼리는 같지 않다 — `form_factor`가 NULL인 행(수입 완제품·매입품)은
+        #   이 제약이 **중복을 막지 못한다**. 상품명 단독 중복은 승인 화면이 판정한다.
+        UniqueConstraint("product_name", "form_factor", name="uq_cost_recipe_name_form"),
+    )
+
+
+class CostRecipeLine(Base):
+    """구성 한 줄.
+
+    ★`quantity`는 **매수**다(3매 제품 = 3 — 원가표의 「매입」 열이 이 값이다).
+    Jino 확인(2026-08-22): *"필름을 대량으로 조아테크에서 구매해서 우리가 제품에 따라서
+    1장제품도 만들고 2장 제품도 만들어."* 매수는 상품명에 인코딩돼 있으므로(계약 §0-B)
+    **같은 원단·다른 매수 = 다른 상품명·다른 레시피**이지 별도 축이 아니다.
+
+    ★수입 완제품 라인은 `material_id` 대신 `ledger_item_name`(원장 품목명)을 참조한다 —
+    강화유리처럼 단가가 원장 라인에서 직접 파생되는 것은 `cost_material` 종을 거치지 않는다.
+    **둘 중 정확히 하나만 채워진다**(판정은 서비스층 — 훅·DB 제약이 아니라 코드가 본다).
+    """
+
+    __tablename__ = "cost_recipe_line"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recipe_id: Mapped[int] = mapped_column(
+        ForeignKey("cost_recipe.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    material_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("cost_material.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    ledger_item_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    recipe: Mapped[CostRecipe] = relationship(back_populates="lines")
+
+
+class CostRecipeLink(Base):
+    """SKU(옵션) 1건이 어느 레시피에 닿는가 — grain = SKU.
+
+    ★폼팩터를 **상품명이 아니라 옵션(기종)이 정하므로**(계약 §0-B: 한 상품명이 플립·폴드
+    옵션을 함께 담는 실례가 매핑 정본에 있다) 상품명 층만으로는 도달이 안 된다. 이 층이
+    그 분류를 담는다.
+
+    ★`internal_sku`는 **문자열 참조**다 — FK를 걸지 않는다(계약 B와 같은 이유: 원가 층
+    미접촉). 채널 코드 도달은 기존 `product_channel_mapping`을 **소비**한다.
+
+    ⚠️경계: 이 계약은 링크 없는 SKU를 「미연결 — 계산 안 함」으로 **표면화까지만** 하고
+    커버리지·충돌의 판정·수리는 하지 않는다 → 소관: `track_product-connection-map.md`.
+    """
+
+    __tablename__ = "cost_recipe_link"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    internal_sku: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    recipe_id: Mapped[int] = mapped_column(
+        ForeignKey("cost_recipe.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="draft", server_default="draft"
+    )
+    source: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="manual", server_default="manual"
+    )
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("internal_sku", "recipe_id", name="uq_cost_recipe_link_sku_recipe"),
+    )
+
+
+class CostStandard(Base):
+    """표준원가 계산 결과 — grain = **레시피 1건**.
+
+    ★SKU가 아니라 레시피인 이유(계약 §5-1): 같은 레시피의 SKU들은 값이 같다(Jino 원문 ①).
+    SKU별 행 944벌은 근거 없는 복제다. SKU별 표시·`cost_price` 격차는 보드가 링크 조인으로
+    계산해 **표시만** 한다(저장 안 함).
+
+    ★`breakdown`은 라인별 단가×수량 내역(JSON 문자열)이다 — «계산되는 방법이 나오는» 화면의
+    원료이자 근거 보존이다. 재계산은 **쓰기 시점**에 한다(로트 확정·레시피 승인·수동 단가
+    입력·설정 변경) — 읽기 시점 계산은 계산 시점 값이 안 남아 채택하지 않는다(계약 §5-2).
+
+    ★두 값(ex/inc)을 다 저장한다 — 기준이 바뀌어도 재계산 없이 표시만 갈아끼우기 위해서다.
+    """
+
+    __tablename__ = "cost_standard"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recipe_id: Mapped[int] = mapped_column(
+        ForeignKey("cost_recipe.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    price_rule: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="latest", server_default="latest"
+    )
+    # ★nullable — 「단가가 하나라도 미확정이라 계산 못 함」과 「0원」은 다른 사실이다(계약 §2-7).
+    std_cost_ex_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    std_cost_inc_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    breakdown: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("recipe_id", "price_rule", name="uq_cost_standard_recipe_rule"),
+    )
+
+
+class CostSetting(Base):
+    """설정 1키.
+
+    ★`confirmed`가 이 테이블의 전부다 — **「법정 기본값이라 이 값이다」와 「우리가 신고한
+    값이 이것이다」는 다른 사실**이고, 그 차이가 화면에 안 보이면 시스템이 모르는 것을 아는
+    척하게 된다(계약 §9-1). 초기 2행:
+      · `valuation_method` = `fifo`, **confirmed=False** — 법인세법 시행령 §74④의 **무신고 시
+        법정 기본값**일 뿐이다. 우리 신고 내역(재고자산 평가조정명세서 「③신고방법」 칸)은
+        미확인이다. 「선입선출이 우리 신고 방법」이라고 확정 기재하는 것은 금지선(계약 §3).
+      · `standard_price_rule` = `latest`, confirmed=True — 표준원가(층1)는 7.14의 표준원가법이지
+        법정 재고 평가(§74·계약 C)가 아니라, «실제와 유사»하기만 하면 되고 최신 로트가
+        실측상 실제에 가장 가깝다(계약 §4).
+    """
+
+    __tablename__ = "cost_setting"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    value: Mapped[str] = mapped_column(String(200), nullable=False)
+    # ★Boolean에 정수 리터럴을 쓰지 않는다(교훈 #341) — `false()`가 방언별로 옳게 컴파일된다.
+    confirmed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
