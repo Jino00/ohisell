@@ -140,7 +140,14 @@
 
 ## 2-3b. 착지
 
-(Step 6에서 채움)
+- **완료 단계**: 커밋 → push → PR **#381** → 리뷰 **생략(기록물만)** → **머지 완료**
+- **멈춘 단계**: **없음**
+- **재개 명령**: 해당 없음
+- **좌표**: 커밋 `ad78b5a1` · PR **#381** · 머지 `96ff1cff` · 브랜치 `feat/yardstick-attribution`
+- **리뷰 판정**: ⚠️ **리뷰 생략: 기록물만** — `.claude/memory/chains/pao-논의.jsonl` · `.claude/memory/HANDOFF_yardstick-attribution-contract_20260823.md` · `docs/contracts/CONTRACT_yardstick_attribution.md` · `docs/tracks/active/track_naver-ad-optimization.md` (코드 0파일, 전역 §6 기록물 예외)
+- ⚠️ **`safe_merge.sh 381 --force` 자백**: CI 3잡 전부 `steps=0` · 1~3초 만료 = **결제정지로 러너 미부착**이지 테스트 실패가 아니다(직접 `gh api .../jobs/<id> --jq '.steps|length'`로 확인). 기록 `$TMPDIR/safe_merge.log`
+- **정정 경로**: `git revert -m 1 96ff1cff` (force-push 안 씀)
+- **배포**: **없음** — 코드 변경 0파일이라 배포할 것이 없다
 
 ---
 
