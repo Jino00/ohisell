@@ -360,10 +360,19 @@ class KpiEvidenceTotals(BaseModel):
 
 
 class KpiEvidenceChecks(BaseModel):
+    """카드 4칸 각각에 대해 화면이 스스로 찍는 ✓/✗.
+
+    ★**네 칸이 전부 자기 배지를 가져야 한다**(계약 §2-3 「검산식은 항상 카드 값과 대조해
+      ✓/✗를 화면에 찍는다」). 초판은 이익률만 빠져 있었고, 그래서 이익률 탭에서는
+      「분자·분모가 카드와 같은가」를 **사람 눈에 맡기고 있었다** — 다른 세 탭이 스스로 찍는
+      그 판정을 한 칸만 안 한 것이다. 칸을 늘릴 땐 `frontend/src/pages/KpiEvidence.tsx`의
+      그 탭에 배지를 실제로 «그리는» 곳까지 가야 한다(여기까지만 하면 값은 있고 화면은 없다).
+    """
     revenue_matches: bool
     net_matches: bool
     order_count_matches: bool
     net_fully_explained: bool
+    profit_rate_matches: bool
 
 
 class KpiEvidence(BaseModel):
