@@ -10,7 +10,7 @@
 //
 // ★「없음」은 「0」이 아니다(계약 §2-7). 단가 표시는 전부 `formatCostWon`을 지난다 —
 //   `null`은 「—」이고, 그 자리에 0원을 그리면 미입력이 확정값으로 둔갑한다.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   addCostManualPrice,
@@ -499,6 +499,188 @@ export function RecipeStatusBadge({ recipe }: { recipe: CostRecipe }) {
   );
 }
 
+/** `.xlsx`인지 그 자리에서 판별한다. 서버 400까지 가기 전에 화면이 먼저 사유를 말한다.
+ *
+ * ★사유는 「무엇을 해야 하는지」를 같이 말한다(교훈 #349 — 사유가 틀리면 사람이 틀린 일을 한다).
+ * 확장자만 보고 파일명을 그대로 되돌려줘 「받은 것이 무엇인지」가 사람 눈에 바로 보이게 한다. */
+export function validateCostExcelFile(file: File): string | null {
+  if (!file.name.toLowerCase().endsWith(".xlsx")) {
+    return `.xlsx 파일이 아닙니다 (받은 것: ${file.name}) — 엑셀에서 「다른 이름으로 저장」 → 파일 형식을 xlsx로 바꿔 다시 올리세요.`;
+  }
+  return null;
+}
+
+/** 파일 크기를 KB/MB로 사람이 읽게 바꾼다. */
+export function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${bytes}B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)}KB`;
+  return `${(kb / 1024).toFixed(2)}MB`;
+}
+
+/** 「초안 만들기」가 왜 비활성인지 — 흐려지기만 하면 사람은 무엇을 해야 할지 모른다. */
+export function importDisabledReason(cost: File | null, mapping: File | null): string | null {
+  if (!cost && !mapping) return "엑셀 2종을 모두 고르세요 — 원가 정본 · 매핑 정본";
+  if (!cost) return "원가 정본을 아직 고르지 않았습니다";
+  if (!mapping) return "매핑 정본을 아직 고르지 않았습니다";
+  return null;
+}
+
+/** 카드형 드롭존 하나 — 클릭·드래그·키보드 셋 다로 파일을 고를 수 있다.
+ *
+ * ★숨은 `<input type="file">`의 `aria-label`은 그대로 유지한다 — 접근성·기존 테스트 훅이다.
+ * 카드 자체는 `role="button"` + `tabIndex`로 Enter/Space 선택을 받는다. */
+function CostExcelDropZone({
+  slot,
+  title,
+  sheetHint,
+  exampleHint,
+  ariaLabel,
+  file,
+  error,
+  busy,
+  onSelect,
+  onClear,
+}: {
+  slot: "cost" | "mapping";
+  title: string;
+  sheetHint: string;
+  exampleHint: string;
+  ariaLabel: string;
+  file: File | null;
+  error: string | null;
+  busy: boolean;
+  onSelect: (file: File) => void;
+  onClear: () => void;
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const openPicker = () => {
+    if (busy) return;
+    inputRef.current?.click();
+  };
+
+  return (
+    <div
+      role="button"
+      tabIndex={busy ? -1 : 0}
+      aria-label={`${title} 선택 영역 — ${sheetHint}`}
+      data-testid={`cost-dropzone-${slot}`}
+      onClick={openPicker}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openPicker();
+        }
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!busy) setDragOver(true);
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragOver(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragOver(false);
+        if (busy) return;
+        const f = e.dataTransfer.files?.[0];
+        if (f) onSelect(f);
+      }}
+      className={`relative flex flex-col gap-1 rounded-md border-2 border-dashed p-3 select-none ${
+        busy ? "cursor-not-allowed" : "cursor-pointer"
+      } transition-colors ${
+        error
+          ? "border-red-300 bg-red-50"
+          : dragOver
+            ? "border-blue-400 bg-blue-50"
+            : busy
+              ? "border-gray-200 bg-gray-50"
+              : "border-gray-300 bg-gray-50 hover:border-blue-300 hover:bg-blue-50"
+      }`}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".xlsx"
+        aria-label={ariaLabel}
+        className="sr-only"
+        disabled={busy}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onSelect(f);
+          // 같은 파일을 다시 골라도 onChange가 뜨도록 값을 비운다.
+          e.target.value = "";
+        }}
+      />
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium text-gray-700">{title}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 shrink-0">
+          .xlsx만
+        </span>
+      </div>
+      <div className="text-[11px] text-gray-500">{sheetHint}</div>
+
+      {file ? (
+        <div className="mt-1 flex items-center justify-between gap-2 rounded border bg-white px-2 py-1.5">
+          <div className="min-w-0">
+            <div className="text-xs text-gray-800 truncate" title={file.name}>
+              {file.name}
+            </div>
+            <div className="text-[11px] text-gray-400">{formatFileSize(file.size)}</div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              className="text-[11px] text-blue-600 hover:underline disabled:opacity-40"
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                openPicker();
+              }}
+            >
+              바꾸기
+            </button>
+            <button
+              type="button"
+              className="text-[11px] text-gray-500 hover:underline disabled:opacity-40"
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClear();
+              }}
+            >
+              지우기
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="text-[11px] text-gray-400 truncate">예: {exampleHint}</div>
+          <div className={`mt-0.5 text-[11px] ${dragOver ? "text-blue-600" : "text-gray-400"}`}>
+            {dragOver ? "여기에 놓으세요" : "클릭하거나 파일을 끌어다 놓으세요"}
+          </div>
+        </>
+      )}
+
+      {error ? (
+        <div
+          className="mt-1 text-[11px] text-red-700"
+          data-testid={`cost-dropzone-${slot}-error`}
+        >
+          ⚠ {error}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** 두 엑셀 업로드. **아무것도 승인하지 않는다**는 것을 화면이 먼저 말한다. */
 export function RecipeImportPanel({
   busy,
@@ -511,35 +693,75 @@ export function RecipeImportPanel({
 }) {
   const [cost, setCost] = useState<File | null>(null);
   const [mapping, setMapping] = useState<File | null>(null);
+  const [costError, setCostError] = useState<string | null>(null);
+  const [mappingError, setMappingError] = useState<string | null>(null);
+
+  const handleSelect = (slot: "cost" | "mapping", file: File) => {
+    const problem = validateCostExcelFile(file);
+    if (slot === "cost") {
+      setCostError(problem);
+      setCost(problem ? null : file);
+    } else {
+      setMappingError(problem);
+      setMapping(problem ? null : file);
+    }
+  };
+
+  const disabledReason = importDisabledReason(cost, mapping);
+
   return (
-    <section className="border rounded-md p-4">
+    <section
+      className="border rounded-md p-4"
+      // ★실수로 카드 밖에 떨어뜨려도 브라우저가 그 파일을 열어 페이지를 이탈하지 않게 한다.
+      //   카드 밖은 조용히 무시한다 — 카드 안의 드롭은 카드가 stopPropagation으로 먼저 받는다.
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => e.preventDefault()}
+    >
       <h2 className="text-sm font-semibold text-gray-700">엑셀 2종 업로드 → 구성 초안</h2>
       <p className="text-xs text-gray-500 mt-1">
         파싱은 <b>구성(부자재 목록·수량)</b>까지다 — 엑셀의 단가는 <b>참고값</b>으로만 실리고,
         승인·채택을 눌러야 단가가 된다(계약 §3). 이미 승인된 레시피는 덮지 않는다.
       </p>
-      <div className="mt-3 grid gap-2 text-xs">
-        <label className="flex items-center gap-2">
-          <span className="w-28 text-gray-600">원가 정본</span>
-          <input
-            type="file"
-            accept=".xlsx"
-            aria-label="원가 정본 파일"
-            onChange={(e) => setCost(e.target.files?.[0] ?? null)}
-          />
-        </label>
-        <label className="flex items-center gap-2">
-          <span className="w-28 text-gray-600">매핑 정본</span>
-          <input
-            type="file"
-            accept=".xlsx"
-            aria-label="매핑 정본 파일"
-            onChange={(e) => setMapping(e.target.files?.[0] ?? null)}
-          />
-        </label>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <CostExcelDropZone
+          slot="cost"
+          title="원가 정본"
+          sheetHint="「제품 원가표」 시트"
+          exampleHint="MD_원가 계산_….xlsx"
+          ariaLabel="원가 정본 파일"
+          file={cost}
+          error={costError}
+          busy={busy}
+          onSelect={(f) => handleSelect("cost", f)}
+          onClear={() => {
+            setCost(null);
+            setCostError(null);
+          }}
+        />
+        <CostExcelDropZone
+          slot="mapping"
+          title="매핑 정본"
+          sheetHint="「원가 매핑」 시트"
+          exampleHint="ohisell_mapping_template_….xlsx"
+          ariaLabel="매핑 정본 파일"
+          file={mapping}
+          error={mappingError}
+          busy={busy}
+          onSelect={(f) => handleSelect("mapping", f)}
+          onClear={() => {
+            setMapping(null);
+            setMappingError(null);
+          }}
+        />
       </div>
+
+      {disabledReason ? (
+        <div className="mt-2 text-xs text-amber-700" data-testid="import-disabled-reason">
+          {disabledReason}
+        </div>
+      ) : null}
       <button
-        className="mt-3 text-xs px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-40"
+        className="mt-2 text-xs px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-40"
         disabled={busy || !cost || !mapping}
         onClick={() => cost && mapping && onImport(cost, mapping)}
       >
