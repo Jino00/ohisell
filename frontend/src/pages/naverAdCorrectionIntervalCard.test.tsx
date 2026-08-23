@@ -133,6 +133,7 @@ describe("D-NAO-21 보정계수 카드 — 구간 자 표면(D-NAO-230 §5-5)", 
   // ★★D-NAO-234 표면 요건 — 값 옆에 «근거»가 붙는가(계약 §6-5).
   it("하한의 근거·창·[미상]을 화면이 말한다 — 숫자만 그리면 「0.827이 어디서 왔나」가 사라진다", async () => {
     h.data = diagnosis({ factor: 1.3291, factor_low: 0.827, factor_high: 1.3291, factor_point: 1.3291,
+      factor_floor: 0.827, factor_floor_end: "low",
       factor_low_source: "inflowpath_ad_prefix_over_direct",
       factor_low_window: "2026-07-25~2026-08-23",
       factor_low_evidence: "docs/references/95_inflowpath_yardstick_census_20260823.md",
@@ -152,6 +153,9 @@ describe("D-NAO-21 보정계수 카드 — 구간 자 표면(D-NAO-230 §5-5)", 
     expect(basis).toMatch(/플러스스토어/);     // 하한에 붙박인 [미상]
     expect(basis).toMatch(/1\.067/);           // 그 [미상]을 포함하면 얼마가 되나
     expect(basis).toMatch(/0\.8289~0\.8862/);  // 「고정값이 안 흔들린다」고 말하지 않는다
+    // ★2R 변이 N9 상환 — 「(실측 기준선 ×0.8270)」 렌더를 지워도 전건 초록이었다.
+    //   값은 API에 실려 있는데 화면에서만 사라지는 자리 = 「표방↔실배선 괴리」의 씨앗.
+    expect((await screen.findByTestId("factor-floor-value")).textContent).toContain("0.8270");
   });
 
   // ★★적대 리뷰 P1-3 — 점추정<0.827이면 기준선이 «상한» 자리로 올라간다.

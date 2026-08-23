@@ -631,16 +631,32 @@ def test_every_live_simulate_bid_call_site_passes_both_ends():
 
     (런타임 spy가 닿지 못하는 호출부까지 덮는 회귀 저지선이다. P1-5의 교훈대로 이것만으로는
     부족하므로 위 spy와 «둘 다» 둔다.)
+
+    ★2R P2-B 상환 — 초판은 `n_high >= n_low - 1`이라 **파일당 배선 1곳 절단**을 통과시켰다
+    (변이 N1·N2가 full suite 기준선과 완전히 동일하게 초록으로 생존). 개수 여유를 없애고
+    **`simulate_bid(` 호출부를 ast로 하나씩 세어** 두 끝이 다 넘어가는지 본다.
     """
     base = pathlib.Path(diagnosis.__file__).parent
+    missing = []
     for fname in ("proposal_pipeline.py", "auto_operator.py"):
-        src = (base / fname).read_text()
-        n_low = src.count("correction_factor_low=")
-        n_high = src.count("correction_factor_high=")
-        assert n_high >= n_low - 1, (
-            f"{fname}: 하한은 {n_low}곳에 넘기는데 상한은 {n_high}곳뿐이다 — "
-            "안 넘긴 곳은 simulate_bid가 max(1.0, cf)로 유도해 구간 밖 값을 쓴다"
-        )
+        tree = ast.parse((base / fname).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            # ★변이 N2가 이 자리에서 생존했다 — 서보는 `simulate_bid`를 **직접** 부르지 않고
+            #   `_estimate_direct_step`을 거쳐 전달한다. 호출부를 한 함수 이름으로만 세면
+            #   그 경유 배선을 끊어도 전건 초록이다(「전수에서 세야 하는 건 호출부」의 재현).
+            if name not in ("simulate_bid", "_estimate_direct_step"):
+                continue
+            kw = {k.arg for k in node.keywords if k.arg}
+            if not {"correction_factor_low", "correction_factor_high"} <= kw:
+                missing.append(f"{fname}:{node.lineno} (넘긴 것: {sorted(kw & {'correction_factor', 'correction_factor_low', 'correction_factor_high'})})")
+    assert missing == [], (
+        "simulate_bid 호출부가 두 끝을 다 안 넘긴다 — 안 넘긴 끝은 max(1.0, cf)로 유도돼 "
+        f"선언된 구간 밖 값이 쓰인다: {missing}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════

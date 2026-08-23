@@ -63,7 +63,9 @@ const LIVE_GATE = {
   brake_total_ext: 667,
   survive_low: 195,
   survive_high: 221,
-  ratio_selection: 3.005,
+  // ★2R P1-4 — 선정 비율을 게이트 후 상한값(3.005)과 **다른 값**으로 가른다.
+  //   둘이 같으면 「게이트 후 3.005」 단언이 선정 비율로 만족돼 단언이 공허해진다.
+  ratio_selection: 2.777,
   ratio_after_gate_low: 3.405,
   ratio_after_gate_high: 3.005,
   buckets: {
@@ -147,11 +149,13 @@ describe("액셀 게이트 카드 — 표면 요건(D-NAO-232 §4-④)", () => {
     await draw({ ...LIVE_GATE, gate_end: "factor_high" });
     const high = screen.getByTestId("accel-gate-survive").textContent;
     const highSym = screen.getByTestId("accel-gate-symmetry").textContent;
+    const highAfter = screen.getByTestId("accel-gate-ratio-after").textContent;
     cleanup();
 
     await draw({ ...LIVE_GATE, gate_end: "factor_low" });
     const low = screen.getByTestId("accel-gate-survive").textContent;
     const lowSym = screen.getByTestId("accel-gate-symmetry").textContent;
+    const lowAfter = screen.getByTestId("accel-gate-ratio-after").textContent;
 
     expect(high).toContain("221");
     expect(low).toContain("195");
@@ -159,6 +163,10 @@ describe("액셀 게이트 카드 — 표면 요건(D-NAO-232 §4-④)", () => {
     expect(highSym).toContain("3.005");     // 상한 게이트 후 대칭
     expect(lowSym).toContain("3.405");      // 하한 게이트 후 대칭
     expect(highSym).not.toEqual(lowSym);
+    // ★2R P1-4 본체 — «게이트 후» 값만 담는 자리를 직접 본다. 위 블록 단언은 선정 비율이
+    //   같은 블록에 있어 만족될 수 있었다(그래서 F4 변이가 생존했다).
+    expect(highAfter).toBe("3.005:1");
+    expect(lowAfter).toBe("3.405:1");
   });
 
   it("★M2 — 가정·자의 끝 자백 블록이 실재한다(D-NAO-230이 요구한 「가정 병기」)", async () => {
@@ -223,7 +231,7 @@ describe("액셀 게이트 카드 — 표면 요건(D-NAO-232 §4-④)", () => {
     expect(t).toContain("3.405");
   });
 
-  it("게이트가 «하한»을 쓴다는 사실이 화면에 적혀 있다 — 화면과 동작이 어긋나면 안 된다", async () => {
+  it("게이트가 «상한»을 쓴다는 사실이 화면에 적혀 있다 — 화면과 동작이 어긋나면 안 된다", async () => {
     const card = await draw(LIVE_GATE);
     expect(card.textContent).toContain("하한");
   });

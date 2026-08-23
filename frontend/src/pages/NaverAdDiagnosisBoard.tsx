@@ -189,9 +189,11 @@ export default function NaverAdDiagnosisBoard() {
                   <span className="text-gray-500">
                     {data.correction_factor.factor_floor_end === "high" ? "상한" : "하한"} 근거
                   </span>
-                  {data.correction_factor.factor_floor !== undefined
-                    ? ` (실측 기준선 ×${data.correction_factor.factor_floor.toFixed(4)})`
-                    : ""}
+                  {data.correction_factor.factor_floor !== undefined ? (
+                    <span data-testid="factor-floor-value">
+                      {` (실측 기준선 ×${data.correction_factor.factor_floor.toFixed(4)})`}
+                    </span>
+                  ) : null}
                   : 유입경로 「광고&gt;」 5종 매출 ÷ 광고 direct 전환매출
                   {data.correction_factor.factor_low_window ? ` (창 ${data.correction_factor.factor_low_window})` : ""} —{" "}
                   <span className="text-gray-500">마지막터치 라벨 기준</span>.{" "}
@@ -299,7 +301,13 @@ export default function NaverAdDiagnosisBoard() {
                   <tbody>
                     {([
                       ["게이트 통과 (양끝 공통)", data.accel_gate.buckets.passing_both, false],
-                      ["하한에서만 차단 — 현행 게이트가 죽이는 것", data.accel_gate.buckets.blocked_low_only, true],
+                      // ★2R P2-C — 행 이름이 `gate_end`를 따라야 한다. 게이트가 상한으로 옮겨진 뒤엔
+                      //   이 건수를 «현행 게이트가 죽이지 않는다» — 고정 문구면 같은 카드의
+                      //   헤드라인(「통과 221건」 = 195+26)과 정면으로 모순된다.
+                      [data.accel_gate.gate_end === "factor_high"
+                        ? "하한에서만 차단 — 현행 게이트는 통과시키는 것(하한이었다면 죽었다)"
+                        : "하한에서만 차단 — 현행 게이트가 죽이는 것",
+                        data.accel_gate.buckets.blocked_low_only, true],
                       ["양끝 차단", data.accel_gate.buckets.blocked_both, false],
                     ] as const).map(([label, b, emphasize]) => (
                       <tr key={label} className="border-t border-gray-100">
@@ -336,7 +344,10 @@ export default function NaverAdDiagnosisBoard() {
                   {" → "}게이트 후{" "}
                   {/* ★D-NAO-234 ⓐ — 헤드라인과 같은 이유로 `gate_end`가 고른다. 여기만 옛 끝으로
                       남으면 같은 카드 안에서 두 문장이 다른 게이트를 말한다(n=40 P1-2의 모양). */}
-                  <span className="font-medium text-gray-900">
+                  {/* ★2R P1-4 — 「게이트 후」 값에 **자기 testid**를 준다. 예전엔 선정 비율과
+                      같은 블록 안에 있어서, 픽스처에서 두 값이 겹치면 단언이 선정 비율로
+                      만족돼 «게이트 후를 하드코딩하는 변이»(F4)를 못 잡았다. */}
+                  <span className="font-medium text-gray-900" data-testid="accel-gate-ratio-after">
                     {(data.accel_gate.gate_end === "factor_high"
                       ? data.accel_gate.ratio_after_gate_high
                       : data.accel_gate.ratio_after_gate_low) ?? NO_DATA}:1

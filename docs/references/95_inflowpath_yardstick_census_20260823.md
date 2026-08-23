@@ -230,7 +230,7 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 | # | 파일:줄 | 역할 |
 |---|---|---|
 | 1 | `bid_simulator.py:169` `direction = dir_high`(`cf_high`로 판정한 `_direction(rec_high)`) | **방향**(up/down/hold) 판정 — 상한 기준, "액셀 판정 불변"(D-NAO-231) |
-| 2 | `auto_operator.py:3102` `servo_correction_factor = Decimal(str(_cf["factor_high"]))` | 서보 방향 판정 원천(하류: `_estimate_direct_step`의 `correction_factor=`) |
+| 2 | `auto_operator.py:3107` `servo_correction_factor = Decimal(str(_cf["factor_high"]))` | 서보 방향 판정 원천(하류: `_estimate_direct_step`의 `correction_factor=`) |
 
 ### 층 B — 게이트(통과/차단 불리언, `factor_high`) — **7곳, D-NAO-234 ⓐ 재배정**
 
@@ -242,7 +242,7 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 | 6 | `expansion_pressure.py:165` | 확장압력 갭 게이트 `corrected_revenue`(EX_PRESSURE_RATIO 통과/차단) |
 | 7 | `expansion_allocator.py:282` | 확장배분 own_ratio 제외 게이트 |
 | 8 | `auto_operator.py:436` | 정착창 보정ROAS 게이트(below/ok/unknown) |
-| 9 | `auto_operator.py:2344` | P4 밴드 deep_ok 게이트 |
+| 9 | `auto_operator.py:2349` | P4 밴드 deep_ok 게이트 |
 
 이 7곳은 **원래 `factor_low`를 읽던 자리였다**(초판 표의 #1~#7과 같은 자리). 코드 주석
 전부가 같은 근거를 반복한다(예 `naver_execution_harness.py:926-931`): *"증액 가드는 «얼마나
@@ -255,9 +255,9 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 |---|---|---|
 | 10 | `bid_simulator.py:141` | `cf_low = ... correction_factor_low` → `_resolve(cf_low)`의 `ceiling_low = affordable_ceiling(rpc_raw × cf_low, target_roas)`, up 방향일 때 `rec_low`로 크기만 누름 |
 | 11 | `bid_simulator.py:183` | `rpc_corrected = (rpc_raw × cf_low)` — 예상매출 **표기**용(보수 끝) |
-| 12 | `auto_operator.py:3103` | `servo_correction_factor_low = Decimal(str(_cf["factor_low"]))` |
-| 13 | `auto_operator.py:3367` | `_servo_economic_ceiling(correction_factor=servo_correction_factor_low)` — 서보 경제성 상한 |
-| 14 | `auto_operator.py:3406` | `_estimate_direct_step(correction_factor_low=servo_correction_factor_low, correction_factor_high=servo_correction_factor)` — 양끝 다 넘김(방향=상한/크기=하한 동시 전달) |
+| 12 | `auto_operator.py:3108` | `servo_correction_factor_low = Decimal(str(_cf["factor_low"]))` |
+| 13 | `auto_operator.py:3372` | `_servo_economic_ceiling(correction_factor=servo_correction_factor_low)` — 서보 경제성 상한 |
+| 14 | `auto_operator.py:3408` | `_estimate_direct_step(correction_factor_low=servo_correction_factor_low, correction_factor_high=servo_correction_factor)` — 양끝 다 넘김(방향=상한/크기=하한 동시 전달) |
 
 ### [미상] — 분류 미확정 1곳 (리뷰 P1-1, 이 문서는 확정하지 않는다)
 
