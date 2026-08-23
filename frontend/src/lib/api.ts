@@ -5084,3 +5084,204 @@ export function deleteImportDocument(
     method: "DELETE",
   });
 }
+
+// ══════════════════════════════════════════════════════════════════
+// 원가 메뉴 — D-CPP-53 / 계약 `docs/PLAN_cost-menu-standard-cost.md` (S1: 부자재 층)
+//
+// ★단가는 **`string | null`**이다 — 숫자로 좁히면 `null`(미입력)이 `0`으로 접힌다.
+//   0=미입력 혼동이 기존 `cost_price` 스키마의 결함이고, 새 층에서 재생산하면 이 층을
+//   만들 이유가 없다(계약 §2-7). 화면은 `null`을 「—」로 그린다.
+// ══════════════════════════════════════════════════════════════════
+export interface CostPriceShipmentRef {
+  id: number;
+  hbl_no: string;
+  declaration_date: string | null;
+  item_name: string;
+  quantity: string | null;
+}
+
+/** 단가 행 ↔ 원장 라인 **조회 시점 재검사** (적대 리뷰 1R P1).
+ *
+ * ★단가는 연결 시점 값을 복사해 보존한다 — 그건 의도다(근거 보존). 결함은 그 보존값이
+ * **어긋난 뒤에도** 아무 표시 없이 「최신 확정 로트 단가」 자리를 차지하던 것이다. 이 칸이
+ * 그 자백이다: `ok=false`면 화면이 **왜** 어긋났는지 말하고, 그 행은 최신 단가에서 빠진다. */
+export interface CostLedgerCheck {
+  status:
+    | "manual"
+    | "ok"
+    | "missing" // 원장 라인이 사라졌다(고아 행)
+    | "unconfirmed" // 수입건 확정 해제(reopen) — 원장은 단가를 지웠다
+    | "item_mismatch" // 같은 id가 다른 품목을 가리킨다(rowid 재사용)
+    | "changed"; // 원장 재확정으로 값이 달라졌다
+  ok: boolean;
+  label: string;
+  detail: string;
+  counts_as_evidence: boolean;
+  refreshable: boolean;
+  ledger_unit_price_ex_vat: string | null;
+  ledger_unit_price_inc_vat: string | null;
+  ledger_item_name: string | null;
+}
+
+export interface CostMaterialPrice {
+  id: number;
+  material_id: number;
+  source: "ledger" | "manual";
+  import_invoice_line_id: number | null;
+  supplier: string | null;
+  /** 연결 «당시» 원장 품목명 — 지금 값과 다르면 라인 id가 재사용된 것이다. */
+  linked_item_name: string | null;
+  linked_shipment_id: number | null;
+  unit_price_ex_vat: string | null;
+  unit_price_inc_vat: string | null;
+  effective_date: string | null;
+  note: string | null;
+  shipment: CostPriceShipmentRef | null;
+  ledger_check: CostLedgerCheck;
+}
+
+export interface CostMaterial {
+  id: number;
+  name: string;
+  unit: string | null;
+  category: string | null;
+  status: "unconfirmed" | "approved";
+  excel_label: string | null;
+  match_rule: string | null;
+  form_factor: string | null;
+  part: string | null;
+  note: string | null;
+  /** 근거로 «세는» 로트 수 = 원장 파생 + 재검사 통과분. 어긋난 행은 여기 안 들어간다. */
+  lot_count: number;
+  price_count: number;
+  /** 원장과 어긋난 연결 수. 0이 아니면 화면이 「최신 단가에서 왜 빠졌나」를 말해야 한다. */
+  stale_count: number;
+  latest_price_ex_vat: string | null;
+  latest_price_inc_vat: string | null;
+  latest_price_source: "ledger" | "manual" | null;
+  prices: CostMaterialPrice[];
+}
+
+export interface CostLedgerSuggestion {
+  line_id: number;
+  item_name: string;
+  material_id: number | null;
+  reason: string;
+  candidates: number[];
+  ambiguous: boolean;
+  unmatched: boolean;
+}
+
+export interface CostLedgerMaterialLine {
+  line_id: number;
+  shipment_id: number;
+  hbl_no: string;
+  declaration_date: string | null;
+  item_name: string;
+  quantity: string | null;
+  unit_cost_ex_vat: string | null;
+  unit_cost_inc_vat: string | null;
+  allocated_cost_krw: string | null;
+  linked_material_id: number | null;
+  linked_material_name: string | null;
+  linked_price_id: number | null;
+  /** 이 라인이 속한 수입건의 «지금» 상태. `confirmed`가 아니면 원장은 단가를 지운 상태다. */
+  shipment_status: string;
+  /** 붙어 있는 단가 행의 재검사 결과(안 붙었으면 null). */
+  linked_price_check: CostLedgerCheck | null;
+  suggestion: CostLedgerSuggestion;
+}
+
+export interface CostSetting {
+  key: string;
+  value: string;
+  confirmed: boolean;
+  note: string | null;
+  updated_at: string | null;
+}
+
+export function fetchCostMaterials(): Promise<{ items: CostMaterial[] }> {
+  return fetchApi("/api/cost/materials");
+}
+
+export function fetchCostLedgerMaterialLines(): Promise<{
+  items: CostLedgerMaterialLine[];
+}> {
+  return fetchApi("/api/cost/ledger-material-lines");
+}
+
+export function fetchCostSettings(): Promise<{ items: CostSetting[] }> {
+  return fetchApi("/api/cost/settings");
+}
+
+/** 원장 라인 → 부자재 종 **사람이 하는 확정**(계약 §5-2). 제안은 스스로 링크하지 않는다. */
+export function linkCostLedgerPrice(
+  materialId: number,
+  importInvoiceLineId: number,
+): Promise<{ linked_price_id: number; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices/link`, {
+    method: "POST",
+    body: JSON.stringify({ import_invoice_line_id: importInvoiceLineId }),
+  });
+}
+
+/** 어긋난 원장 단가 행을 **원장 현재값으로 다시 맞춘다**(적대 리뷰 1R P1-2).
+ *
+ * 이게 없으면 환율 정정 후 재확정된 로트를 화면이 영영 못 따라간다 — 재연결은 유일 제약
+ * 때문에 409이기 때문이다. 품목이 달라진 행은 백엔드가 거부한다(해제 후 사람이 재연결). */
+export function refreshCostLedgerPrice(
+  materialId: number,
+  priceId: number,
+): Promise<{ price_id: number; was: CostLedgerCheck; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices/${priceId}/refresh`, {
+    method: "POST",
+  });
+}
+
+export function deleteCostMaterialPrice(
+  materialId: number,
+  priceId: number,
+): Promise<{ deleted: boolean; id: number; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices/${priceId}`, {
+    method: "DELETE",
+  });
+}
+
+export function createCostMaterial(body: {
+  name: string;
+  unit?: string | null;
+  category?: string | null;
+  match_rule?: string | null;
+}): Promise<CostMaterial> {
+  return fetchApi("/api/cost/materials", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function patchCostMaterial(
+  materialId: number,
+  body: Partial<Pick<CostMaterial, "name" | "unit" | "category" | "status" | "match_rule" | "excel_label" | "note">>,
+): Promise<CostMaterial> {
+  return fetchApi(`/api/cost/materials/${materialId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 국내 구매 부자재 등 원장 파생이 불가한 종의 단가(계약 §4 하이브리드 ②). */
+export function addCostManualPrice(
+  materialId: number,
+  body: {
+    unit_price_ex_vat?: string | null;
+    unit_price_inc_vat?: string | null;
+    supplier?: string | null;
+    effective_date?: string | null;
+    note?: string | null;
+  },
+): Promise<{ price_id: number; material: CostMaterial }> {
+  return fetchApi(`/api/cost/materials/${materialId}/prices`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
