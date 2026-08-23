@@ -190,6 +190,73 @@ export default function NaverAdDiagnosisBoard() {
             </div>
           </div>
 
+          {/* ★D-NAO-232 계약 §4-④ — 「액셀이 실행 게이트에서 얼마나 죽는가」.
+              북극성 §7이 *"자동화 범위를 넓힐 때마다 「액셀·브레이크가 대칭인가」를 검사 항목으로
+              둘 것"* 이라 정했는데 그 검사가 화면에 없어서 세션마다 사람이 curl로 다시 셌다.
+              여기 있으면 다시 안 센다. 관측 전용 — 어떤 판정·필터도 바꾸지 않는다(ref 94 §5·§6). */}
+          {data.accel_gate ? (
+            <div className="bg-white rounded-lg border border-gray-200 p-4" data-testid="accel-gate-card">
+              <div className="flex items-baseline justify-between flex-wrap gap-2 mb-1">
+                <h2 className="text-sm font-semibold text-gray-900">⚖️ 액셀 게이트 — BEP 증액금지가 막는 것</h2>
+                <div className="text-xs text-gray-500 tabular-nums">
+                  액셀 후보 {num(data.accel_gate.accel_total)}건 → 게이트 통과{" "}
+                  <span className="font-semibold text-gray-900">{num(data.accel_gate.survive_low)}건</span>
+                  {data.accel_gate.survive_high !== data.accel_gate.survive_low && (
+                    <> (상한이었다면 {num(data.accel_gate.survive_high)}건)</>
+                  )}
+                </div>
+              </div>
+              <div className="text-[11px] text-gray-400 mb-3 leading-snug">
+                {data.accel_gate.gate_note} 그래서 <span className="text-gray-500">막힌 건의 총이익을 구간 양끝으로 병기</span>한다 —{" "}
+                {data.accel_gate.assumption}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs text-gray-500">
+                      <th className="text-left font-normal pb-1">구간</th>
+                      <th className="text-right font-normal pb-1">건수</th>
+                      <th className="text-right font-normal pb-1">비용</th>
+                      <th className="text-right font-normal pb-1">전환매출</th>
+                      <th className="text-right font-normal pb-1">총이익(상한)</th>
+                      <th className="text-right font-normal pb-1">총이익(하한)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {([
+                      ["게이트 통과 (양끝 공통)", data.accel_gate.buckets.passing_both, false],
+                      ["하한에서만 차단 — 현행 게이트가 죽이는 것", data.accel_gate.buckets.blocked_low_only, true],
+                      ["양끝 차단", data.accel_gate.buckets.blocked_both, false],
+                    ] as const).map(([label, b, emphasize]) => (
+                      <tr key={label} className="border-t border-gray-100">
+                        <td className={`py-1.5 pr-2 ${emphasize ? "font-medium text-gray-900" : "text-gray-600"}`}>{label}</td>
+                        <td className="py-1.5 text-right tabular-nums">{num(b.count)}</td>
+                        <td className="py-1.5 text-right tabular-nums text-gray-600">{won(b.cost)}</td>
+                        <td className="py-1.5 text-right tabular-nums text-gray-600">{won(b.conv_amt)}</td>
+                        <td className="py-1.5 text-right tabular-nums">{won(b.profit_high)}</td>
+                        <td className={`py-1.5 text-right tabular-nums font-medium ${b.profit_low < 0 ? "text-red-600" : "text-gray-900"}`}>
+                          {won(b.profit_low)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 tabular-nums">
+                <span>
+                  대칭(브레이크:액셀) 선정{" "}
+                  <span className="font-medium text-gray-900">{data.accel_gate.ratio_selection ?? NO_DATA}:1</span>
+                  {" → "}게이트 후{" "}
+                  <span className="font-medium text-gray-900">{data.accel_gate.ratio_after_gate_low ?? NO_DATA}:1</span>
+                  {" (상한이었다면 "}{data.accel_gate.ratio_after_gate_high ?? NO_DATA}:1)
+                </span>
+                <span>브레이크 후보 {num(data.accel_gate.brake_total)}건</span>
+                {/* 0이어도 «측정했더니 없음»임을 보이려고 항상 그린다 — 키 부재 ≠ 0건(교훈 #123) */}
+                <span>판정 불가(roas 부재) {num(data.accel_gate.buckets.unmeasurable)}건</span>
+              </div>
+            </div>
+          ) : null}
+
           {/* ① 출혈 키워드 */}
           <Board
             title="🔴 출혈 키워드"

@@ -10,7 +10,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.services.naver_ad import account_diagnosis as diag
-from app.services.naver_ad import campaign_target_resolver, metrics_aggregator
+from app.services.naver_ad import accel_gate_view, campaign_target_resolver, metrics_aggregator
 from app.services.naver_ad.actual_revenue import naver_order_revenue
 
 _CORRECTION_LOOKBACK_DAYS = 30  # D-NAO-21: 계정 보정계수 산출 창(30일 고정)
@@ -162,6 +162,7 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
             "account_target_roas": float(target_roas) if target_roas is not None else None,
             "error": "계정 BEP/목표ROAS 산출 불가 — naver_product_bep에 has_cost=True 상품 없음",
             "boards": None,
+            "accel_gate": None,  # D-NAO-232: 응답 모양을 두 분기에서 같게 유지(키 부재 ≠ 값 없음)
         }
 
     boards = {
@@ -221,4 +222,17 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "account_bep_roas": float(bep_roas),
         "account_target_roas": float(target_roas),
         "boards": boards,
+        # D-NAO-232(계약 §4-④): 「액셀이 실행 게이트에서 얼마나 죽는가」 관측 표면.
+        # ★이 값이 `factor_low`를 읽는 것은 D-NAO-231 위반이 아니다 — 보드 «선정»은 위에서
+        #   전부 상한(`factor`)으로 이미 끝났고, 여기는 **그 선정 결과가 실행 게이트에서
+        #   어떻게 되는지 «관측»**만 한다. 판정·필터를 바꾸지 않는다(accel_gate_view 머리 주석).
+        #   게이트가 실제로 하한을 쓰므로(`naver_execution_harness.py:926`), 하한을 안 보면
+        #   화면이 실제 동작과 다른 것을 그리게 된다 — 그게 세션 39 적대 리뷰 P1-1이었다.
+        "accel_gate": accel_gate_view.build(
+            boards,
+            factor_low=float(correction["factor_low"]),
+            factor_high=float(correction["factor_high"]),
+            target_roas=float(target_roas),
+            bep_roas=float(bep_roas),
+        ),
     }
