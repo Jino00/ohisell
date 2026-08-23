@@ -320,4 +320,17 @@ describe("RocketGrowthPnl — 판매도 광고도 없는 행 접기", () => {
 });
 
 // ════════════════════════ 변이 주입 결과 (실행 확인 후 원복) ════════════════════════
-// (아래 주석은 실제 주입·재실행 후 채운다)
+// 기준선 12/12 그린. 8종 전부 주입 직후 RED, `git checkout --` 원복 직후 12/12 그린으로 재확인했고
+// 마지막에 `git status --porcelain`이 빈 출력임을 확인했다(소스 영구 변경 0).
+//   ⓐ `<RgSettlementCard data={overview} />` → `<span />`            → 2건 RED
+//   ⓑ `{ovErr ? (` → `{false ? (`                                    → 1건 RED
+//   ⓒ `overview.rg_settlement == null ? (` → `false ? (`             → 1건 RED
+//   ⓓ CommandCenter의 카드 호출 → `<span />`                          → 1건 RED (원자리 후퇴 탐지)
+//   ⓔ `const RefreshButton = onRefresh ? (` → `true ? (`             → 1건 RED (읽기 전용 파괴)
+//   ⓕ `{visibleRows.map(` → `{rows.map(`                             → 3건 RED
+//   ⓖ `{quietCount > 0 && (` → `{false && (`                         → 5건 RED
+//   ⓗ `isQuiet`에서 `n(r.revenue) === 0` 제거                         → 1건 RED (반품 행이 접힘)
+//
+// ★ⓓ가 이 파일의 «최종 표면까지 가는 경로를 끊는» 변이다(전역 §4). 정의를 공용 모듈로 옮긴
+//   리팩터는 타입체크·기존 테스트가 전부 초록인 채로 «원자리 렌더를 지워도» 통과할 수 있다 —
+//   종합 조망을 실제로 마운트해 카드 문자열과 갱신 버튼을 함께 보는 단언만이 그걸 잡는다.
