@@ -1246,15 +1246,10 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     elif (res3 := _vs_recover_and_refetch(page, cfg, windows[0])) is not None:
                         # ★사람을 부르기 **전에** 자동 재로그인을 시도한다(계약 W1의 VS 절반,
                         #   2026-08-23 라이브 실사고로 드러난 공백 — _recover_vs_session 참조).
+                        res, login_needed, keep_open = _vs_apply_recovery(res3)
+                        owner.keep_open = owner.keep_open or keep_open
                         if _is_success(res3):
                             save()
-                            res = res3
-                            log.info("VS: 자동 재로그인으로 세션 복구 — 사람 개입 없이 수집 계속.")
-                        else:
-                            log.warning("VS: 자동 복구를 선언했으나 재fetch가 실패 — 사람 로그인으로 폴백.")
-                            res = res3
-                            owner.keep_open = True
-                            login_needed = True
                     elif login_wait_secs > 0:
                         log.info("자동 회복 실패 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                         with contextlib.suppress(Exception):
@@ -2717,7 +2712,10 @@ def _recover_vs_session(page, cfg: dict, window: tuple | None = None) -> str:
     ★verify가 앱 프로브인 이유는 RG와 같다(적대 리뷰 P2-1의 교훈): URL 착지 판정만 믿으면
       실제로 복구됐는데도 실패로 오판해 ②③으로 잘못 escalate한다. VS의 앱 프로브는
       **vendor-summary 자체를 한 번 받아 보는 것**이다 — 이 레인이 실제로 하려는 일과 같다.
-      `retries=0`으로 짧게 잡는다: 여기서의 실패는 재시도할 실패가 아니라 «아직 복구 안 됨»이다.
+      `retries=1`(=한 번만 시도)로 짧게 잡는다: 여기서의 실패는 재시도할 실패가 아니라
+      «아직 복구 안 됨»이다. ★**0이 아니다** — 0은 `raise None`(TypeError) 함정이고,
+      이 문장이 `retries=0`을 처방하던 초판이 17:25:38 라이브 사고를 만들었다(적대 리뷰 P2-1:
+      *"이번 사고를 만든 그 문장이 처방문으로 남아 다음 세션이 그대로 베낀다"*).
     """
     login_id = cfg.get("wing_login_id")
     if not login_id:
@@ -2736,6 +2734,22 @@ def _recover_vs_session(page, cfg: dict, window: tuple | None = None) -> str:
         #   여기서의 실패는 재시도할 실패가 아니라 «아직 복구 안 됨»이라 1회면 족하다.
         verify=lambda: _is_success(_fetch_vendor_summary(page, cfg, retries=1, window=window)),
     )
+
+
+def _vs_apply_recovery(res3):
+    """복구 후 재fetch 결과를 **회차의 결과로 반영**한다. 반환: (res, login_needed, keep_open)
+
+    ★왜 함수인가 (2026-08-23 적대 리뷰 P2-2): 인라인일 때 「`res = res3` 대입만 지우기」 변이가
+      **전건 초록으로 생존**했다. 그 상태의 라이브 모습이 최악이다 — 로그는 「자동 재로그인으로
+      세션 복구」라 말하는데 결과가 안 실려 push가 안 가고, **폰 패널엔 ❌ 「로그인 필요」가 뜬다.**
+      「함수는 맞는데 결과가 사람에게 안 닿는다」는 이 저장소가 반복해서 밟은 병이고,
+      여기가 그 마지막 한 칸이다. 순수 함수로 뽑으면 브라우저 없이 그 칸을 단언할 수 있다.
+    """
+    if _is_success(res3):
+        log.info("VS: 자동 재로그인으로 세션 복구 — 사람 개입 없이 수집 계속.")
+        return res3, False, False
+    log.warning("VS: 자동 복구를 선언했으나 재fetch가 실패 — 사람 로그인으로 폴백.")
+    return res3, True, True
 
 
 def _vs_recover_and_refetch(page, cfg: dict, window: tuple | None = None):

@@ -378,3 +378,59 @@ def test_vs_verify_probe_says_false_when_logged_out(spy_ensure, monkeypatch):
     monkeypatch.setattr(w, "_is_logged_out", lambda url: True)
     w._recover_vs_session(_StubPage(), {"wing_login_id": "x"})
     assert spy_ensure["verify"]() is False
+
+
+# ════════════════════════════════════════════════════════════════════
+# 6. 적대 리뷰 P2 채택분 (2026-08-23 PR #360 1R) — 생존 변이 3종이 가리킨 구멍
+# ════════════════════════════════════════════════════════════════════
+
+def test_vs_recovery_result_reaches_the_run(caplog):
+    """★P2-2 — 복구 성공이 «회차의 결과»로 실려야 한다(그래야 push가 가고 폰 패널이 ✅다).
+
+    생존 변이(M5)의 라이브 모습이 최악이다: 로그는 「자동 재로그인으로 세션 복구」라 말하는데
+    결과가 안 실려 push가 안 가고 **폰 패널엔 ❌ 「로그인 필요」**가 뜬다. 로그와 화면이
+    서로 다른 말을 하는 상태 — 이 계약이 없애려는 «틀린 처방»의 가장 나쁜 형태다.
+    """
+    ok = {"status": 200, "body": '{"saleSummaryByDate": []}'}
+    with caplog.at_level(logging.INFO):
+        res, login_needed, keep_open = w._vs_apply_recovery(ok)
+    assert res is ok, "복구 결과가 회차 결과로 안 실린다 — push 경로가 통째로 끊긴다"
+    assert login_needed is False and keep_open is False, "복구했는데 사람을 부른다"
+    assert any("사람 개입 없이" in r.getMessage() for r in caplog.records)
+
+
+def test_vs_recovery_failure_falls_back_to_a_human(caplog):
+    """복구를 선언했는데 재fetch가 실패하면 **정직하게** 사람 경로로 넘긴다(창도 남긴다)."""
+    bad = {"status": 401, "body": "signin"}
+    with caplog.at_level(logging.WARNING):
+        res, login_needed, keep_open = w._vs_apply_recovery(bad)
+    assert res is bad and login_needed is True and keep_open is True
+    assert any("재fetch가 실패" in r.getMessage() for r in caplog.records), \
+        "사유가 로그에 안 남으면 합격 ③의 「정직하게 남는다」가 깨진다"
+
+
+def test_recover_vs_warns_when_login_id_missing(spy_ensure, caplog):
+    """★P2-4 — VS도 login_id 부재를 «경고»한다(RG엔 있는데 VS엔 없던 가드).
+
+    모듈이 조용히 폴백하므로 로그마저 침묵하면 배선해 두고도 「고쳤는데 안 되는」 상태를
+    아무도 모른다. Wing은 ①SSO가 원리적으로 무효라 login_id 없음 = 자동 복구 전면 무력화다.
+    """
+    with caplog.at_level(logging.WARNING):
+        w._recover_vs_session(object(), {"account_key": "COUPANG_WING1"})
+    assert any("wing_login_id" in r.getMessage() for r in caplog.records), \
+        "VS의 login_id 없음이 로그에 안 남는다"
+
+
+def test_rg_verify_probe_actually_returns_a_verdict(spy_ensure, monkeypatch):
+    """★P2-3 — RG의 verify도 «불러 본다». 지금까지 `callable()`만 봐서 같은 구멍이 남아 있었다.
+
+    17:25:38 사고(VS verify가 호출 시 TypeError)와 **정확히 같은 종류**의 결함을 RG에서는
+    아무도 못 잡는 상태였다 — 리뷰어가 `_rg_session_ok(page, 0)`으로 바꿔도 전건 초록이었다.
+    「호출 가능하다」와 「호출하면 답을 준다」는 다르다.
+    """
+    monkeypatch.setattr(w, "_rg_session_probe", lambda page: (w._PROBE_OK, "ok"))
+    w._recover_rg_session(object(), {"wing_login_id": "x"})
+    assert spy_ensure["verify"]() is True, "RG verify가 호출에 답을 못 한다"
+
+    monkeypatch.setattr(w, "_rg_session_probe", lambda page: (w._PROBE_AUTH, "로그아웃"))
+    assert spy_ensure["verify"]() is False, "로그아웃인데 참을 말한다"
