@@ -130,6 +130,11 @@ describe("액셀 게이트 카드 — 표면 요건(D-NAO-232 §4-④)", () => {
     const survive = screen.getByTestId("accel-gate-survive");
     expect(survive.textContent).toContain("195");
     expect(survive.textContent).not.toContain("221");
+    // ★2R 변이 N8 상환 — 반대쪽 끝(반사실) 병기를 지워도 초록이었다.
+    //   「하한이면 195, 상한이었다면 221」의 대비가 이 카드의 논지다.
+    const headline = screen.getByTestId("accel-gate-headline");
+    expect(headline.textContent).toContain("상한이었다면");
+    expect(headline.textContent).toContain("221");
   });
 
   it("★M2 — 가정·자의 끝 자백 블록이 실재한다(D-NAO-230이 요구한 「가정 병기」)", async () => {

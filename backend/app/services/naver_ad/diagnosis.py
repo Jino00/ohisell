@@ -165,6 +165,10 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
             "accel_gate": None,  # D-NAO-232: 응답 모양을 두 분기에서 같게 유지(키 부재 ≠ 값 없음)
         }
 
+    # 2R 이월 후보 4: 리졸버를 회차당 **하나만** 만든다 — 인스턴스마다 캐시가 갈려
+    #   같은 campaign_id에 resolve_target_roas 쿼리가 중복됐다(정확성 영향 없음, 성능만).
+    target_roas_of = _target_roas_resolver(db, target_roas)
+
     boards = {
         # 2a 브레이크(bid_down만) → 상한
         "bleeding_keywords": diag.bleeding_keywords(db, date_from, date_to, bep_roas, factor),
@@ -178,7 +182,7 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         # 성장 후보(bid_up). 같은 캠페인별 target_roas 리졸버(override>계정기본값) 재사용.
         # 2i 액셀 — «선정»이므로 상한(D-NAO-231)
         "shopping_group_growth": diag.shopping_group_growth(
-            db, date_from, date_to, _target_roas_resolver(db, target_roas), factor,
+            db, date_from, date_to, target_roas_of, factor,
         ),
         "exclusion_candidates": diag.exclusion_candidates(db, date_from, date_to),
         "keyword_triage": diag.keyword_triage(db, as_of=date_to),
@@ -187,7 +191,7 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "pause_candidates": diag.pause_candidates(db, date_from, date_to),
         # 2f 액셀(재개) — «선정»이므로 상한(D-NAO-231)
         "resume_candidates": diag.resume_candidates(
-            db, date_to, _target_roas_resolver(db, target_roas), factor,
+            db, date_to, target_roas_of, factor,
         ),
         # X1b-S S1(D-NAO-43): pause_candidates/resume_candidates(WEB_SITE 키워드)의 SHOPPING
         # adgroup 대칭 확장 — 04 등 쇼핑 캠페인 스톱로스 정지·재개.
@@ -198,7 +202,7 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         ),
         # 2j 액셀(재개) — «선정»이므로 상한(D-NAO-231)
         "shopping_resume_candidates": diag.shopping_resume_candidates(
-            db, date_to, _target_roas_resolver(db, target_roas), factor,
+            db, date_to, target_roas_of, factor,
         ),
         # B4(D-NAO-65): 이미 pause된 레버끊김(MO형) 그룹의 소재-레벨 재개 배선 — 소재 실효입찰
         # vs 입찰 바닥(70) 비교로 재개 준비(소재 bid_down)/바닥 재개(resume) 분기(GATE P2-1)
@@ -237,6 +241,6 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
             factor_high=float(correction["factor_high"]),
             target_roas=float(target_roas),
             bep_roas=float(bep_roas),
-            resolve_target_roas=_target_roas_resolver(db, target_roas),
+            resolve_target_roas=target_roas_of,
         ),
     }
