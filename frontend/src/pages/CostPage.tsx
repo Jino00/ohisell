@@ -498,10 +498,18 @@ export function ProductOptionPicker({
   onReset: () => void;
 }) {
   const [search, setSearch] = useState("");
-  const filteredProducts = useMemo(
-    () => filterPickerItems(products, search),
-    [products, search],
-  );
+  const filteredProducts = useMemo(() => {
+    const base = filterPickerItems(products, search);
+    // ★유령 선택 방지(적대 리뷰 1R P2-D): 검색어가 좁혀도 «이미 선택된» 제품은 목록에서
+    //   빠지면 안 된다. 안 빠지게 하지 않으면 <select>의 value가 목록에 없는 상태가 되어
+    //   브라우저가 빈 값처럼 그린다 — 필터링 자체는 여전히 그 제품 기준으로 맞게 도는데
+    //   화면만 「아무것도 안 골랐다」고 거짓말한다(상태 ≠ 표시).
+    if (productValue && !base.some((p) => p.value === productValue)) {
+      const pinned = products.find((p) => p.value === productValue);
+      if (pinned) return [pinned, ...base];
+    }
+    return base;
+  }, [products, search, productValue]);
 
   return (
     <div className="flex flex-wrap items-end gap-2 border rounded-md p-2 bg-gray-50">

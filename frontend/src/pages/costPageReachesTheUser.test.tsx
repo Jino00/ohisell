@@ -31,6 +31,13 @@ import type {
   CostSetting,
 } from "../lib/api";
 
+// ★P2-A용: 0건 안내 렌더 분기 «자신»을 직접 잡는다. 이 두 컴포넌트는 CostPage.tsx가
+//   「전부 순수 — props만 본다. 테스트가 직접 렌더한다」고 선언한 표시 계층이다
+//   (`costMaterialsSurface.test.tsx`가 같은 파일의 다른 순수 컴포넌트에 쓰는 것과 같은 결).
+//   전체 App 경로로는 이 분기에 진짜 0건을 못 만든다 — 옵션 목록이 항상 «현재 제품에
+//   속한 것만»으로 구성되게 P1을 고쳤기 때문에, 정상 네비게이션으로는 0건이 안 나온다.
+import { RecipeList, StandardCostBoard } from "./CostPage";
+
 // ── prod 실측값(2026-08-22) — 합격 1이 화면에서 보겠다는 바로 그 두 로트 ──
 const KIT: CostMaterial = {
   id: 1,
@@ -260,6 +267,34 @@ const RECIPE_OTHER_PRODUCT: CostRecipe = {
   },
 };
 
+// ── P2-C: `form_factor: null` 레시피 — 수입·매입 완제품처럼 폼팩터 개념이 없는 종.
+//    「강화유리 풀커버」 제품에 bar(RECIPE_OTHER_PRODUCT)와 null을 나란히 두어, 폼팩터
+//    필터가 null도 «하나의 선택지」로 다뤄야 한다는 것을 잰다(`?? "__none__"` sentinel).
+const RECIPE_NULL_FORM: CostRecipe = {
+  id: 10,
+  product_name: "오하이 강화유리 풀커버",
+  form_factor: null,
+  status: "draft",
+  source: "excel",
+  recipe_kind: "assembly",
+  anomaly_flag: null,
+  approved_at: null,
+  match: null,
+  line_count: 0,
+  link_count: 0,
+  standard: {
+    computable: false,
+    std_cost_ex_vat: null,
+    std_cost_inc_vat: null,
+    reason: "구성 없음",
+    unresolved: [],
+    partial_ex_vat: null,
+    partial_inc_vat: null,
+    line_count: 0,
+    lines: [],
+  },
+};
+
 const BOARD: CostBoard = {
   items: [
     {
@@ -355,7 +390,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCostLedgerMaterialLines: vi.fn(async () => ({ items: [LEDGER_ROW] })),
     fetchCostSettings: vi.fn(async () => ({ items: SETTINGS })),
     fetchCostRecipes: vi.fn(async () => ({
-      items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT],
+      items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
     })),
     fetchCostBoard: vi.fn(async () => BOARD),
     getSchedulerHealth: vi.fn(async () => ({ healthy: true })),
@@ -600,6 +635,64 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(screen.getByText("OHI-0390")).toBeTruthy();
       expect(screen.getByText("OHI-6001")).toBeTruthy();
     });
+
+    // ── 적대 리뷰 1R P1-1 채택 (2026-08-23) ──────────────────────────────
+    // 코드는 `handleBoardProductChange`에서 이미 `setBoardOption(null)`을 부른다 — 문제는
+    // 그 줄을 지워도 28건 전부 초록이었다는 것이다. 이 테스트가 그 줄을 «지키는» 첫 테스트다.
+    it("P1-1: 옵션을 고른 뒤 제품을 바꾸면 이전 옵션이 남지 않는다 — 있는 SKU가 「없다」로 보이면 안 된다", async () => {
+      await openBoardTab();
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+      const optionSelect = screen.getByTestId("board-option-select") as HTMLSelectElement;
+      fireEvent.change(optionSelect, { target: { value: "OHI-0391" } });
+      expect(screen.getByText("OHI-0391")).toBeTruthy();
+
+      // 제품을 바꾼다 — 「강화유리 풀커버」엔 SKU 「OHI-0391」이 없다.
+      fireEvent.change(productSelect, { target: { value: "오하이 강화유리 풀커버" } });
+
+      // ★버그(있었다면): `setBoardOption(null)`이 없으면 필터가 「강화유리 AND OHI-0391」이
+      //   되어, 실제로 있는 강화유리 행이 «해당 조건에 맞는 SKU가 없다»로 둔갑한다.
+      expect(screen.getByText("OHI-6001")).toBeTruthy();
+      expect(screen.getByText("OHI-6002")).toBeTruthy();
+      expect(screen.queryByText(/해당 조건에 맞는 SKU가 없다/)).toBeNull();
+      // 옵션 셀렉트 자신도 「전체」로 되돌아가 있어야 한다 — 상태와 표시가 같이 원복된다.
+      expect(optionSelect.value).toBe("");
+    });
+
+    // ── P2-B 채택: 「전체 (N건)」의 N은 «선택된 제품 기준»이어야 한다. 전체 보드 건수로
+    //   바꿔도 이 테스트 전엔 아무도 안 죽었다(적대 리뷰 1R 변이 실측).
+    it("P2-B: 옵션 셀렉트 「전체 (N건)」의 N은 전체 보드 건수가 아니라 선택된 제품 건수다", async () => {
+      await openBoardTab();
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+      const optionSelect = screen.getByTestId("board-option-select") as HTMLSelectElement;
+      // BOARD 전체는 5건이지만 「빛반사…」 제품은 3건(OHI-0390·0391·9001)뿐이다.
+      expect(within(optionSelect).getByText("전체 (3건)")).toBeTruthy();
+      expect(within(optionSelect).queryByText("전체 (5건)")).toBeNull();
+    });
+
+    // ── P2-D 채택: 검색어가 이미 선택된 제품을 걸러내도 셀렉트는 그 제품을 계속 들고
+    //   있어야 한다 — 안 그러면 <select>의 value가 목록 밖이라 빈 값처럼 보인다(유령 선택).
+    it("P2-D: 검색어가 선택된 제품을 가려도 셀렉트는 그 제품을 계속 보여준다", async () => {
+      await openBoardTab();
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, { target: { value: "오하이 강화유리 풀커버" } });
+      expect(productSelect.value).toBe("오하이 강화유리 풀커버");
+
+      const search = screen.getByTestId("board-product-search");
+      fireEvent.change(search, { target: { value: "빛반사" } });
+
+      // ★검색이 「강화유리」를 목록에서 걸러내도, 이미 선택된 값은 살아 있어야 한다.
+      expect(productSelect.value).toBe("오하이 강화유리 풀커버");
+      expect(within(productSelect).getByText(/강화유리 풀커버/)).toBeTruthy();
+      // 화면도 그 선택 기준으로 계속 필터링돼 있다 — 상태·표시가 어긋나지 않는다.
+      expect(screen.getByText("OHI-6001")).toBeTruthy();
+      expect(screen.queryByText("OHI-0390")).toBeNull();
+    });
   });
 
   describe("★제품 → 옵션(폼팩터) 필터 — 레시피 탭", () => {
@@ -634,8 +727,8 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
       });
       const summary = await screen.findByTestId("recipe-filter-summary");
-      // 전체 레시피 3건 중 그 제품 2건(bar·flip).
-      expect(summary.textContent).toContain("3건 중 2건 표시 중");
+      // 전체 레시피 4건(RECIPE_NULL_FORM 포함) 중 그 제품 2건(bar·flip).
+      expect(summary.textContent).toContain("4건 중 2건 표시 중");
     });
 
     it("레시피 탭 초기화를 누르면 필터가 전부 풀린다", async () => {
@@ -648,6 +741,51 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
 
       expect(productSelect.value).toBe("");
       expect(screen.queryByTestId("recipe-filter-summary")).toBeNull();
+    });
+
+    // ── 적대 리뷰 1R P1-2 채택 (2026-08-23) ──────────────────────────────
+    // `handleRecipeProductChange`가 이미 `setRecipeFormFactor(null)`을 부르지만, 그 줄을
+    // 지워도 28건 전부 초록이었다 — P1-1과 같은 결함의 다른 표현이다.
+    it("P1-2: 폼팩터를 고른 뒤 제품을 바꾸면 이전 폼팩터가 남지 않는다", async () => {
+      await openRecipesTabForFilter();
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+      const formFactorSelect = screen.getByTestId("recipe-option-select") as HTMLSelectElement;
+      fireEvent.change(formFactorSelect, { target: { value: "flip" } });
+      expect(await screen.findByTestId("recipe-filter-summary")).toBeTruthy();
+
+      // 제품을 바꾼다 — 「강화유리 풀커버」엔 flip 폼팩터가 없다(bar·null뿐이다).
+      fireEvent.change(productSelect, { target: { value: "오하이 강화유리 풀커버" } });
+
+      // ★버그(있었다면): `setRecipeFormFactor(null)`이 없으면 필터가 「강화유리 AND flip」이
+      //   되어, 실제로 있는 강화유리 레시피(bar·null)가 목록에서 통째로 사라진다.
+      expect(screen.getAllByText("오하이 강화유리 풀커버").length).toBeGreaterThan(0);
+      const summary = await screen.findByTestId("recipe-filter-summary");
+      expect(summary.textContent).not.toContain("0건 표시 중");
+      // 폼팩터 셀렉트 자신도 「전체」로 되돌아가 있어야 한다.
+      expect(formFactorSelect.value).toBe("");
+    });
+
+    // ── P2-C 채택: `form_factor: null`(수입·매입 완제품)도 하나의 선택지로 다뤄야 한다.
+    //   `?? "__none__"` sentinel이 없으면 null 레시피는 필터에 걸려 영영 안 보인다.
+    it("P2-C: 폼팩터가 없는(`null`) 레시피도 「—」 선택지로 걸러진다", async () => {
+      await openRecipesTabForFilter();
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, { target: { value: "오하이 강화유리 풀커버" } });
+
+      const formFactorSelect = screen.getByTestId("recipe-option-select") as HTMLSelectElement;
+      // 「강화유리 풀커버」엔 bar(RECIPE_OTHER_PRODUCT)와 null(RECIPE_NULL_FORM) 둘이 있다.
+      expect(within(formFactorSelect).getByText("bar")).toBeTruthy();
+      expect(within(formFactorSelect).getByText("—")).toBeTruthy();
+
+      fireEvent.change(formFactorSelect, { target: { value: "__none__" } });
+
+      // ★sentinel이 없으면(mutant) null 레시피가 필터에서 빠져 0건이 된다.
+      const summary = await screen.findByTestId("recipe-filter-summary");
+      expect(summary.textContent).toContain("1건 표시 중");
+      expect(summary.textContent).not.toContain("0건 표시 중");
     });
   });
 
@@ -852,6 +990,44 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(noteEl.textContent).toContain("첫.xlsx");
       // ★거부가 아니다 — 첫 파일은 실제로 선택돼 있어야 한다.
       expect(within(costZone).getByText("첫.xlsx")).toBeTruthy();
+    });
+  });
+
+  // ── 적대 리뷰 1R P2-A 채택 (2026-08-23) ────────────────────────────────
+  // 보드·레시피 둘 다 「해당 조건에 맞는 …가 없다」 렌더 분기를 통째로 `false`로 바꿔도
+  // 28/28 통과했다 — 기존 테스트가 「0건이 아니다」만 확인하고 0건 경로를 일부러 피해갔다.
+  //
+  // ★전체 App 경로로는 이 분기에 진짜 0건을 못 만든다: P1을 고치고 나면 옵션 목록이
+  //   항상 «현재 제품에 속한 것만»으로 구성되므로, 정상 네비게이션으로는 0건 조합 자체가
+  //   안 만들어진다(0건이 나오려면 P1의 그 버그가 다시 있어야 한다). 그래서 이 두 컴포넌트
+  //   — `StandardCostBoard`·`RecipeList` — 를 **직접** 렌더해 분기 자체를 잡는다. 이 파일의
+  //   머리말이 말하는 「전부 순수 컴포넌트로 export 해 테스트가 직접 렌더한다」 그 계층이다.
+  describe("★P2-A: 0건 안내가 실제로 화면에 뜬다 — 렌더 분기 자체를 잡는다", () => {
+    it("보드: 필터로 0건이 되면 「해당 조건에 맞는 SKU가 없다」가 뜬다", () => {
+      render(
+        <StandardCostBoard
+          board={BOARD}
+          displayItems={[]}
+          filterSummary="5건 중 0건 표시 중 — 필터: 제품=존재하지 않는 제품"
+        />,
+      );
+      expect(screen.getByText(/해당 조건에 맞는 SKU가 없다/)).toBeTruthy();
+      // ★총계(SKU 5건 등)는 필터와 무관하게 «전체» 기준을 유지한다 — 0건이라고
+      //   전체 숫자까지 0으로 보이면 커버리지 착시가 다시 생긴다.
+      expect(screen.getByText(/SKU 5건/)).toBeTruthy();
+    });
+
+    it("레시피: 필터로 0건이 되면 「해당 조건에 맞는 레시피가 없다」가 뜬다", () => {
+      render(
+        <RecipeList
+          recipes={[]}
+          selectedId={null}
+          onSelect={() => {}}
+          totalCount={4}
+          filterSummary="4건 중 0건 표시 중 — 필터: 제품=존재하지 않는 제품"
+        />,
+      );
+      expect(screen.getByText(/해당 조건에 맞는 레시피가 없다/)).toBeTruthy();
     });
   });
 });
