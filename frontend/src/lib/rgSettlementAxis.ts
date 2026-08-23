@@ -119,6 +119,35 @@ export function rgFeeFactsFromRow(row: Record<string, unknown>): RgFeeFacts {
   };
 }
 
+/**
+ * RG «자기 화면»(`/api/coupang/rg/option-pnl`)의 칸 이름 → 공통 사실.
+ * 계약 `CONTRACT_2p_own_screens.md`(D-CPP-54) §1-B — **자백 문장을 새로 쓰지 않는다.**
+ *
+ * ★왜 어댑터를 하나 더 두나: 같은 사실을 세 표면이 서로 다른 키로 준다(대시보드 leaf 행 ·
+ *   종합조망 계정 요약 · 이 화면). 문장을 각자 쓰면 세 화면이 같은 값을 다르게 말하게 된다 —
+ *   D-CPP-47이 고쳤던 병의 문장판이다. 키만 여기서 맞추고 문장은 `rgFeeNote()` 하나가 낸다.
+ * ★요율은 이 엔드포인트에서 비율(0~1)로 온다(종합조망과 같고 대시보드 행과 다르다).
+ */
+export function rgFeeFactsFromOptionPnl(r: Record<string, unknown>): RgFeeFacts {
+  const rec = (r.reconciliation ?? null) as Record<string, unknown> | null;
+  return {
+    axis: (r.commission_axis as string) ?? null,
+    basis: (r.rate_basis as string) ?? null,
+    rate: r.rate == null ? null : num(r.rate) * 100,
+    cycles: (r.rate_cycles as string) ?? null,
+    coverage: (r.fee_coverage as string | number) ?? null,
+    unmappedRevenue:
+      ((r.account_common as Record<string, unknown> | undefined)?.fee_unmapped_revenue as
+        | string
+        | number
+        | undefined) ?? null,
+    reconcileCycle: rec ? `${rec.cycle_from}~${rec.cycle_to}` : null,
+    reconcileActual: rec ? (rec.actual as string) : null,
+    reconcileDiff: rec ? (rec.diff as string) : null,
+    reconcilePct: rec ? (rec.diff_pct as string) : null,
+  };
+}
+
 /** 종합조망 계정 요약(`account.summary`)의 칸 이름 → 공통 사실. 요율은 비율(0~1)로 온다. */
 export function rgFeeFactsFromSummary(s: Record<string, unknown>): RgFeeFacts {
   const rec = (s.rg_fee_reconcile ?? null) as Record<string, unknown> | null;

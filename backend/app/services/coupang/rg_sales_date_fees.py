@@ -298,6 +298,22 @@ def sales_date_fees(
       by_option           {vid: 판매일 축 귀속액(VAT後)} — 상품손익 귀속용
       reconciliation      최근 완결 주기에서 Σ(이 방식) vs 실청구 (계약 §4 ⓒ). 못 재면 None
 
+    ★★2026-08-23 additive(CONTRACT_2p_own_screens §1-A-4) — `by_option_detail`:
+      {vid: {"logistics": D|None, "sale_fee": D|None, "total": D}} — 화면 A(RG 손익 판매일 축)의
+      «상품 행마다 물류비/판매수수료를 갈라 보여준다»는 요구를 위해 **기존 `by_option`은 그대로
+      두고** 옆에 새 키로 추가한다(기존 반환 키 무엇도 지우거나 바꾸지 않았다).
+      ★`by_option`과의 차이: `by_option`은 «단가를 아는 옵션만» 담는다(단가를 모르면 그 옵션은
+        통째로 빠진다 — 판매수수료 몫까지 함께 사라진다). 그런데 판매수수료는 **요율만 있으면**
+        계산되고 «단가»는 필요 없다(물류비만 단가가 필요하다) — 즉 두 항은 필요 정보가 다르다.
+        `by_option_detail`은 그 둘을 **따로** 채운다: 단가를 몰라도 `sale_fee`는 채워지고
+        (`logistics`는 None), 그 결과 이 dict의 `sale_fee` 총합은 `revenue_total × rate`
+        (=계정 전체 `sale_fee`)와 **정확히 일치**한다(옵션축의 어떤 vid도 빠뜨리지 않는다 —
+        `by_option`처럼 «단가 모르면 통째로 skip」하지 않기 때문). 물류비 쪽은 여전히 단가를
+        아는 옵션만 채워지므로 그 총합은 `logistics`(계정 값)와 일치한다.
+      ★이 성질(두 총합이 계정 값과 정확히 일치)이 `rg_daily_pnl.py`가 요구하는 «보존식»의
+        전제다 — 화면이 상품 행 합계와 계정 값을 원 단위로 맞추려면 어느 옵션도 누락 없이
+        분해가 존재해야 한다.
+
     ★창 합계가 곧 일별 합계다 — 물류비(단가×수량)도 수수료(매출×요율)도 **선형**이라 날짜별로
       쪼갠 뒤 더한 것과 창 전체로 한 번 곱한 것이 같다. 그래서 날짜 루프를 돌지 않는다.
       기간비용만 일할이라 창 단위로 따로 센다.
@@ -328,6 +344,7 @@ def sales_date_fees(
     revenue_priced = ZERO
     unmapped_revenue = ZERO
     by_option: dict[str, Decimal] = {}
+    by_option_detail: dict[str, dict] = {}  # ★additive — docstring 참조
 
     for vid, qty, gmv in rows:
         vid = str(vid)
@@ -340,14 +357,27 @@ def sales_date_fees(
             # ★매출이 0인 옵션(그 창에 안 팔린 옵션)은 자백 대상이 아니다 — 잴 것이 없다.
             if gmv != ZERO:
                 unmapped_revenue += gmv
+            # ★additive — 단가는 몰라도 «요율»만 있으면 판매수수료는 이 옵션의 매출에
+            #   붙는다(물류비와 필요 정보가 다르다). `by_option`은 그대로 skip한다(불변).
+            if rate is not None and gmv != ZERO:
+                fee_i = gmv * rate
+                by_option_detail[vid] = {"logistics": None, "sale_fee": fee_i, "total": fee_i}
             continue
         unit_sum = price.get("delivery", ZERO) + price.get("warehousing", ZERO)
         opt_logi = unit_sum * qty * VAT_GROSSUP
         logistics += opt_logi
         revenue_priced += gmv
         by_option[vid] = opt_logi
+        sale_fee_i = None
         if rate is not None:
-            by_option[vid] += gmv * rate
+            sale_fee_i = gmv * rate
+            by_option[vid] += sale_fee_i
+        # ★additive — 로지스틱스·판매수수료를 «갈라» 낸다(`by_option`은 합쳐진 값만 준다).
+        by_option_detail[vid] = {
+            "logistics": opt_logi,
+            "sale_fee": sale_fee_i,
+            "total": opt_logi + (sale_fee_i or ZERO),
+        }
 
     fee = (revenue_total * rate) if rate is not None else ZERO
     period = period_fees(db, account_key, date_from, date_to)
@@ -385,6 +415,7 @@ def sales_date_fees(
         "revenue_priced": revenue_priced,
         "revenue_total": revenue_total,
         "by_option": by_option,
+        "by_option_detail": by_option_detail,  # ★additive — docstring 참조
         "reconciliation": None,
     }
     if reconcile:

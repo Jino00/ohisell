@@ -5464,3 +5464,91 @@ export function adoptCostExcelPrices(
 export function fetchCostBoard(): Promise<CostBoard> {
   return fetchApi("/api/cost/board");
 }
+
+// ════════════════════════════════════════════════════════════════════
+// RG(로켓그로스 2P) «자기 화면» — 옵션별 판매일 축 손익
+// 계약 `docs/contracts/CONTRACT_2p_own_screens.md`(D-CPP-54) §1-A-2.
+//
+// ★새 계산은 없다. 백엔드 `rg_daily_pnl.rg_option_pnl()`이 대시보드 RG 행과 «같은 다섯 항»을
+//   날짜×옵션 grain으로 분해해 줄 뿐이고, 여기선 그것을 그대로 받는다.
+// ★`Decimal`은 문자열로 온다(이 저장소 관례) — 화면에서 `Number()`로 바꿔 쓴다.
+// ════════════════════════════════════════════════════════════════════
+
+/** 상품(옵션) 행 — 상품에 «붙일 수 있는» 것만 들어온다. 납부세액·보관비는 여기 없다. */
+export interface RgOptionPnlRow {
+  vendor_item_id: string;
+  name: string | null;
+  revenue: string;
+  units_sold: number;
+  order_count: number;
+  fee_logistics: string | null;   // null = 물류비 단가를 모른다(0이 아니다)
+  fee_sale_fee: string | null;    // null = 요율을 못 쟀다
+  fee_total: string | null;
+  cost: string | null;
+  has_cost: boolean;
+  ad_spend: string;
+  net_profit: string | null;      // null = 원가 게이트 미달 또는 원장 축 폴백
+}
+
+/** 상품에 «못 붙이는» 것 — 0으로 채우지 않고 여기로 모아 자백한다. */
+export interface RgAccountCommon {
+  period_fees: string;             // 보관비·반품비 일할 — 판매일에 안 붙는다(계약 §8-5)
+  payable_vat: string;             // 납부세액 — 계정 단위
+  revenue_axis_gap: string;        // 요약축 − Σ옵션축. 0이 아닐 수 있다
+  ad_unallocated: string;          // 어느 판매경로인지 모르는 광고비 — 대시보드 RG 행엔 안 실린다
+  ad_unallocated_options: number;
+  fee_axis_fallback_gap: string;   // 원장 축 폴백 창에서 옵션 분해가 못 덮은 몫
+  cost_unmapped_revenue: string;
+  fee_unmapped_revenue: string;
+}
+
+/** 보존식 — 이 화면이 대시보드와 «같은 말»을 하는지 코드가 스스로 대조한 결과. */
+export interface RgConservation {
+  // ★다섯 칸이 «함께» null이 된다 — 원가 커버리지 게이트 미달 창에서 백엔드가 그렇게 낸다
+  //   (`rg_daily_pnl.py:194-249`). 적대 리뷰 2R P2: 앞의 두 칸만 non-nullable로 선언해 뒀더니
+  //   **타입이 거짓말을 했고**, 그게 1R P1(「모름」을 「0원」으로 그린 결함)이 숨을 수 있었던
+  //   자리다. 런타임은 `cell()`이 막지만 타입이 거짓이면 다음 호출자가 가드 없이 쓴다.
+  options_net_sum: string | null;
+  account_common_sum: string | null;
+  computed_total_net: string | null;
+  reference_net: string | null;    // 대시보드 RG 행이 낸 값(compute_rg_summary_row)
+  diff: string | null;             // 0으로 숨기지 않는다
+  ok: boolean;
+}
+
+export interface RgOptionPnlResponse {
+  account: string;
+  date_from: string;
+  date_to: string;
+  options: RgOptionPnlRow[];
+  account_common: RgAccountCommon;
+  conservation: RgConservation;
+  // ── 자백 칸 (계약 §4 ⓔⓕ) ──
+  commission_axis: string | null;
+  rate: string | null;
+  rate_basis: string | null;
+  rate_cycles: string | null;
+  fee_coverage: string | null;
+  cost_coverage: string | null;
+  option_axis_days: string | null;
+  option_axis_complete: boolean;
+  cost_trustworthy: boolean;
+  fee_trustworthy: boolean;
+  reconciliation: {
+    cycle_from: string; cycle_to: string;
+    computed: string; actual: string; diff: string; diff_pct: string | null;
+  } | null;
+  ad_spend_warning: string | null;  // vendor_id를 못 찾았을 때 «0이 아니라 미상»임을 말한다
+}
+
+/** RG 옵션별 손익. 기본 창은 백엔드가 KST 어제 단일일로 잡는다(Jino 원문 「어제 …」). */
+export function fetchRgOptionPnl(
+  account: string,
+  dateFrom?: string,
+  dateTo?: string,
+): Promise<RgOptionPnlResponse> {
+  const q = new URLSearchParams({ account });
+  if (dateFrom) q.set("date_from", dateFrom);
+  if (dateTo) q.set("date_to", dateTo);
+  return fetchApi(`/api/coupang/rg/option-pnl?${q.toString()}`);
+}

@@ -558,3 +558,81 @@ class SchedulerHealthOut(BaseModel):
     #   (**TestClient로 실제 호출**한다 — 서비스층 dict만 보는 테스트로는 원리적으로 못 잡는다).
     partial_sync: list[dict] | None = None
     as_of: str
+
+
+# ── RG(로켓그로스) 상품(옵션) 단위 일별 손익 — GET /api/coupang/rg/option-pnl
+#    (D-CPP-54, CONTRACT_2p_own_screens §1-A-4). 이 라우터는 `rg_option_pnl()`의 반환을
+#    그대로 옮겨 담는다 — 계산은 안 한다(계약 §3 금지선).
+#
+# ★★교훈 #319·#321·#223의 재발 지점: `response_model`이 선언 안 된 키를 응답에서 조용히
+#   지운다. 아래는 서비스층 반환의 **모든 키**를 빠짐없이 선언한다 — 짝이 되는 테스트
+#   `test_rg_pnl_http.py`가 하나라도 빠지면 죽도록 만든다.
+class RgOptionPnlRow(BaseModel):
+    vendor_item_id: str
+    name: Optional[str] = None
+    revenue: Decimal
+    units_sold: int
+    order_count: int
+    fee_logistics: Optional[Decimal] = None
+    fee_sale_fee: Optional[Decimal] = None
+    fee_total: Optional[Decimal] = None
+    cost: Optional[Decimal] = None
+    has_cost: bool
+    ad_spend: Decimal
+    net_profit: Optional[Decimal] = None
+
+
+class RgAccountCommon(BaseModel):
+    period_fees: Decimal
+    payable_vat: Optional[Decimal] = None
+    revenue_axis_gap: Decimal
+    ad_unallocated: Decimal
+    ad_unallocated_options: int
+    fee_axis_fallback_gap: Decimal
+    cost_unmapped_revenue: Decimal
+    fee_unmapped_revenue: Decimal
+
+
+class RgConservation(BaseModel):
+    options_net_sum: Optional[Decimal] = None
+    account_common_sum: Optional[Decimal] = None
+    computed_total_net: Optional[Decimal] = None
+    reference_net: Optional[Decimal] = None
+    diff: Optional[Decimal] = None
+    ok: Optional[bool] = None
+
+
+class RgReconciliation(BaseModel):
+    """`rg_sales_date_fees._reconcile`의 원시 반환 — 여기서는 str화하지 않고 그대로 받는다
+    (`rg_option_pnl`이 `fees["reconciliation"]`을 그대로 넘기기 때문. `rg_channel_pnl`처럼
+    `_reconcile_fields`로 접두사·str화하지 않은 것이 이 모듈의 실제 동작이다 — 스키마가
+    그 동작을 고치지 않고 그대로 옮긴다, 계약 §3 「기존 파일 동작 변경 금지」와 같은 결)."""
+    cycle_from: str
+    cycle_to: str
+    computed: Decimal
+    actual: Decimal
+    diff: Decimal
+    diff_pct: Optional[Decimal] = None
+
+
+class RgOptionPnlResponse(BaseModel):
+    options: list[RgOptionPnlRow]
+    account_common: RgAccountCommon
+    commission_axis: str
+    rate: Optional[Decimal] = None
+    rate_basis: Optional[str] = None
+    rate_cycles: Optional[str] = None
+    fee_coverage: Optional[Decimal] = None
+    cost_coverage: Optional[Decimal] = None
+    option_axis_days: str
+    option_axis_complete: bool
+    cost_trustworthy: bool
+    fee_trustworthy: bool
+    reconciliation: Optional[RgReconciliation] = None
+    conservation: RgConservation
+    # ── HTTP 경계에서 추가한 메타(서비스층 계산이 아니라 요청 에코 + vendor_id 자백) ──
+    account: str
+    date_from: str
+    date_to: str
+    # vendor_id를 못 찾으면 광고비를 「0원」이 아니라 「모름」으로 자백한다(추정 금지 — 위 지시).
+    ad_spend_warning: Optional[str] = None
