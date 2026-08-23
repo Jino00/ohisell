@@ -17,6 +17,10 @@ import RocketRecon from "./pages/RocketRecon";
 import Rocket1PRevenue from "./pages/Rocket1PRevenue";
 import Rocket1PFunnel from "./pages/Rocket1PFunnel";
 import Rocket1PPnlAudit from "./pages/Rocket1PPnlAudit";
+// RG(로켓그로스 2P) 전용 화면 — 계약 CONTRACT_2p_own_screens(D-CPP-54) §1-A.
+// 1P 전용 4화면 바로 뒤에 둔다: 둘 다 «쿠팡 아래 판매방식»이라 같은 층이다(Layout.tsx:236-240).
+import RocketGrowthPnl from "./pages/RocketGrowthPnl";
+import RocketGrowthSettlement from "./pages/RocketGrowthSettlement";
 import NaverOps from "./pages/NaverOps";
 import ProductConnectionMap from "./pages/ProductConnectionMap";
 import NaverAdReport from "./pages/NaverAdReport";
@@ -42,6 +46,8 @@ export default function App() {
           <Route path="rocket-1p-revenue" element={<Rocket1PRevenue />} />
           <Route path="rocket-1p-funnel" element={<Rocket1PFunnel />} />
           <Route path="rocket-1p/pnl-audit" element={<Rocket1PPnlAudit />} />
+          <Route path="rocket-growth" element={<RocketGrowthPnl />} />
+          <Route path="rocket-growth/settlement" element={<RocketGrowthSettlement />} />
           <Route path="naver-ops" element={<NaverOps />} />
           <Route path="orders" element={<Orders />} />
           <Route path="products" element={<Products />} />

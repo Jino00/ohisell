@@ -251,13 +251,34 @@ const ROCKET_1P_GROUP: NavGroup = {
   ],
 };
 
+// 로켓그로스(2P) 전용 화면 묶음 — 1P 그룹과 **같은 층**이다.
+//   계약 `docs/contracts/CONTRACT_2p_own_screens.md`(D-CPP-54, Jino 승인 2026-08-23).
+//   ★왜 최상위가 아니라 여기인가: 바로 위 2026-08-06 규칙이 「채널(쿠팡·스마트스토어)과 그 안의
+//     판매방식 그레인을 같은 줄에 섞지 않는다」이고, 로켓그로스도 **쿠팡 아래 판매방식**이다.
+//     최상위에 두면 그 규칙이 깨진다 — 새 축을 발명하지 않고 1P와 동형으로 둔다.
+//   ★왜 이 그룹이 생겼나: 실측(2026-08-23) 전용 사이드바 메뉴 1P 4 · 네이버 2 · **RG 0**.
+//     Jino 원문 *"2P에 대한 내용이 sellc의 데시보드와 서브메뉴에 전혀 안보이는게 문제"*.
+//   ★1P의 4화면을 베끼지 않았다 — 1P 4화면은 1P 고유 업무(발주·납품·계산서)에서 나왔고 2P엔
+//     그 업무가 없다. 세 번째 링크는 **신설이 아니라 기존 완비 화면**을 가리킨다(재고 RG 탭은
+//     이미 발송관제+청구감사 둘 다 있다 — 그쪽은 오히려 1P가 「준비 중」이다).
+const ROCKET_GROWTH_GROUP: NavGroup = {
+  label: "쿠팡 로켓그로스(2P)",
+  icon: "🌱",
+  children: [
+    { to: "/rocket-growth", label: "손익(판매일 축)", icon: "💵" },
+    { to: "/rocket-growth/settlement", label: "정산·근거", icon: "🧾" },
+    { to: "/inventory?tab=rg", label: "재고·발송관제", icon: "🏭" },
+  ],
+};
+
 // 대시보드 하위 채널별 운영 패널 (접이식). 항목은 **링크이거나 그룹**이다.
-//   순서가 곧 화면 순서다 — 1P 그룹은 쿠팡 것들 바로 뒤, 스마트스토어 앞.
+//   순서가 곧 화면 순서다 — 1P·2P 그룹은 쿠팡 것들 바로 뒤, 스마트스토어 앞.
 const DASHBOARD_CHILDREN: (NavLinkItem | NavGroup)[] = [
   { to: "/coupang-ops", label: "쿠팡 운영", icon: "🔧" },
   // 쿠팡 광고 설정 변경 이력(트랙 coupang-ad-change-log). 조회 전용 — 여기서 광고를 만지지 않는다.
   { to: "/coupang-ad-changes", label: "쿠팡 광고 수정", icon: "📝" },
   ROCKET_1P_GROUP,
+  ROCKET_GROWTH_GROUP,
   { to: "/naver-ops", label: "스마트스토어", icon: "🛒" },
 ];
 
