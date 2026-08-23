@@ -21,7 +21,7 @@
 // 통과하므로 넷 중 어느 하나만 끊어도 죽는다. api 모듈은 모킹해 네트워크를 타지 않는다 —
 // 재는 것은 「값이 화면 픽셀이 되나」이지 서버가 아니다.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type {
   CostBoard,
@@ -36,7 +36,11 @@ import type {
 //   (`costMaterialsSurface.test.tsx`가 같은 파일의 다른 순수 컴포넌트에 쓰는 것과 같은 결).
 //   전체 App 경로로는 이 분기에 진짜 0건을 못 만든다 — 옵션 목록이 항상 «현재 제품에
 //   속한 것만»으로 구성되게 P1을 고쳤기 때문에, 정상 네비게이션으로는 0건이 안 나온다.
-import { RecipeList, StandardCostBoard } from "./CostPage";
+// ★2026-08-23 추가: `reconcileSelectedRecipeId`는 「선택이 필터 밖으로 나가면 상세
+//   패널이 뭘 보여줘야 하나」를 정하는 유일한 진실의 원천이다(CostPage.tsx). 순수 함수라
+//   전체 App 경로로는 못 만드는 조합(0건 등)까지 직접 단언할 수 있다 — 같은 이유로
+//   RecipeList·StandardCostBoard를 직접 렌더하는 이 파일의 기존 관례를 그대로 따른다.
+import { reconcileSelectedRecipeId, RecipeList, StandardCostBoard } from "./CostPage";
 
 // ── prod 실측값(2026-08-22) — 합격 1이 화면에서 보겠다는 바로 그 두 로트 ──
 const KIT: CostMaterial = {
@@ -393,6 +397,11 @@ vi.mock("../lib/api", async (importOriginal) => {
       items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
     })),
     fetchCostBoard: vi.fn(async () => BOARD),
+    // ★「보존」테스트가 재조회를 일으키는 트리거로 쓴다 — 실제 구현은 fetch를 타는데
+    //   그러면 전역 fetchSpy가 `{}`를 돌려줘 `out.skipped_has_price.length`에서
+    //   TypeError가 나 load()가 아예 안 불린다. 이 파일의 다른 쓰기 호출들과 같은 결로
+    //   여기서 값을 직접 만든다.
+    adoptCostExcelPrices: vi.fn(async () => ({ skipped_has_price: [], skipped_no_ref: [] })),
     getSchedulerHealth: vi.fn(async () => ({ healthy: true })),
     getAdCostCookieStatus: vi.fn(async () => ({})),
     getCollectionStatus: vi.fn(async () => ({ streams: [] })),
@@ -812,6 +821,108 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         expect(el.className).not.toMatch(/(^|\s)w-\d/);
         expect(el.className).not.toMatch(/min-w-\[/);
       }
+    });
+  });
+
+  // ── 결함 수리 (2026-08-23, Jino 실관측): 레시피 탭에서 제품 검색으로 목록을 좁혀도
+  //   상세 패널은 필터 밖(목록에 없는) 레시피를 계속 붙들고 있었다 — 그 상태에서
+  //   「이 구성을 승인한다」를 누르면 엉뚱한 레시피가 승인된다. 값은 맞았지만 사람이
+  //   보는 화면이 틀렸다는 점에서 이 파일이 아홉 번째로 밟는 같은 병이다.
+  describe("★결함 수리 — 상세 패널이 필터 밖 레시피를 붙들지 않는다", () => {
+    async function openRecipesTabForFilter() {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      // 기본 선택(목록 첫 항목, RECIPE id 7)이 뜰 때까지 기다린다.
+      await screen.findByRole("heading", { name: "오하이 빛반사, 지문방지 매트 필름 3매" });
+    }
+
+    it("회귀: 필터 밖으로 나간 선택은 상세 패널에서 더 이상 렌더되지 않는다", async () => {
+      await openRecipesTabForFilter();
+
+      // 다른 제품(강화유리 풀커버, id 9)의 레시피를 명시적으로 고른다.
+      fireEvent.click(screen.getByTestId("recipe-row-9"));
+      expect(await screen.findByRole("heading", { name: "오하이 강화유리 풀커버" })).toBeTruthy();
+
+      // 제품 필터를 걸어 지금 선택된 레시피(id 9)를 목록 밖으로 밀어낸다.
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+
+      // ★결함이 있었다면 상세 패널은 여전히 「강화유리 풀커버」를 보여준다.
+      //   「상태가 바뀌었다」가 아니라 화면에 그 글자가 «없다»를 잰다.
+      await waitFor(() => {
+        expect(screen.queryByRole("heading", { name: "오하이 강화유리 풀커버" })).toBeNull();
+      });
+      // ★왼쪽 목록에서도 사라진다 — 필터가 실제로 걸렸다는 대조군.
+      expect(screen.queryByTestId("recipe-row-9")).toBeNull();
+    });
+
+    it("스냅: 선택이 목록 밖으로 나가면 필터된 목록의 첫 레시피로 자동 전환된다", async () => {
+      await openRecipesTabForFilter();
+      fireEvent.click(screen.getByTestId("recipe-row-9")); // 강화유리 풀커버 선택
+      await screen.findByRole("heading", { name: "오하이 강화유리 풀커버" });
+
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+
+      // 필터된 목록(id 7 bar, id 8 flip) 중 배열 순서상 첫 항목 id 7(bar)로 스냅한다.
+      const panel = await screen.findByTestId("recipe-detail-panel");
+      await waitFor(() => {
+        expect(
+          within(panel).getByRole("heading", { name: "오하이 빛반사, 지문방지 매트 필름 3매" }),
+        ).toBeTruthy();
+      });
+      expect(within(panel).getByText(/폼팩터 bar ·/)).toBeTruthy();
+      // id 7은 계산이 끝난 레시피다 — id 8(flip, 미계산)로 잘못 스냅하지 않았다는 대조군.
+      expect(within(panel).getAllByText("2,350.7원").length).toBeGreaterThan(0);
+    });
+
+    it("보존: 필터를 건 상태에서 재조회(승인 등)가 일어나도 같은 레시피가 계속 선택돼 있다", async () => {
+      await openRecipesTabForFilter();
+
+      // 「강화유리 풀커버」로 필터 — id 9(bar)로 스냅된다(배열 순서상 첫 항목).
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, { target: { value: "오하이 강화유리 풀커버" } });
+      const panel = await screen.findByTestId("recipe-detail-panel");
+      await waitFor(() => {
+        expect(within(panel).getByRole("heading", { name: "오하이 강화유리 풀커버" })).toBeTruthy();
+      });
+
+      // 재조회를 일으킨다 — 「엑셀 참고값을 단가로 채택」은 line_count와 무관하게 항상
+      // 눌릴 수 있고, 성공하면 onAdopt 안에서 load()가 다시 호출된다.
+      fireEvent.click(screen.getByRole("button", { name: /엑셀 참고값을 단가로 채택/ }));
+
+      // ★재조회 뒤에도 같은 필터·같은 선택이 유지된다 — 승인 직후 목록이 갱신되며
+      //   선택이 풀리면 방금 승인한 결과를 못 본다(CostPage.tsx 주석과 같은 이유).
+      await waitFor(() => {
+        expect(within(panel).getByRole("heading", { name: "오하이 강화유리 풀커버" })).toBeTruthy();
+      });
+    });
+
+    describe("0건: reconcileSelectedRecipeId — 상세 패널이 엉뚱한 레시피를 안 보여준다", () => {
+      // ★전체 App 경로로는 진짜 0건을 못 만든다(폼팩터 셀렉트가 항상 «현재 제품에
+      //   속한 것만»이라 0건 조합 자체가 안 만들어진다 — 위 P2-A 설명과 같은 사정).
+      //   그래서 이 결함 수리의 «유일한 진실의 원천»인 순수 함수를 직접 잰다.
+      it("필터 결과가 0건이면 이전 선택과 무관하게 null이다", () => {
+        expect(reconcileSelectedRecipeId([], RECIPE_OTHER_PRODUCT.id)).toBeNull();
+        expect(reconcileSelectedRecipeId([], null)).toBeNull();
+      });
+
+      it("현재 선택이 필터된 목록 안에 있으면 그대로 유지한다", () => {
+        expect(
+          reconcileSelectedRecipeId([RECIPE, RECIPE_FLIP], RECIPE_FLIP.id),
+        ).toBe(RECIPE_FLIP.id);
+      });
+
+      it("현재 선택이 필터된 목록 밖이면 첫 항목으로 스냅한다", () => {
+        expect(
+          reconcileSelectedRecipeId([RECIPE, RECIPE_FLIP], RECIPE_OTHER_PRODUCT.id),
+        ).toBe(RECIPE.id);
+      });
     });
   });
 

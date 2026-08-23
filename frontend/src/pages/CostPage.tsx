@@ -600,6 +600,26 @@ export function formFactorLabel(form: string | null): string {
   return form && form.trim() ? form : "—";
 }
 
+/**
+ * ★레시피 상세 패널이 «어떤 레시피를 가리키는가»의 유일한 진실의 원천.
+ *
+ * 필터(제품/폼팩터)가 바뀌거나 데이터가 재조회돼 `filtered`가 달라질 때마다 이 함수
+ * 하나로 다음 선택을 다시 계산한다 — 호출하는 자리가 둘(필터 변경 · 데이터 재조회)이어도
+ * 로직은 여기 하나뿐이라 서로 다른 기준으로 같은 상태를 다투지 않는다.
+ *
+ * - 현재 선택이 `filtered` 안에 여전히 있으면 그대로 유지한다(승인 직후 재조회돼도
+ *   방금 승인한 레시피를 계속 보여주기 위해서다).
+ * - 없으면(필터가 바뀌었거나 레시피 자체가 사라졌으면) `filtered`의 첫 항목으로 스냅한다.
+ * - `filtered`가 0건이면 `null`이다 — 있지도 않은 레시피를 붙들고 있지 않는다.
+ */
+export function reconcileSelectedRecipeId(
+  filtered: CostRecipe[],
+  currentId: number | null,
+): number | null {
+  if (currentId !== null && filtered.some((r) => r.id === currentId)) return currentId;
+  return filtered.length ? filtered[0].id : null;
+}
+
 /** 격차 표시. `null`은 「—」다 — 「격차 0%」와 「잴 수 없음」은 다른 사실이다. */
 export function gapText(gap: number | null): string {
   if (gap === null || gap === undefined || !Number.isFinite(gap)) return "—";
@@ -1031,6 +1051,7 @@ export function RecipeList({
         {recipes.map((r) => (
         <li key={r.id}>
           <button
+            data-testid={`recipe-row-${r.id}`}
             className={`w-full text-left px-3 py-2 hover:bg-gray-50 ${
               r.id === selectedId ? "bg-blue-50" : ""
             }`}
@@ -1138,7 +1159,7 @@ export function RecipeDetail({
 }) {
   const m = recipe.match;
   return (
-    <section className="border rounded-md p-4">
+    <section className="border rounded-md p-4" data-testid="recipe-detail-panel">
       <div className="flex items-start justify-between gap-2 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold text-gray-800">{recipe.product_name}</h2>
@@ -1420,14 +1441,9 @@ export default function CostPage() {
       setRecipes(r.items);
       setBoard(b);
       setSelectedId((prev) => prev ?? (m.items.length ? m.items[0].id : null));
-      // ★선택은 유지한다 — 승인 직후 목록이 갱신되며 선택이 풀리면 방금 승인한 결과를 못 본다.
-      setSelectedRecipeId((prev) =>
-        prev !== null && r.items.some((x) => x.id === prev)
-          ? prev
-          : r.items.length
-            ? r.items[0].id
-            : null,
-      );
+      // ★레시피 선택은 여기서 건드리지 않는다 — 진실의 원천은 아래 단일 effect
+      // (filteredRecipes 기준)뿐이다. 여기서도 setSelectedRecipeId를 하면 두 곳이
+      // 서로 다른 기준(전체 recipes vs 필터된 목록)으로 같은 값을 다투게 된다.
       setErr(null);
     } catch (e) {
       // ★조용히 빈 화면을 주지 않는다 — 실패는 실패라고 말한다(교훈 #319).
@@ -1444,10 +1460,21 @@ export default function CostPage() {
     [materials, selectedId],
   );
 
+  // ★진실의 원천은 여기 하나뿐이다 — selectedRecipeId가 무엇을 가리키든,
+  // 화면에 실제로 뜨는 selectedRecipe는 항상 filteredRecipes(현재 필터가 적용된
+  // 목록) 안에서만 찾는다. recipes(전체 100건) 안에서 찾으면 필터 밖 레시피가
+  // 그대로 상세 패널에 남는다 — 그게 이 파일이 고치는 결함이다.
   const selectedRecipe = useMemo(
-    () => recipes.find((r) => r.id === selectedRecipeId) ?? null,
-    [recipes, selectedRecipeId],
+    () => filteredRecipes.find((r) => r.id === selectedRecipeId) ?? null,
+    [filteredRecipes, selectedRecipeId],
   );
+
+  // ★선택 ID를 필터에 맞춰 되돌리는 유일한 자리 — load()는 더 이상 selectedRecipeId를
+  // 건드리지 않는다. 로직 자체는 reconcileSelectedRecipeId 하나뿐이고, 여기선 그저
+  // 「filteredRecipes가 바뀔 때마다 다시 계산해라」만 배선한다.
+  useEffect(() => {
+    setSelectedRecipeId((prev) => reconcileSelectedRecipeId(filteredRecipes, prev));
+  }, [filteredRecipes]);
 
   async function run(fn: () => Promise<unknown>, ok: string) {
     setBusy(true);
@@ -1464,7 +1491,7 @@ export default function CostPage() {
   }
 
   return (
-    <div className="p-6 max-w-6xl">
+    <div className="p-6 max-w-[96rem]">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">💰 원가</h1>
         <div className="flex items-center gap-2 flex-wrap">
