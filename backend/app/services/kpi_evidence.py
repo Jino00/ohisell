@@ -65,15 +65,32 @@ def _cost_is_unknown(row: dict) -> bool:
       (RG는 그렇게 적어 놓고 바로 아래에서 `cost = ZERO`를 싣는다.)
       그래서 초판 화면은 로켓1P 원가 칸에 **「0원」**을 찍었다 — 계약 §2-2가 금지한 바로 그 거짓말.
 
-    판정 신호는 **행이 스스로 낸 자백**을 쓴다: `net_profit`이 None이면 그 행은 「손익을 못 잰다」고
-    선언한 것이고, 두 엔진 모두 **정확히 그 분기에서만** 원가를 0으로 만든다. 원가가 0이 아닌 값이면
-    그건 실측이므로 손대지 않는다.
+    판정 신호는 **행이 스스로 낸 자백 둘** 중 하나다:
+      · `net_scope == "ad_only"` — 「손익을 못 재는 구간이라 확정 비용인 광고비만 반영된 하한」
+      · `net_profit is None`     — 「잴 것이 아무것도 없다」(RG의 원가 미신뢰 분기가 여기다)
+    둘 다 아니면(=`full`이거나 평범한 주문 축 행) 그 `cost`는 실측이므로 손대지 않는다.
+
+    ★`net_scope`가 **키로 없는 것**과 **값이 None인 것**을 같게 보면 안 된다 —
+      `calculate_channel_summary`(주문 축) 행은 이 키를 아예 안 싣는다. `not in (None, AD_ONLY)`로
+      쓰면 그 행 전부가 조건을 통과해, 원가가 진짜 0인 평범한 채널까지 "—"로 덮인다.
+
+    ★★신호를 두 번 틀렸다 — 그 이력을 남긴다(적대 리뷰 2R P1-1 미해소).
+      초판 신호는 「`net_profit is None`」이었는데, **로켓1P producer는 `net_profit`을 None으로
+      내지 않는다** — 계산서 축에서 하한을 «자기가 만들어» 넣는다
+      (`elif ad_spend > ZERO: net, scope = -ad_spend, NET_SCOPE_AD_ONLY` → `"net_profit": str(net)`).
+      그래서 RG만 고쳐지고 로켓1P는 **한 글자도 안 바뀌었다.** 게다가 부작용이 더 나빴다:
+      같은 「원가 미상」이 **광고비 유무로 갈렸다** — 광고비 0이면 `net_profit=None`이라 "—",
+      광고비가 있으면 "0원". **광고를 돌린 날만 거짓말이 뜬다**(라이브의 상시 조건이 그쪽이다).
+      ⇒ 행이 «이미 말하고 있는» 자백(`net_scope`)을 읽는다. 새 신호를 발명하지 않는다.
 
     ★고치는 자리를 producer가 아니라 여기로 잡은 이유: producer의 `cost`는 다른 화면들이 이미 읽고
       있어 건드리면 이번 계약의 「숫자 자체 수정 안 함」을 넘는다. 여기서 내리면 **근거 화면에서만**
       «모른다»가 되고 어떤 합계도 안 바뀐다(0을 빼는 것이라 잔차가 불변이다).
     """
-    if row.get("net_profit") is not None:
+    cannot_measure = (
+        row.get("net_scope") == NET_SCOPE_AD_ONLY or row.get("net_profit") is None
+    )
+    if not cannot_measure:
         return False
     cost = _opt_dec(row.get("cost"))
     return cost is not None and cost == ZERO

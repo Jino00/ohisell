@@ -9,6 +9,7 @@
 # 여기서는 같은 창으로 `/kpi`와 `/kpi/evidence`를 **둘 다 호출해** 4값을 원 단위로 맞춘다.
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -35,9 +36,14 @@ _ROCKET = {
     "settlement": {
         "channel_id": ROCKET_ID, "channel_name": "쿠팡 로켓배송", "revenue": "1578000",
         "product_revenue": "1578000", "shipping_revenue": "0",
-        # ★실제 producer가 내는 모양 — 원가를 못 믿는 분기에서 **0을 싣는다**(리뷰 1R P1-1).
+        # ★★실제 producer가 내는 모양 그대로다(리뷰 2R P1-1 — 초판 픽스처가 여기서 갈라졌다).
+        #   `compute_rocket_1p_summary_row`는 원가를 못 믿는 분기에서 `cost`를 **0으로 싣고**,
+        #   `net_profit`은 **None으로 두지 않는다** — 하한(−광고비)을 «자기가 만들어» 넣는다:
+        #       elif ad_spend > ZERO: net, scope = -ad_spend, NET_SCOPE_AD_ONLY
+        #   초판 픽스처는 `net_profit: None`이라 **producer가 한 번도 만들지 않는 모양**이었고,
+        #   그래서 로켓1P의 「원가 0원」 거짓말을 통과시켰다.
         "cost": "0", "commission": "0", "ad_spend": "597888", "shipping": "0",
-        "net_profit": None, "net_scope": "ad_only", "net_basis_revenue": "0",
+        "net_profit": "-597888", "net_scope": "ad_only", "net_basis_revenue": "0",
         "unmapped_revenue": "1578000", "order_count": 0, "revenue_basis": "settlement",
     },
     "sales": {
@@ -124,6 +130,39 @@ def test_rocket_settlement_cost_is_unknown_not_zero(client):
     assert Decimal(rocket["deductions"]["ad_spend"]) == Decimal("597888")
 
 
+def test_unknown_cost_does_not_flip_with_ad_spend(client, monkeypatch):
+    """★리뷰 2R P1-1 — 같은 「원가 미상」이 **광고비 유무로 갈리면 안 된다.**
+
+    초판 신호(`net_profit is None`)는 광고비가 0일 때만 참이었다. producer는 광고비가 있으면
+    하한을 자기가 만들어 `net_profit`을 채우므로, **광고를 돌린 날만 「원가 0원」 거짓말**이 떴다 —
+    하필 라이브의 상시 조건이 그쪽이다.
+    """
+    from app.services.kpi_evidence import build_row_evidence
+
+    base = dict(_ROCKET["settlement"])
+    with_ad = build_row_evidence(base, ROCKET_ID)
+    # 광고비 0 → producer는 net_profit을 None으로 둔다(하한이랄 것도 없다)
+    no_ad = build_row_evidence(
+        dict(base, ad_spend="0", net_profit=None, net_scope=None), ROCKET_ID
+    )
+    assert with_ad["deductions"]["cost"] is None
+    assert no_ad["deductions"]["cost"] is None, "광고비 유무로 「모른다」가 갈렸다"
+
+
+def test_ordinary_channel_with_zero_cost_is_not_overwritten():
+    """평범한 주문 축 행은 `net_scope` 키가 **아예 없다** — 그 행까지 «모른다»로 덮으면 안 된다."""
+    from app.services.kpi_evidence import build_row_evidence
+
+    row = {
+        "channel_id": 9, "revenue": "1000", "cost": "0", "commission": "0",
+        "ad_spend": "0", "shipping": "0", "fixed_cost": "0",
+        "payable_vat": "90.909090909090909090909091",
+        "net_profit": "909.090909090909090909090909", "order_count": 1,
+    }
+    ev = build_row_evidence(row, ROCKET_ID)
+    assert ev["deductions"]["cost"] == "0", "손익을 온전히 잰 행의 원가 0은 사실이다"
+
+
 def test_rocket_sales_cost_is_a_fact(client):
     """반대로 원가가 실측인 축에서는 값을 그대로 보인다 — 무조건 «모른다»로 덮으면 안 된다."""
     _, ev = _both(client, "sales")
@@ -169,27 +208,63 @@ def test_net_fully_explained_is_false_when_a_residual_remains(client):
     assert ev["checks"]["net_matches"] is True
 
 
-def test_three_p_ad_merge_keeps_payable_vat_in_step():
+def test_three_p_ad_merge_keeps_payable_vat_in_step(monkeypatch):
     """★리뷰 1R P1-4 — 3P 행에 쿠팡 광고비를 얹을 때 `payable_vat`도 같이 줄어야 한다.
 
     안 그러면 근거 화면이 「이 행이 실제로 뺀 부가세」라며 **광고비 매입세액만큼 큰 값**을 보이고,
     그 차액이 잔차로 떠서 「설명 못 한 돈」에 틀린 이름이 붙는다.
+
+    ★**`_merge_rg_summary`를 실제로 부른다**(리뷰 2R 지적): 초판은 라우터의 세 줄을 테스트 안에
+      다시 적어 검증해서, **라우터에서 그 줄을 지워도 안 죽는 장식**이었다. 자기가 베낀 코드를
+      자기가 검사하는 테스트는 아무것도 안 지킨다.
     """
     ad_p3 = Decimal("120000")
+
+    class _Ch3P:
+        id = 9
+        code = "COUPANG_WING1"
+        name = "오픽스 3P"
+
+    class _Q:
+        def filter(self, *a, **k):
+            return self
+
+        def all(self):
+            return [_Ch3P()]
+
+    class _DB:
+        def query(self, *a, **k):
+            return _Q()
+
+    monkeypatch.setattr(dash, "_WING_ACCOUNTS", ("COUPANG_WING1",))
+    monkeypatch.setenv("COUPANG_WING1_VENDOR_ID", "A00000000")
+    monkeypatch.setattr(
+        dash, "split_wing_ad_spend",
+        lambda db, df, dt, account_key, vendor_id: {"p3": ad_p3, "rg": Decimal("0")},
+    )
+    # RG 행 자체는 이 테스트의 관심사가 아니다 — 3P 행에 광고비를 얹는 경로만 본다.
+    monkeypatch.setattr(dash, "compute_rg_summary_row", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.coupang.intelligence._cost_master", lambda db: {}
+    )
+
     row = {
-        "channel_id": 9, "revenue": "1000000", "cost": "400000", "commission": "100000",
+        "channel_id": 9, "channel_name": "오픽스 3P",
+        "revenue": "1000000", "product_revenue": "1000000", "shipping_revenue": "0",
+        "cost": "400000", "commission": "100000",
         "ad_spend": "0", "shipping": "0", "fixed_cost": "0",
         "payable_vat": "45454.54545454545454545454545",
         "net_profit": "454545.4545454545454545454545",
+        "unmapped_revenue": "0", "order_count": 10,
     }
-    input_vat = ad_p3 * Decimal("10") / Decimal("110")
-    # 라우터가 하는 두 줄과 같은 조정
-    row["ad_spend"] = str(Decimal(row["ad_spend"]) + ad_p3)
-    row["net_profit"] = str(Decimal(row["net_profit"]) - ad_p3 + input_vat)
-    row["payable_vat"] = str(Decimal(row["payable_vat"]) - input_vat)
+    merged = dash._merge_rg_summary(_DB(), [row], date(2026, 8, 22), date(2026, 8, 22))
+    row_3p = next(r for r in merged if r["channel_id"] == 9)
+
+    assert Decimal(row_3p["ad_spend"]) == ad_p3, "광고비가 안 얹혔다 — 테스트 전제가 깨졌다"
 
     from app.services.kpi_evidence import build_row_evidence
 
-    ev = build_row_evidence(row, None)
-    assert ev["residual"] == "0.00", "부가세 칸이 스테일이면 잔차가 이만큼 뜬다"
+    ev = build_row_evidence(row_3p, None)
+    assert ev["residual"] == "0.00", "부가세 칸이 스테일이면 잔차가 광고비 매입세액만큼 뜬다"
     assert ev["explains_net"] is True
+    assert "payable_vat" not in ev["missing"]
