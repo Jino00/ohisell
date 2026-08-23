@@ -30,6 +30,10 @@ import type {
   CostRecipe,
   CostSetting,
 } from "../lib/api";
+// ★P1-1(적대 리뷰)용 — 승인/승인취소 호출부가 실제로 눌리는지 재려면 그 함수들
+//   «자신»을 vi.fn()으로 잡아야 한다(아래 vi.mock 팩토리에서 오버라이드).
+//   fetchCostRecipes도 테스트별로 응답을 바꿔치기하려고 함께 들여온다.
+import { approveCostRecipe, fetchCostRecipes, unapproveCostRecipe } from "../lib/api";
 
 // ★P2-A용: 0건 안내 렌더 분기 «자신»을 직접 잡는다. 이 두 컴포넌트는 CostPage.tsx가
 //   「전부 순수 — props만 본다. 테스트가 직접 렌더한다」고 선언한 표시 계층이다
@@ -397,6 +401,11 @@ vi.mock("../lib/api", async (importOriginal) => {
       items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
     })),
     fetchCostBoard: vi.fn(async () => BOARD),
+    // ★P1-1 — 승인/승인취소가 «화면 클릭에서 실제로 불리는가»를 재려면 이 둘도
+    //   vi.fn()이어야 한다. 오버라이드가 없으면 `actual`의 진짜 구현이 전역 fetchSpy를
+    //   타는데, 그러면 「호출됐다/안 됐다」·「어떤 id로 불렸다」를 잴 수단이 없다.
+    approveCostRecipe: vi.fn(async (id: number) => ({ ...RECIPE, id, status: "approved" })),
+    unapproveCostRecipe: vi.fn(async (id: number) => ({ ...RECIPE, id, status: "draft" })),
     // ★「보존」테스트가 재조회를 일으키는 트리거로 쓴다 — 실제 구현은 fetch를 타는데
     //   그러면 전역 fetchSpy가 `{}`를 돌려줘 `out.skipped_has_price.length`에서
     //   TypeError가 나 load()가 아예 안 불린다. 이 파일의 다른 쓰기 호출들과 같은 결로
@@ -881,26 +890,67 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(within(panel).getAllByText("2,350.7원").length).toBeGreaterThan(0);
     });
 
-    it("보존: 필터를 건 상태에서 재조회(승인 등)가 일어나도 같은 레시피가 계속 선택돼 있다", async () => {
+    // ── 적대 리뷰 P2-1 채택 (2026-08-23) — 옛 버전은 두 가지 이유로 아무것도 안 지켰다:
+    //   ① 필터 걸린 뒤 «항상 첫 항목으로 스냅»과 «선택을 보존»이 같은 답을 냈다
+    //      (강화유리 필터의 첫 항목이 바로 대상이라 M7 — reconcile에서 currentId 유지
+    //      조건을 빼고 언제나 filtered[0]을 반환 — 이 이 테스트를 통과했다).
+    //   ② `panel`을 클릭 «전»에 캡처해 재사용했다 — 재조회 중 패널이 언마운트→
+    //      리마운트되면(M13) 캡처한 노드는 분리된 옛 DOM을 계속 들고 있어 단언이
+    //      그대로 통과했다.
+    //   고치는 방향: 필터의 «두 번째» 항목을 사람이 명시적으로 고르고(첫 항목 스냅과
+    //   구별), 단언마다 `recipe-detail-panel`을 다시 조회한다(캡처 재사용 금지).
+    it("보존: 필터를 건 상태에서 재조회(승인 등)가 일어나도 «두 번째로 고른» 레시피가 계속 선택돼 있다", async () => {
       await openRecipesTabForFilter();
 
-      // 「강화유리 풀커버」로 필터 — id 9(bar)로 스냅된다(배열 순서상 첫 항목).
+      // 「강화유리 풀커버」로 필터 — 배열 순서상 첫 스냅은 id 9(form_factor bar)다.
       const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
       fireEvent.change(productSelect, { target: { value: "오하이 강화유리 풀커버" } });
-      const panel = await screen.findByTestId("recipe-detail-panel");
       await waitFor(() => {
-        expect(within(panel).getByRole("heading", { name: "오하이 강화유리 풀커버" })).toBeTruthy();
+        expect(
+          within(screen.getByTestId("recipe-detail-panel")).getByText(/폼팩터 bar ·/),
+        ).toBeTruthy();
       });
+
+      // ★그 필터 안의 «두 번째» 항목(id 10, form_factor null → 「—」)을 사람이 직접
+      //   고른다 — 「사람이 고른 두 번째 항목을 지키는 것」과 「무조건 첫 항목으로
+      //   스냅하는 것」이 다른 결과를 내게 하는 것이 이 가드의 요점이다.
+      fireEvent.click(screen.getByTestId("recipe-row-10"));
+      await waitFor(() => {
+        expect(
+          within(screen.getByTestId("recipe-detail-panel")).getByText(/폼팩터 — ·/),
+        ).toBeTruthy();
+      });
+
+      // ★M13 가드용 — 재조회 «직전»의 패널 DOM 노드 «정체성»을 잡아 둔다. 내용이 아니라
+      //   신원을 재조회 뒤와 대조하는 데만 쓴다(내용 대조에 이 노드를 재사용하면 그게
+      //   바로 옛 결함이다 — 아래에서 내용은 항상 새로 조회한다).
+      const panelBeforeReload = screen.getByTestId("recipe-detail-panel");
 
       // 재조회를 일으킨다 — 「엑셀 참고값을 단가로 채택」은 line_count와 무관하게 항상
       // 눌릴 수 있고, 성공하면 onAdopt 안에서 load()가 다시 호출된다.
       fireEvent.click(screen.getByRole("button", { name: /엑셀 참고값을 단가로 채택/ }));
 
-      // ★재조회 뒤에도 같은 필터·같은 선택이 유지된다 — 승인 직후 목록이 갱신되며
-      //   선택이 풀리면 방금 승인한 결과를 못 본다(CostPage.tsx 주석과 같은 이유).
+      // ★먼저 성공 토스트로 「재조회 사이클이 실제로 끝났다」를 확인한다 — 이게 없으면
+      //   클릭 직후(재조회가 아직 안 끝난 시점)의 옛 화면을 보고 아래 waitFor가
+      //   «처음부터 참이었으니 통과」로 헛통과한다(재조회를 한 번도 못 기다린 채).
+      await screen.findByText("엑셀 참고값을 수동 단가로 채택했다");
+
+      // ★단언마다 `recipe-detail-panel`을 다시 조회한다 — 재조회 도중 패널이 한 번
+      //   언마운트→리마운트돼도(M13) 캡처해 둔 옛 노드가 아니라 실제 현재 DOM을 본다.
       await waitFor(() => {
-        expect(within(panel).getByRole("heading", { name: "오하이 강화유리 풀커버" })).toBeTruthy();
+        expect(
+          within(screen.getByTestId("recipe-detail-panel")).getByText(/폼팩터 — ·/),
+        ).toBeTruthy();
       });
+      // ★대조군 — 「항상 첫 항목(bar)으로 스냅」했다면 이 문구가 다시 나타난다.
+      expect(
+        within(screen.getByTestId("recipe-detail-panel")).queryByText(/폼팩터 bar ·/),
+      ).toBeNull();
+      // ★M13 가드 — 재조회 중 패널이 통째로 언마운트→리마운트되면 React가 새 DOM
+      //   노드를 만든다(최종 내용이 우연히 같아도 정체성은 달라진다). 노드가 그대로면
+      //   한 번도 사라지지 않았다는 뜻이다 — 이게 「내용 재조회」만으로는 못 잡는
+      //   변이(패널이 통째로 사라졌다 같은 내용으로 되살아나는 경우)를 잡는 자리다.
+      expect(screen.getByTestId("recipe-detail-panel")).toBe(panelBeforeReload);
     });
 
     describe("0건: reconcileSelectedRecipeId — 상세 패널이 엉뚱한 레시피를 안 보여준다", () => {
@@ -923,6 +973,106 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
           reconcileSelectedRecipeId([RECIPE, RECIPE_FLIP], RECIPE_OTHER_PRODUCT.id),
         ).toBe(RECIPE.id);
       });
+    });
+  });
+
+  // ── 적대 리뷰 1R P1-1 채택 (2026-08-23) ────────────────────────────────────
+  // 실측: 「이 구성을 승인한다」·「승인 취소」 버튼 블록을 통째로 지워도(M2) —
+  // 승인 경로 자체가 화면에서 사라지는데도 — 전체 회귀 742건이 전부 초록이었다.
+  // 두 버튼 이름이 이 테스트 파일에 **단 한 번도** 등장하지 않았기 때문이다. 이 화면의
+  // 합격 조건은 「승인 버튼을 눌러야 표준원가 보드에 값이 뜬다」인데, 그 버튼이 화면에
+  // 있는지·눌리는지·누르면 무엇을 부르는지를 아무 테스트도 안 지키고 있었다.
+  describe("★결함 수리 — 승인 버튼의 표면을 붙든다 (적대 리뷰 1R P1-1)", () => {
+    // RECIPE(id 7)를 베이스로 삼되 **미승인 + 구성 있음** 조합을 만든다 — 기존 draft
+    // 픽스처(FLIP·OTHER_PRODUCT·NULL_FORM)는 전부 line_count 0이라 「승인 가능한
+    // 미승인 레시피」를 못 만든다.
+    const RECIPE_DRAFT_WITH_LINES: CostRecipe = {
+      ...RECIPE,
+      id: 11,
+      status: "draft",
+      approved_at: null,
+    };
+
+    beforeEach(() => {
+      // ★vite.config.ts엔 clearMocks/restoreMocks가 없다 — 앞 테스트의 호출 이력이
+      // 남아 있으면 「불리지 않았다」단언이 거짓으로 실패한다.
+      vi.mocked(approveCostRecipe).mockClear();
+      vi.mocked(unapproveCostRecipe).mockClear();
+    });
+
+    afterEach(() => {
+      // ★다음 테스트로 오버라이드가 새지 않게 기본 목록으로 되돌린다 — 위와 같은 이유로
+      // mockResolvedValue도 명시적으로 되돌려야 한다.
+      vi.mocked(fetchCostRecipes).mockResolvedValue({
+        items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+      });
+    });
+
+    async function openRecipesTabWith(items: CostRecipe[]) {
+      vi.mocked(fetchCostRecipes).mockResolvedValue({ items });
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      return screen.findByTestId("recipe-detail-panel");
+    }
+
+    // M2(버튼 블록→<span/>)·M11(status 조건 반전)·M12(disabled={true} 고정)를 죽인다.
+    it("미승인 + 구성 있는 레시피 — 승인 버튼이 존재·활성이고 누르면 그 레시피 id로 approveCostRecipe가 불린다", async () => {
+      await openRecipesTabWith([RECIPE_DRAFT_WITH_LINES]);
+      const panel = screen.getByTestId("recipe-detail-panel");
+
+      const approveBtn = within(panel).getByRole(
+        "button",
+        { name: "이 구성을 승인한다" },
+      ) as HTMLButtonElement;
+      expect(approveBtn.disabled).toBe(false);
+      // M11 가드 — 미승인 레시피엔 「승인 취소」가 있으면 안 된다.
+      expect(within(panel).queryByRole("button", { name: "승인 취소" })).toBeNull();
+
+      fireEvent.click(approveBtn);
+
+      await waitFor(() => {
+        expect(vi.mocked(approveCostRecipe)).toHaveBeenCalledWith(RECIPE_DRAFT_WITH_LINES.id);
+      });
+      // unapprove는 이 경로에서 불릴 이유가 없다 — M11이 살아 있으면(status 조건 반전)
+      // 미승인 레시피에서 「승인 취소」가 렌더돼 unapprove가 불릴 것이다.
+      expect(vi.mocked(unapproveCostRecipe)).not.toHaveBeenCalled();
+    });
+
+    // M11을 반대 방향에서도 죽인다 — 승인된 레시피엔 승인 버튼이 아예 없어야 한다.
+    it("승인된 레시피 — 「승인 취소」만 뜨고 「이 구성을 승인한다」는 없다, 누르면 그 id로 unapproveCostRecipe가 불린다", async () => {
+      const panel = await openRecipesTabWith([RECIPE]); // RECIPE.status === "approved"
+
+      expect(within(panel).queryByRole("button", { name: "이 구성을 승인한다" })).toBeNull();
+      const unapproveBtn = within(panel).getByRole(
+        "button",
+        { name: "승인 취소" },
+      ) as HTMLButtonElement;
+      expect(unapproveBtn.disabled).toBe(false);
+
+      fireEvent.click(unapproveBtn);
+
+      await waitFor(() => {
+        expect(vi.mocked(unapproveCostRecipe)).toHaveBeenCalledWith(RECIPE.id);
+      });
+      expect(vi.mocked(approveCostRecipe)).not.toHaveBeenCalled();
+    });
+
+    // M12 가드 — `disabled={true}`로 고정하면 line_count > 0인 RECIPE_DRAFT_WITH_LINES에서도
+    // 비활성이 돼 위 첫 테스트의 `approveBtn.disabled === false` 단언이 이미 이걸 죽인다.
+    // 여기선 반대 극단(line_count 0)에서 **정상적으로도** 비활성인 것과, 그 이유가 화면에
+    // 있는지를 확인한다 — 「구성이 비어 있다 — 계산할 것이 없다」는 CostPage.tsx가
+    // `StandardBreakdown`에서 `standard.lines`가 빈 배열일 때 실제로 렌더하는 문구다
+    // (코드 확인: CostPage.tsx의 StandardBreakdown, `if (!standard.lines.length) return …`).
+    it("구성이 빈(line_count 0) 레시피 — 승인 버튼이 비활성이고, 그 옆 계산 내역이 「구성이 비어 있다」를 말한다", async () => {
+      const panel = await openRecipesTabWith([RECIPE_FLIP]); // draft, line_count 0, standard.lines: []
+
+      const approveBtn = within(panel).getByRole(
+        "button",
+        { name: "이 구성을 승인한다" },
+      ) as HTMLButtonElement;
+      expect(approveBtn.disabled).toBe(true);
+      expect(within(panel).getByText(/구성이 비어 있다 — 계산할 것이 없다/)).toBeTruthy();
     });
   });
 
