@@ -308,12 +308,36 @@ describe("RocketGrowthSettlement — 계정 전환이 옛 계정의 카드를 �
     expect(screen.queryByText(/«모른다»이지 «미상\/미달»이 아니다/)).toBeNull();
   });
 
-  it("손익 조회가 «실패»하면 로딩이 아니라 에러를 말한다 — 두 결손이 같은 얼굴이면 안 된다", async () => {
+  // ★3R P2 — 실패 얼굴도 결론 문장을 말하고 있었다(origin/main부터의 선재 결함). 실패와 로딩은
+  //   «다른 문장»이어야 하지만 둘 다 «모름»이지 «미상/미달»이 아니다 — 갈라야 할 것은 얼굴이다.
+  it("손익 조회가 «실패»해도 ①②③이 «미상/미달»을 단정하지 않는다 — 3R P2", async () => {
     h.overview = makeOverview();
     h.nextOptionPnl = () => Promise.reject(new Error("손익 500"));
     renderSettlement();
     await waitFor(() => expect(screen.getByText(/손익 500/)).toBeTruthy());
+    // 실패 얼굴은 «로딩»과 다른 문장이어야 한다(두 결손이 같은 얼굴이면 안 된다).
+    // 문장이 <strong>으로 쪼개져 있어 정규식 하나로는 못 잡는다 — 실패 얼굴에만 있는 절로 집는다.
+    expect(screen.getByText("«미상/미달»이 아니라 «모름»이다.")).toBeTruthy();
+    expect(screen.getByText("못 불러왔다")).toBeTruthy();
     expect(screen.queryByText(/«모른다»이지 «미상\/미달»이 아니다/)).toBeNull();
+    // 그리고 결론 문장은 하나도 없어야 한다.
+    expect(screen.queryByText(/요율 미상 — 잴 완결 주기가 없다/)).toBeNull();
+    expect(screen.queryByText(/원가 커버리지 미달/)).toBeNull();
+    expect(screen.queryByText(/순이익을 내지 않는다/)).toBeNull();
+  });
+
+  // ★3R P2 — `by_account?.length`의 `?.`를 지키는 테스트가 하나도 없었다(변이 `?? 0` → `?? 1`이
+  //   생존했다). 그 변이는 크래시를 카드의 `by_account.map`으로 «자리만 옮겨» 재발시킨다.
+  it("by_account가 아예 없는 응답에도 화면이 죽지 않고 «아직»을 말한다 — 3R P2", async () => {
+    const ov = makeOverview() as unknown as Record<string, unknown>;
+    (ov.rg_settlement as Record<string, unknown>).by_account = undefined;
+    h.overview = ov as unknown as OverviewResponse;
+    h.optionPnl = OPTION_PNL_BASE;
+    renderSettlement();
+    await waitFor(() => expect(screen.getByText(/아직 안 들어왔다/)).toBeTruthy());
+    // 화면이 살아 있다는 증거 — 다른 섹션이 정상 렌더된다.
+    expect(screen.getByText("판매수수료 요율의 출처")).toBeTruthy();
+    expect(screen.queryByText(/RG 정산 비용 — 순이익 반영됨/)).toBeNull();
   });
 
   it("전환 조회가 실패하면 «못 불러왔다»로 끝난다 — 옛 값으로 되돌아가지 않는다", async () => {
