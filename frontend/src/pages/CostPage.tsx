@@ -89,13 +89,110 @@ export function valuationBadgeText(settings: CostSetting[]): string | null {
     : `재고 평가방법: ${method}(무신고 시 법정 기본값) — 신고 내역 미확인`;
 }
 
+// ══════════════════════════════════════════════════════════════════
+// S4 ㉯ — 수입 종 / 비수입 종을 가른다 (계약 §6 S4 · 합격 11·12·13)
+//
+// ★판별은 **새 필드도 마이그레이션도 없이** 한다: 「이 종에 대응하는 원장 라인이 있는가」.
+//   prod 실측(2026-08-23): 수입 부자재 **1종**(cleaning kits) vs 비수입 **128종**.
+//   그런데 화면은 128종에게 ①엑셀 값을 「단가 아님」이라 불러 **값을 의심하게** 만들고
+//   ②「원장 연결」을 첫 번째 길로 안내했다 — 그 종엔 원장 라인이 **0건이라 영영 안 오는
+//   길**이다(계약 §0-C, Jino 정정 2026-08-24 00:06).
+// ══════════════════════════════════════════════════════════════════
+
+/** 이 원장 라인이 «가리키는» 종 — 연결됐으면 연결된 종, 아니면 제안된 종.
+ *
+ * 둘 다 없으면 `null`이고 그건 **어느 종도 이 라인을 못 가진다**는 뜻이다(합격 13의 감시 대상).
+ * 제안이 모호한(`ambiguous`) 라인도 `material_id`가 null이라 여기로 떨어진다 — 그래야 한다.
+ * 「모호해서 어디에도 안 그린다」가 되면 그 라인은 화면에서 **통째로 사라진다.** */
+export function ledgerLineMaterialId(r: CostLedgerMaterialLine): number | null {
+  return r.linked_material_id ?? r.suggestion.material_id ?? null;
+}
+
+/** 한 종에 붙는 원장 라인만. 종을 고르면 그 종 것만 보인다(합격 12). */
+export function ledgerLinesForMaterial(
+  rows: CostLedgerMaterialLine[],
+  materialId: number,
+): CostLedgerMaterialLine[] {
+  return rows.filter((r) => ledgerLineMaterialId(r) === materialId);
+}
+
+/** ★적대 리뷰 1R P1 — **「어느 종에도 안 붙었다」보다 넓은 질문이 진짜 감시 대상이다.**
+ *
+ * 재현(리뷰어): 종 목록에 폼팩터 필터 `bar`를 걸면 `cleaning kits`(폼팩터 null)가 목록에서
+ * 빠져 **고를 수 없게** 되고, 그 종의 원장 라인은 종별 표에도 안 뜬다. 그런데 그 라인은
+ * «제안이 있으니» 미귀속도 아니라 별도 섹션에도 안 떴다 — 결과적으로 **화면이 「미매칭 없음」
+ * 이라고 말하면서 사람의 확정(「연결」)을 기다리는 라인을 통째로 감췄다.**
+ * `origin/main`은 하단 전건 표로 항상 보여줬으므로 **이 슬라이스가 만든 회귀**였다.
+ *
+ * ⇒ 섹션이 세는 것은 「미매칭」이 아니라 **「지금 이 화면에서 도달할 수 없는 라인」**이다.
+ * 그게 계약 §6 S4가 적은 목적(*"안 보이면 단가 이력이 조용히 빈다"*)의 정확한 문언이다.
+ *
+ * `reachableMaterialIds` = **지금 목록에 떠 있는**(필터 통과) 종의 id. 그 종은 클릭하면
+ * 종별 표가 뜨므로 도달 가능하다 — 여기서 뺀다. */
+export function unreachableLedgerLines(
+  rows: CostLedgerMaterialLine[],
+  reachableMaterialIds: Set<number>,
+): CostLedgerMaterialLine[] {
+  return rows.filter((r) => {
+    const id = ledgerLineMaterialId(r);
+    return id === null || !reachableMaterialIds.has(id);
+  });
+}
+
+/** 도달 불가 라인이 «왜» 도달 불가인가. 두 사유는 **처분이 다르다** — 하나는 매칭 규칙을
+ * 손봐야 하고, 하나는 필터만 풀면 된다. 한 단어로 접으면 사람이 틀린 일을 한다. */
+export function unreachableReason(
+  r: CostLedgerMaterialLine,
+  materials: CostMaterial[],
+): string {
+  const id = ledgerLineMaterialId(r);
+  if (id === null) {
+    return "어느 종도 이 라인을 못 가진다 — 매칭 규칙(match_rule)을 손봐야 붙는다";
+  }
+  const name = materials.find((m) => m.id === id)?.name;
+  return `「${name ?? `종 id=${id}`}」의 라인인데 그 종이 지금 필터 밖이라 고를 수 없다 — 필터를 풀면 종별 표에서 보인다`;
+}
+
+/** 원장 라인이 하나라도 가리키는 종의 id 집합 = **수입 종**. */
+export function importedMaterialIds(rows: CostLedgerMaterialLine[]): Set<number> {
+  const out = new Set<number>();
+  for (const r of rows) {
+    const id = ledgerLineMaterialId(r);
+    if (id !== null) out.add(id);
+  }
+  return out;
+}
+
+/** 종별 표 + 도달 불가 섹션이 **전건을 덮는가**. 한 라인도 화면 밖으로 떨어지면 안 된다.
+ *
+ * ★이 함수는 화면이 쓰라고 있는 게 아니라 **테스트가 재라고** 있다 — 필터를 도입하면
+ * 「어느 표에도 안 들어가는 행」이 소리 없이 생기는 것이 전형적인 실패 모드다.
+ * ★그래서 **`reachable`를 인자로 받는다**(적대 리뷰 1R P2-3): 필터를 안 보는 커버리지는
+ * 「필터가 만든 구멍」을 원리적으로 못 재고, 실제로 1R P1이 그 틈으로 통과했다. */
+export function ledgerLineCoverage(
+  rows: CostLedgerMaterialLine[],
+  reachableMaterialIds: Set<number>,
+): {
+  reachable: number;
+  unreachable: number;
+  total: number;
+} {
+  const un = unreachableLedgerLines(rows, reachableMaterialIds).length;
+  return { reachable: rows.length - un, unreachable: un, total: rows.length };
+}
+
 /** 「이 표준의 근거는 로트 N건」 — 표본 부족을 숨기지 않는다(계약 §9-5).
  *
  * ★어긋난 연결(`stale_count`)을 **따로 말한다**(적대 리뷰 1R P1-1). 그 행들은 최신 단가
- * 산정에서 빠지는데, 왜 빠졌는지를 화면이 안 말하면 「단가가 왜 없지?」가 결함 조사로 번진다. */
+ * 산정에서 빠지는데, 왜 빠졌는지를 화면이 안 말하면 「단가가 왜 없지?」가 결함 조사로 번진다.
+ *
+ * ★`imported`는 **필수 인자다**(기본값 없음, 2026-08-24 S4). 기본값을 주면 새 호출부가
+ * 조용히 「수입 종」 문구를 쓰게 되고, 그게 이 파일이 아홉 번 밟은 「한쪽만 고친다」의
+ * 재발 경로다 — 호출부마다 **판단을 강제**한다. */
 export function lotCountText(
   m: Pick<CostMaterial, "lot_count" | "price_count" | "stale_count"> &
     Partial<Pick<CostMaterial, "excel_ref_price">>,
+  imported: boolean,
 ): string {
   const stale = m.stale_count ?? 0;
   if (m.price_count === 0) {
@@ -105,8 +202,15 @@ export function lotCountText(
     //   화면이 사람을 더 비싼 일로 보내고 있었다.
     //   ★문구는 «있는 조작»만 가리킨다: 부자재 탭엔 채택 버튼이 없으므로, 여기서
     //   「채택을 누르세요」라고 쓰면 없는 버튼을 가리키는 거짓말이 된다(교훈 #349).
+    if (!imported) {
+      // ★비수입 종 — **엑셀이 정본이다**(계약 §0-C). 「단가 아님」은 값을 의심하게 만드는
+      //   말인데 실제로는 **아직 «넣지» 않았을 뿐**이다. 그리고 원장은 이 종에 영영 안 온다.
+      return m.excel_ref_price
+        ? `엑셀 단가(미확정) ${formatCostWon(m.excel_ref_price)} — 값은 있고 아직 확정만 안 했다`
+        : "단가 없음 — 「+ 수동 단가 입력」으로 넣는다 (수입 종이 아니라 원장에서 올 값이 없다)";
+    }
     return m.excel_ref_price
-      ? `단가 없음 — 엑셀 참고값 ${formatCostWon(m.excel_ref_price)}은 있다(단가 아님)`
+      ? `단가 없음 — 엑셀 참고값 ${formatCostWon(m.excel_ref_price)}은 있다(대조값)`
       : "단가 없음 — 원장 연결 또는 수동 입력 필요";
   }
   const manual = m.price_count - m.lot_count - stale;
@@ -136,15 +240,36 @@ export function ledgerCheckText(check: CostLedgerCheck | null | undefined): stri
  * 반환 `null` = 참고값이 없다(할 말이 없다). 조용한 빈 칸이 아니라 «해당 없음»이다. */
 export function excelRefNoteText(
   m: Pick<CostMaterial, "excel_ref_price" | "price_count">,
+  imported: boolean,
 ): string | null {
   if (!m.excel_ref_price) return null;
   const value = formatCostWon(m.excel_ref_price);
+  // ★비수입 검사가 **먼저다**(적대 리뷰 1R P2-1). 순서를 뒤집으면 비수입 종이 「채택」으로
+  //   단가를 갖는 순간 그 엑셀 값을 다시 「대조값」이라 부른다 — 그 종엔 엑셀이 정본인데도.
+  if (!imported && m.price_count > 0) {
+    // ★「이 값이 그대로 들어갔다」고 단언하지 않는다(적대 리뷰 2R 기록). §0-C가 명시한
+    //   Jino의 수동 정정 경로(*"단가가 조정되면 그때 수정을 별도로"*)로 «다른 값»이
+    //   들어가 있을 수 있고, 그러면 그 단언은 거짓이다. 실값은 바로 아래 단가 이력이 말한다.
+    return `엑셀 단가(정본) ${value} — 이 종은 수입 종이 아니라 이 값이 정본이다. 단가 이력에 이미 값이 있으니 «지금 쓰이는 값»은 아래 표에서 확인한다(둘이 다르면 수동 정정분이다).`;
+  }
   if (m.price_count > 0) {
-    // 이미 단가가 있는 종 — 채택은 «단가 없는 종»만 건드리므로 여기선 대조값일 뿐이다.
+    // 이미 단가가 있는 수입 종 — 채택은 «단가 없는 종»만 건드리므로 여기선 대조값일 뿐이다.
     return `엑셀 참고값 ${value} — 단가가 아니라 대조값이다. 이 종엔 이미 단가가 있어 「채택」은 건드리지 않는다.`;
   }
+  if (!imported) {
+    // ★비수입 종(현재 128종) — Jino 원문(2026-08-24 00:06): *"수입하는게 아닌 물건은
+    //   엑셀파일에 있던 값이 맞고, 단가가 조정되면 그때 수정을 별도로 하면 되지"*.
+    //   ⇒ **엑셀이 정본이다.** 그리고 **원장 연결을 안내하지 않는다** — 이 종엔 원장 라인이
+    //   0건이라 그 길은 영영 안 온다. 없는 길을 첫 번째로 가리키면 사람이 거기서 멈춘다.
+    return (
+      `엑셀 단가(미확정) ${value} — 이 종은 수입 종이 아니라 **엑셀 값이 정본**이다(계약 §0-C). ` +
+      `아직 확정만 안 한 상태다. 확정하는 길: 이 종을 쓰는 레시피의 상세 화면에서 ` +
+      `「엑셀 참고값을 단가로 채택」, 또는 값이 다르면 「+ 수동 단가 입력」. ` +
+      `이 탭에는 채택 버튼이 없다 — 채택은 레시피 단위 동작이기 때문이다.`
+    );
+  }
   return (
-    `엑셀 참고값 ${value} — 이건 단가가 아니다(계약 §3). ` +
+    `엑셀 참고값 ${value} — 이 종은 **수입 종**이라 정본은 원장이고 이 값은 대조값이다(계약 §3). ` +
     `단가로 만드는 길 셋: ①이 종을 쓰는 레시피의 상세 화면에서 「엑셀 참고값을 단가로 채택」 ` +
     `②아래 「원장 부자재 라인」에서 연결 ③「+ 수동 단가 입력」. ` +
     `이 탭에는 채택 버튼이 없다 — 채택은 레시피 단위 동작이기 때문이다.`
@@ -200,17 +325,23 @@ export function MaterialPriceHistory({
   onDelete,
   onRefresh,
   busy,
+  imported,
 }: {
   material: CostMaterial;
   onDelete?: (priceId: number) => void;
   /** 어긋난 원장 행을 원장 현재값으로 다시 맞춘다(적대 리뷰 1R P1-2). */
   onRefresh?: (priceId: number) => void;
   busy?: boolean;
+  /** 수입 종인가(계약 §6 S4 ㉯). **빈 이력이 가리킬 길이 갈린다** — 비수입 종에게
+   *  「원장 부자재 라인에서 연결하라」는 0건짜리 길이라 영영 안 온다. */
+  imported: boolean;
 }) {
   if (material.prices.length === 0) {
     return (
       <div className="text-sm text-gray-500 py-3">
-        단가 이력이 없다 — 아래 「원장 부자재 라인」에서 연결하거나 수동 단가를 입력한다.
+        {imported
+          ? "단가 이력이 없다 — 아래 「원장 부자재 라인」에서 연결하거나 수동 단가를 입력한다."
+          : "단가 이력이 없다 — 이 종을 쓰는 레시피 상세에서 「엑셀 참고값을 단가로 채택」하거나 「+ 수동 단가 입력」으로 넣는다."}
         <span className="text-gray-400"> (빈 칸이지 0원이 아니다)</span>
       </div>
     );
@@ -310,6 +441,7 @@ export function MaterialList({
   busy,
   totalCount,
   filterSummary,
+  importedIds,
 }: {
   materials: CostMaterial[];
   selectedId: number | null;
@@ -320,6 +452,9 @@ export function MaterialList({
   totalCount?: number;
   /** 「129건 중 N건 표시 중 — 필터: …」. null/undefined면 필터 없음. */
   filterSummary?: string | null;
+  /** 원장 라인이 가리키는 종 = **수입 종**(계약 §6 S4 ㉯). 목록의 요약 줄도 상세 패널과
+   *  **같은 말을 해야 한다** — 한쪽만 고치는 것이 이 파일의 상습 실패 모드다. */
+  importedIds: Set<number>;
 }) {
   // ★조용한 0은 커버리지 착시다 — 0건이면 «사유»를 그린다(RecipeList와 같은 관례).
   if (materials.length === 0) {
@@ -374,7 +509,7 @@ export function MaterialList({
             </span>
             <span className={m.stale_count > 0 ? "text-amber-700" : "text-gray-400"}>
               {" "}
-              · {lotCountText(m)}
+              · {lotCountText(m, importedIds.has(m.id))}
             </span>
           </div>
           {onApprove && m.status !== "approved" ? (
@@ -406,16 +541,20 @@ export function LedgerMaterialLines({
   materials,
   onLink,
   busy,
+  emptyText,
 }: {
   rows: CostLedgerMaterialLine[];
   materials: CostMaterial[];
   onLink?: (materialId: number, lineId: number) => void;
   busy?: boolean;
+  /** 0건일 때 할 말. 호출부마다 «없다»의 뜻이 다르다(종별 표의 0건 ≠ 미귀속의 0건). */
+  emptyText?: string;
 }) {
   if (rows.length === 0) {
     return (
       <div className="text-sm text-gray-500 py-3">
-        확정된 수입건에 부자재(`material`) 라인이 없다. 원장에서 분류를 먼저 확인한다.
+        {emptyText ??
+          "확정된 수입건에 부자재(`material`) 라인이 없다. 원장에서 분류를 먼저 확인한다."}
       </div>
     );
   }
@@ -493,6 +632,22 @@ export function LedgerMaterialLines({
     </table>
   );
 }
+
+/** ★목록 칼럼의 «독립 스크롤» 규율 — 부자재 탭·레시피 탭이 **같은 상수**를 쓴다.
+ *
+ * Jino 원문 ①(2026-08-23 22:25, 부자재): *"부자재 종에서 스크롤을 내리면 부자재 종만
+ * 내려가고 전체 화면은 고정되게 만들자"*
+ * Jino 원문 ②(2026-08-24 00:10, 레시피): *"레시피에도 우리가 부자재에서 했던 똑같은 문제가
+ * 있네. … 레시피 밑의 상품명을 밑으로 스크롤 하면 화면 전체가 움직여서 내용을 볼 수가 없어."*
+ *
+ * ★**문자열을 복사하지 않고 상수로 묶는 이유**: 원문 ①을 부자재 탭에만 적용한 것이 이 파일이
+ * 아홉 번 밟은 「같은 병을 고칠 때 한쪽만 고친다」의 다섯 번째였다. 복사본을 두면 다음 수정이
+ * 또 한쪽에만 간다 — 상수 하나면 «한쪽만 고치는 것»이 **원리적으로 불가능**해진다.
+ *
+ * ⚠️jsdom은 레이아웃을 계산하지 않는다 — 테스트는 「이 클래스가 두 칼럼 다에 살아 있나」까지만
+ * 재고, **진짜 판정은 배포 후 라이브 눈 확인**이다(계약 §7 합격 10). */
+export const LIST_COLUMN_SCROLL_CLASS =
+  "md:sticky md:top-4 md:max-h-[calc(100vh-14rem)] md:overflow-y-auto pr-1";
 
 /** S2·S3 몫인 탭의 빈 상태 — «아직 없음»을 말한다. 그냥 비어 있는 것과 다르다. */
 export function NotYetPanel({ what, slice }: { what: string; slice: string }) {
@@ -1657,6 +1812,26 @@ export default function CostPage() {
     [filteredMaterials, selectedId],
   );
 
+  // ★S4 ㉯ — 수입/비수입 판별은 **원장 라인에서 파생**한다(새 필드·마이그 없음, 계약 §6 S4).
+  //   진실의 원천은 `ledgerLines` 하나이고, 목록·상세·원장 표가 전부 이 파생값을 본다.
+  //   따로 계산하는 자리를 만들면 두 벌이 되고 두 벌은 갈라진다.
+  const importedIds = useMemo(() => importedMaterialIds(ledgerLines), [ledgerLines]);
+  const selectedImported = selected ? importedIds.has(selected.id) : false;
+  const selectedLedgerLines = useMemo(
+    () => (selected ? ledgerLinesForMaterial(ledgerLines, selected.id) : []),
+    [ledgerLines, selected],
+  );
+  // ★적대 리뷰 1R P1 — 「도달 가능」의 기준은 **지금 목록에 떠 있는 종**이다. `materials`
+  //   (전체 129종)를 쓰면 필터가 만든 구멍을 원리적으로 못 본다 — 그게 1R P1의 뿌리였다.
+  const unreachableLines = useMemo(
+    () =>
+      unreachableLedgerLines(
+        ledgerLines,
+        new Set(filteredMaterials.map((m) => m.id)),
+      ),
+    [ledgerLines, filteredMaterials],
+  );
+
   // ★선택 ID를 필터에 맞춰 되돌리는 유일한 자리(부자재). `useLayoutEffect`인 이유는
   //   아래 레시피 쪽과 같다 — 페인트 전에 맞춰야 첫 프레임이 깜빡이지 않는다.
   useLayoutEffect(() => {
@@ -1824,10 +1999,7 @@ export default function CostPage() {
                 `sticky`로 뷰포트에 붙어 오른쪽 단가 이력이 화면 밖으로 밀려나지 않는다.
                 ⚠️jsdom은 레이아웃을 계산하지 않는다 — 테스트는 「이 클래스가 살아 있나」까지만
                 재고, 진짜 판정은 배포 후 라이브 화면이 한다. */}
-            <div
-              className="md:sticky md:top-4 md:max-h-[calc(100vh-14rem)] md:overflow-y-auto pr-1"
-              data-testid="material-list-scroll"
-            >
+            <div className={LIST_COLUMN_SCROLL_CLASS} data-testid="material-list-scroll">
               <MaterialList
                 materials={filteredMaterials}
                 selectedId={selectedId}
@@ -1835,6 +2007,7 @@ export default function CostPage() {
                 busy={busy}
                 totalCount={materials.length}
                 filterSummary={materialFilterSummary}
+                importedIds={importedIds}
                 onApprove={(m) =>
                   run(
                     () => patchCostMaterial(m.id, { status: "approved" }),
@@ -1852,16 +2025,29 @@ export default function CostPage() {
                   「{selected.name}」 단가 이력
                 </h2>
                 <div className="text-xs text-gray-500 mt-0.5">
-                  엑셀 대응: {excelLabelText(selected.excel_label)} · {lotCountText(selected)}
+                  엑셀 대응: {excelLabelText(selected.excel_label)} ·{" "}
+                  {lotCountText(selected, selectedImported)}
+                </div>
+                {/* ★S4 ㉯ — 「이 종이 수입 종인가」를 화면이 **먼저** 말한다. 이 한 줄이 없으면
+                    아래에서 원장 표가 왜 있는지/없는지를 아무도 설명 못 한다. */}
+                <div
+                  className={`text-xs mt-1 ${
+                    selectedImported ? "text-gray-600" : "text-gray-500"
+                  }`}
+                  data-testid="material-origin-note"
+                >
+                  {selectedImported
+                    ? `수입 종 — 원장 부자재 라인 ${selectedLedgerLines.length}건. 정본은 원장이고 엑셀 값은 대조값이다.`
+                    : "비수입 종 — 원장 부자재 라인 0건. 정본은 엑셀이다(계약 §0-C)."}
                 </div>
                 {/* ★D — 참고값이 «있다는 사실»과 «그 값»과 «단가가 되는 길»을 말한다.
                     참고값이 없으면 이 줄 자체가 없다(해당 없음 — 빈 칸이 아니다). */}
-                {excelRefNoteText(selected) ? (
+                {excelRefNoteText(selected, selectedImported) ? (
                   <div
                     className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded p-2 mt-1"
                     data-testid="material-excel-ref-note"
                   >
-                    {excelRefNoteText(selected)}
+                    {excelRefNoteText(selected, selectedImported)}
                   </div>
                 ) : null}
                 {latestPriceNote(selected) ? (
@@ -1873,6 +2059,7 @@ export default function CostPage() {
                   <MaterialPriceHistory
                     material={selected}
                     busy={busy}
+                    imported={selectedImported}
                     onDelete={(priceId) =>
                       run(
                         () => deleteCostMaterialPrice(selected.id, priceId),
@@ -1906,20 +2093,72 @@ export default function CostPage() {
                 >
                   + 수동 단가 입력
                 </button>
+
+                {/* ★S4 ㉯ 합격 12 — 원장 표는 **이 종의 라인만** 그린다. 초판은 확정 라인
+                    전건을 무필터로 그려, 필름 종을 골라도 `cleaning kits`가 떴다
+                    (Jino 2026-08-24 00:01). 합격 11은 그 뒷면이다 — 비수입 종엔 **안 그린다.** */}
+                {selectedImported ? (
+                  <section className="mt-6" data-testid="material-ledger-lines">
+                    <h2 className="text-sm font-semibold text-gray-700">
+                      「{selected.name}」 원장 부자재 라인
+                    </h2>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      제안은 제안이다 — 「연결」을 눌러야 단가 이력이 생긴다(확정은 사람). 이미
+                      연결한 라인은 수입건의 확정이 풀려도 목록에 남는다 — 사라지면 어긋남이 안
+                      보인다.
+                    </div>
+                    <div className="mt-2">
+                      <LedgerMaterialLines
+                        rows={selectedLedgerLines}
+                        materials={materials}
+                        busy={busy}
+                        onLink={(materialId, lineId) =>
+                          run(
+                            () => linkCostLedgerPrice(materialId, lineId),
+                            "원장 로트를 부자재에 연결했다",
+                          )
+                        }
+                      />
+                    </div>
+                  </section>
+                ) : null}
               </section>
             ) : null}
 
-            <section>
-              <h2 className="text-sm font-semibold text-gray-700">
-                원장 부자재 라인 (확정된 수입건 + 이미 연결된 라인)
-              </h2>
-              <div className="text-xs text-gray-500 mt-0.5">
-                제안은 제안이다 — 「연결」을 눌러야 단가 이력이 생긴다(확정은 사람). 이미 연결한
-                라인은 수입건의 확정이 풀려도 목록에 남는다 — 사라지면 어긋남이 안 보인다.
-              </div>
-              <div className="mt-2">
+            {/* ★S4 ㉯ 합격 13 — **도달 불가 라인은 자리를 옮기는 것이지 없애는 게 아니다.**
+                종별 표를 도입하면서 이 섹션을 안 두면 「원장에 부자재 라인이 있는데 화면 어디에도
+                안 보인다」가 되고 단가 이력이 조용히 빈다(계약 §6 S4 · 합격 13).
+                ★건수는 `<summary>`에 있어 **접혀 있어도 보인다** — 접힌 것과 없는 것은 다르다.
+                ★적대 리뷰 1R P1으로 **질문이 넓어졌다**: 「어느 종에도 안 붙었다」만 세면,
+                붙을 종이 «필터 밖»이라 못 고르는 라인이 어느 표에도 안 남는데 화면은 「미매칭
+                없음」이라고 말한다. 세는 것은 **지금 도달할 수 없는 라인**이다. */}
+            <details className="border rounded" data-testid="unattributed-ledger-lines">
+              <summary className="text-sm font-semibold text-gray-700 cursor-pointer px-3 py-2">
+                지금 화면에서 도달할 수 없는 원장 부자재 라인{" "}
+                <span data-testid="unattributed-count">
+                  {unreachableLines.length === 0
+                    ? "— 미매칭 없음"
+                    : `${unreachableLines.length}건`}
+                </span>
+              </summary>
+              <div className="px-3 pb-3">
+                <div className="text-xs text-gray-500 mb-2">
+                  원장엔 있는데 지금 이 화면의 어느 표에도 안 뜨는 라인이다 — ①어느 종도 이 라인을
+                  못 가지거나(제안 없음·모호) ②붙을 종이 **필터 밖**이라 고를 수 없거나. 사유는
+                  행마다 아래에 적는다. 여기서 사라지면 그 종의 단가 이력이 조용히 빈다.
+                </div>
+                {/* ★행마다 «왜» 도달 불가인지 — 두 사유는 처분이 다르다(규칙 수정 vs 필터 해제). */}
+                <ul className="text-xs text-gray-600 mb-2 space-y-0.5">
+                  {unreachableLines.map((r) => (
+                    <li key={r.line_id} data-testid={`unreachable-reason-${r.line_id}`}>
+                      · {r.item_name} — {unreachableReason(r, materials)}
+                    </li>
+                  ))}
+                </ul>
+                {/* ★`onLink`를 넘긴다(적대 리뷰 1R P2-2) — 이 섹션엔 «제안이 있는데 종이 필터
+                    밖인» 라인이 오므로, 버튼을 빼면 연결이 원리적으로 불가능해진다. */}
                 <LedgerMaterialLines
-                  rows={ledgerLines}
+                  rows={unreachableLines}
                   materials={materials}
                   busy={busy}
                   onLink={(materialId, lineId) =>
@@ -1928,9 +2167,10 @@ export default function CostPage() {
                       "원장 로트를 부자재에 연결했다",
                     )
                   }
+                  emptyText="미매칭 없음 — 원장의 부자재 라인이 전부 지금 화면에서 도달 가능하다."
                 />
               </div>
-            </section>
+            </details>
           </div>
         </div>
       ) : null}
@@ -1946,7 +2186,10 @@ export default function CostPage() {
               }, "엑셀에서 구성 초안을 만들었다 — 아직 아무것도 승인하지 않았다")
             }
           />
-          <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6">
+          {/* ★`items-start`가 없으면 `md:sticky`가 **작동하지 않는다** — 그리드 아이템이
+              기본값(`stretch`)으로 칼럼 전체 높이를 차지해 붙을 여백이 안 생긴다.
+              부자재 탭 그리드엔 이미 있었고 여기만 없었다(같은 규율의 나머지 반쪽). */}
+          <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6 items-start">
             {/* ★`min-w-0` — 없으면 320px 트랙이 내용 폭에 밀려 오른쪽 패널을 침범한다. */}
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-gray-700 mb-2">
@@ -1966,13 +2209,18 @@ export default function CostPage() {
                   onReset={handleRecipeReset}
                 />
               </div>
-              <RecipeList
-                recipes={filteredRecipes}
-                selectedId={selectedRecipeId}
-                onSelect={setSelectedRecipeId}
-                totalCount={recipes.length}
-                filterSummary={recipeFilterSummary}
-              />
+              {/* ★S4 ㉮ 합격 10 — 부자재 탭과 **같은 상수**를 쓴다(위 `LIST_COLUMN_SCROLL_CLASS`).
+                  원문 ②(2026-08-24 00:10)가 가리킨 자리이고, 원문 ①을 부자재 탭에만 적용한 것이
+                  이 트랙의 「한쪽만 고친다」 다섯 번째였다. */}
+              <div className={LIST_COLUMN_SCROLL_CLASS} data-testid="recipe-list-scroll">
+                <RecipeList
+                  recipes={filteredRecipes}
+                  selectedId={selectedRecipeId}
+                  onSelect={setSelectedRecipeId}
+                  totalCount={recipes.length}
+                  filterSummary={recipeFilterSummary}
+                />
+              </div>
             </div>
             {selectedRecipe ? (
               <RecipeDetail
