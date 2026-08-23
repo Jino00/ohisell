@@ -2,6 +2,7 @@
 // 채널 탭 [로켓그로스(RG) | 로켓배송 1P | Wing]. RG = 발송관제 | 청구 감사(S8, D-17) 서브탭.
 // 1P/Wing은 향후 입주.
 import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { fetchReplenishmentPlan, fetchRgFeeAudit, type ReplenishmentPlan, type RgFeeAudit } from "../lib/api";
 import RgReplenishmentTable from "../components/RgReplenishmentTable";
 import RgFeeAuditView from "../components/RgFeeAuditView";
@@ -18,9 +19,30 @@ type Channel = (typeof CHANNELS)[number];
 const RG_SUBTABS = ["발송관제", "청구 감사"] as const;
 type RgSubTab = (typeof RG_SUBTABS)[number];
 
+/** `?tab=` → 채널 탭. 계약 CONTRACT_2p_own_screens §1-B-2의 딥링크가 실제로 «착지»하게 한다.
+ *
+ * ★왜 필요한가(실측 2026-08-23): 이 화면은 쿼리 파라미터를 **전혀 읽지 않았다**. 기본값이
+ *   우연히 "로켓그로스"라 `/inventory`가 RG로 열릴 뿐이라, 사이드바 링크가 «맞는 곳에 도착한
+ *   것처럼» 보이지만 실제로는 아무것도 가리키지 않는다. 기본값이 언젠가 바뀌면 조용히 어긋난다.
+ * ★모르는 값이면 null을 돌려 기존 기본값을 그대로 둔다 — 이 함수가 화면을 «바꾸는» 것은
+ *   아는 값을 받았을 때뿐이다.
+ */
+export function channelFromTabParam(tab: string | null): Channel | null {
+  if (!tab) return null;
+  const m: Record<string, Channel> = {
+    rg: "로켓그로스",
+    "1p": "로켓배송 1P",
+    wing: "Wing",
+  };
+  return m[tab.toLowerCase()] ?? null;
+}
+
 export default function InventoryPage() {
+  const [searchParams] = useSearchParams();
   const [company, setCompany] = useState("ALL");
-  const [channel, setChannel] = useState<Channel>("로켓그로스");
+  const [channel, setChannel] = useState<Channel>(
+    () => channelFromTabParam(searchParams.get("tab")) ?? "로켓그로스",
+  );
   const [rgSubTab, setRgSubTab] = useState<RgSubTab>("발송관제");
 
   // RG 발송관제 플랜
