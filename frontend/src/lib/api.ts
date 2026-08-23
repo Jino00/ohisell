@@ -3158,6 +3158,70 @@ export interface NaverAdDiagnosis {
   account_target_roas: number | null;
   error?: string;
   boards: NaverAdDiagnosisBoards | null;
+  /**
+   * D-NAO-232 — 「액셀이 실행 게이트에서 얼마나 죽는가」 관측 전용(ref 94 §5·§6).
+   * 보드 «선정»은 상한으로 끝난 뒤, 그 후보가 BEP 증액금지 게이트(하한 사용)를
+   * 지나면 몇 건이 남는지를 센다. 재료가 없으면 null — 0으로 위장하지 않는다.
+   */
+  accel_gate: NaverAdAccelGate | null;
+}
+
+/** D-NAO-232 액셀 게이트 관측 페이로드. 금액은 원 단위 정수(반올림). */
+export interface NaverAdAccelGateBucket {
+  count: number;
+  cost: number;
+  conv_amt: number;
+  /** 총이익 = (Σconv_amt × factor) ÷ bep_roas − Σcost (profit_scorecard.py:133 정본) */
+  profit_high: number;
+  profit_low: number;
+}
+
+export interface NaverAdAccelGate {
+  /** 실제 게이트가 읽는 끝. 현재 'factor_low' — 하한은 보정을 없애 차단을 최대로 만든다. */
+  gate_end: string;
+  gate_note: string;
+  /** 보드 창 기준 근사라는 자백 — 화면이 확정값처럼 보이면 안 된다(적대 리뷰 1R P2-2). */
+  window_caveat: string;
+  assumption: string;
+  factor_low: number;
+  factor_high: number;
+  target_roas: number;
+  /**
+   * 'per_campaign' = 실제 게이트와 같은 자로 쟀다 / 'account_default' = 계정 기본값 하나로 쟀다.
+   * 후자면 화면이 실제 게이트와 «다른 그룹»을 지목할 수 있다(적대 리뷰 1R P1-1).
+   */
+  target_roas_source: string;
+  target_roas_min: number | null;
+  target_roas_max: number | null;
+  bep_roas: number;
+  /** 세션 39(ref 93 §2)와 같은 보드 집합 — 비교 가능해야 하므로 primary. */
+  accel_total: number;
+  brake_total: number;
+  /** 정지·재개 보드까지 포함한 확장 정의. */
+  accel_total_ext: number;
+  brake_total_ext: number;
+  survive_low: number;
+  survive_high: number;
+  ratio_selection: number | null;
+  ratio_after_gate_low: number | null;
+  ratio_after_gate_high: number | null;
+  buckets: {
+    passing_both: NaverAdAccelGateBucket;
+    blocked_low_only: NaverAdAccelGateBucket;
+    blocked_both: NaverAdAccelGateBucket;
+    /** roas_naver가 없어 판정 못 한 행. 「통과」로 세지 않는다(교훈 #123). */
+    unmeasurable: number;
+    /** 실제로 적용된 목표ROAS의 범위(캠페인별이면 벌어진다). */
+    target_roas_min: number | null;
+    target_roas_max: number | null;
+  };
+  by_board: Array<{
+    board: string;
+    total: number;
+    blocked_low_only: number;
+    blocked_both: number;
+    unmeasurable: number;
+  }>;
 }
 
 export function fetchNaverAdDiagnosis(params?: {
