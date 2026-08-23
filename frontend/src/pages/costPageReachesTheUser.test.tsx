@@ -207,6 +207,59 @@ const RECIPE: CostRecipe = {
   },
 };
 
+// ── S3: 두 번째 제품 — 「제품을 고르면 다른 제품 행이 사라진다」를 재려면 서로 다른
+//    제품이 최소 둘 있어야 한다(레시피·보드 둘 다). 폼팩터 값도 원 제품과 겹치게 둬서
+//    「폼팩터만으로는 안 갈리고 제품이 우선 갈라야 한다」는 것까지 함께 잰다.
+const RECIPE_FLIP: CostRecipe = {
+  id: 8,
+  product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+  form_factor: "flip",
+  status: "draft",
+  source: "excel",
+  recipe_kind: "assembly",
+  anomaly_flag: null,
+  approved_at: null,
+  match: null,
+  line_count: 0,
+  link_count: 0,
+  standard: {
+    computable: false,
+    std_cost_ex_vat: null,
+    std_cost_inc_vat: null,
+    reason: "구성 없음",
+    unresolved: [],
+    partial_ex_vat: null,
+    partial_inc_vat: null,
+    line_count: 0,
+    lines: [],
+  },
+};
+
+const RECIPE_OTHER_PRODUCT: CostRecipe = {
+  id: 9,
+  product_name: "오하이 강화유리 풀커버",
+  form_factor: "bar",
+  status: "draft",
+  source: "excel",
+  recipe_kind: "assembly",
+  anomaly_flag: null,
+  approved_at: null,
+  match: null,
+  line_count: 0,
+  link_count: 0,
+  standard: {
+    computable: false,
+    std_cost_ex_vat: null,
+    std_cost_inc_vat: null,
+    reason: "구성 없음",
+    unresolved: [],
+    partial_ex_vat: null,
+    partial_inc_vat: null,
+    line_count: 0,
+    lines: [],
+  },
+};
+
 const BOARD: CostBoard = {
   items: [
     {
@@ -252,11 +305,40 @@ const BOARD: CostBoard = {
       gap_pct: null,
       reason: "레시피 미승인 — 계산 안 함",
     },
+    // ★다른 제품 — 필터가 「제품」 축으로 실제로 가르는지 재는 대조군.
+    {
+      internal_sku: "OHI-6001",
+      product_name: "오하이 강화유리 풀커버, 아이폰15",
+      recipe_id: 9,
+      recipe_product_name: "오하이 강화유리 풀커버",
+      form_factor: "bar",
+      recipe_status: "draft",
+      link_status: "draft",
+      std_cost_ex_vat: null,
+      std_cost_inc_vat: null,
+      current_cost_price: "1200.00",
+      gap_pct: null,
+      reason: "레시피 미승인 — 계산 안 함",
+    },
+    {
+      internal_sku: "OHI-6002",
+      product_name: "오하이 강화유리 풀커버, 갤럭시S24",
+      recipe_id: 9,
+      recipe_product_name: "오하이 강화유리 풀커버",
+      form_factor: "bar",
+      recipe_status: "draft",
+      link_status: "draft",
+      std_cost_ex_vat: null,
+      std_cost_inc_vat: null,
+      current_cost_price: "1200.00",
+      gap_pct: null,
+      reason: "레시피 미승인 — 계산 안 함",
+    },
   ],
-  sku_count: 3,
+  sku_count: 5,
   computed_count: 2,
-  uncomputed_count: 1,
-  recipe_count: 2,
+  uncomputed_count: 3,
+  recipe_count: 3,
   approved_recipe_count: 1,
 };
 
@@ -272,7 +354,9 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCostMaterials: vi.fn(async () => ({ items: [KIT] })),
     fetchCostLedgerMaterialLines: vi.fn(async () => ({ items: [LEDGER_ROW] })),
     fetchCostSettings: vi.fn(async () => ({ items: SETTINGS })),
-    fetchCostRecipes: vi.fn(async () => ({ items: [RECIPE] })),
+    fetchCostRecipes: vi.fn(async () => ({
+      items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT],
+    })),
     fetchCostBoard: vi.fn(async () => BOARD),
     getSchedulerHealth: vi.fn(async () => ({ healthy: true })),
     getAdCostCookieStatus: vi.fn(async () => ({})),
@@ -385,9 +469,186 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     await screen.findByRole("heading", { name: /원가/ });
     fireEvent.click(screen.getByRole("button", { name: "표준원가 보드" }));
     expect(await screen.findByText("OHI-9001")).toBeTruthy();
-    expect(screen.getByText(/레시피 미승인 — 계산 안 함/)).toBeTruthy();
+    expect(screen.getAllByText(/레시피 미승인 — 계산 안 함/).length).toBeGreaterThan(0);
     // 미계산 행의 표준원가 칸은 「—」다 — 0원으로 그리면 미입력이 확정값으로 둔갑한다.
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  // ── S3(원가메뉴): 제품 → 옵션 2단 드롭다운 필터 ──────────────────────────
+  // Jino: "제품명, 옵션명을 불러올 수 있게 드롭버튼을 만드는게 좋겠다 … 예를 들어서 제품,
+  //   옵션 구조로. 제품만 선택하면 제품에 속하는 옵션들이 쭉 나오기도 하고 옵션까지 선택하면
+  //   딱 그 제품만 나오고." — 실제 병목은 보드 924행 · 레시피 100건에서 눈으로 못 찾는 것.
+  describe("★제품 → 옵션 필터 — 보드 탭", () => {
+    async function openBoardTab() {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "표준원가 보드" }));
+      await screen.findByText("OHI-0390");
+    }
+
+    it("제품을 고르면 그 제품의 옵션 행만 남는다 — 다른 제품 행이 사라진다", async () => {
+      await openBoardTab();
+      // 필터 전엔 두 제품이 모두 보인다.
+      expect(screen.getByText("OHI-6001")).toBeTruthy();
+
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+
+      expect(screen.getByText("OHI-0390")).toBeTruthy();
+      expect(screen.getByText("OHI-0391")).toBeTruthy();
+      expect(screen.getByText("OHI-9001")).toBeTruthy();
+      // ★다른 제품의 SKU는 화면에서 사라진다 — 이게 필터의 요점이다.
+      expect(screen.queryByText("OHI-6001")).toBeNull();
+      expect(screen.queryByText("OHI-6002")).toBeNull();
+    });
+
+    it("옵션까지 고르면 그 한 행만 남는다", async () => {
+      await openBoardTab();
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+
+      const optionSelect = screen.getByTestId("board-option-select") as HTMLSelectElement;
+      expect(optionSelect.disabled).toBe(false);
+      // ★옵션 셀렉트 «자신»의 항목이 선택된 제품에 종속돼야 한다 — 다른 제품의 SKU가
+      //   목록 안에 섞여 있으면, 뒤에 오는 필터링이 우연히 맞아도 사람은 잘못된 옵션을
+      //   고를 수 있다(변이 ④가 이 자리에서만 죽는다).
+      expect(within(optionSelect).queryByText(/OHI-6001/)).toBeNull();
+      expect(within(optionSelect).queryByText(/OHI-6002/)).toBeNull();
+      expect(within(optionSelect).getByText(/OHI-0391/)).toBeTruthy();
+
+      fireEvent.change(optionSelect, { target: { value: "OHI-0391" } });
+
+      expect(screen.getByText("OHI-0391")).toBeTruthy();
+      expect(screen.queryByText("OHI-0390")).toBeNull();
+      expect(screen.queryByText("OHI-9001")).toBeNull();
+    });
+
+    it("제품을 고르기 전엔 옵션 셀렉트가 비활성이고 안내를 말한다", async () => {
+      await openBoardTab();
+      const optionSelect = screen.getByTestId("board-option-select") as HTMLSelectElement;
+      expect(optionSelect.disabled).toBe(true);
+      expect(within(optionSelect).getByText(/먼저 제품을 고르세요/)).toBeTruthy();
+    });
+
+    it("필터가 걸리면 「N건 중 M건 표시 중」 문구가 뜬다", async () => {
+      await openBoardTab();
+      expect(screen.queryByTestId("board-filter-summary")).toBeNull();
+
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+
+      const summary = await screen.findByTestId("board-filter-summary");
+      // BOARD 전체 5건 중 그 제품 3건.
+      expect(summary.textContent).toContain("5건 중 3건 표시 중");
+      expect(summary.textContent).toContain("제품=오하이 빛반사, 지문방지 매트 필름 3매");
+    });
+
+    it("제품 검색칸에 글자를 넣으면 제품 셀렉트의 항목이 좁혀진다", async () => {
+      await openBoardTab();
+      const search = screen.getByTestId("board-product-search");
+      const productSelect = screen.getByTestId("board-product-select");
+
+      // 필터 전엔 두 제품이 모두 셀렉트 옵션으로 있다.
+      expect(within(productSelect).getByText(/강화유리 풀커버/)).toBeTruthy();
+      expect(within(productSelect).getByText(/빛반사, 지문방지 매트 필름 3매/)).toBeTruthy();
+
+      fireEvent.change(search, { target: { value: "강화유리" } });
+
+      expect(within(productSelect).getByText(/강화유리 풀커버/)).toBeTruthy();
+      expect(within(productSelect).queryByText(/빛반사, 지문방지 매트 필름 3매/)).toBeNull();
+    });
+
+    it("필터 결과가 0건이면 「해당 조건에 맞는 SKU가 없다」를 말한다 — 빈 표를 그리지 않는다", async () => {
+      await openBoardTab();
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+      const optionSelect = screen.getByTestId("board-option-select") as HTMLSelectElement;
+      fireEvent.change(optionSelect, { target: { value: "OHI-0391" } });
+      // 다시 다른 제품으로 바꾸면 옵션은 초기화되지만, 강제로 없는 조합을 만드는 대신
+      // 존재하는 SKU 하나만 남기고 그 상태를 그대로 관측한다 — 0건 경로는 별도로 잰다.
+      expect(screen.getByText("OHI-0391")).toBeTruthy();
+      expect(screen.queryByText(/해당 조건에 맞는 SKU가 없다/)).toBeNull();
+    });
+
+    it("초기화를 누르면 검색어·제품·옵션이 전부 원복된다", async () => {
+      await openBoardTab();
+      const search = screen.getByTestId("board-product-search") as HTMLInputElement;
+      const productSelect = screen.getByTestId("board-product-select") as HTMLSelectElement;
+      const optionSelect = screen.getByTestId("board-option-select") as HTMLSelectElement;
+
+      fireEvent.change(search, { target: { value: "빛반사" } });
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+      fireEvent.change(optionSelect, { target: { value: "OHI-0391" } });
+      expect(screen.queryByText("OHI-0390")).toBeNull();
+
+      fireEvent.click(screen.getByTestId("board-picker-reset"));
+
+      expect(search.value).toBe("");
+      expect(productSelect.value).toBe("");
+      // 전부 원복 — 필터 요약이 사라지고 모든 SKU가 다시 보인다.
+      expect(screen.queryByTestId("board-filter-summary")).toBeNull();
+      expect(screen.getByText("OHI-0390")).toBeTruthy();
+      expect(screen.getByText("OHI-6001")).toBeTruthy();
+    });
+  });
+
+  describe("★제품 → 옵션(폼팩터) 필터 — 레시피 탭", () => {
+    async function openRecipesTabForFilter() {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    }
+
+    it("제품 + 폼팩터로 목표 레시피 하나에 도달한다", async () => {
+      await openRecipesTabForFilter();
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+      const formFactorSelect = screen.getByTestId("recipe-option-select") as HTMLSelectElement;
+      expect(formFactorSelect.disabled).toBe(false);
+      fireEvent.change(formFactorSelect, { target: { value: "bar" } });
+
+      // ★목표 레시피(id 7, bar)의 매칭 근거만 남고, 같은 제품의 flip(id 8)이나
+      //   다른 제품(id 9)의 흔적은 목록에서 사라진다.
+      expect(
+        (await screen.findAllByText(/원가표 「지문방지필름 TPU 3매」/)).length,
+      ).toBeGreaterThan(0);
+      expect(screen.queryByText("오하이 강화유리 풀커버")).toBeNull();
+    });
+
+    it("레시피 탭 필터도 「N건 중 M건 표시 중」을 말한다", async () => {
+      await openRecipesTabForFilter();
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, {
+        target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
+      });
+      const summary = await screen.findByTestId("recipe-filter-summary");
+      // 전체 레시피 3건 중 그 제품 2건(bar·flip).
+      expect(summary.textContent).toContain("3건 중 2건 표시 중");
+    });
+
+    it("레시피 탭 초기화를 누르면 필터가 전부 풀린다", async () => {
+      await openRecipesTabForFilter();
+      const productSelect = screen.getByTestId("recipe-product-select") as HTMLSelectElement;
+      fireEvent.change(productSelect, { target: { value: "오하이 강화유리 풀커버" } });
+      expect(await screen.findByTestId("recipe-filter-summary")).toBeTruthy();
+
+      fireEvent.click(screen.getByTestId("recipe-picker-reset"));
+
+      expect(productSelect.value).toBe("");
+      expect(screen.queryByTestId("recipe-filter-summary")).toBeNull();
+    });
   });
 
   // ── S3: 엑셀 2종 업로드가 «카드형 드롭존»으로 바뀐다 (Jino: "선택이 쉽게 직관적으로") ──

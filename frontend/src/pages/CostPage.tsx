@@ -441,6 +441,145 @@ export function NotYetPanel({ what, slice }: { what: string; slice: string }) {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// S3 — 제품 → 옵션 2단 드롭다운 필터 (Jino: "제품, 옵션 구조로 … 찾는게 쉽지 않네")
+//
+// 병목은 계산이 아니라 «찾기»다 — 보드 924행 · 레시피 100건을 눈으로 훑을 수 없다.
+// 이 컴포넌트는 순수 표시/선택 계층이다: 집계(제품별 건수 세기 등)는 호출부가 하고,
+// 여기는 검색·선택·초기화만 담당한다(다른 순수 컴포넌트들과 같은 결).
+// ══════════════════════════════════════════════════════════════════
+
+export interface PickerItem {
+  value: string;
+  label: string;
+  count?: number;
+}
+
+/** 대소문자 무시·공백 무시 부분일치. */
+function normalizeForSearch(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, "");
+}
+
+/** 제품 검색어로 제품 목록을 좁힌다 — 셀렉트 하나로는 88~100종을 못 찾는다는 게
+ * Jino가 실제로 겪은 문제다. */
+export function filterPickerItems(items: PickerItem[], search: string): PickerItem[] {
+  const q = search.trim();
+  if (!q) return items;
+  const needle = normalizeForSearch(q);
+  return items.filter((it) => normalizeForSearch(it.label).includes(needle));
+}
+
+export function ProductOptionPicker({
+  idPrefix,
+  productLabel = "제품",
+  optionLabel = "옵션",
+  products,
+  options,
+  optionTotalCount,
+  productValue,
+  optionValue,
+  onProductChange,
+  onOptionChange,
+  onReset,
+}: {
+  /** 렌더 인스턴스마다 다른 `data-testid` 접두사(보드 탭 · 레시피 탭이 동시에 이 컴포넌트를 쓴다). */
+  idPrefix: string;
+  productLabel?: string;
+  optionLabel?: string;
+  /** 이미 건수까지 집계된 제품 목록(호출부가 만든다). */
+  products: PickerItem[];
+  /** 선택된 제품에 속한 옵션 목록. 제품 미선택이면 빈 배열을 넘긴다. */
+  options: PickerItem[];
+  /** 옵션 셀렉트 「전체 (N건)」의 N. */
+  optionTotalCount: number;
+  productValue: string | null;
+  optionValue: string | null;
+  onProductChange: (value: string | null) => void;
+  onOptionChange: (value: string | null) => void;
+  onReset: () => void;
+}) {
+  const [search, setSearch] = useState("");
+  const filteredProducts = useMemo(
+    () => filterPickerItems(products, search),
+    [products, search],
+  );
+
+  return (
+    <div className="flex flex-wrap items-end gap-2 border rounded-md p-2 bg-gray-50">
+      <div className="flex flex-col gap-1">
+        <label className="text-[11px] text-gray-500" htmlFor={`${idPrefix}-product-search`}>
+          {productLabel} 검색
+        </label>
+        <input
+          id={`${idPrefix}-product-search`}
+          type="text"
+          value={search}
+          placeholder={`${productLabel}명으로 찾기`}
+          className="text-xs border rounded px-2 py-1 w-56"
+          data-testid={`${idPrefix}-product-search`}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-[11px] text-gray-500" htmlFor={`${idPrefix}-product-select`}>
+          {productLabel}
+        </label>
+        <select
+          id={`${idPrefix}-product-select`}
+          className="text-xs border rounded px-2 py-1 min-w-[16rem]"
+          value={productValue ?? ""}
+          data-testid={`${idPrefix}-product-select`}
+          onChange={(e) => onProductChange(e.target.value || null)}
+        >
+          <option value="">전체</option>
+          {filteredProducts.map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label} ({p.count ?? 0})
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-[11px] text-gray-500" htmlFor={`${idPrefix}-option-select`}>
+          {optionLabel}
+        </label>
+        <select
+          id={`${idPrefix}-option-select`}
+          className="text-xs border rounded px-2 py-1 min-w-[16rem] disabled:bg-gray-100 disabled:text-gray-400"
+          value={productValue ? (optionValue ?? "") : ""}
+          disabled={!productValue}
+          data-testid={`${idPrefix}-option-select`}
+          onChange={(e) => onOptionChange(e.target.value || null)}
+        >
+          {!productValue ? (
+            <option value="">먼저 {productLabel}을 고르세요</option>
+          ) : (
+            <>
+              <option value="">전체 ({optionTotalCount}건)</option>
+              {options.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </>
+          )}
+        </select>
+      </div>
+      <button
+        type="button"
+        className="text-xs px-2 py-1 rounded border text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+        data-testid={`${idPrefix}-picker-reset`}
+        onClick={() => {
+          setSearch("");
+          onReset();
+        }}
+      >
+        초기화
+      </button>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
 // S2 — 레시피 · 표준원가 보드 (계약 §5-3 탭2·탭3)
 // ══════════════════════════════════════════════════════════════════
 
@@ -840,21 +979,44 @@ export function RecipeList({
   recipes,
   selectedId,
   onSelect,
+  totalCount,
+  filterSummary,
 }: {
   recipes: CostRecipe[];
   selectedId: number | null;
   onSelect: (id: number) => void;
+  /** 필터 적용 전 전체 레시피 건수 — 필터가 걸린 0건과 «원래 없음»을 가른다. */
+  totalCount?: number;
+  /** 「100건 중 N건 표시 중 — 필터: …」. null/undefined면 필터 없음. */
+  filterSummary?: string | null;
 }) {
   if (!recipes.length) {
     return (
-      <div className="text-xs text-gray-500 border border-dashed rounded p-4">
-        레시피가 없다 — 위에서 엑셀 2종을 올리면 초안이 생긴다.
+      <div>
+        {filterSummary ? (
+          <div className="text-xs text-gray-500 mb-2" data-testid="recipe-filter-summary">
+            {filterSummary}
+          </div>
+        ) : null}
+        <div className="text-xs text-gray-500 border border-dashed rounded p-4">
+          {totalCount ? (
+            "해당 조건에 맞는 레시피가 없다."
+          ) : (
+            "레시피가 없다 — 위에서 엑셀 2종을 올리면 초안이 생긴다."
+          )}
+        </div>
       </div>
     );
   }
   return (
-    <ul className="text-sm divide-y border rounded-md overflow-hidden">
-      {recipes.map((r) => (
+    <div>
+      {filterSummary ? (
+        <div className="text-xs text-gray-500 mb-2" data-testid="recipe-filter-summary">
+          {filterSummary}
+        </div>
+      ) : null}
+      <ul className="text-sm divide-y border rounded-md overflow-hidden">
+        {recipes.map((r) => (
         <li key={r.id}>
           <button
             className={`w-full text-left px-3 py-2 hover:bg-gray-50 ${
@@ -883,7 +1045,8 @@ export function RecipeList({
           </button>
         </li>
       ))}
-    </ul>
+      </ul>
+    </div>
   );
 }
 
@@ -1026,7 +1189,17 @@ export function RecipeDetail({
 }
 
 /** 표준원가 보드 — SKU별. ★미계산 행도 빠짐없이 실리고 «왜»를 말한다. */
-export function StandardCostBoard({ board }: { board: CostBoard | null }) {
+export function StandardCostBoard({
+  board,
+  displayItems,
+  filterSummary,
+}: {
+  board: CostBoard | null;
+  /** 제품/옵션 필터 적용 후 실제로 그릴 행 — 생략하면 `board.items`를 그대로 쓴다(필터 없음). */
+  displayItems?: CostBoardRow[];
+  /** 「924건 중 107건 표시 중 — 필터: …」. null/undefined면 필터 없음(조용히 안 숨긴다). */
+  filterSummary?: string | null;
+}) {
   if (!board) {
     return <div className="text-xs text-gray-500">불러오는 중…</div>;
   }
@@ -1037,6 +1210,9 @@ export function StandardCostBoard({ board }: { board: CostBoard | null }) {
       </div>
     );
   }
+  // ★필터가 걸려도 이 총계는 «전체» 기준을 유지한다 — 필터가 924건 자체를 못 보게 만들면
+  //   커버리지 착시가 다시 생긴다. 「몇 건 중 몇 건을 보고 있나」는 filterSummary가 따로 말한다.
+  const items = displayItems ?? board.items;
   return (
     <div>
       <div className="text-xs text-gray-600">
@@ -1044,41 +1220,52 @@ export function StandardCostBoard({ board }: { board: CostBoard | null }) {
         <b>{board.uncomputed_count}</b> · 승인 레시피 {board.approved_recipe_count}/
         {board.recipe_count}
       </div>
-      <div className="mt-2 overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead className="text-gray-500">
-            <tr className="text-left border-b">
-              <th className="py-1 pr-2">SKU</th>
-              <th className="py-1 pr-2">상품</th>
-              <th className="py-1 pr-2">폼팩터</th>
-              <th className="py-1 pr-2 text-right">표준원가(VAT 포함)</th>
-              <th className="py-1 pr-2 text-right">현 cost_price</th>
-              <th className="py-1 pr-2 text-right">격차</th>
-              <th className="py-1">비고</th>
-            </tr>
-          </thead>
-          <tbody>
-            {board.items.map((row) => (
-              <tr key={`${row.recipe_id}-${row.internal_sku}`} className="border-b last:border-0">
-                <td className="py-1 pr-2 font-mono">{row.internal_sku}</td>
-                <td className="py-1 pr-2 truncate max-w-[22rem]">
-                  {row.product_name ?? row.recipe_product_name}
-                </td>
-                <td className="py-1 pr-2">{formFactorLabel(row.form_factor)}</td>
-                <td className="py-1 pr-2 text-right font-medium">
-                  {formatCostWon(row.std_cost_inc_vat)}
-                </td>
-                {/* ★읽기 전용 대조값이다 — 이 화면은 이 칸에 쓰지 않는다(계약 §3 금지선). */}
-                <td className="py-1 pr-2 text-right text-gray-600">
-                  {formatCostWon(row.current_cost_price)}
-                </td>
-                <td className="py-1 pr-2 text-right">{gapText(row.gap_pct)}</td>
-                <td className="py-1 text-amber-700">{uncomputedReason(row) ?? ""}</td>
+      {filterSummary ? (
+        <div className="mt-1 text-xs text-blue-700" data-testid="board-filter-summary">
+          {filterSummary}
+        </div>
+      ) : null}
+      {items.length === 0 ? (
+        <div className="mt-2 text-xs text-gray-500 border border-dashed rounded p-4">
+          해당 조건에 맞는 SKU가 없다.
+        </div>
+      ) : (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="text-gray-500">
+              <tr className="text-left border-b">
+                <th className="py-1 pr-2">SKU</th>
+                <th className="py-1 pr-2">상품</th>
+                <th className="py-1 pr-2">폼팩터</th>
+                <th className="py-1 pr-2 text-right">표준원가(VAT 포함)</th>
+                <th className="py-1 pr-2 text-right">현 cost_price</th>
+                <th className="py-1 pr-2 text-right">격차</th>
+                <th className="py-1">비고</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {items.map((row) => (
+                <tr key={`${row.recipe_id}-${row.internal_sku}`} className="border-b last:border-0">
+                  <td className="py-1 pr-2 font-mono">{row.internal_sku}</td>
+                  <td className="py-1 pr-2 truncate max-w-[22rem]">
+                    {row.product_name ?? row.recipe_product_name}
+                  </td>
+                  <td className="py-1 pr-2">{formFactorLabel(row.form_factor)}</td>
+                  <td className="py-1 pr-2 text-right font-medium">
+                    {formatCostWon(row.std_cost_inc_vat)}
+                  </td>
+                  {/* ★읽기 전용 대조값이다 — 이 화면은 이 칸에 쓰지 않는다(계약 §3 금지선). */}
+                  <td className="py-1 pr-2 text-right text-gray-600">
+                    {formatCostWon(row.current_cost_price)}
+                  </td>
+                  <td className="py-1 pr-2 text-right">{gapText(row.gap_pct)}</td>
+                  <td className="py-1 text-amber-700">{uncomputedReason(row) ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -1099,6 +1286,112 @@ export default function CostPage() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // ── S3: 보드 탭 제품 → 옵션 필터 ──────────────────────────────────
+  const [boardProduct, setBoardProduct] = useState<string | null>(null);
+  const [boardOption, setBoardOption] = useState<string | null>(null);
+  const handleBoardProductChange = useCallback((v: string | null) => {
+    setBoardProduct(v);
+    setBoardOption(null); // ★제품이 바뀌면 이전 제품의 옵션값은 더 이상 유효하지 않다.
+  }, []);
+  const handleBoardReset = useCallback(() => {
+    setBoardProduct(null);
+    setBoardOption(null);
+  }, []);
+
+  const boardProducts = useMemo<PickerItem[]>(() => {
+    if (!board) return [];
+    const counts = new Map<string, number>();
+    for (const row of board.items) {
+      counts.set(row.recipe_product_name, (counts.get(row.recipe_product_name) ?? 0) + 1);
+    }
+    return Array.from(counts, ([value, count]) => ({ value, label: value, count })).sort((a, b) =>
+      a.label.localeCompare(b.label, "ko"),
+    );
+  }, [board]);
+
+  const boardOptionsForProduct = useMemo<PickerItem[]>(() => {
+    if (!board || !boardProduct) return [];
+    return board.items
+      .filter((r) => r.recipe_product_name === boardProduct)
+      .map((r) => ({
+        value: r.internal_sku,
+        label: `${r.internal_sku} · ${r.product_name ?? r.recipe_product_name}`,
+      }));
+  }, [board, boardProduct]);
+
+  const filteredBoardItems = useMemo(() => {
+    if (!board) return [];
+    return board.items.filter((r) => {
+      if (boardProduct && r.recipe_product_name !== boardProduct) return false;
+      if (boardOption && r.internal_sku !== boardOption) return false;
+      return true;
+    });
+  }, [board, boardProduct, boardOption]);
+
+  const boardFilterSummary = useMemo(() => {
+    if (!board || (!boardProduct && !boardOption)) return null;
+    const parts: string[] = [];
+    if (boardProduct) parts.push(`제품=${boardProduct}`);
+    if (boardOption) parts.push(`옵션=${boardOption}`);
+    return `${board.items.length}건 중 ${filteredBoardItems.length}건 표시 중 — 필터: ${parts.join(", ")}`;
+  }, [board, boardProduct, boardOption, filteredBoardItems]);
+
+  // ── S3: 레시피 탭 제품 → 폼팩터 필터 ──────────────────────────────
+  const [recipeProduct, setRecipeProduct] = useState<string | null>(null);
+  const [recipeFormFactor, setRecipeFormFactor] = useState<string | null>(null);
+  const handleRecipeProductChange = useCallback((v: string | null) => {
+    setRecipeProduct(v);
+    setRecipeFormFactor(null);
+  }, []);
+  const handleRecipeReset = useCallback(() => {
+    setRecipeProduct(null);
+    setRecipeFormFactor(null);
+  }, []);
+
+  const recipeProducts = useMemo<PickerItem[]>(() => {
+    const counts = new Map<string, number>();
+    for (const r of recipes) counts.set(r.product_name, (counts.get(r.product_name) ?? 0) + 1);
+    return Array.from(counts, ([value, count]) => ({ value, label: value, count })).sort((a, b) =>
+      a.label.localeCompare(b.label, "ko"),
+    );
+  }, [recipes]);
+
+  // ★레시피엔 «옵션» 개념이 없다 — 제품 안에서는 **폼팩터**로 가른다(위임문 §C).
+  const recipeFormFactorsForProduct = useMemo<PickerItem[]>(() => {
+    if (!recipeProduct) return [];
+    const seen = new Set<string>();
+    const out: PickerItem[] = [];
+    for (const r of recipes) {
+      if (r.product_name !== recipeProduct) continue;
+      const key = r.form_factor ?? "__none__";
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ value: key, label: formFactorLabel(r.form_factor) });
+    }
+    return out;
+  }, [recipes, recipeProduct]);
+
+  const recipeCountForSelectedProduct = useMemo(() => {
+    if (!recipeProduct) return 0;
+    return recipeProducts.find((p) => p.value === recipeProduct)?.count ?? 0;
+  }, [recipeProducts, recipeProduct]);
+
+  const filteredRecipes = useMemo(() => {
+    return recipes.filter((r) => {
+      if (recipeProduct && r.product_name !== recipeProduct) return false;
+      if (recipeFormFactor && (r.form_factor ?? "__none__") !== recipeFormFactor) return false;
+      return true;
+    });
+  }, [recipes, recipeProduct, recipeFormFactor]);
+
+  const recipeFilterSummary = useMemo(() => {
+    if (!recipeProduct && !recipeFormFactor) return null;
+    const parts: string[] = [];
+    if (recipeProduct) parts.push(`제품=${recipeProduct}`);
+    if (recipeFormFactor) parts.push(`폼팩터=${formFactorLabel(recipeFormFactor === "__none__" ? null : recipeFormFactor)}`);
+    return `${recipes.length}건 중 ${filteredRecipes.length}건 표시 중 — 필터: ${parts.join(", ")}`;
+  }, [recipes, recipeProduct, recipeFormFactor, filteredRecipes]);
 
   const load = useCallback(async () => {
     try {
@@ -1332,10 +1625,26 @@ export default function CostPage() {
               <h2 className="text-sm font-semibold text-gray-700 mb-2">
                 레시피 (상품명 × 폼팩터)
               </h2>
+              <div className="mb-2">
+                <ProductOptionPicker
+                  idPrefix="recipe"
+                  optionLabel="폼팩터"
+                  products={recipeProducts}
+                  options={recipeFormFactorsForProduct}
+                  optionTotalCount={recipeCountForSelectedProduct}
+                  productValue={recipeProduct}
+                  optionValue={recipeFormFactor}
+                  onProductChange={handleRecipeProductChange}
+                  onOptionChange={setRecipeFormFactor}
+                  onReset={handleRecipeReset}
+                />
+              </div>
               <RecipeList
-                recipes={recipes}
+                recipes={filteredRecipes}
                 selectedId={selectedRecipeId}
                 onSelect={setSelectedRecipeId}
+                totalCount={recipes.length}
+                filterSummary={recipeFilterSummary}
               />
             </div>
             {selectedRecipe ? (
@@ -1374,7 +1683,24 @@ export default function CostPage() {
       ) : null}
       {tab === "board" ? (
         <div className="mt-4">
-          <StandardCostBoard board={board} />
+          <div className="mb-3">
+            <ProductOptionPicker
+              idPrefix="board"
+              products={boardProducts}
+              options={boardOptionsForProduct}
+              optionTotalCount={boardOptionsForProduct.length}
+              productValue={boardProduct}
+              optionValue={boardOption}
+              onProductChange={handleBoardProductChange}
+              onOptionChange={setBoardOption}
+              onReset={handleBoardReset}
+            />
+          </div>
+          <StandardCostBoard
+            board={board}
+            displayItems={boardProduct || boardOption ? filteredBoardItems : undefined}
+            filterSummary={boardFilterSummary}
+          />
         </div>
       ) : null}
     </div>
