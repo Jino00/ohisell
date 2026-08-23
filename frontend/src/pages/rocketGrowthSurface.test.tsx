@@ -214,8 +214,8 @@ describe("RocketGrowthPnl — 보존식 블록 (변이③)", () => {
       ...BASE,
       cost_trustworthy: false,
       conservation: {
-        options_net_sum: null as unknown as string,
-        account_common_sum: null as unknown as string,
+        options_net_sum: null,
+        account_common_sum: null,
         computed_total_net: null,
         reference_net: null,
         diff: null,

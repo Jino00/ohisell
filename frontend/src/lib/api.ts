@@ -5325,8 +5325,12 @@ export interface RgAccountCommon {
 
 /** 보존식 — 이 화면이 대시보드와 «같은 말»을 하는지 코드가 스스로 대조한 결과. */
 export interface RgConservation {
-  options_net_sum: string;
-  account_common_sum: string;
+  // ★다섯 칸이 «함께» null이 된다 — 원가 커버리지 게이트 미달 창에서 백엔드가 그렇게 낸다
+  //   (`rg_daily_pnl.py:194-249`). 적대 리뷰 2R P2: 앞의 두 칸만 non-nullable로 선언해 뒀더니
+  //   **타입이 거짓말을 했고**, 그게 1R P1(「모름」을 「0원」으로 그린 결함)이 숨을 수 있었던
+  //   자리다. 런타임은 `cell()`이 막지만 타입이 거짓이면 다음 호출자가 가드 없이 쓴다.
+  options_net_sum: string | null;
+  account_common_sum: string | null;
   computed_total_net: string | null;
   reference_net: string | null;    // 대시보드 RG 행이 낸 값(compute_rg_summary_row)
   diff: string | null;             // 0으로 숨기지 않는다
