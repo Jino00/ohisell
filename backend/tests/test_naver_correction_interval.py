@@ -245,8 +245,18 @@ def test_up_uses_the_lower_end_for_size():
     assert got["economic_ceiling_low"] < got["economic_ceiling_high"], "구간이 접히면 시험이 헛돈다"
 
 
-def test_up_becomes_hold_when_the_floor_cannot_clear_current_bid():
-    """상한은 올리라 하고 하한은 아니라 하면 → 올리지 않는다(현재보다 낮은 값으로 up 금지)."""
+def test_gate_verdict_survives_when_the_floor_cannot_clear_current_bid():
+    """★D-NAO-236 — 구간이 현재 입찰을 «가로지를» 때 게이트 판정은 살아남는다.
+
+    이전 판(D-NAO-231/234)은 여기서 `direction`을 hold로 **뒤집었다**
+    (`basis="interval_floor_blocks_up"`). 그 한 줄이 D-NAO-234의 하한 인하(1.0→0.827) 때
+    **액셀 제안 296→225건(−24.0%)·증액 총액 −30.7%**를 만들었고, 같은 변화에서 브레이크는
+    **531건·−282,870원으로 완전 불변**이었다(n=43 prod 실측 — ref 95 §9-2). 즉 하한 인하의
+    효과가 100% 액셀 억제 쪽으로만 갔다 = 계약 §4 금지선 2(액셀·브레이크 대칭) 위반.
+
+    ⇒ 방향은 게이트 층(상한)이 정하고 **어떤 층도 뒤집지 않는다.** 하한은 크기만 누른다 —
+      구간이 현재를 가로지르면 **최소 한 틱**(10원)만 올리고 상한 추천값으로 캡을 씌운다.
+    """
     high = bid_simulator.affordable_ceiling(
         (bid_simulator.pooled_rpc({"clk": 100, "conv_amt": 300_000}, {"clk": 100, "conv_amt": 300_000},
                                   {"clk": 100, "conv_amt": 300_000}, {"clk": 100, "conv_amt": 300_000})
@@ -259,9 +269,20 @@ def test_up_becomes_hold_when_the_floor_cannot_clear_current_bid():
     current = (low + high) // 2  # 하한 위, 상한 아래
     got = _sim(current, Decimal("1.5"))
     assert got["direction_high"] == "up" and got["direction_low"] == "down"
-    assert got["direction"] == "hold"
-    assert got["basis"] == "interval_floor_blocks_up"
-    assert got["recommended_bid"] == current, "hold는 현재 입찰을 그대로 둔다"
+    # ①게이트 판정이 살아남는다 — 크기 층이 뒤집지 못한다
+    assert got["direction"] == "up", (
+        "게이트(상한)가 up이라 했으면 up이다. hold로 뒤집히면 D-NAO-236 이전으로 회귀한 것이고, "
+        "그 회귀는 하한을 내릴 때마다 액셀을 조용히 없앤다(실측 −24.0%)."
+    )
+    assert got["basis"] == "interval_floor_min_step"
+    # ②크기는 «가능한 최소 인상» — 한 틱 위, 단 상한 추천값을 못 넘는다
+    assert got["recommended_bid"] == min(got["rank_bid"] or high, current + 10), (
+        "구간이 현재를 가로지를 때의 크기는 min(상한 추천값, 현재+10원)이다"
+    )
+    assert got["recommended_bid"] > current, "up이라고 해 놓고 안 올리면 방향과 크기가 모순이다"
+    # ③보수 끝을 그대로 보고한다 — 추천값이 이를 «넘을 수 있다»는 사실이 사후 재구성돼야 한다
+    assert got["economic_ceiling"] == got["economic_ceiling_low"]
+    assert got["direction_low"] == "down", "구간이 가로지른다는 사실 자체가 반환에 남아 있다"
 
 
 def test_down_uses_the_upper_end_so_the_brake_is_gentler():
@@ -668,19 +689,24 @@ def test_every_live_simulate_bid_call_site_passes_both_ends():
 
 
 # ══════════════════════════════════════════════════════════════════
-# ★적대 리뷰 P1-1 — 하한 인하가 «액셀 제안 자체를 죽이는» 자리를 못 박는다
+# ★★D-NAO-236 — 하한을 내려도 «액셀 제안 자체»는 안 죽는다
 #
-# `bid_simulator`는 상한이 "up"이라 판정한 건도, 하한 기준 추천값이 현재 입찰을 못 넘으면
-# `direction="hold"`(`basis="interval_floor_blocks_up"`)로 뒤집는다. 이건 «크기 축소»가 아니라
-# **액셀 제안의 소멸**이다 — 계약이 «게이트=상한»으로 옮기라고 한 바로 그 성격(통과/차단).
+# 이 자리는 적대 리뷰 P1-1이 지목했고, n=43이 prod에서 수치로 잰 뒤 Jino가 처분한 곳이다.
 #
-# ⚠️**이 테스트는 그 동작을 «옳다»고 승인하지 않는다.** D-NAO-231(Jino 결정)이 「실쓰기 크기는
-#   하한」이라 정했고 이 hold는 그 결정의 귀결이므로, 동작을 바꾸는 것은 새 Jino 결정이다.
-#   이 테스트가 하는 일은 **하한을 내리면 그 차단이 넓어진다는 사실을 코드에 고정**해,
-#   다음에 하한을 만질 때 이 자리가 조용히 지나가지 않게 하는 것이다(계약 §8 [미상] 6과 같은 결).
+#   [옛 동작] 상한이 "up"이라 판정해도, 하한 기준 추천값이 현재 입찰을 못 넘으면
+#            `direction="hold"`(`basis="interval_floor_blocks_up"`)로 **뒤집었다.**
+#   [실측]   하한 1.0 → 0.827에서 (창 08-09~23·후보 884건, ref 95 §9-2)
+#              액셀 up   296 → 225건 (−71건, −24.0%) · 증액 총액 −30.7%
+#              브레이크 down 531 → 531건 (0)         · 감액 총액 **0원 불변**
+#            브레이크가 안 움직인 이유는 `down` 분기가 상한만 쓰기 때문이다 — 하한은
+#            브레이크 경로에 아예 안 들어간다. ⇒ 하한 인하 = 100% 액셀 억제.
+#   [처분]   D-NAO-236(Jino 2026-08-24) — «게이트=상한»은 어떤 층도 뒤집지 못한다.
+#            구간이 현재 입찰을 가로지르면 방향을 유지한 채 **최소 한 틱**만 올린다.
+#
+# 아래 테스트는 그 «비대칭이 사라졌음»을 못 박는다. 옛 동작으로 되돌리면 죽는다.
 # ══════════════════════════════════════════════════════════════════
-def test_lowering_the_floor_widens_the_up_to_hold_block():
-    """리뷰어 재현의 회귀 고정 — 같은 키워드가 하한 1.0에선 up, 0.827에선 hold가 된다."""
+def test_lowering_the_floor_no_longer_kills_the_accelerator():
+    """★D-NAO-236 — 같은 키워드가 하한 1.0에서도 0.827에서도 «up»으로 살아남는다."""
     kw = {"clk": 200, "conv_amt": 400_000, "bid_amt": 900}
     agg = {"clk": 1000, "conv_amt": 2_000_000}
 
@@ -692,11 +718,50 @@ def test_lowering_the_floor_widens_the_up_to_hold_block():
         )
 
     before, after = _run("1"), _run("0.827")
-    assert before["direction"] == "up", "옛 하한에서는 증액 제안이 살아 있었다"
-    assert after["direction"] == "hold", "새 하한에서는 같은 건이 hold로 뒤집힌다"
-    assert after["basis"] == "interval_floor_blocks_up", (
-        "이 차단은 이름이 붙어 있어야 세어질 수 있다 — 이름 없는 차단은 ⓑ 실측에서 안 보인다"
+    assert before["direction"] == "up", "옛 하한에서 증액 제안이 살아 있었다"
+    assert after["direction"] == "up", (
+        "★새 하한에서도 살아 있어야 한다 — 여기가 hold로 뒤집히면 D-NAO-236 이전으로 회귀한 "
+        "것이고, prod에서 액셀 71건(−24.0%)이 조용히 사라진다"
+    )
+    assert after["basis"] == "interval_floor_min_step", (
+        "차단이 아니라 «최소 인상»으로 처리됐다는 사실에 이름이 붙어 있어야 세어진다"
+    )
+    assert after["recommended_bid"] > kw["bid_amt"], "up이면 실제로 올라가야 한다"
+    assert after["recommended_bid"] <= before["recommended_bid"], (
+        "★그래도 하한은 «크기»를 누른다 — 새 하한의 추천값이 옛 하한보다 크면 "
+        "보수화가 통째로 사라진 것이다(반대 방향 회귀)"
     )
     assert before["direction_high"] == after["direction_high"] == "up", (
         "★상한 판정(=«선정»)은 양쪽에서 불변이어야 한다 — 그게 D-NAO-231의 「액셀 판정 불변」이다"
     )
+
+
+def test_lowering_the_floor_moves_accel_and_brake_in_a_comparable_way():
+    """★금지선 2의 회귀 가드 — 하한 인하가 «액셀만» 죽이는 모양으로 되돌아가면 죽는다.
+
+    n=43 실측이 잡은 병은 「액셀 −24%, 브레이크 0%」였다. 그 병의 본질은 «액셀이 hold로
+    사라진다»이므로, 여기서는 **하한을 내려도 방향 분포가 안 바뀐다**를 못 박는다.
+    (크기는 줄어도 된다 — 그게 크기 층의 일이다.)
+    """
+    agg = {"clk": 1000, "conv_amt": 2_000_000}
+    # 현재 입찰을 넓게 훑어 «구간이 가로지르는» 구간을 포함시킨다
+    bids = [200, 400, 600, 800, 900, 1000, 1200, 1500, 2000, 3000]
+
+    def _dirs(low):
+        out = []
+        for b in bids:
+            got = bid_simulator.simulate_bid(
+                {"clk": 200, "conv_amt": 400_000, "bid_amt": b}, Decimal("2.0"),
+                group_agg=agg, campaign_agg=agg, account_agg=agg,
+                correction_factor=Decimal("1.3318"), correction_factor_low=Decimal(low),
+                correction_factor_high=Decimal("1.3318"),
+            )
+            out.append(got["direction"])
+        return out
+
+    before, after = _dirs("1"), _dirs("0.827")
+    assert before == after, (
+        "★하한을 내렸는데 방향 분포가 바뀌었다 = 하한이 «게이트»로 새고 있다. "
+        f"하한 1.0: {before} / 하한 0.827: {after}"
+    )
+    assert before.count("up") > 0, "픽스처 전제: 액셀 후보가 실제로 있어야 이 가드가 의미 있다"

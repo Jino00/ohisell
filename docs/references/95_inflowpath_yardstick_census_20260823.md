@@ -265,7 +265,7 @@ SELECT strftime('%Y-%m', order_date) AS ym,
 
 | # | 파일:줄 | 사실만 |
 |---|---|---|
-| — | `bid_simulator.py:168-177` `interval_floor_blocks_up` | `direction="up"`인데 `rec_low`(하한 크기)가 `current_bid`를 못 넘으면 `direction`을 **"hold"로 뒤집는다**(주석 원문: `"상한은 올리라 하고 하한은 아니라 한다"`). 형태상 층C(크기) 산식이 만들어내는 결과이지만, 결과가 "방향을 뒤집는 차단"이라 층B(게이트)의 성격도 있다. **[미상]** — 하한이 내려가면 이 경로로 up 제안이 hold로 뒤집히는 차단이 넓어진다는 사실만 적는다. 층 배정은 확정하지 않는다(적대 리뷰가 이미 지적한 미해결 항목). |
+| ✅ | `bid_simulator.py` `direction` 판정 → **층B(게이트)** | ~~[미상]~~ **해소됨 — D-NAO-236(Jino 결정 2026-08-24).** 초판은 *"형태상 층C(크기) 산식이 만들어내는 결과이지만, 결과가 «방향을 뒤집는 차단»이라 층B(게이트)의 성격도 있다"*고 적고 배정을 유보했다. n=43 실측(§9-2)이 그 유보의 대가를 수치로 냈다 — 하한 1.0→0.827에서 **액셀 −24.0%·브레이크 0%**. ⇒ **층은 «파일 위치»가 아니라 «묻는 질문»으로 배정한다**: `direction`이 묻는 것은 「올리나 마나」 = 게이트이므로 **층B(상한)**, `recommended_bid`가 묻는 것은 「얼마나」 = 층C(하한). `interval_floor_blocks_up`(방향 뒤집기)은 **삭제**되고 `interval_floor_min_step`(방향 유지 + 최소 한 틱)으로 대체됐다. |
 
 ### 관측 전용(방향·게이트·크기 어디에도 실쓰기하지 않음, 양끝 다 노출) — 4곳, 미변경
 
@@ -424,6 +424,45 @@ DB는 `sqlite:///file:…?mode=ro&uri=true`로 열었다(쓰기 원천 차단, p
 scp measure_floor_blocks.py sellc.ohitech.co.kr:/tmp/
 ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python /tmp/measure_floor_blocks.py"
 ```
+
+---
+
+### ★§9-3 처분과 그 «배포 전» 검증 — D-NAO-236 (Jino 결정 2026-08-24 07:29 KST)
+
+**Jino 원문**: *"(나)로 가자 — 게이트 층으로 옮겨서 71건 살려줘"*
+(선택지 원문: (가) 그대로 배포 / **(나) `interval_floor_blocks_up`을 게이트 층으로 옮겨 71건을 살린다** / (다) 보류)
+
+**무엇을 바꿨나**: `bid_simulator`에서 크기 층이 게이트 판정을 뒤집던 한 줄을 없앴다.
+- 게이트(상한)가 `up`이라 하면 **어떤 층도 뒤집지 못한다**.
+- 구간이 현재 입찰을 **가로지르면**(`rec_low <= current_bid`) 방향을 유지한 채 크기만
+  `min(rec_high, current_bid + 10원)`로 눌러 두 층을 동시에 만족시킨다.
+- `basis`: `interval_floor_blocks_up`(삭제) → **`interval_floor_min_step`**.
+- ⚠️이 분기의 추천값은 **하한의 경제성 상한을 넘을 수 있다.** 은폐하지 않는다 — 반환의
+  `economic_ceiling`은 보수 끝(`ceiling_low`)을 그대로 싣고 `direction_low`도 함께 실어,
+  「구간이 가로질렀다」가 사후에 재구성되게 둔다.
+
+**배포 전 검증 (읽기 전용)**: 새 `bid_simulator.py`·`correction_interval.py`를 prod `/tmp`에
+올려 **`sys.modules`에 인메모리로만 얹고**(앱·크론은 옛 코드 그대로) 같은 DB(`mode=ro`)로 측정.
+창 2026-08-09~23, 후보 913건, 2026-08-24 07:4x KST.
+
+| | 하한 1.0 | 하한 0.827 | 판정 |
+|---|---|---|---|
+| 액셀 `up` 건수 | 354 | **354** | ★**완전 불변** — 하한이 방향을 1건도 안 바꾼다 |
+| 브레이크 `down` 건수 | 557 | 557 | 불변 |
+| `hold` | 2 | 2 | 불변 |
+| 액셀 증액 총액 | +252,480원 | +176,290원 | **−30.2%** — 크기는 여전히 하한이 누른다 ✅ |
+| 브레이크 감액 총액 | −304,910원 | −304,910원 | 불변 |
+| `basis="interval_floor_min_step"` | 51 | 117 | 옛 판에서 죽던 건이 «최소 인상»으로 산다 |
+
+⇒ **하한은 이제 게이트에서 완전히 손을 뗐고 크기 층에서만 작동한다.** §9-2가 잡은 비대칭
+(액셀 −24.0% / 브레이크 0%)이 사라졌다 — 방향 분포가 양쪽에서 동일하다.
+회귀 가드: `test_lowering_the_floor_no_longer_kills_the_accelerator` ·
+`test_lowering_the_floor_moves_accel_and_brake_in_a_comparable_way`(방향 분포 동일성) ·
+`test_gate_verdict_survives_when_the_floor_cannot_clear_current_bid`.
+
+**⚠️ §9-2와 §9-3의 후보 총계가 다르다(884 vs 913)** — 두 측정 사이(00:4x → 07:4x)에 수집이
+돌아 universe가 커졌다. **각 표는 «같은 실행 안에서» A/B를 잰 것**이므로 표 안의 비교는
+유효하고, 표를 **가로질러** 두 숫자를 빼는 것은 유효하지 않다.
 
 ---
 

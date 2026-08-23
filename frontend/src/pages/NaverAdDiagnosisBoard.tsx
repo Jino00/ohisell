@@ -224,6 +224,17 @@ export default function NaverAdDiagnosisBoard() {
                 하한이 내려갈수록 차단이 늘어 브레이크가 커진다), 하한은{" "}
                 <span className="text-gray-500">«크기»에만</span> 쓴다(입찰 크기·서보 경제성 상한·확장 배분).
               </div>
+              {/* ★D-NAO-236 — 이 줄이 화면에 있어야 하는 이유: ⓐ가 게이트를 «파일 단위»로 옮기면서
+                  bid_simulator 안의 방향 판정을 놓쳤고, 그래서 하한을 내리면 액셀이 24% 조용히
+                  사라졌다. 사라지는 것은 로그를 안 남긴다(hold는 정상으로 보인다) — 그러니
+                  「이제 안 사라진다」를 사람이 보는 자리에 적어 둔다. */}
+              <div className="text-[11px] text-gray-400 mt-1 leading-snug" data-testid="factor-floor-not-a-gate">
+                <span className="text-gray-500">하한은 «게이트»가 아니다</span>(D-NAO-236, 2026-08-24) —
+                입찰 <span className="text-gray-500">방향</span>은 상한이 정하고 어떤 층도 뒤집지 않는다.
+                구간이 현재 입찰을 가로지르면 방향을 유지한 채 <span className="text-gray-500">최소 한 틱</span>만
+                올린다. 실측: 하한 1.0↔0.827에서 방향 분포 <span className="text-gray-500">354/557/2 동일</span>,
+                증액 총액만 −30.2%.
+              </div>
             </div>
             <div className="bg-white rounded-lg border border-gray-200 p-3">
               <div className="text-xs text-gray-500 mb-1">진단 창</div>

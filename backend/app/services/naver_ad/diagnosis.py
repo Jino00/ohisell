@@ -121,8 +121,17 @@ def correction_factor(db: Session, date_to: date) -> dict:
       | 층 | 질문 | 끝 | 소비처 |
       |---|---|---|---|
       | 선정 | 이 대상을 후보에 넣나 | **상한** | 진단 보드 6종(D-NAO-231) |
-      | **게이트** | 통과시키나 차단하나 | **상한** | 증액 가드(`naver_execution_harness` ×3) · 확장압력 갭 게이트(`expansion_pressure`) · 확장배분 own_ratio 제외(`expansion_allocator`) · 정착창 below/ok(`auto_operator`) · deep_ok(`auto_operator`) |
-      | 크기 | 얼마나 쓰나 | **하한** | 입찰 크기(`bid_simulator`) · 서보 경제성 상한(`auto_operator._servo_economic_ceiling`) · estimate 직행 스텝 |
+      | **게이트** | 통과시키나 차단하나 | **상한** | 증액 가드(`naver_execution_harness` ×3) · 확장압력 갭 게이트(`expansion_pressure`) · 확장배분 own_ratio 제외(`expansion_allocator`) · 정착창 below/ok(`auto_operator`) · deep_ok(`auto_operator`) · ★**입찰 방향 판정(`bid_simulator`의 `direction`)** — D-NAO-236에서 옮김 |
+      | 크기 | 얼마나 쓰나 | **하한** | 입찰 **크기**(`bid_simulator`의 `recommended_bid`) · 서보 경제성 상한(`auto_operator._servo_economic_ceiling`) · estimate 직행 스텝 |
+
+    ★★**D-NAO-236 (Jino 결정 2026-08-24) — 층은 «파일 위치»가 아니라 «묻는 질문»으로 배정한다.**
+    D-NAO-234 ⓐ가 위 표를 세울 때 `bid_simulator`를 통째로 크기 층에 넣었는데, 그 안에는
+    **질문이 다른 코드가 섞여 있었다**: `direction`(올리나 마나 = 게이트)과 `recommended_bid`
+    (얼마나 = 크기). 크기 층 코드가 게이트 판정을 **뒤집고** 있었고, 그래서 하한을 0.827로
+    내리자 **액셀 제안 296→225건(−24.0%)·증액 총액 −30.7%인데 브레이크는 531건·−282,870원으로
+    완전 불변**이었다(n=43 prod 실측, ref 95 §9-2). 대칭이 한쪽으로만 깨진 것이다.
+    ⇒ 방향은 게이트 층(상한)으로 옮기고, 하한은 크기만 누른다. 구간이 현재 입찰을 가로지르면
+    방향을 유지한 채 **최소 한 틱**만 올린다(`basis="interval_floor_min_step"`).
 
     D-NAO-231은 «선정»과 «크기» 둘로만 갈랐고, 그 사이의 **«게이트»에 배정이 없었다.**
     배정이 없으니 게이트들은 옛 코드대로 하한을 계속 썼고 — 하한은 게이트에서 «보수적

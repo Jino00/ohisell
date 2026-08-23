@@ -130,6 +130,24 @@ describe("D-NAO-21 보정계수 카드 — 구간 자 표면(D-NAO-230 §5-5)", 
     expect(text).not.toMatch(/«실행 게이트»의 통과·차단/);
   });
 
+  // ★★D-NAO-236 표면 요건 — 「하한은 게이트가 아니다」가 사람이 보는 자리에 있는가.
+  //   왜 화면이어야 하나: 액셀이 사라지는 것은 **아무 로그도 안 남긴다**(hold는 정상으로 보인다).
+  //   그래서 이 사실은 세어 두지 않으면 기본값으로 참처럼 보인다(교훈 #355).
+  it("★D-NAO-236 — 화면이 「하한은 게이트가 아니다」와 그 실측을 말한다", async () => {
+    h.data = diagnosis({ factor: 1.3318, factor_low: 0.827, factor_high: 1.3318, factor_point: 1.3318 });
+    render(
+      <MemoryRouter>
+        <NaverAdDiagnosisBoard />
+      </MemoryRouter>,
+    );
+    const text = (await screen.findByTestId("factor-floor-not-a-gate")).textContent ?? "";
+    expect(text).toMatch(/하한은 «게이트»가 아니다/);
+    expect(text).toMatch(/방향/);                    // 무엇이 상한 몫인지
+    expect(text).toMatch(/최소 한 틱/);              // 구간이 가로지를 때의 처리
+    expect(text).toMatch(/354\/557\/2/);             // 배포 전 실측 — 방향 분포 동일
+    expect(text).toMatch(/30\.2%/);                  // 크기는 여전히 눌린다
+  });
+
   // ★★D-NAO-234 표면 요건 — 값 옆에 «근거»가 붙는가(계약 §6-5).
   it("하한의 근거·창·[미상]을 화면이 말한다 — 숫자만 그리면 「0.827이 어디서 왔나」가 사라진다", async () => {
     h.data = diagnosis({ factor: 1.3291, factor_low: 0.827, factor_high: 1.3291, factor_point: 1.3291,
