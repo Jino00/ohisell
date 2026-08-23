@@ -20,6 +20,10 @@ const ACCOUNTS = [
 
 const n = (v: unknown): number => Number(v ?? 0) || 0;
 
+/** 원 단위 반올림 — 백엔드 Decimal의 잔차가 화면에 소수점으로 새지 않게(화면 A와 같은 규율).
+ *  공용 `format.won()`은 반올림하지 않고, 그건 전 화면 공용이라 고치지 않는다(계약 §3). */
+const wonR = (v: unknown): string => won(Math.round(n(v)));
+
 function yesterdayKST(): string {
   return isoKST(new Date(Date.now() - 86_400_000));
 }
@@ -131,7 +135,7 @@ export default function RocketGrowthSettlement() {
             {data?.account_common && n(data.account_common.fee_unmapped_revenue) > 0 && (
               <span className="text-amber-700">
                 {" "}
-                · 매출 {won(n(data.account_common.fee_unmapped_revenue))}에는 비용을 못 붙였다
+                · 매출 {wonR((data.account_common.fee_unmapped_revenue))}에는 비용을 못 붙였다
                 (0으로 «채우지 않았다» — 그만큼 공제는 하한이다)
               </span>
             )}
@@ -142,7 +146,7 @@ export default function RocketGrowthSettlement() {
             {data?.account_common && n(data.account_common.cost_unmapped_revenue) > 0 && (
               <span className="text-amber-700">
                 {" "}
-                · 원가 미상 매출 {won(n(data.account_common.cost_unmapped_revenue))}
+                · 원가 미상 매출 {wonR((data.account_common.cost_unmapped_revenue))}
               </span>
             )}
           </dd>
@@ -188,13 +192,13 @@ export default function RocketGrowthSettlement() {
                 {rec.cycle_from} ~ {rec.cycle_to}
               </dd>
               <dt className="text-gray-500">이 방식의 합</dt>
-              <dd>{won(n(rec.computed))}</dd>
+              <dd>{wonR((rec.computed))}</dd>
               <dt className="text-gray-500">원장 실청구액</dt>
-              <dd>{won(n(rec.actual))}</dd>
+              <dd>{wonR((rec.actual))}</dd>
               <dt className="text-gray-500">차이</dt>
               <dd className="font-medium">
                 {n(rec.diff) >= 0 ? "+" : "−"}
-                {won(Math.abs(n(rec.diff)))}
+                {wonR(Math.abs(n(rec.diff)))}
                 {recPct != null && ` (${recPct >= 0 ? "+" : ""}${recPct.toFixed(2)}%)`}
               </dd>
             </dl>

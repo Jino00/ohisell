@@ -5577,7 +5577,11 @@ export interface RgConservation {
   computed_total_net: string | null;
   reference_net: string | null;    // 대시보드 RG 행이 낸 값(compute_rg_summary_row)
   diff: string | null;             // 0으로 숨기지 않는다
-  ok: boolean;
+  // ★3상태다 — true(원 단위 일치) / false(어긋남) / **null(판정할 수 없다)**.
+  //   원가 게이트가 미달인 창은 순이익 자체를 안 내므로 대조할 것이 없다. `boolean`으로
+  //   선언해 두면 `null`이 falsy로 접혀 화면이 「어긋남」을 «단정»한다 — 실제로 그랬다
+  //   (2026-08-23 라이브, 08-22 창). 「모름」과 「아니다」는 다른 말이다.
+  ok: boolean | null;
 }
 
 export interface RgOptionPnlResponse {

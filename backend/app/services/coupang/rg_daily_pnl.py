@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy.orm import Session
 
@@ -292,11 +292,21 @@ def _conservation_diff(
     하드코딩한」 변이와 「진짜로 뺄셈한」 정상 코드가 **어느 정상 입력에서도 구별되지 않는다**
     (둘 다 0을 낸다). 이 함수를 분리해 두면 **일부러 어긋난 두 값**을 직접 넣어 「진짜 뺄셈인가」를
     독립적으로 검사할 수 있다(`test_rg_daily_pnl.py`의 `test_conservation_diff_helper_*`).
+
+    ★`ok`는 «완전 일치»가 아니라 «원 단위 일치»다 (2026-08-23 라이브가 잡았다).
+    처음엔 `diff == 0`이었는데, prod 08-21에서 **합계와 대시보드가 소수점까지 같은데도
+    화면이 「⚠️ 어긋남」을 단정**했다: 요율 곱셈·VAT 나눗셈 사슬이 1E-25 수준의 잔차를 남기고
+    `Decimal`은 그걸 0으로 안 본다. 테스트 636종·변이 26종이 전부 초록이었다 — 조립 코드가
+    같은 잔차를 양쪽에 만들어 «단위 테스트에선 정확히 상쇄»되기 때문이다. 라이브에서만 갈렸다.
+    ⇒ 계약 §4 ⓓ의 문언이 **「원 단위 일치」**이므로 판정도 그 단위로 한다.
+    ★**드리프트를 숨기는 게 아니다**: `diff`는 반올림 없이 그대로 반환하고 화면도 그대로 싣는다.
+      바뀌는 것은 「일치/어긋남」 배지의 임계뿐이고, 1원 이상 어긋나면 여전히 「어긋남」이다.
     """
     if computed_total_net is None or reference_net is None:
         return None, None
     diff = computed_total_net - reference_net
-    return diff, diff == ZERO
+    ok = diff.quantize(Decimal("1"), rounding=ROUND_HALF_UP) == ZERO
+    return diff, ok
 
 
 def intelligence_agg_ads(db: Session, date_from: date, date_to: date, vendor_id: str) -> dict[str, dict]:
