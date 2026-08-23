@@ -180,8 +180,13 @@ export default function NaverAdDiagnosisBoard() {
               <div className="text-[11px] text-gray-400 mt-1 leading-snug">
                 하한=보정 없음 · 상한=채널매출÷광고전환매출(광고 귀속 조인 없음 ={" "}
                 <span className="text-gray-500">100% 견인 가정</span>).{" "}
-                <span className="text-gray-500">아래 보드의 후보 «선정»은 전부 상한</span>이고(액셀
-                판정 불변), 하한은 실제 쓰기의 «크기»에만 쓴다 — 입찰 크기·증액 가드·확장 배분·진입 게이트.
+                {/* ★D-NAO-232 적대 리뷰 1R P1-2: 초판은 「하한은 «크기»에만 쓴다」였는데
+                    이 PR의 실측이 그걸 반증했다 — 실행 게이트(BEP 증액금지)도 하한을 쓰고,
+                    거기서 하한은 크기가 아니라 «통과/차단»을 정한다(ref 94 §6). 세 층으로 적는다. */}
+                <span className="text-gray-500">후보 «선정»은 전부 상한</span>이고(액셀 판정 불변),
+                하한은 두 곳에 쓴다 — 실제 쓰기의 «크기»(입찰 크기·확장 배분)와{" "}
+                <span className="text-gray-500">«실행 게이트»의 통과·차단</span>(증액 가드·진입 게이트).
+                게이트에서 하한은 보수적 «크기»가 아니라 <span className="text-gray-500">차단 증가</span>로 작동한다.
               </div>
             </div>
             <div className="bg-white rounded-lg border border-gray-200 p-3">
@@ -198,17 +203,37 @@ export default function NaverAdDiagnosisBoard() {
             <div className="bg-white rounded-lg border border-gray-200 p-4" data-testid="accel-gate-card">
               <div className="flex items-baseline justify-between flex-wrap gap-2 mb-1">
                 <h2 className="text-sm font-semibold text-gray-900">⚖️ 액셀 게이트 — BEP 증액금지가 막는 것</h2>
-                <div className="text-xs text-gray-500 tabular-nums">
+                {/* ★testid로 «위치»를 고정한다 — 적대 리뷰 1R 변이 M1(헤드라인의 survive_low를
+                    survive_high로 바꿔 「막힌 게 없다」로 말하기)이 생존한 이유가, 테스트가
+                    card.textContent 어딘가에 "195"만 있으면 만족했기 때문이다. */}
+                <div className="text-xs text-gray-500 tabular-nums" data-testid="accel-gate-headline">
                   액셀 후보 {num(data.accel_gate.accel_total)}건 → 게이트 통과{" "}
-                  <span className="font-semibold text-gray-900">{num(data.accel_gate.survive_low)}건</span>
+                  <span className="font-semibold text-gray-900" data-testid="accel-gate-survive">
+                    {num(data.accel_gate.survive_low)}건
+                  </span>
                   {data.accel_gate.survive_high !== data.accel_gate.survive_low && (
                     <> (상한이었다면 {num(data.accel_gate.survive_high)}건)</>
                   )}
                 </div>
               </div>
-              <div className="text-[11px] text-gray-400 mb-3 leading-snug">
+              <div className="text-[11px] text-gray-400 mb-3 leading-snug" data-testid="accel-gate-caveats">
                 {data.accel_gate.gate_note} 그래서 <span className="text-gray-500">막힌 건의 총이익을 구간 양끝으로 병기</span>한다 —{" "}
                 {data.accel_gate.assumption}
+                <br />
+                {/* ★1R P2-2: 확정값처럼 보이지 않게 창 근사를 화면에서 자백한다 */}
+                <span className="text-gray-500">{data.accel_gate.window_caveat}</span>{" "}
+                목표ROAS는{" "}
+                {data.accel_gate.target_roas_source === "per_campaign" ? (
+                  <>
+                    <span className="text-gray-500">캠페인별</span>
+                    {data.accel_gate.target_roas_min != null && data.accel_gate.target_roas_max != null && (
+                      <> ({data.accel_gate.target_roas_min}~{data.accel_gate.target_roas_max})</>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-amber-600">계정 기본값(게이트와 다른 자)</span>
+                )}
+                로 잰다.
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -242,7 +267,20 @@ export default function NaverAdDiagnosisBoard() {
                   </tbody>
                 </table>
               </div>
-              <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 tabular-nums">
+              {/* ★1R P2-1: by_board를 계산·타입·테스트까지 해 놓고 화면에 한 글자도 안 그렸다 —
+                  「어느 보드에서 죽는지가 안 보이면 처분을 못 정한다」고 주석에 써 놓고서다.
+                  이 저장소가 네 번 밟은 「값은 있는데 사람이 못 봄」의 다섯 번째가 될 뻔했다. */}
+              <div className="mt-2 text-xs text-gray-500 tabular-nums" data-testid="accel-gate-by-board">
+                어디서 죽나 —{" "}
+                {data.accel_gate.by_board
+                  .filter((b) => b.total > 0)
+                  .map((b) => `${b.board} ${b.blocked_low_only}/${b.total}`)
+                  .join(" · ") || "액셀 후보 없음"}
+              </div>
+              <div
+                className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 tabular-nums"
+                data-testid="accel-gate-symmetry"
+              >
                 <span>
                   대칭(브레이크:액셀) 선정{" "}
                   <span className="font-medium text-gray-900">{data.accel_gate.ratio_selection ?? NO_DATA}:1</span>

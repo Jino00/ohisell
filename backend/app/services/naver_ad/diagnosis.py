@@ -228,11 +228,15 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         #   어떻게 되는지 «관측»**만 한다. 판정·필터를 바꾸지 않는다(accel_gate_view 머리 주석).
         #   게이트가 실제로 하한을 쓰므로(`naver_execution_harness.py:926`), 하한을 안 보면
         #   화면이 실제 동작과 다른 것을 그리게 된다 — 그게 세션 39 적대 리뷰 P1-1이었다.
+        #   ★적대 리뷰 1R P1-1: 목표ROAS는 **캠페인별**로 넘긴다 — 실제 게이트가
+        #   `_resolve_target_roas_float(db, campaign_id)`를 쓰므로, 계정 기본값 하나로 재면
+        #   화면이 실제 게이트와 «다른 그룹»을 지목한다(라이브에서 3그룹 교체·하한 총이익 66% 어긋남).
         "accel_gate": accel_gate_view.build(
             boards,
             factor_low=float(correction["factor_low"]),
             factor_high=float(correction["factor_high"]),
             target_roas=float(target_roas),
             bep_roas=float(bep_roas),
+            resolve_target_roas=_target_roas_resolver(db, target_roas),
         ),
     }

@@ -3113,10 +3113,19 @@ export interface NaverAdAccelGate {
   /** 실제 게이트가 읽는 끝. 현재 'factor_low' — 하한은 보정을 없애 차단을 최대로 만든다. */
   gate_end: string;
   gate_note: string;
+  /** 보드 창 기준 근사라는 자백 — 화면이 확정값처럼 보이면 안 된다(적대 리뷰 1R P2-2). */
+  window_caveat: string;
   assumption: string;
   factor_low: number;
   factor_high: number;
   target_roas: number;
+  /**
+   * 'per_campaign' = 실제 게이트와 같은 자로 쟀다 / 'account_default' = 계정 기본값 하나로 쟀다.
+   * 후자면 화면이 실제 게이트와 «다른 그룹»을 지목할 수 있다(적대 리뷰 1R P1-1).
+   */
+  target_roas_source: string;
+  target_roas_min: number | null;
+  target_roas_max: number | null;
   bep_roas: number;
   /** 세션 39(ref 93 §2)와 같은 보드 집합 — 비교 가능해야 하므로 primary. */
   accel_total: number;
@@ -3135,6 +3144,9 @@ export interface NaverAdAccelGate {
     blocked_both: NaverAdAccelGateBucket;
     /** roas_naver가 없어 판정 못 한 행. 「통과」로 세지 않는다(교훈 #123). */
     unmeasurable: number;
+    /** 실제로 적용된 목표ROAS의 범위(캠페인별이면 벌어진다). */
+    target_roas_min: number | null;
+    target_roas_max: number | null;
   };
   by_board: Array<{
     board: string;

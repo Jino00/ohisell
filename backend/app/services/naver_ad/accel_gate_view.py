@@ -40,6 +40,13 @@ ASSUMPTION = (
 GATE_NOTE = (
     "액셀 게이트(BEP 증액금지)는 구간의 «하한»을 쓴다 — 하한은 보정을 없애 차단을 최대로 만든다."
 )
+# ★적대 리뷰 1R P2-2: 이 수치는 «보드 창»의 roas_naver로 잰 근사다. 실제 게이트는
+#   `account_diagnosis.keyword_window_agg`(as_of=D-1)의 다른 창을 쓴다 — 양끝이 같은
+#   roas_naver를 쓰므로 «차이»(막힌 건수·부호)는 정확하고 절대 건수는 근사다.
+#   자백을 페이로드에 실어야 화면이 확정값처럼 보이지 않는다(ref 94 §8-3).
+WINDOW_CAVEAT = (
+    "보드 창 기준 근사 — 실제 게이트는 as_of=D-1 창을 쓴다. 양끝의 «차이»는 정확하고 절대 건수는 근사."
+)
 
 
 def _rows(boards: dict[str, Any], names: Iterable[str]) -> list[dict]:
@@ -65,18 +72,28 @@ def _profit(conv_amt: float, cost: float, factor: float, bep_roas: float) -> flo
 
 
 def _bucket(rows: Sequence[dict], factor_low: float, factor_high: float,
-            target_roas: float, bep_roas: float) -> dict:
-    """액셀 후보를 게이트 판정으로 세 통에 가른다 + 통마다 총이익 양끝."""
+            target_of, bep_roas: float) -> dict:
+    """액셀 후보를 게이트 판정으로 세 통에 가른다 + 통마다 총이익 양끝.
+
+    ★`target_of(row) -> float`는 **행마다** 목표ROAS를 준다 — 계정 기본값 하나가 아니다.
+    실제 게이트(`naver_execution_harness._build_guardrail_context`)가
+    `_resolve_target_roas_float(db, proposal.campaign_id)`로 **캠페인별** 목표를 넣기 때문이다.
+    계정 기본값 하나로 재면 화면이 실제 게이트와 다른 그룹을 지목한다(적대 리뷰 1R P1-1:
+    라이브에서 3그룹이 빠지고 3그룹이 새로 들어왔고, 하한 총이익이 −10,636 ↔ −17,691로 66% 어긋났다).
+    """
     passing: list[dict] = []      # 양끝 모두 통과
     low_only: list[dict] = []     # 하한에서만 차단(= 현행 게이트가 죽이는 것)
     both: list[dict] = []         # 양끝 모두 차단
     unmeasurable = 0
+    targets_seen: list[float] = []
 
     for r in rows:
         roas = _f(r, "roas_naver")
         if roas is None:
             unmeasurable += 1
             continue
+        target_roas = target_of(r)
+        targets_seen.append(target_roas)
         blocked_low = roas * factor_low < target_roas
         blocked_high = roas * factor_high < target_roas
         if blocked_low and blocked_high:
@@ -102,21 +119,38 @@ def _bucket(rows: Sequence[dict], factor_low: float, factor_high: float,
         "blocked_low_only": agg(low_only),
         "blocked_both": agg(both),
         "unmeasurable": unmeasurable,
+        "target_roas_min": round(min(targets_seen), 4) if targets_seen else None,
+        "target_roas_max": round(max(targets_seen), 4) if targets_seen else None,
     }
 
 
 def build(boards: dict[str, Any] | None, *, factor_low: float, factor_high: float,
-          target_roas: float | None, bep_roas: float | None) -> dict | None:
-    """진단 응답에 실을 「액셀 게이트」 관측 페이로드. 재료가 없으면 None(0으로 위장 금지)."""
+          target_roas: float | None, bep_roas: float | None,
+          resolve_target_roas=None) -> dict | None:
+    """진단 응답에 실을 「액셀 게이트」 관측 페이로드. 재료가 없으면 None(0으로 위장 금지).
+
+    resolve_target_roas: `campaign_id -> target_roas` 리졸버(override > 상품파생 > 계정기본값).
+      **주면 행마다 캠페인별 목표를 쓴다** — 실제 게이트와 같은 값을 써야 같은 그룹을 지목한다.
+      안 주면 `target_roas`(계정 기본값)로 폴백하되, 그때는 페이로드가 그 사실을 밝힌다
+      (`target_roas_source`) — 조용히 다른 자로 재고 화면엔 확정값처럼 그리는 것이 P1-1이었다.
+    """
     if not boards or target_roas is None or bep_roas is None or not bep_roas:
         return None
+
+    def target_of(row: dict) -> float:
+        cid = row.get("campaign_id")
+        if resolve_target_roas is not None and isinstance(cid, str) and cid:
+            resolved = resolve_target_roas(cid)
+            if resolved is not None:
+                return float(resolved)
+        return target_roas
 
     accel = _rows(boards, ACCEL_BOARDS)
     brake_n = len(_rows(boards, BRAKE_BOARDS))
     accel_ext_n = len(_rows(boards, ACCEL_BOARDS_EXT))
     brake_ext_n = len(_rows(boards, BRAKE_BOARDS_EXT))
 
-    b = _bucket(accel, factor_low, factor_high, target_roas, bep_roas)
+    b = _bucket(accel, factor_low, factor_high, target_of, bep_roas)
     accel_n = len(accel)
     survive_low = b["passing_both"]["count"]
     survive_high = survive_low + b["blocked_low_only"]["count"]
@@ -128,7 +162,7 @@ def build(boards: dict[str, Any] | None, *, factor_low: float, factor_high: floa
     by_board = []
     for name in ACCEL_BOARDS_EXT:
         rows = _rows(boards, (name,))
-        sub = _bucket(rows, factor_low, factor_high, target_roas, bep_roas)
+        sub = _bucket(rows, factor_low, factor_high, target_of, bep_roas)
         by_board.append({
             "board": name,
             "total": len(rows),
@@ -140,10 +174,15 @@ def build(boards: dict[str, Any] | None, *, factor_low: float, factor_high: floa
     return {
         "gate_end": "factor_low",
         "gate_note": GATE_NOTE,
+        "window_caveat": WINDOW_CAVEAT,
         "assumption": ASSUMPTION,
         "factor_low": factor_low,
         "factor_high": factor_high,
         "target_roas": target_roas,
+        # ★적대 리뷰 1R P1-1 상환 — 어느 자로 쟀는지 페이로드가 밝힌다.
+        "target_roas_source": "per_campaign" if resolve_target_roas is not None else "account_default",
+        "target_roas_min": b["target_roas_min"],
+        "target_roas_max": b["target_roas_max"],
         "bep_roas": bep_roas,
         "accel_total": accel_n,
         "brake_total": brake_n,

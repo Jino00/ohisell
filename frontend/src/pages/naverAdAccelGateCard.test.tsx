@@ -43,10 +43,14 @@ const EMPTY_BOARDS = {
 const LIVE_GATE = {
   gate_end: "factor_low",
   gate_note: "액셀 게이트(BEP 증액금지)는 구간의 «하한»을 쓴다 — 하한은 보정을 없애 차단을 최대로 만든다.",
+  window_caveat: "보드 창 기준 근사 — 실제 게이트는 as_of=D-1 창을 쓴다. 양끝의 «차이»는 정확하고 절대 건수는 근사.",
   assumption: "보정계수의 분자에 광고 귀속 조인이 없어 「채널 매출 100%를 광고가 견인」 가정과 동치다 — 그래서 총이익을 구간 양끝으로 병기한다(D-NAO-230).",
   factor_low: 1.0,
   factor_high: 1.3213,
   target_roas: 1.9358841828557574,
+  target_roas_source: "per_campaign",
+  target_roas_min: 1.6724,
+  target_roas_max: 2.4261,
   bep_roas: 1.6833747072015681,
   accel_total: 221,
   brake_total: 664,
@@ -62,6 +66,8 @@ const LIVE_GATE = {
     blocked_low_only: { count: 26, cost: 2_806_318, conv_amt: 4_706_260, profit_high: 887_679, profit_low: -10_589 },
     blocked_both: { count: 0, cost: 0, conv_amt: 0, profit_high: 0, profit_low: 0 },
     unmeasurable: 0,
+    target_roas_min: 1.6724,
+    target_roas_max: 2.4261,
   },
   by_board: [
     { board: "starving_winners", total: 136, blocked_low_only: 6, blocked_both: 0, unmeasurable: 0 },
@@ -109,6 +115,61 @@ describe("액셀 게이트 카드 — 표면 요건(D-NAO-232 §4-④)", () => {
     expect(card.textContent).toContain("26");
     expect(card.textContent).toContain("195"); // 게이트 통과
     expect(card.textContent).toContain("221"); // 액셀 후보 전체
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ★적대 리뷰 1R에서 «생존»한 표면 변이 셋을 죽이는 가드
+  //   M1 = 헤드라인의 survive_low → survive_high (카드가 「통과 221건」 = 「막힌 게 없다」)
+  //   M2 = gate_note + assumption 자백 블록 통째 삭제
+  //   M3 = 「브레이크 후보 N건」 스팬 삭제 (대칭의 분자)
+  //   ⇒ 셋 다 `card.textContent`에 숫자가 «어딘가» 있으면 만족하는 단언이라 통과했다.
+  //      숫자의 **위치**를 testid로 고정한다.
+  // ══════════════════════════════════════════════════════════
+  it("★M1 — 「게이트 통과」 자리에 하한 기준 값이 온다(상한이 오면 「막힌 게 없다」가 된다)", async () => {
+    await draw(LIVE_GATE);
+    const survive = screen.getByTestId("accel-gate-survive");
+    expect(survive.textContent).toContain("195");
+    expect(survive.textContent).not.toContain("221");
+  });
+
+  it("★M2 — 가정·자의 끝 자백 블록이 실재한다(D-NAO-230이 요구한 「가정 병기」)", async () => {
+    await draw(LIVE_GATE);
+    const caveats = screen.getByTestId("accel-gate-caveats");
+    expect(caveats.textContent).toContain("하한");
+    expect(caveats.textContent).toContain("가정과 동치"); // 자의 분자에 광고 귀속 조인이 없다는 자백
+    // 1R P2-2 — 확정값이 아니라 근사임을 화면이 자백한다
+    expect(caveats.textContent).toContain("근사");
+  });
+
+  it("★M3 — 대칭의 분자(브레이크 후보 수)가 화면에 있다(북극성 §7 검사의 절반)", async () => {
+    await draw(LIVE_GATE);
+    const sym = screen.getByTestId("accel-gate-symmetry");
+    expect(sym.textContent).toContain("브레이크 후보");
+    expect(sym.textContent).toContain("664");
+  });
+
+  it("★1R P2-1 — 「어디서 죽나」가 화면에 있다(값만 만들고 안 그리면 처분을 못 정한다)", async () => {
+    await draw(LIVE_GATE);
+    const byBoard = screen.getByTestId("accel-gate-by-board");
+    expect(byBoard.textContent).toContain("starving_winners");
+    expect(byBoard.textContent).toContain("6/136");
+    expect(byBoard.textContent).toContain("shopping_group_growth");
+    expect(byBoard.textContent).toContain("20/85");
+  });
+
+  it("★1R P1-1 — 계정 기본값으로 잰 경우 화면이 그 사실을 경고한다", async () => {
+    await draw({ ...LIVE_GATE, target_roas_source: "account_default" });
+    const caveats = screen.getByTestId("accel-gate-caveats");
+    expect(caveats.textContent).toContain("게이트와 다른 자");
+    expect(caveats.className).not.toContain("hidden");
+  });
+
+  it("캠페인별로 쟀으면 그 범위를 그린다 — 어느 자로 쟀는지가 숫자와 함께 보여야 한다", async () => {
+    await draw(LIVE_GATE);
+    const caveats = screen.getByTestId("accel-gate-caveats");
+    expect(caveats.textContent).toContain("캠페인별");
+    expect(caveats.textContent).toContain("1.6724");
+    expect(caveats.textContent).toContain("2.4261");
   });
 
   it("★막힌 건의 총이익을 «양끝»으로 그린다 — 한쪽만 그리면 부호가 숨는다", async () => {

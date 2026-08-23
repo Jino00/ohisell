@@ -25,6 +25,7 @@ def _row(roas_naver: float, cost: float = 1000.0, conv_amt: float | None = None)
         "roas_naver": roas_naver,
         "cost": cost,
         "conv_amt": roas_naver * cost if conv_amt is None else conv_amt,
+        "campaign_id": "cmp-x",
     }
 
 
@@ -40,9 +41,10 @@ def _boards(*, starving=(), growth=(), bleeding=0, group_bep=0) -> dict:
     }
 
 
-def _build(boards):
+def _build(boards, resolve=None):
     return accel_gate_view.build(
-        boards, factor_low=LOW, factor_high=HIGH, target_roas=TARGET, bep_roas=BEP
+        boards, factor_low=LOW, factor_high=HIGH, target_roas=TARGET, bep_roas=BEP,
+        resolve_target_roas=resolve,
     )
 
 
@@ -148,6 +150,61 @@ def test_게이트가_읽는_끝이_페이로드에_명시된다():
 
 
 # ══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R P1-1 상환 — 목표ROAS는 «캠페인별»이다
+#   실제 게이트는 `_resolve_target_roas_float(db, campaign_id)`를 쓴다. 계정 기본값 하나로 재면
+#   라이브에서 3그룹이 빠지고 3그룹이 새로 들어왔고(건수는 우연히 26으로 같았다),
+#   하한 총이익이 −10,636 ↔ −17,691로 66% 어긋났다.
+# ══════════════════════════════════════════════════════════════════
+def test_캠페인별_목표가_판정을_바꾼다():
+    """같은 행이 캠페인 목표에 따라 통과도 되고 차단도 된다 — 이게 P1-1의 실체다."""
+    row = _row(2.0)                     # 2.0 × 하한 1.0 = 2.0
+    row["campaign_id"] = "cmp-high"
+    # 계정 기본값(1.9359)이면 통과
+    assert _build(_boards(starving=[row]))["buckets"]["passing_both"]["count"] == 1
+    # 그런데 이 캠페인의 실제 목표가 2.4261이면 하한에서 막힌다
+    out = _build(_boards(starving=[row]), resolve=lambda cid: 2.4261)
+    assert out["buckets"]["blocked_low_only"]["count"] == 1
+    assert out["buckets"]["passing_both"]["count"] == 0
+
+
+def test_어느_자로_쟀는지_페이로드가_밝힌다():
+    """조용히 다른 자로 재고 화면엔 확정값처럼 그리는 것이 P1-1이었다."""
+    assert _build(_boards(starving=[_row(3.0)]))["target_roas_source"] == "account_default"
+    out = _build(_boards(starving=[_row(3.0)]), resolve=lambda cid: 2.0)
+    assert out["target_roas_source"] == "per_campaign"
+    assert out["target_roas_min"] == 2.0 and out["target_roas_max"] == 2.0
+
+
+def test_리졸버가_None을_주면_계정_기본값으로_폴백한다():
+    """캠페인 매핑이 없는 WEB_SITE 캠페인이 실제로 이 경로를 탄다(라이브 확인)."""
+    out = _build(_boards(starving=[_row(1.5)]), resolve=lambda cid: None)
+    assert out["buckets"]["blocked_low_only"]["count"] == 1  # 계정 기본값 1.9359 기준
+
+
+def test_campaign_id가_없는_행도_폴백한다():
+    row = _row(1.5)
+    del row["campaign_id"]
+    out = _build(_boards(starving=[row]), resolve=lambda cid: 99.0)
+    assert out["buckets"]["blocked_low_only"]["count"] == 1  # 99.0이 아니라 계정 기본값으로 쟀다
+
+
+def test_확장_보드_집합이_조용히_바뀌지_않는다():
+    """★1R 변이 M6 상환 — `*_EXT` 집합을 바꿔도 아무 테스트가 안 깨졌다."""
+    assert accel_gate_view.ACCEL_BOARDS_EXT == (
+        "starving_winners", "shopping_group_growth", "resume_candidates", "shopping_resume_candidates",
+    )
+    assert accel_gate_view.BRAKE_BOARDS_EXT == (
+        "bleeding_keywords", "shopping_group_bep", "shopping_pause_candidates",
+    )
+
+
+def test_창_근사_자백이_페이로드에_실린다():
+    """★1R P2-2 — 화면이 확정값처럼 보이면 안 된다."""
+    out = _build(_boards(starving=[_row(3.0)]))
+    assert "근사" in out["window_caveat"]
+
+
+# ══════════════════════════════════════════════════════════════════
 # ★배선 가드 — Harness가 «실제로» 이 표면을 응답에 싣는가
 #   세션 39 적대 리뷰 1R에서 변이 M7·M8(실쓰기 배선·응답 배선 절단)이 **살아남았다**.
 #   격리 호출만 검사하면 「Harness가 그걸 쓰는가」는 아무도 안 본다
@@ -226,6 +283,9 @@ def test_harness가_게이트에_하한을_넘긴다(wired, monkeypatch):
     diagnosis.build_diagnosis(None, date(2026, 8, 9), date(2026, 8, 23))
     assert seen["factor_low"] == LOW, "게이트 관측에 상한을 넘기면 실제 동작과 다른 화면이 된다"
     assert seen["factor_high"] == HIGH
+    # ★1R P1-1 상환 배선 가드 — 리졸버를 안 넘기면 계정 기본값 하나로 재고,
+    #   화면이 실제 게이트와 «다른 그룹»을 지목한다.
+    assert seen.get("resolve_target_roas") is not None, "캠페인별 목표 리졸버가 안 넘어갔다"
 
 
 def test_조기반환_가지도_같은_키를_낸다(wired, monkeypatch):
