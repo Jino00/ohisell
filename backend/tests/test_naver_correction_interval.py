@@ -756,12 +756,113 @@ def test_lowering_the_floor_moves_accel_and_brake_in_a_comparable_way():
                 correction_factor=Decimal("1.3318"), correction_factor_low=Decimal(low),
                 correction_factor_high=Decimal("1.3318"),
             )
-            out.append(got["direction"])
+            out.append((got["direction"], got["basis"]))
         return out
 
     before, after = _dirs("1"), _dirs("0.827")
-    assert before == after, (
+    assert [d for d, _ in before] == [d for d, _ in after], (
         "★하한을 내렸는데 방향 분포가 바뀌었다 = 하한이 «게이트»로 새고 있다. "
         f"하한 1.0: {before} / 하한 0.827: {after}"
     )
-    assert before.count("up") > 0, "픽스처 전제: 액셀 후보가 실제로 있어야 이 가드가 의미 있다"
+    # ★적대 리뷰 P2-4 상환 — 픽스처의 «적합성»을 단언한다. 초판은 `before.count("up") > 0`만
+    #   요구해서 「구간이 가로지르는」 케이스를 한 번도 안 밟는 픽스처(bids=[200])로 줄여도
+    #   통과했다 — 그러면 이 가드는 자기가 겨냥한 자리를 실제로는 안 지나면서 초록이 된다
+    #   (교훈 #354 「공허한 단언」이 픽스처 «퇴화»의 얼굴로 재발한 것).
+    assert any(d == "up" for d, _ in before), "픽스처 전제: 액셀 후보가 실제로 있어야 한다"
+    assert any(b == "interval_floor_min_step" for _, b in after), (
+        "픽스처 전제: «구간이 현재 입찰을 가로지르는» 케이스를 최소 1건 밟아야 이 가드가 "
+        "D-NAO-236의 자리를 실제로 지킨다 — 안 밟으면 항진명제다"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★★D-NAO-236 적대 리뷰 P1-1 상환 — 액셀이 «제안까지» 살아서 도달하는가
+#
+# 리뷰어가 잡은 것: D-NAO-236이 「up이면 economic_ceiling > 0」이라는 **암묵 불변식**을 깼는데
+# (게이트가 상한이라 하한 경제성 상한이 0이어도 up이 산다), `proposal_writer._bid_proposal`의
+# `economic_ceiling <= 0 → negative_keyword` 격상이 그 불변식 위에 세워져 있었다. 그래서
+# **액셀 판정이 「제외 키워드」 제안으로 뒤집혔다** — 저가 대역(대략 current_bid ≲ 110원,
+# SHOPPING 최소입찰 50원 포함)에서 D-NAO-236이 살리려던 건이 hold로 사라지는 대신
+# **죽은 제외 제안으로 바뀔 뿐**이었다.
+#
+# ★이 자리를 아래 세 테스트가 지킨다. 위의 D-NAO-236 테스트 3종은 `bid_simulator` 반환값만
+#   보므로 **이 결함을 원리적으로 못 잡는다** — 전역 §4 「최종 산출물까지 가는 경로를 끊는
+#   변이」가 정확히 이 모양이다(교훈 #355).
+# ══════════════════════════════════════════════════════════════════
+def _sim_with_zero_floor_ceiling():
+    """구간이 현재 입찰을 가로지르면서 «하한 경제성 상한이 0»인 sim을 만든다."""
+    from app.services.naver_ad import bid_simulator as bs
+    agg = {"clk": 1000, "conv_amt": 100_000}  # rpc = 100
+    return bs.simulate_bid(
+        {"clk": 1000, "conv_amt": 100_000, "bid_amt": 70}, Decimal("1"),
+        group_agg=agg, campaign_agg=agg, account_agg=agg,
+        correction_factor=Decimal("0.9"),
+        correction_factor_low=Decimal("0.6"), correction_factor_high=Decimal("1.2"),
+    )
+
+
+def test_accelerator_reaches_the_proposal_even_when_the_floor_ceiling_is_zero():
+    """★액셀이 «제안까지» 산다 — 제외 키워드로 뒤집히지 않는다(D-NAO-236 P1-1)."""
+    from app.services.naver_ad import proposal_writer as pw
+
+    sim = _sim_with_zero_floor_ceiling()
+    # 픽스처 전제를 단언한다 — 이게 없으면 조건이 안 걸린 채 초록이 난다(교훈 #354)
+    assert sim["direction"] == "up", "픽스처 전제: 게이트가 up이라 판정해야 한다"
+    assert sim["economic_ceiling"] <= 0, "픽스처 전제: 하한 경제성 상한이 0이어야 이 결함이 걸린다"
+    assert sim["basis"] == "interval_floor_min_step", "픽스처 전제: 새 분기를 밟아야 한다"
+
+    got = pw._bid_proposal(
+        {"roas_corrected": 1.0, "cost": 1000, "clk": 10}, sim, "cmp-1", "kw-1",
+        target_type="keyword", target_label={"source": "test", "target_roas": 1.0},
+        board_name="starving_winners",
+    )
+    assert got is not None, "액셀 후보가 통째로 사라지면 안 된다"
+    assert got["proposal_type"] == "bid_up", (
+        "★게이트가 up이라 한 건이 negative_keyword로 나가면 액셀 판정이 브레이크 액션으로 "
+        "뒤집힌 것이다 — D-NAO-236이 살리려던 바로 그 건을 다른 방식으로 죽인다"
+    )
+    assert got["target_bid"] == sim["recommended_bid"], (
+        "negative_keyword로 격상되면 target_bid가 None이 된다 — 실행자가 읽을 값이 사라진다"
+    )
+
+
+def test_negative_keyword_escalation_still_fires_for_the_down_case_it_was_built_for():
+    """★반대편 회귀 가드 — 격상을 좁혔다고 «원래 하던 일»까지 없애면 안 된다."""
+    from app.services.naver_ad import proposal_writer as pw
+
+    sim = {"direction": "down", "economic_ceiling": 0, "recommended_bid": 0,
+           "basis": "economic_ceiling", "current_bid": 500,
+           "expected_effect_text": "t", "capability_flags": {}, "rank_bid": None}
+    got = pw._bid_proposal(
+        {"roas_corrected": 0.2, "cost": 50_000, "clk": 100}, sim, "cmp-1", "kw-1",
+        target_type="keyword", target_label={"source": "test", "target_roas": 2.0},
+        board_name="bleeding_losers",
+    )
+    assert got is not None and got["proposal_type"] == "negative_keyword", (
+        "수익성 있는 입찰가가 아예 없는 down 건은 여전히 제외 키워드로 격상돼야 한다"
+    )
+    assert got["target_bid"] is None, "제외 격상엔 입찰 목표가 없다"
+
+
+def test_escalation_is_not_reachable_from_the_up_direction_at_all():
+    """★불변식을 «조건»으로 못 박는다 — 어떤 입찰가에서도 up이 제외로 뒤집히지 않는다."""
+    from app.services.naver_ad import bid_simulator as bs, proposal_writer as pw
+    agg = {"clk": 1000, "conv_amt": 100_000}
+    flipped = []
+    for bid in (10, 30, 50, 60, 70, 80, 90, 100, 110, 130, 200, 500):
+        sim = bs.simulate_bid(
+            {"clk": 1000, "conv_amt": 100_000, "bid_amt": bid}, Decimal("1"),
+            group_agg=agg, campaign_agg=agg, account_agg=agg,
+            correction_factor=Decimal("0.9"),
+            correction_factor_low=Decimal("0.6"), correction_factor_high=Decimal("1.2"),
+        )
+        if sim["direction"] != "up":
+            continue
+        got = pw._bid_proposal(
+            {"roas_corrected": 1.0, "cost": 1000, "clk": 10}, sim, "cmp-1", f"kw-{bid}",
+            target_type="keyword", target_label={"source": "test", "target_roas": 1.0},
+            board_name="starving_winners",
+        )
+        if got is not None and got["proposal_type"] != "bid_up":
+            flipped.append((bid, sim["economic_ceiling"], got["proposal_type"]))
+    assert flipped == [], f"up인데 bid_up이 아닌 제안이 나왔다: {flipped}"

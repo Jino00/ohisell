@@ -280,13 +280,25 @@ def _bid_proposal(
     보드 무관하게 항상 허용. 격상되지 않은 bid_up/bid_down은 보드가 허용하는 방향
     (_ALLOWED_DIRECTIONS)과 일치해야 한다 — 표본이 얇은 키워드는 계층 수축으로 보드 의도와
     반대 방향이 나올 수 있어(라이브검증 실측), 그런 경우 억지로 제안하지 않고 건너뛴다.
+
+    ★★D-NAO-236 적대 리뷰 P1-1 상환 — 이 격상은 **`direction=="down"` 전용**이다.
+    위 문장이 원래부터 「**bid_down 대신**」이라 적고 있었고 실제로도 그 뜻이었다. 그게
+    조건에 안 적혀 있었던 이유는 **「up이면서 economic_ceiling<=0」이 원리적으로 불가능**했기
+    때문이다: 옛 `bid_simulator`에서 up의 ceiling은 `ceiling_low`였고
+    `rec_low = min(ceiling_low, rank_bid) > current_bid >= 0` 이 `ceiling_low > 0`을 강제했다.
+    D-NAO-236이 그 불변식을 깼다 — 게이트(상한)가 up이라 판정하면 하한의 경제성 상한이 0이어도
+    up이 살아남는다. 그러자 이 줄이 **액셀 판정을 「제외 키워드」로 뒤집었다**(재현: rpc=100·
+    current_bid=70·구간[0.6,1.2] → `direction=up`인데 `proposal_type=negative_keyword`,
+    `target_bid=None`). 즉 D-NAO-236이 살리려던 저가 대역(대략 `current_bid ≲ 110원`,
+    SHOPPING 최소입찰 50원 포함)이 hold로 사라지는 대신 **죽은 제외 제안으로 바뀔 뿐**이었다.
+    ⇒ 조건을 원래 의도대로 좁힌다. 넓히는 변경이 아니라 **깨진 불변식을 조건으로 되돌린 것**이다.
     """
     if sim is None:
         return None
     if sim["direction"] == "hold":
         return None
 
-    if sim["economic_ceiling"] <= 0 and target_type == "keyword":
+    if sim["direction"] == "down" and sim["economic_ceiling"] <= 0 and target_type == "keyword":
         proposal_type = _NEGATIVE
     else:
         if sim["direction"] not in _ALLOWED_DIRECTIONS.get(board_name, {"up", "down"}):
