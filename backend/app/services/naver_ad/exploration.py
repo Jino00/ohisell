@@ -290,35 +290,67 @@ def _grain_settlement_agg(
     return {"clk": int(clk), "conv_amt": int(direct) + int(indirect)}
 
 
-def _resolve_exploration_bep_roas(db: Session, campaign_id: str, adgroup_id: str) -> Decimal | None:
+def _resolve_exploration_bep_roas(
+    db: Session, campaign_id: str, adgroup_id: str, *, cache: dict | None = None,
+) -> Decimal | None:
     """탐색 경제성 상한의 분모 BEP ROAS 폴백 사다리(D-NAO-71 "product_bep의 BEP ROAS(상품 미연결
     시 캠페인 기본 BEP)"): ① 그룹 매핑 상품 BEP → ② 캠페인 매핑 상품 BEP → ③ 계정 기본 BEP.
     전부 부재면 None(→ 경제성 상한 계산 불가 → 휴리스틱 캡만 남음). has_cost=True 상품만 대상
     (원가 미확인 상품 추정 금지) — campaign_target_resolver 단일 소스 재사용.
     ★has_cost=True가 "실거래 관측이 있다"를 뜻하지는 않는다(D-NAO-95): 주문 0건 신규 상품도
     매핑에 판매가를 적어 넣으면 원가와 함께 has_cost=True가 된다. 원가·판매가 모두 사람이
-    확인한 값이라는 보증은 유지되지만, 실거래 검증은 아니다."""
+    확인한 값이라는 보증은 유지되지만, 실거래 검증은 아니다.
+
+    ★cache (D-NAO-244, 적대 리뷰 P2-2 상환): **호출부가 주는 요청 단위 메모**. 넘기지 않으면
+    동작은 종전과 완전히 동일하다(기본 None = 매번 조회 = 레인 경로 무영향). 넘기면 ②캠페인·
+    ③계정 tier의 결과만 재사용한다 — ①그룹 tier는 그룹마다 다른 값이라 캐시 대상이 아니다.
+
+    왜 사다리를 호출부에 복제하지 않고 여기에 cache를 뚫었나: 407개 광고그룹을 한 화면에
+    모으는 로스터(pao_scope_roster)가 그룹마다 이 함수를 불러 prod 실측 **10.1초**가 나왔다.
+    호출부에서 tier②③을 미리 구해 폴백을 직접 쓰면 사다리가 두 벌이 되고, 두 벌은 반드시
+    갈라진다(D-NAO-125의 교훈). 사다리는 한 벌로 두고 «반복 조회»만 없앤다.
+
+    ⚠️ 캐시 수명은 **호출부의 한 요청**이다. 레인처럼 오래 도는 경로에 장수 캐시를 넘기면
+    그 사이 바뀐 BEP를 못 본다 — 그래서 기본값이 None이고, 넘길지는 호출부가 정한다.
+    """
     bep = campaign_target_resolver.weighted_product_value_for_adgroup(
         db, adgroup_id, NaverProductBep.bep_roas,
     )
     if bep is not None and bep > 0:
         return bep
-    bep = campaign_target_resolver.weighted_product_value_for_campaign(
-        db, campaign_id, NaverProductBep.bep_roas,
-    )
+
+    ckey = f"cmp:{campaign_id}"
+    if cache is not None and ckey in cache:
+        bep = cache[ckey]
+    else:
+        bep = campaign_target_resolver.weighted_product_value_for_campaign(
+            db, campaign_id, NaverProductBep.bep_roas,
+        )
+        if cache is not None:
+            cache[ckey] = bep
     if bep is not None and bep > 0:
         return bep
-    bep = campaign_target_resolver.account_default_bep_roas(db)
+
+    if cache is not None and "account" in cache:
+        bep = cache["account"]
+    else:
+        bep = campaign_target_resolver.account_default_bep_roas(db)
+        if cache is not None:
+            cache["account"] = bep
     if bep is not None and bep > 0:
         return bep
     return None
 
 
-def resolve_exploration_bep_roas(db: Session, campaign_id: str, adgroup_id: str):
+def resolve_exploration_bep_roas(
+    db: Session, campaign_id: str, adgroup_id: str, *, cache: dict | None = None,
+):
     """공개 래퍼(VF D-NAO-83) — 탐색 상한의 BEP ROAS 폴백 사다리를 레인(auto_operator)이
     visibility.evidence_ceiling의 분모로 재사용할 수 있게 노출한다(원칙18-8 — SA간 정보 유통을
-    허브가 중계). 내부 산식은 _resolve_exploration_bep_roas 단일 소스(그룹→캠페인→계정)."""
-    return _resolve_exploration_bep_roas(db, campaign_id, adgroup_id)
+    허브가 중계). 내부 산식은 _resolve_exploration_bep_roas 단일 소스(그룹→캠페인→계정).
+
+    cache는 요청 단위 메모(위 docstring 참조) — 안 넘기면 종전 동작 그대로다."""
+    return _resolve_exploration_bep_roas(db, campaign_id, adgroup_id, cache=cache)
 
 
 def _heuristic_ceiling(current_bid: int) -> int:

@@ -115,6 +115,12 @@ def build_roster(
     for r in rows:
         by_campaign.setdefault(r["campaign_id"], []).append(r)
 
+    # ★BEP 사다리의 «요청 단위» 메모(적대 리뷰 P2-2 상환) — 407그룹 × 3 tier 반복 조회로
+    #   prod 실측 10.1초가 나왔다. 캠페인·계정 tier는 그룹마다 같은 값이라 한 번만 구하면 된다.
+    #   사다리 자체는 exploration에 한 벌로 두고 여기선 메모만 넘긴다(두 벌이 되면 갈라진다).
+    #   수명은 이 함수 호출 하나 — 다음 요청은 새 dict라 stale BEP를 물고 있지 않는다.
+    bep_cache: dict = {}
+
     campaigns: list[dict] = []
     for cid in campaign_ids:
         s = settings.get(cid)
@@ -131,7 +137,7 @@ def build_roster(
             gid = r["adgroup_id"]
             cost = int(r.get("cost") or 0)
             conv_amt = int(r.get("conv_amt") or 0)
-            bep = exploration.resolve_exploration_bep_roas(db, cid, gid)
+            bep = exploration.resolve_exploration_bep_roas(db, cid, gid, cache=bep_cache)
             profit, profit_status = _profit(conv_amt, cost, factor=factor, bep_roas=bep)
             sr = scope_by_group.get(gid)
             e = entities.get(("adgroup", gid))
