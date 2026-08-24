@@ -6,7 +6,22 @@
 주장이다.** 그래서 판정에 쓰인 측정 스크립트는 여기 커밋한다.
 
 ## 공통 규율
-- **읽기 전용**: DB는 `sqlite:///file:...?mode=ro&uri=true`로 연다. prod 앱·크론 무접촉.
+- **DB는 읽기 전용**: `sqlite:///file:...?mode=ro&uri=true`로 연다. prod 앱·크론 무접촉.
+  `compute_bid_sims`/`_precompute_aggregates` 경로에 `db.commit()`은 0건이다(적대 리뷰가 그레인
+  인구조사로 확인). `proposal_pipeline`의 실제 commit 4곳은 전부 `run_*_stage` 소속이고 이 경로가
+  호출하지 않는다.
+- ⚠️★**「읽기 전용」은 DB 얘기다 — 이 스크립트는 네이버 실서비스 API를 «호출한다».**
+  `compute_bid_sims` 안의 `_fetch_rank_estimates`·`_fill_predicted_clicks`가 매 실행마다
+  `/estimate/average-position-bid`·`/estimate/performance-bulk`를 부른다
+  (`naver_sa_ad_fetcher.py:2032·2057`). **입찰·주문 제출이 아니라 견적 조회**라 재무 부작용은
+  없지만 **외부 호출은 외부 호출이다** — 쿼터·레이트리밋을 쓰고, 로그에 남는다. A/B 2회를 돌면
+  2배 부른다. 「prod 무접촉」이라 말하지 말고 **「DB 쓰기 0건 · 네이버 견적 API 호출 있음」**이라
+  말하라(적대 리뷰 P2-2 지적, 2026-08-24).
+- ⚠️**전제: 대상 DB가 이미 WAL 모드여야 한다.** `app/database.py`의 connect 훅이
+  `PRAGMA journal_mode=WAL`을 try/except 없이 실행하는데, **non-WAL DB를 `mode=ro`로 열면 그 순간
+  `OperationalError: attempt to write a readonly database`로 죽는다**(적대 리뷰 실측). prod
+  `ohisell.db`는 앱이 상시 같은 pragma를 걸어 두므로 이미 WAL이라 안전하다 — 그러나 **백업 복원본·
+  새 사본**에 돌리면 원인 불명 크래시로 보인다. 그때는 먼저 `sqlite3 <db> 'PRAGMA journal_mode=WAL;'`.
 - prod에서 돌린다: `scp <파일> sellc.ohitech.co.kr:/tmp/ && ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python /tmp/<파일>"`
 - 창은 `run_daily`과 동일(`kst_today()-1`부터 `lookback_days=15`).
 

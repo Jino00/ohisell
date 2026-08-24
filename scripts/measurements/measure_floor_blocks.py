@@ -2,12 +2,19 @@
 """④ 합격기준 6의 빈 칸 — `interval_floor_blocks_up`으로 «사라지는 액셀 제안» 건수 실측.
 
 읽기 전용. prod에 배포된 «현행» 코드로 돈다 — 새 코드(correction_interval.py)를 안 쓴다.
-가능한 이유: `interval_floor_blocks_up` 분기와 `diag["correction_factor"]["factor_low"]`
-소비 경로는 D-NAO-231로 «이미 배포돼» 있고, D-NAO-234가 바꾸는 것은 그 자리에 들어가는
-«값»(1.0 → 0.827)뿐이다. 그러니 diag 딕셔너리의 factor_low만 갈아끼워 두 번 돌리면
-「하한을 내렸을 때 액셀 제안이 몇 건 사라지는가」가 그대로 나온다.
+★이 docstring은 **2026-08-24 08:0x 이전의 코드 상태**를 서술한다(과거형으로 읽어라):
+당시 `interval_floor_blocks_up` 분기와 `diag["correction_factor"]["factor_low"]` 소비 경로가
+D-NAO-231로 이미 배포돼 있었고, D-NAO-234가 바꾸는 것은 그 자리에 들어가는 «값»(1.0 → 0.827)
+뿐이었다. 그래서 diag의 factor_low만 갈아끼워 두 번 돌리면 「하한을 내렸을 때 액셀 제안이 몇 건
+사라지는가」가 나왔다 — 그 출력이 ref 95 §9-2다(액셀 −24.0% / 브레이크 완전 불변).
 
-DB는 mode=ro URI로 연다(쓰기 원천 차단). prod 앱·크론 무접촉.
+⚠️**그 분기는 D-NAO-236(2026-08-24)으로 «삭제»됐다.** 지금 이 스크립트를 돌리면
+`interval_floor_blocks_up`은 **항상 0**이고(그 basis 문자열이 코드에 없다) 그 자리에
+`interval_floor_min_step`이 나온다. **0→0을 「좋아졌다」로 읽지 마라 — 그건 측정이 아니라
+항등식이다.** 지금 이 스크립트가 실제로 재는 것은 「하한을 바꿔도 방향 분포가 안 바뀌는가」다.
+(적대 리뷰 P2-3 지적 — 초판 docstring이 삭제된 분기를 현재형으로 서술하고 있었다.)
+
+접촉 범위: **DB 쓰기 0건**(mode=ro URI) · **네이버 견적 API 호출 있음**(README 참조) · 앱·크론 무접촉.
 """
 import copy
 import os
