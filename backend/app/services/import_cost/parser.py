@@ -322,12 +322,27 @@ def _map_columns(ws, header_row: int, spec: dict[str, list[str]], max_col: int =
     return out
 
 
-def extract_pdf_text(data: bytes) -> str:
+def extract_pdf_text(data: bytes, *, layout: bool = False) -> str:
     """통관경비서 PDF에서 텍스트를 뽑는다. 실패하면 «수기 경로»를 안내한다.
 
     ★`pypdf`도 선택 의존성이다(위 `xlrd`와 같은 이유).
     ★**스캔 PDF는 못 읽는다** — 텍스트 레이어가 없으면 빈 문자열이 나오고, 그때는
       「글자가 없다」고 말한다. OCR을 붙이지 않는다(계약 범위 밖이고, 틀린 숫자를 지어낼 위험이 크다).
+
+    ## `layout=True`가 왜 필요한가 (2026-08-25 실측)
+
+    기본 추출은 셀을 **읽은 순서대로** 한 줄씩 뱉는다. 그래서 자금정산서(§3-B)처럼
+    라벨 블록과 값 블록이 통째로 갈리는 양식에서는 「라벨 37줄 → 값 40줄」이 되어
+    **어느 값이 어느 라벨의 것인지 복원할 수 없다.** 실측: `신고번호`는 35번째 줄,
+    그 값 `44598-26-650964M`은 54번째 줄에 있었고 상대 위치 규칙(`_near`)이 전부 빗나가
+    `declaration_no`·`hbl_no`·`fx_rate`·`customs_value_krw`가 **모두 None**이었다.
+
+    `extraction_mode="layout"`은 x좌표를 살려 **같은 행을 같은 줄로** 낸다:
+        `입항일자  2026-07-23  신고번호  44598-26-650964M  과세금액(₩)  2,407,850`
+    라벨과 값이 한 줄에 있으므로 「짐작」이 아니라 「읽기」가 된다.
+
+    기본값을 바꾸지 않는 이유: 기존 통관예상경비(§3-A) 경로가 이미 이 함수의 기본 출력에
+    맞춰 검증돼 있다. 양식이 하나 늘었다고 이미 도는 경로의 입력을 바꾸지 않는다.
     """
     try:
         import pypdf  # noqa: PLC0415 — 선택 의존성
@@ -338,7 +353,11 @@ def extract_pdf_text(data: bytes) -> str:
         ) from exc
     try:
         reader = pypdf.PdfReader(BytesIO(data))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        if layout:
+            pages = (page.extract_text(extraction_mode="layout") or "" for page in reader.pages)
+        else:
+            pages = ((page.extract_text() or "") for page in reader.pages)
+        text = "\n".join(pages)
     except Exception as exc:
         raise CustomsDocParseError(f"PDF를 읽지 못했다({exc}).") from exc
     if not text.strip():
@@ -890,4 +909,191 @@ def parse_customs_expense(text: str) -> ExpenseParseResult:
         carton_count=carton_count,
         gross_weight_kg=gross_weight_kg,
         cbm=cbm,
+    )
+
+
+# ──────────────────────────────────────────────
+# §3-B 자금정산서 (관세법인 발행) — 통관예상경비와 «다른 서류»다
+# ──────────────────────────────────────────────
+#: 자금정산서인지 가르는 표지. 문서 제목 줄에 그대로 찍혀 나온다.
+_SETTLEMENT_MARK_RE = re.compile(r"자\s*금\s*정\s*산\s*서")
+#: 통관경비서(세아트랜스 「통관예상경비 청구서」)의 표지. 이 서류에만 있는 영문 라벨을 쓴다 —
+#: 한글 제목은 파일마다 흔들리지만 표 라벨은 양식이 정한 것이라 덜 흔들린다.
+_EXPENSE_MARK_RE = re.compile(r"HBL\s*NO|Shipper\s*NM|INV\s*Value|통관\s*예상\s*경비", re.IGNORECASE)
+
+#: 비용 표 한 행: `관세  0  0  15,200` / `통관수수료  25,000  2,500  27,500`.
+#: 열 머리글이 `비 용 명 / 공급가 / 부가세 / 합 계`라 **숫자 셋**이다(통관예상경비는 둘).
+_SETTLEMENT_ROW_RE = re.compile(
+    r"^\s*(?P<name>[가-힣A-Za-z][가-힣A-Za-z0-9()/·\s]*?)\s+"
+    r"(?P<supply>-?[\d,]+)\s+(?P<vat>-?[\d,]+)\s+(?P<total>-?[\d,]+)\s*$"
+)
+
+#: 비용 표가 아닌, 이름+숫자 꼴로 걸릴 수 있는 정산 구역 라벨. 표 아래에 붙어 있다.
+_SETTLEMENT_STOP = ("비용합계", "미수금", "이월잔액", "입금금액", "잔액송금", "차액")
+
+
+def parse_settlement_statement(text: str) -> ExpenseParseResult:
+    """관세법인 **자금정산서**를 파싱한다. 입력은 `extract_pdf_text(..., layout=True)`의 결과다.
+
+    ## 왜 별도 함수인가 (2026-08-25 실측)
+
+    `parse_customs_expense`가 상대하는 것은 **세아트랜스 「통관예상경비 청구서」**(영문 라벨:
+    `HBL NO`·`Shipper NM`·`INV Value`·`Gross W/T`·`CARTONS`)이고 그건 **이메일 첨부**로 온다.
+    Drive 폴더에 쌓이는 것은 **관세법인 「자금정산서」**(한글 라벨: `B/L No`·`과세금액(₩)`·
+    `적용환율`·`비 용 명 공급가`)로 **양식이 통째로 다르다**. 실측에서 옛 파서에 이 서류를
+    넣으면 `declaration_no`·`hbl_no`·`fx_rate`·`customs_value_krw`가 전부 None이면서
+    **예외 없이 «성공»으로 돌아왔고**, 비용 라인 자리에는 주소 문자열
+    (`'경기도 화성시 동탄영천로 150, B동 11층1101호'  공급 15200  세액 242300`)이 들어왔다.
+    ★그때 자기검산이 안 걸린 이유는 이 양식에 「소계」 라벨이 없어 `subtotal`이 None이었기
+    때문이다 — `parse_customs_expense` 주석이 *"이게 없으면 틀린 금액이 조용히 채워진다"*고
+    경고해 둔 바로 그 자리를 밟았다. 그래서 이 함수는 **검산을 선택이 아니라 필수로** 둔다.
+
+    ★이름이 말한다: 메일 쪽은 「통관**예상**경비」, 폴더 쪽은 「자금**정산**서」다.
+    원가의 정본은 **확정된 쪽**이므로 이 파서가 읽는 서류가 우선이다.
+
+    ## 금액 열을 어떻게 읽는가
+
+    열 머리글이 `공급가 / 부가세 / 합계`이고, 세 번째가 **실제 금액**이다:
+        관세          0       0    15,200   ← 세금이라 공급가·부가세 칸이 비고 합계에만 값이 있다
+        통관수수료  25,000   2,500   27,500   ← 용역이라 25,000 + 2,500 = 27,500
+    그래서 규칙은 하나다 — **`공급가 + 부가세 == 합계`면 그 둘을 그대로 쓰고, 아니면 합계를
+    공급가 칸에 넣는다.** 뒤쪽이 기존 배부기 규약과 맞는다: 배부는 `is_costing` 라인의
+    `supply_amount`만 더하고(`allocator._costing_total`), 부가세 라인은 `is_costing=False`인 채
+    «공급가액 칸에 세액이 적혀 오는» 것으로 이미 취급하고 있다.
+    """
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    flat = "\n".join(lines)
+
+    def _one(pattern: str) -> str | None:
+        # ★`re.M` — 이 양식은 «한 줄 = 한 행»이 성립하는 layout 출력이라 줄 끝 앵커(`$`)를
+        #   쓰는 규칙이 있다. 멀티라인을 안 켜면 `$`가 문서 끝에만 걸려 조용히 None이 된다
+        #   (실측 2026-08-25: `declared_inv_value`가 7건 전부 None이었다).
+        m = re.search(pattern, flat, re.M)
+        return m.group(1).strip() if m else None
+
+    # ── 헤더 — 라벨과 값이 «같은 줄»에 있다(layout 모드의 이득). 못 읽으면 None이지 추정 금지.
+    declaration_no = _one(r"신고번호\s+([0-9]{3,}-[0-9]{2}-\w+)")
+    hbl_no = _one(r"B\s*/\s*L\s*No\s+([A-Za-z0-9\-]{6,})")
+    declaration_date = _as_date(_one(r"신고일자\s+(\d{4}-\d{2}-\d{2})"))
+    eta = _as_date(_one(r"입항일자\s+(\d{4}-\d{2}-\d{2})"))
+    customs_value_krw = _to_decimal(_one(r"과세금액\s*\(\s*₩\s*\)\s+([\d,]+)"))
+    fx_rate = _to_decimal(_one(r"적용환율\s+([\d,]*\d(?:\.\d+)?)"))
+    gross_weight_kg = _to_decimal(_one(r"총\s*중\s*량\s+([\d,]*\d(?:\.\d+)?)\s*KG"))
+    carton_count_s = _one(r"수\s*량\s+([\d,]+)\s*CT")
+    carton_count = int(carton_count_s.replace(",", "")) if carton_count_s else None
+    # 해외거래처 값 뒤에 결제금액이 같은 줄로 밀려 오는 양식이 있어, 두 칸 이상 공백에서 끊는다.
+    shipper_name = _one(r"해외거래처\s+(\S.*?)(?:\s{2,}|$)")
+    currency = _one(r"결제금액\s+(?:\S+\s+)?([A-Z]{3})\b")
+    # 결제금액 값은 라벨 줄이 아니라 **다음 줄 끝**에 실린다(실측: `…OTAO TECHNOLOGY CO LTD  10,820.00`).
+    declared_inv_value = _to_decimal(_one(r"해외거래처\s+\S.*?\s{2,}([\d,]+\.\d{2})\s*$"))
+
+    # ── 비용 표
+    cost_lines: list[CostLine] = []
+    for ln in lines:
+        compact = _compact(ln)
+        if any(compact.startswith(s) for s in _SETTLEMENT_STOP):
+            break  # 표 끝. 아래는 정산 구역이라 계속 읽으면 가짜 비용 행이 생긴다.
+        m = _SETTLEMENT_ROW_RE.match(ln)
+        if m is None:
+            continue
+        name = " ".join(m.group("name").split())
+        if _compact(name).startswith(("비용명", "적요사항", "FileNo")):
+            continue
+        supply = _to_decimal(m.group("supply")) or _ZERO
+        vat = _to_decimal(m.group("vat")) or _ZERO
+        total = _to_decimal(m.group("total")) or _ZERO
+        if supply + vat != total:
+            # 세금 행(관세·부가세) — 금액이 합계 칸에만 있다.
+            supply, vat = total, _ZERO
+        cost_lines.append(
+            CostLine(
+                item_name=name,
+                supply_amount=supply,
+                tax_amount=vat,
+                # 판정 규약은 `parse_customs_expense`와 «같은 것»을 쓴다 — 두 파서가 다른 규칙을
+                # 쓰면 어느 서류로 넣었느냐에 따라 원가가 달라진다.
+                is_costing=not _compact(name).startswith("부가세"),
+                is_duty=_compact(name).startswith("관세"),
+            )
+        )
+
+    if not cost_lines:
+        raise CustomsDocParseError(
+            "자금정산서에서 비용 라인을 하나도 못 찾음 — "
+            "「비 용 명 / 공급가 / 부가세 / 합계」 표가 있는지 확인해야 한다. "
+            "스캔본이면 글자가 없으므로 수기로 입력해야 한다."
+        )
+
+    # ★자기검산 — 필수다. 이 서류엔 「소계」가 없고 `비용합계(a)`가 그 자리다.
+    #   옛 파서가 이 서류에서 조용히 틀린 값을 낸 이유가 «검산 기준을 못 찾아 건너뛴 것»이므로,
+    #   여기서는 기준을 못 찾는 것 자체를 실패로 본다.
+    want_total = _to_decimal(_one(r"비용합계\s*\(\s*a\s*\)\s+([\d,]+)"))
+    if want_total is None:
+        raise CustomsDocParseError(
+            "자금정산서에서 「비용합계(a)」를 못 찾아 검산할 수 없다 — "
+            "검산 없이 값을 채우면 틀린 금액이 조용히 들어간다. 수기로 확인해야 한다."
+        )
+    got_total = sum((c.total for c in cost_lines), _ZERO)
+    if got_total != want_total:
+        raise CustomsDocParseError(
+            "자금정산서 자기검산 불일치 — 뽑은 비용 라인의 합이 「비용합계(a)」와 다르다. "
+            f"합계 {got_total} vs 비용합계(a) {want_total}. "
+            "표 구조가 예상과 달라 라인을 빠뜨렸거나 중복했을 수 있다 — 수기로 확인해야 한다."
+        )
+
+    return ExpenseParseResult(
+        cost_lines=cost_lines,
+        hbl_no=hbl_no,
+        declaration_no=declaration_no,
+        declaration_date=declaration_date,
+        eta=eta,
+        shipper_name=shipper_name,
+        vessel=None,  # 이 양식엔 선명/항차 칸이 없다 — 「모름」이지 빈 문자열이 아니다.
+        fx_rate=fx_rate,
+        declared_inv_value=declared_inv_value,
+        currency=currency,
+        customs_value_krw=customs_value_krw,
+        carton_count=carton_count,
+        gross_weight_kg=gross_weight_kg,
+        cbm=None,  # 이 양식엔 CBM 칸이 없다. 배부 기준을 cbm으로 잡으려면 PL에서 와야 한다.
+    )
+
+
+def detect_expense_form(text: str) -> str | None:
+    """텍스트가 어느 경비 양식인가 — `"settlement"` / `"expense"` / `None`.
+
+    **파일명으로 가르지 않는다.** 실측(2026-08-25)에서 같은 자금정산서가
+    `…수입신고필증 외 _SETR….pdf` · `…SETR…_정산서.pdf` · `20260722_주식회사 오하이테크 SETR….pdf`
+    세 가지 이름으로 저장돼 있었고, 「정산서」로 이름 필터를 걸면 **마지막 하나가 통째로 샜다**.
+    폴더를 훑는 일괄 경로는 송금증·PI도 같이 집으므로 «이건 경비 서류가 아니다»를
+    말할 수 있어야 한다 — 그래서 `None`이 유효한 답이다.
+    """
+    if _SETTLEMENT_MARK_RE.search(text):
+        return "settlement"
+    if _EXPENSE_MARK_RE.search(text):
+        return "expense"
+    return None
+
+
+def parse_expense_document(data: bytes) -> ExpenseParseResult:
+    """경비 서류 PDF 1개를 «양식을 가려서» 파싱한다 — 라우터가 부르는 단일 입구.
+
+    양식이 둘이고 앞으로 더 늘 수 있으므로(2026-08-02 관세사가 천지인 → 송현으로 바뀌었다),
+    «어느 파서를 쓸지»를 호출부가 아니라 여기서 정한다. 호출부가 고르게 두면 새 양식이 생길
+    때마다 호출부를 전부 고쳐야 하고, 하나를 빠뜨리면 그 화면만 조용히 옛 파서를 쓴다.
+    """
+    layout_text = extract_pdf_text(data, layout=True)
+    form = detect_expense_form(layout_text)
+    if form == "settlement":
+        return parse_settlement_statement(layout_text)
+    if form == "expense":
+        # 통관예상경비는 기본 추출 결과에 맞춰 검증돼 있다 — 입력을 바꾸지 않는다.
+        return parse_customs_expense(extract_pdf_text(data))
+    # ★어느 양식도 아니면 «그렇게 말한다». 옛 코드는 이때도 통관경비서 파서를 태워
+    #   「비용 라인을 못 찾음」이라는 **엉뚱한 사유**를 냈다 — 송금증·PI를 폴더에서 같이
+    #   읽는 일괄 경로에서는 그 문구가 「경비서가 깨졌다」로 오독된다(실측 2026-08-25:
+    #   송금증 4건·PI 3건이 전부 그 사유로 실패했다). 사유가 틀리면 사람이 엉뚱한 걸 고친다.
+    raise CustomsDocParseError(
+        "경비 서류가 아니다 — 「자금정산서」도 「통관경비서」도 아닌 PDF다"
+        "(송금증·PI·기타 문서로 보인다). 이 문서에서 뽑을 비용은 없다."
     )
