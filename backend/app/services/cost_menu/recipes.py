@@ -519,6 +519,8 @@ def recompute(db: Session, recipe: CostRecipe) -> SC.StandardCostResult:
     if recipe.status != "approved" or not result.computable:
         if row is not None:
             db.delete(row)
+            # ★아래와 같은 이유 — 지운 행이 남아 있는 것처럼 보이면 다음 호출이 그것을 갱신한다.
+            db.flush()
         return result
 
     if row is None:
@@ -528,7 +530,56 @@ def recompute(db: Session, recipe: CostRecipe) -> SC.StandardCostResult:
     row.std_cost_inc_vat = result.std_cost_inc_vat
     row.breakdown = json.dumps(SC.breakdown_payload(result), ensure_ascii=False)
     row.computed_at = datetime.now()
+    # ★**같은 트랜잭션 안에서 이 함수가 다시 불릴 수 있다** (D-CPP-55): 한 레시피가 여러 종을
+    #   쓰므로 `recompute_for_material`이 종마다 돌면 같은 레시피에 두 번 닿는다. 여기서 flush를
+    #   안 하면 **`autoflush=False` 세션에서 방금 add한 행이 다음 조회에 안 보여** 같은
+    #   (recipe_id, price_rule)로 두 번째 행을 만들고 유일 제약에 걸린다(IntegrityError).
+    #   prod 세션과 테스트 세션의 autoflush가 다를 수 있으므로 «둘 다에서 참»인 쪽으로 못 박는다
+    #   (교훈: 테스트 픽스처가 prod 세션과 다르면 결함을 못 잡는다 — 여기선 반대로 테스트가 잡았다).
+    db.flush()
     return result
+
+
+def recompute_for_material(db: Session, material_id: int) -> list[int]:
+    """이 종을 쓰는 **승인된** 레시피의 저장 표준원가를 전부 다시 계산한다 (D-CPP-55, 계약 §6 S5).
+
+    ★**이것이 「단가가 바뀌면 모든 원가에 같이 적용된다」의 유일한 자리다.** 단가를 쓰는 경로가
+    6개인데(계약 §6 S5 표) 경로마다 재계산 사본을 두면, 다음에 생기는 7번째 경로가 또 한쪽만
+    고쳐진다 — 이 저장소가 아홉 번 밟은 병이다. 그래서 트리거는 **한 벌**이고 경로는 이것을
+    부르기만 한다.
+
+    ★**대상은 승인된 레시피뿐**이다 — 미승인 레시피의 「확정 표준원가」 저장은 계약 §3 금지선이고
+    (`recompute()`가 스스로 막지만 여기서 미리 걸러 필요 없는 쓰기를 안 만든다), 승인 상태가
+    바뀌는 경로(종 승인/해제)는 어차피 레시피 상태를 안 바꾸므로 이 필터로 충분하다.
+
+    ★**컬렉션 만료가 이 함수의 절반이다.** 호출부는 방금 `db.add()`/`db.delete()`로 단가 행을
+    건드렸는데, 이미 로드된 `material.prices`는 그것을 모른다. 그대로 계산하면
+    **「단가 없음」으로 굳어** `cost_standard` 행이 지워진다 — `adopt_excel_prices`가
+    이 파일 안에 이미 적어 둔 함정(위 `m.prices.append` 주석)과 **같은 함정**이다.
+    그래서 계산 전에 그 종의 `prices`를 만료시킨다. 라인은 `material`을 selectin으로 물고
+    있으므로 identity map을 통해 같은 객체가 갱신된다.
+
+    반환값은 재계산된 레시피 id들 — 호출부·테스트가 «몇 개에 닿았나»를 셀 수 있게(빈 리스트도
+    유효한 답이다: 그 종을 쓰는 승인 레시피가 없다는 사실).
+    """
+
+    material = db.get(CostMaterial, material_id)
+    if material is not None:
+        db.expire(material, ["prices"])
+
+    recipes = (
+        db.query(CostRecipe)
+        .join(CostRecipeLine, CostRecipeLine.recipe_id == CostRecipe.id)
+        .filter(
+            CostRecipeLine.material_id == material_id,
+            CostRecipe.status == "approved",
+        )
+        .distinct()
+        .all()
+    )
+    for r in recipes:
+        recompute(db, r)
+    return [r.id for r in recipes]
 
 
 # ──────────────────────────────────────────────
@@ -573,6 +624,10 @@ def adopt_excel_prices(db: Session, recipe_id: int, note: Optional[str] = None) 
 
     recipe = get_recipe(db, recipe_id)
     adopted, skipped_has_price, skipped_no_ref = [], [], []
+    # ★채택은 «종»의 단가를 만든다 — 그 종을 공유하는 **다른 승인 레시피**도 함께 바뀐다
+    #   (D-CPP-55 · 계약 §6 S5의 6번 경로). 초판은 자기 레시피만 재계산해서, 「채택 경로는
+    #   이미 닫혔다」가 절반만 참이었다.
+    adopted_ids: list[int] = []
     today = datetime.now().date()
 
     for line in recipe.lines:
@@ -609,14 +664,22 @@ def adopt_excel_prices(db: Session, recipe_id: int, note: Optional[str] = None) 
         if m.status != "approved":
             m.status = "approved"
         adopted.append(m.name)
+        adopted_ids.append(m.id)
 
     db.flush()
     result = recompute(db, recipe)
+    # 그 종을 쓰는 «다른» 승인 레시피들 — 이 레시피는 바로 위에서 이미 계산했다.
+    also: set[int] = set()
+    for mid in adopted_ids:
+        also.update(recompute_for_material(db, mid))
+    also.discard(recipe.id)
     return {
         "adopted": adopted,
         "skipped_has_price": skipped_has_price,
         "skipped_no_ref": skipped_no_ref,
         "standard": standard_payload(result),
+        # 「어디까지 번졌나」를 화면·테스트가 셀 수 있게 — 조용한 전파는 전파가 아니다.
+        "also_recomputed_recipe_ids": sorted(also),
     }
 
 
