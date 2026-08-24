@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
+    NaverAdgroupScope,
     NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
@@ -131,6 +132,50 @@ def test_open_exclusion_killswitch_recheck_before_delete_blocks(db):
     mock_del.assert_not_called()  # 킬스위치 재확인이 delete 차단
     db.refresh(row)
     assert row.status == "excluded"  # 상태 유지
+
+
+# ── ★D-NAO-244(적대 리뷰 PR #422 P1-1 상환): 자동운영 스코프 밖 그룹은 개방하지 않는다 ──
+#
+# 이 레인은 **harness.execute()를 안 거치고** naver_sa_writer.delete_restricted_keywords를
+# 직접 부르는 예외 경로라, harness에 단 스코프 게이트가 여기엔 안 걸렸다. 적대 리뷰가 재현했다:
+# 스코프를 grp-A로 좁혀도 grp-B의 제외키워드 삭제가 그대로 나갔다.
+#
+# ★방향이 «복귀»(제외 삭제)라 더 위험했다 — 재제외(_autofire_exclude)는 harness를 타서 이미
+#   막히는데 개방만 안 막히면, 스코프 밖 그룹에서 **우리가 검색어를 다시 열어 주는** 비대칭이
+#   된다(브레이크는 스코프를 지키는데 그 해제는 안 지키는 꼴).
+def test_open_exclusion_out_of_scope_adgroup_blocks(db):
+    _scope(db)  # cmp1 / grp-web, auto_operate=True
+    # 스코프를 «다른 그룹»으로 좁힌다 → grp-web은 스코프 밖이 된다
+    db.add(NaverAdgroupScope(campaign_id="cmp1", adgroup_id="grp-other", enabled=True))
+    db.commit()
+    row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_del.assert_not_called()  # 스코프 게이트가 delete 차단
+    db.refresh(row)
+    assert row.status == "excluded"  # 상태 유지(fail-closed)
+
+
+def test_open_exclusion_in_scope_adgroup_proceeds(db):
+    """스코프 «안»이면 그대로 개방된다 — 게이트가 상시 막힘이 아님을 확인."""
+    _scope(db)
+    db.add(NaverAdgroupScope(campaign_id="cmp1", adgroup_id="grp-web", enabled=True))
+    db.commit()
+    row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+                      return_value=_del_result()) as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is True
+    mock_del.assert_called_once_with("grp-web", ["rkw-1"])
+
+
+def test_open_exclusion_unaffected_when_no_scope_rows(db):
+    """★행이 0개면 기존 동작 그대로 — 「소급 0」이 이 레인에도 적용된다."""
+    _scope(db)
+    row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+                      return_value=_del_result()) as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is True
+    mock_del.assert_called_once()
 
 
 # ── C1②(codex 1R[P1-3]): adgroup 소속 미검증(상태 행 campaign_id 오염) → 개방 0(대행사 그룹 delete 차단) ──

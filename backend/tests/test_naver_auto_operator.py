@@ -201,6 +201,55 @@ def test_daily_lane_bid_down_always_approved(db):
     assert p.approval_source == "auto_op"  # codex 2R[P1-1] String(12) 계약 준수 단축
 
 
+# ── ★D-NAO-244(적대 리뷰 PR #422 P2-1 채택): 생성측 스코프 필터의 «배선»을 지킨다 ──
+#
+# 리뷰가 변이로 드러냈다: `run_daily_lane`의 `_scope_hold_reason` 호출부를 통째로 제거해도
+# 스코프 테스트 32건이 전부 통과했다(생존). 헬퍼 «단위» 테스트만 있고 그 헬퍼가 레인에 실제로
+# 꽂혀 있는지 재는 테스트가 없었기 때문이다 — 계약의 「생성·실행 두 지점이 같은 리졸버를
+# 읽는다」가 실행 쪽 한 짝으로만 지켜지고 있었다.
+# ★안전 불변식(실집행 0)은 harness 게이트가 따로 지키므로 이건 «죽은 카드» 방지 배선이다.
+def test_daily_lane_holds_out_of_scope_proposal(db):
+    from app.models import NaverAdgroupScope
+
+    _settings(db)
+    db.add(NaverAdgroupScope(campaign_id=CAMPAIGN, adgroup_id="grp-in", enabled=True))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-out", parent_id=CAMPAIGN,
+                       campaign_id=CAMPAIGN, status="on"))
+    db.commit()
+    # 스코프는 grp-in 하나 → grp-out 제안은 승인되지 않고 held로 떨어져야 한다
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-out",
+                  adgroup_id="grp-out", target_bid=900)
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert len(result["held"]) == 1
+    assert result["held"][0]["id"] == p.id
+    assert "스코프" in result["held"][0]["reason"]
+    db.refresh(p)
+    # hold분은 레인 말미에 reject된다(codex 11R 관례 — 익일 재생성 사이클). 스코프 hold도
+    # 같은 처분을 받는다: 스코프가 나중에 열리면 그날 레인이 후보를 새로 만든다.
+    assert p.status == "rejected"
+
+
+def test_daily_lane_approves_in_scope_proposal(db):
+    """스코프 «안»이면 종전대로 승인·실행 — 게이트가 상시 막힘이 아님을 확인."""
+    from app.models import NaverAdgroupScope
+
+    _settings(db)
+    db.add(NaverAdgroupScope(campaign_id=CAMPAIGN, adgroup_id="grp-in", enabled=True))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-in", parent_id=CAMPAIGN,
+                       campaign_id=CAMPAIGN, status="on"))
+    db.commit()
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-in",
+                  adgroup_id="grp-in", target_bid=900)
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_called_once_with(db, p.id, dry_run=False, now=NOW)
+    assert result["approved"] == 1
+    assert result["held"] == []
+
+
 def test_daily_lane_bid_down_held_when_target_entity_deleted(db):
     """deleted 엔티티 사전 제외(2026-07-21 실사고): shopping_group_bep 보드가 NaverAdDaily
     집계만 보고 후보를 뽑아, naver_entity status='deleted'인 그룹(맥세이프 69087677/69089452)에

@@ -17,9 +17,13 @@
 // 이어져야만 통과하므로 어느 하나만 끊어도 죽는다. api 모듈은 모킹해 네트워크를 안 탄다 —
 // 재는 것은 「값이 화면 픽셀이 되나」이지 서버가 아니다.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { PaoScopeRoster } from "../lib/api";
+// ★적대 리뷰 P2-3 채택 — 「클릭이 서버에 닿는가」를 재려면 이 함수들 «자신»을 vi.fn()으로
+//   잡아야 한다(아래 vi.mock 팩토리가 오버라이드한다). 리뷰어의 표면 변이 SUR-5(호출 제거)가
+//   생존했던 이유가 정확히 이것 — 읽기 표면만 재고 쓰기 표면은 아무도 안 봤다.
+import { putPaoScopeAdgroup } from "../lib/api";
 
 const ROSTER: PaoScopeRoster = {
   window: { date_from: "2026-08-03", date_to: "2026-08-23", days: 21 },
@@ -152,5 +156,52 @@ describe("★「🎛️ PAO 스코프」가 사람에게 닿는 경로 — 라�
   it("★스코프가 있는 캠페인은 「예산은 엔진이 안 만진다」를 화면에서 밝힌다", async () => {
     await renderApp();
     expect(await screen.findByText(/캠페인 예산 조정은 엔진이 하지 않습니다/)).toBeTruthy();
+  });
+});
+
+// ── ★적대 리뷰 P2-3 채택 — 쓰기 표면: 「클릭이 실제로 서버에 닿는가」 ──────────────────
+//
+// 리뷰어가 주입한 표면 변이 SUR-5(`setScope`에서 `putPaoScopeAdgroup` 호출 제거)가 **824건을
+// 전부 통과하며 생존**했다. 위 SUR-1~4는 「값이 화면 픽셀이 되나」(읽기 표면)만 재고, 「사람이
+// 누른 것이 서버에 닿나」(쓰기 표면)는 아무도 안 봤기 때문이다. 사용자가 토글을 눌러도 아무
+// 일도 안 일어나는 회귀가 조용히 지나간다 — 이 저장소가 반복해 밟은 병의 쓰기 쪽 얼굴이다.
+describe("★쓰기 표면 — 토글·역할 선택이 실제로 서버를 부른다", () => {
+  it("「안 맡김」 토글을 누르면 putPaoScopeAdgroup가 enabled=true로 호출된다", async () => {
+    await renderApp();
+    const btn = await screen.findByTitle(/이 그룹을 엔진에 맡깁니다/); // in_scope=false 쪽(Z폴드8와이드)
+    fireEvent.click(btn);
+    await waitFor(() => expect(putPaoScopeAdgroup).toHaveBeenCalled());
+    expect(putPaoScopeAdgroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        campaign_id: "cmp-tpu",
+        adgroup_id: "grp-z8wide",
+        enabled: true,
+      }),
+    );
+  });
+
+  it("「맡김」 토글을 누르면 enabled=false로 호출된다 — 끄기는 해제가 아니다", async () => {
+    await renderApp();
+    const btn = await screen.findByTitle(/이 그룹을 끕니다/); // in_scope=true 쪽(S25FE)
+    fireEvent.click(btn);
+    await waitFor(() => expect(putPaoScopeAdgroup).toHaveBeenCalled());
+    expect(putPaoScopeAdgroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        campaign_id: "cmp-tpu",
+        adgroup_id: "grp-s25fe",
+        enabled: false, // ★행은 남기고 끈다(삭제와 결과가 정반대)
+      }),
+    );
+  });
+
+  it("역할 select를 바꾸면 그 역할로 호출된다", async () => {
+    await renderApp();
+    const selects = await screen.findAllByRole("combobox");
+    const target = selects.find((s) => (s as HTMLSelectElement).value === "accel")!;
+    fireEvent.change(target, { target: { value: "brake" } });
+    await waitFor(() => expect(putPaoScopeAdgroup).toHaveBeenCalled());
+    expect(putPaoScopeAdgroup).toHaveBeenCalledWith(
+      expect.objectContaining({ adgroup_id: "grp-s25fe", role: "brake" }),
+    );
   });
 });

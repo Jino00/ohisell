@@ -329,6 +329,27 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
             "— fail-closed(상태 유지)", row.adgroup_id, row.search_term,
         )
         return False
+    # ★D-NAO-244 스코프 게이트 — 적대 리뷰 P1-1 상환(PR #422).
+    #
+    # 이 레인은 **harness.execute()를 안 거치고** naver_sa_writer.delete_restricted_keywords를
+    # 직접 부르는 예외 경로다(아래 §3 주석 참조). 그래서 harness에 단 스코프 게이트가 여기엔
+    # 안 걸린다 — 리뷰가 재현했다: 스코프를 grp-A로 좁혀도 grp-B의 제외키워드 삭제가 그대로
+    # 나갔다. 「캠페인 안 일부 그룹만 맡기고 나머지는 손대지 않는 것을 **코드가 강제한다**」는
+    # 계약이 이 구멍 하나로 무너진다.
+    #
+    # ★방향이 «복귀»(제외 삭제)라 더 위험하다: 재제외(_autofire_exclude)는 harness를 타서
+    # 이미 막히는데, 개방만 안 막히면 **스코프 밖 그룹에서 우리가 검색어를 다시 열어 주는**
+    # 비대칭이 된다(브레이크는 스코프를 지키는데 그 해제는 안 지키는 꼴).
+    #
+    # 킬스위치와 «나란히» 둔다 — 원인이 다르면 로그도 달라야 사후에 둘을 안 섞는다.
+    from app.services.naver_ad import adgroup_scope
+    if adgroup_scope.blocked_by_scope(db, row.campaign_id, row.adgroup_id):
+        log.info(
+            "search_term_ss_lane: 재심사 개방 중단(자동운영 스코프 밖) adgroup=%s campaign=%s "
+            "term=%r — fail-closed(상태 유지, D-NAO-244)",
+            row.adgroup_id, row.campaign_id, row.search_term,
+        )
+        return False
     # C1②(codex 1R[P1-3]): adgroup 소속 실검증 — 상태 행 campaign_id 오염/그룹 이동 시 대행사
     # 그룹 delete 차단(§0 3). 조회 실패/행 부재 = fail-closed skip(상태 유지).
     if not _adgroup_belongs_to_campaign(db, row.adgroup_id, row.campaign_id):
