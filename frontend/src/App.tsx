@@ -27,6 +27,7 @@ import NaverOps from "./pages/NaverOps";
 import ProductConnectionMap from "./pages/ProductConnectionMap";
 import NaverAdReport from "./pages/NaverAdReport";
 import NaverAdCommandCenter from "./pages/NaverAdCommandCenter";
+import NaverAdScope from "./pages/NaverAdScope";
 import NaverAdDiagnosisBoard from "./pages/NaverAdDiagnosisBoard";
 import NaverAdOptimizationConsole from "./pages/NaverAdOptimizationConsole";
 import NaverAdRawExplorer from "./pages/NaverAdRawExplorer";
@@ -63,6 +64,8 @@ export default function App() {
           <Route path="settings" element={<Settings />} />
           <Route path="ad-report" element={<AdReport />} />
           <Route path="naver-ad" element={<NaverAdCommandCenter />} />
+          {/* PAO 스코프 — 어떤 캠페인·광고그룹을 엔진에 맡길지 + 그 성과 (D-NAO-244) */}
+          <Route path="naver-ad/scope" element={<NaverAdScope />} />
           <Route path="naver-ad/performance" element={<NaverAdPerformance />} />
           <Route path="naver-ad/report" element={<NaverAdReport />} />
           <Route path="naver-ad/diagnosis" element={<NaverAdDiagnosisBoard />} />

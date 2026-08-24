@@ -74,6 +74,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (
     NaverAccountSettings,
+    NaverAdgroupScope,
     NaverAgencyOp,
     NaverBmBenchmark,
     NaverCampaignSettings,
@@ -92,8 +93,10 @@ from app.models import (
     NaverSearchTermDaily,
     NaverSearchTermExclusion,
 )
+from app.services.naver_ad import adgroup_scope
 from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
+from app.services.naver_ad import pao_scope_roster
 from app.services.naver_ad import guardrail_params
 from app.services.naver_ad import change_actor
 from app.services.naver_ad import creative_scorecard
@@ -799,6 +802,123 @@ def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get
     db.commit()
     db.refresh(settings)
     return _serialize_settings(settings)
+
+
+# ── PAO 스코프 (D-NAO-244) — 「어떤 캠페인·광고그룹을 돌릴지 + 그 성과」 ──────────────
+#
+# Jino 원문 2026-08-24: *"ohisell에 PAO 메뉴를 만들어서 어떤 캠페인 - 광고그룹 을 돌릴지,
+# 그 성과는 어떻게 나오는지 보여주는 대시보드를 같이 만들자"*
+#
+# ⚠️ 여기 쓰기는 **우리 시스템 내부 설정**이지 광고 API 쓰기가 아니다(campaign-settings와
+#    같은 경계). 스코프 행을 넣어도 auto_operate가 꺼져 있으면 아무 일도 일어나지 않는다.
+
+
+@router.get("/scope/roster")
+def pao_scope_roster_get(
+    campaign_id: str | None = None,
+    days: int = pao_scope_roster.DEFAULT_WINDOW_DAYS,
+    db: Session = Depends(get_db),
+):
+    """PAO 스코프 대시보드 — 캠페인 × 광고그룹 횡단 로스터(읽기 전용).
+
+    각 광고그룹에 ①스코프(in_scope·역할·enabled) ②성과(광고비·클릭·전환·ROAS)
+    ③**총이익**(D-NAO-59 목적함수)을 함께 싣는다. 총이익은 BEP를 해석 못 하면
+    `gross_profit=null` + `profit_status='bep_unknown'` — **0원과 «모름»을 구분한다**
+    (숫자를 지어내면 그 숫자가 그대로 판정에 쓰인다).
+    """
+    return pao_scope_roster.build_roster(db, campaign_id=campaign_id, days=days)
+
+
+class AdgroupScopeIn(BaseModel):
+    """스코프 행 1개 upsert. optimizer 스위치와 동형 — 이 행만 건드리고 캠페인 설정은
+    손대지 않는다(extra='forbid'로 오필드 422)."""
+
+    model_config = {"extra": "forbid"}
+
+    campaign_id: str
+    adgroup_id: str
+    role: str | None = None
+    enabled: bool = True
+    memo: str | None = None
+
+
+@router.put("/scope/adgroup")
+def pao_scope_adgroup_put(body: AdgroupScopeIn, db: Session = Depends(get_db)):
+    """스코프 행 upsert — 「이 광고그룹을 엔진에 맡긴다/뺀다」.
+
+    ★이 엔드포인트는 **엔진을 켜지 않는다.** 스코프는 캠페인 마스터(auto_operate) «아래»의
+    축이라, 캠페인이 꺼져 있으면 행을 넣어도 실행은 0이다. 켜는 것은 별도 결정이다.
+
+    ⚠️ 첫 행이 들어가는 순간 그 캠페인은 「일부 그룹만 맡긴 상태」가 되어 **캠페인 레벨
+    액션(예산)이 hold**된다 — 예산은 광고그룹으로 귀속이 불가능해 열어두면 스코프 «밖»
+    그룹의 노출까지 같이 움직이기 때문이다.
+    """
+    if body.role is not None and body.role not in adgroup_scope.VALID_ROLES:
+        raise HTTPException(
+            422, f"role은 {sorted(adgroup_scope.VALID_ROLES)} 중 하나이거나 null이어야 합니다"
+        )
+
+    row = db.query(NaverAdgroupScope).filter(
+        NaverAdgroupScope.campaign_id == body.campaign_id,
+        NaverAdgroupScope.adgroup_id == body.adgroup_id,
+    ).first()
+    if row is None:
+        row = NaverAdgroupScope(
+            campaign_id=body.campaign_id, adgroup_id=body.adgroup_id,
+            role=body.role, enabled=body.enabled, memo=body.memo,
+        )
+        db.add(row)
+    else:
+        row.role = body.role
+        row.enabled = body.enabled
+        row.memo = body.memo
+
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id=body.adgroup_id, campaign_id=body.campaign_id,
+        action="adgroup_scope_change",
+        before_value=None, after_value=f"role={body.role} enabled={body.enabled}",
+        rationale="PAO 스코프 설정(D-NAO-244)",
+        # changed_at 명시 — 안 넘기면 server_default가 UTC로 박힌다(교훈: 같은 함정 세 번).
+        changed_at=kst_now(),
+    ))
+    db.commit()
+    db.refresh(row)
+    return {
+        "campaign_id": row.campaign_id, "adgroup_id": row.adgroup_id,
+        "role": row.role, "enabled": bool(row.enabled), "memo": row.memo,
+    }
+
+
+@router.delete("/scope/adgroup")
+def pao_scope_adgroup_delete(
+    campaign_id: str, adgroup_id: str, db: Session = Depends(get_db)
+):
+    """스코프 행 삭제 — 되돌리기 사다리의 한 칸(배포 불요).
+
+    ★캠페인의 **마지막** 행을 지우면 그 캠페인은 「스코프 미설정」으로 돌아가 전 그룹이
+    다시 대상이 된다(진리표 2행). 일부만 끄고 싶으면 삭제가 아니라 `enabled=false`다 —
+    둘의 결과가 정반대이므로 화면·운영 문서가 이 차이를 분명히 말해야 한다.
+    """
+    deleted = db.query(NaverAdgroupScope).filter(
+        NaverAdgroupScope.campaign_id == campaign_id,
+        NaverAdgroupScope.adgroup_id == adgroup_id,
+    ).delete()
+    if deleted:
+        db.add(NaverChangeLog(
+            entity_type="adgroup", entity_id=adgroup_id, campaign_id=campaign_id,
+            action="adgroup_scope_change",
+            before_value="scoped", after_value="removed",
+            rationale="PAO 스코프 해제(D-NAO-244)",
+            changed_at=kst_now(),
+        ))
+    db.commit()
+    remaining = len(adgroup_scope.scope_rows_for_campaigns(db, [campaign_id]).get(campaign_id, []))
+    return {
+        "deleted": bool(deleted),
+        "remaining_rows": remaining,
+        # 화면이 「전 그룹으로 돌아갔다」를 말할 수 있게 — 조용히 넓어지면 안 되는 변화다
+        "campaign_now_unrestricted": remaining == 0,
+    }
 
 
 _VALID_LOSS_POLICIES = {"leash", "stoploss_pause"}

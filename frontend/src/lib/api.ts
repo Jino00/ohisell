@@ -5738,3 +5738,92 @@ export function fetchRgOptionPnl(
   if (dateTo) q.set("date_to", dateTo);
   return fetchApi(`/api/coupang/rg/option-pnl?${q.toString()}`);
 }
+
+// ──────────────────────────────────────────────
+// PAO 스코프 (D-NAO-244) — 「어떤 캠페인·광고그룹을 돌릴지 + 그 성과」
+//
+// Jino 원문 2026-08-24: *"ohisell에 PAO 메뉴를 만들어서 어떤 캠페인 - 광고그룹 을 돌릴지,
+// 그 성과는 어떻게 나오는지 보여주는 대시보드를 같이 만들자"*
+//
+// ★gross_profit이 null이면 «0원»이 아니라 «모름»이다(profit_status='bep_unknown').
+//   화면이 이걸 0으로 그리면 적자 그룹이 손익분기로 보인다 — 타입에서부터 갈라 둔다.
+
+export type PaoScopeRole = "accel" | "boundary" | "brake";
+
+export interface PaoScopeAdgroup {
+  adgroup_id: string;
+  name: string;
+  status: string | null;
+  /** 지금 엔진에 맡겨져 있는가(행이 있고 enabled) */
+  in_scope: boolean;
+  scope_role: PaoScopeRole | null;
+  scope_enabled: boolean | null;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  roas: number | null;
+  bep_roas: number | null;
+  /** null = 모름(BEP 미해석). 0원과 구분할 것 */
+  gross_profit: number | null;
+  profit_status: "ok" | "bep_unknown";
+}
+
+export interface PaoScopeCampaign {
+  campaign_id: string;
+  name: string;
+  campaign_type: string | null;
+  optimizer: string;
+  auto_operate: boolean;
+  /** 스코프 행이 하나라도 있으면 true — 이때 캠페인 레벨 액션(예산)은 hold된다 */
+  has_scope: boolean;
+  scoped_count: number;
+  adgroup_count: number;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  roas: number | null;
+  gross_profit: number | null;
+  adgroups: PaoScopeAdgroup[];
+}
+
+export interface PaoScopeRoster {
+  window: { date_from: string; date_to: string; days: number };
+  correction_factor: { value: number; source: string | null };
+  totals: Record<string, number | null>;
+  campaigns: PaoScopeCampaign[];
+}
+
+export function fetchPaoScopeRoster(params: { campaignId?: string; days?: number } = {}): Promise<PaoScopeRoster> {
+  const q = new URLSearchParams();
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  if (params.days) q.set("days", String(params.days));
+  const qs = q.toString();
+  return fetchApi<PaoScopeRoster>(`/api/naver/ad/scope/roster${qs ? `?${qs}` : ""}`);
+}
+
+/** 스코프 행 upsert — 이 호출은 **엔진을 켜지 않는다**(auto_operate는 별도 스위치). */
+export function putPaoScopeAdgroup(body: {
+  campaign_id: string;
+  adgroup_id: string;
+  role: PaoScopeRole | null;
+  enabled: boolean;
+  memo?: string | null;
+}): Promise<{ campaign_id: string; adgroup_id: string; role: PaoScopeRole | null; enabled: boolean; memo: string | null }> {
+  return fetchApi(`/api/naver/ad/scope/adgroup`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** 스코프 행 삭제. ★마지막 행을 지우면 캠페인이 «전 그룹 대상»으로 돌아간다 —
+ *  일부만 끄려면 삭제가 아니라 enabled=false다(결과가 정반대). */
+export function deletePaoScopeAdgroup(
+  campaignId: string,
+  adgroupId: string,
+): Promise<{ deleted: boolean; remaining_rows: number; campaign_now_unrestricted: boolean }> {
+  const q = new URLSearchParams({ campaign_id: campaignId, adgroup_id: adgroupId });
+  return fetchApi(`/api/naver/ad/scope/adgroup?${q.toString()}`, { method: "DELETE" });
+}
