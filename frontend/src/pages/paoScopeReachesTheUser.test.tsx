@@ -27,7 +27,7 @@ import { putPaoScopeAdgroup } from "../lib/api";
 
 const ROSTER: PaoScopeRoster = {
   window: { date_from: "2026-08-03", date_to: "2026-08-23", days: 21 },
-  correction_factor: { value: 1.0, source: "actual_revenue_ratio" },
+  correction_factor: { low: 0.827, high: 1.3016, source: "actual_revenue_ratio" },
   totals: {},
   campaigns: [
     {
@@ -45,6 +45,8 @@ const ROSTER: PaoScopeRoster = {
       conv_amt: 120_000,
       roas: 1.2,
       gross_profit: -30_000,
+      gross_profit_low: -60_000,
+      gross_profit_high: 10_000,
       adgroups: [
         {
           adgroup_id: "grp-s25fe",
@@ -60,6 +62,8 @@ const ROSTER: PaoScopeRoster = {
           roas: 3.0,
           bep_roas: 1.711,
           gross_profit: 7_534,
+          gross_profit_low: 1_200,
+          gross_profit_high: 15_000,
           profit_status: "ok",
         },
         {
@@ -76,6 +80,8 @@ const ROSTER: PaoScopeRoster = {
           roas: 1.0,
           bep_roas: null,
           gross_profit: null, // ★모름 — 0원이 아니다
+          gross_profit_low: null,
+          gross_profit_high: null,
           profit_status: "bep_unknown",
         },
       ],
@@ -151,6 +157,14 @@ describe("★「🎛️ PAO 스코프」가 사람에게 닿는 경로 — 라�
     expect(
       await screen.findByText(/스코프는 지정돼 있지만 엔진은 이 캠페인에서 돌지 않습니다/),
     ).toBeTruthy();
+  });
+
+  it("★SUR-5: 총이익 «구간»이 화면에 뜬다 — 단일값이면 가정이 사실처럼 읽힌다", async () => {
+    await renderApp();
+    // 큰 숫자는 «있는 그대로»(보정 없음), 작은 [하한 ~ 상한]이 «얼마나 모르는지»다.
+    expect(await screen.findByText(/1,200 ~ 15,000/)).toBeTruthy();
+    // 헤더도 단일 보정값이 아니라 구간을 말해야 한다
+    expect(await screen.findByText(/구간\[×0\.827 ~ ×1\.302\]/)).toBeTruthy();
   });
 
   it("★스코프가 있는 캠페인은 「예산은 엔진이 안 만진다」를 화면에서 밝힌다", async () => {

@@ -5764,8 +5764,11 @@ export interface PaoScopeAdgroup {
   conv_amt: number;
   roas: number | null;
   bep_roas: number | null;
-  /** null = 모름(BEP 미해석). 0원과 구분할 것 */
+  /** ★있는 그대로(보정 없음). null = 모름(BEP 미해석) — 0원과 구분할 것 */
   gross_profit: number | null;
+  /** 보정계수 구간 양끝을 적용한 값 — «얼마나 모르는지»를 화면이 같이 보이게 한다 */
+  gross_profit_low: number | null;
+  gross_profit_high: number | null;
   profit_status: "ok" | "bep_unknown";
 }
 
@@ -5785,12 +5788,16 @@ export interface PaoScopeCampaign {
   conv_amt: number;
   roas: number | null;
   gross_profit: number | null;
+  gross_profit_low: number | null;
+  gross_profit_high: number | null;
   adgroups: PaoScopeAdgroup[];
 }
 
 export interface PaoScopeRoster {
   window: { date_from: string; date_to: string; days: number };
-  correction_factor: { value: number; source: string | null };
+  /** ★단일 value가 아니라 «구간»이다 — 하나만 집어 들면 그게 사실처럼 읽힌다.
+   *  하한 = inflowPath 「광고>」5종 근거 · 상한 = 채널 매출 전액을 광고 공으로 돌린 «가정» */
+  correction_factor: { low: number; high: number; source: string | null };
   totals: Record<string, number | null>;
   campaigns: PaoScopeCampaign[];
 }

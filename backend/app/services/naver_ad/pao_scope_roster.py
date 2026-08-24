@@ -62,6 +62,44 @@ def _profit(conv_amt: int, cost: int, *, factor: Decimal, bep_roas: Decimal | No
     return _round_won(corrected / bep_roas - Decimal(cost)), PROFIT_STATUS_OK
 
 
+def _profit_band(conv_amt: int, cost: int, *, bep_roas: Decimal | None,
+                 factor_low: Decimal, factor_high: Decimal) -> dict:
+    """★총이익을 «하나»가 아니라 «있는 그대로 + 구간»으로 낸다 (Jino 지시 2026-08-24).
+
+    Jino 원문: *"보정계수(1.3016)를 왜 쓰는거야? 있는 그대로를 보여줘야 하는거 아니야?"*
+
+    ## 왜 단일값이 위험했나
+
+    보정계수는 `실주문매출 ÷ 네이버 convAmt`인데, **분자에 광고 귀속 조인이 없다**
+    (`channel_id==6` 필터뿐, `diagnosis.correction_factor` 주석이 자백). 즉 이 계수는
+    **「네이버 채널 매출 100%를 광고가 견인했다」는 가정과 수학적으로 동치**다 — 광고를 안
+    켰어도 팔렸을 매출까지 광고 공으로 돌린다. 그래서 D-NAO-230이 점추정을 버리고 구간으로
+    바꿨고, ref 93 §1 행 9는 «표시 전용» 소비처를 **「구간 양끝 병기」 1순위**로 지정했다.
+
+    ★초판이 `factor_high`(상한) 하나만 실었다. 상한은 「후보 선정·게이트」용 끝인데 표시에
+    쓰면 총이익이 **가장 낙관적으로** 보인다 — 실제로 TPU 21일이 무보정 −864,081원인데
+    상한으로는 +557,591원이 되어 **부호가 뒤집혔다**.
+
+    ## 무엇을 내나
+
+      profit        — ★**있는 그대로**(보정 없음). 네이버가 준 convAmt를 그대로 쓴 값.
+      profit_low    — × factor_low  (D-NAO-234 하한 — inflowPath 「광고>」5종 ÷ direct 근거)
+      profit_high   — × factor_high (상한 — 채널 매출 전액 귀속 «가정»)
+
+    셋을 다 실어야 화면이 «얼마나 모르는지»를 같이 보일 수 있다. 하나만 실으면 그 하나가
+    사실처럼 읽힌다.
+    """
+    raw, status = _profit(conv_amt, cost, factor=Decimal(1), bep_roas=bep_roas)
+    low, _ = _profit(conv_amt, cost, factor=factor_low, bep_roas=bep_roas)
+    high, _ = _profit(conv_amt, cost, factor=factor_high, bep_roas=bep_roas)
+    return {
+        "gross_profit": raw,            # ★있는 그대로가 기본값이다
+        "gross_profit_low": low,
+        "gross_profit_high": high,
+        "profit_status": status,
+    }
+
+
 def build_roster(
     db: Session,
     *,
@@ -80,12 +118,16 @@ def build_roster(
     date_from = date_to - timedelta(days=days - 1)
 
     # 보정계수 — profit_scorecard와 같은 소스(fail-open: 산출 불가면 1.0 무보정)
+    # ★구간 양끝을 «둘 다» 가져온다(Jino 지시 2026-08-24 — 표시엔 단일 보정값을 쓰지 않는다).
+    #   하한 = D-NAO-234(inflowPath 「광고>」5종 ÷ direct 근거) · 상한 = 채널 매출 전액 귀속 가정.
     try:
         factor_info = correction_factor(db, date_to)
-        factor = Decimal(str(factor_info.get("factor_high") or 1))
+        factor_low = Decimal(str(factor_info.get("factor_low") or 1))
+        factor_high = Decimal(str(factor_info.get("factor_high") or 1))
         factor_source = factor_info.get("source")
     except Exception:  # noqa: BLE001 — 보정계수 실패가 로스터 전체를 죽이지 않는다
-        factor, factor_source = Decimal(1), "unavailable"
+        factor_low = factor_high = Decimal(1)
+        factor_source = "unavailable"
 
     agg = metrics_aggregator.aggregate(
         db, date_from, date_to, grain="adgroup", campaign_filter=campaign_id
@@ -131,14 +173,15 @@ def build_roster(
 
         adgroups: list[dict] = []
         c_cost = c_clk = c_imp = c_conv_amt = 0
-        c_profit_sum = 0
+        c_profit_sum = c_profit_low_sum = c_profit_high_sum = 0
         c_profit_known = False
         for r in by_campaign.get(cid, []):
             gid = r["adgroup_id"]
             cost = int(r.get("cost") or 0)
             conv_amt = int(r.get("conv_amt") or 0)
             bep = exploration.resolve_exploration_bep_roas(db, cid, gid, cache=bep_cache)
-            profit, profit_status = _profit(conv_amt, cost, factor=factor, bep_roas=bep)
+            band = _profit_band(conv_amt, cost, bep_roas=bep,
+                                factor_low=factor_low, factor_high=factor_high)
             sr = scope_by_group.get(gid)
             e = entities.get(("adgroup", gid))
             adgroups.append({
@@ -155,15 +198,16 @@ def build_roster(
                 "conv_amt": conv_amt,
                 "roas": r.get("roas_naver"),
                 "bep_roas": float(bep) if bep is not None else None,
-                "gross_profit": profit,
-                "profit_status": profit_status,
+                **band,
             })
             c_cost += cost
             c_imp += int(r.get("imp") or 0)
             c_clk += int(r.get("clk") or 0)
             c_conv_amt += conv_amt
-            if profit is not None:
-                c_profit_sum += profit
+            if band["gross_profit"] is not None:
+                c_profit_sum += band["gross_profit"]
+                c_profit_low_sum += band["gross_profit_low"]
+                c_profit_high_sum += band["gross_profit_high"]
                 c_profit_known = True
 
         # 창 안 집행이 없는 스코프 그룹도 보여준다 — 0은 «없는 것»이 아니다(D-47-h).
@@ -179,7 +223,8 @@ def build_roster(
                 "scope_role": sr["role"],
                 "scope_enabled": sr["enabled"],
                 "cost": 0, "imp": 0, "clk": 0, "conv_amt": 0, "roas": None,
-                "bep_roas": None, "gross_profit": None,
+                "bep_roas": None,
+                "gross_profit": None, "gross_profit_low": None, "gross_profit_high": None,
                 "profit_status": PROFIT_STATUS_BEP_UNKNOWN,
             })
 
@@ -199,6 +244,8 @@ def build_roster(
             "cost": c_cost, "imp": c_imp, "clk": c_clk, "conv_amt": c_conv_amt,
             "roas": (round(c_conv_amt / c_cost, 2) if c_cost else None),
             "gross_profit": (c_profit_sum if c_profit_known else None),
+            "gross_profit_low": (c_profit_low_sum if c_profit_known else None),
+            "gross_profit_high": (c_profit_high_sum if c_profit_known else None),
             "adgroups": adgroups,
         })
 
@@ -210,7 +257,10 @@ def build_roster(
             "date_to": date_to.isoformat(),
             "days": days,
         },
-        "correction_factor": {"value": float(factor), "source": factor_source},
+        # ★단일 "value"를 없앴다 — 화면이 하나만 집어 들면 그게 사실처럼 읽힌다.
+        "correction_factor": {
+            "low": float(factor_low), "high": float(factor_high), "source": factor_source,
+        },
         "totals": agg["totals"],
         "campaigns": campaigns,
     }

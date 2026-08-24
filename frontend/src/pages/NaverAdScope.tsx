@@ -32,8 +32,16 @@ const ROLE_HINT: Record<PaoScopeRole, string> = {
   brake: "출혈 — 내리거나 제외할 자리",
 };
 
-/** 총이익 셀. ★null은 «0원»이 아니라 «모름»이다. */
-function ProfitCell({ value, status }: { value: number | null; status: string }) {
+/** 총이익 셀 — ★«있는 그대로» + 구간 병기 (Jino 지시 2026-08-24).
+ *
+ *  ①null은 «0원»이 아니라 «모름»이다.
+ *  ②큰 글씨는 **보정 없는 값**이다 — 네이버가 준 전환매출 그대로.
+ *  ③작은 글씨의 [하한 ~ 상한]이 «얼마나 모르는지»다. 보정계수는 「채널 매출 100%가 광고
+ *    공」이라는 가정에 기대므로 단일값으로 보이면 그 가정이 사실처럼 읽힌다.
+ */
+function ProfitCell({
+  value, low, high, status,
+}: { value: number | null; low?: number | null; high?: number | null; status: string }) {
   if (value === null) {
     return (
       <span className="text-gray-400" title={status === "bep_unknown" ? "BEP를 해석하지 못했습니다(상품 원가 미연결)" : status}>
@@ -41,7 +49,21 @@ function ProfitCell({ value, status }: { value: number | null; status: string })
       </span>
     );
   }
-  return <span className={value < 0 ? "text-red-600" : "text-emerald-700"}>{num(value)}</span>;
+  const band =
+    low !== null && low !== undefined && high !== null && high !== undefined ? (
+      <span
+        className="block text-[10px] text-gray-400 leading-tight"
+        title="보정계수 구간 양끝. 하한=유입경로 라벨 근거 · 상한=채널 매출 전액을 광고 공으로 돌린 가정"
+      >
+        {num(low)} ~ {num(high)}
+      </span>
+    ) : null;
+  return (
+    <span>
+      <span className={value < 0 ? "text-red-600" : "text-emerald-700"}>{num(value)}</span>
+      {band}
+    </span>
+  );
 }
 
 export default function NaverAdScope() {
@@ -86,7 +108,10 @@ export default function NaverAdScope() {
             <div className="px-4 pb-2 text-xs text-gray-500">
               창 {data.window.date_from} ~ {data.window.date_to} ({data.window.days}일, 오늘 제외)
               {" · "}
-              총이익 보정계수 {data.correction_factor.value.toFixed(4)}
+              <span title="큰 숫자는 보정 없는 «있는 그대로»입니다. 작은 [a ~ b]는 보정계수 구간 양끝을 적용한 값입니다.">
+                총이익 = <b>있는 그대로</b> + 구간[×{data.correction_factor.low.toFixed(3)} ~ ×
+                {data.correction_factor.high.toFixed(3)}]
+              </span>
               <span className="text-gray-400">
                 {" "}({data.correction_factor.source ?? "출처 미상"})
               </span>
@@ -141,7 +166,7 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
         </Badge>
         <span className="text-xs text-gray-500 tabular-nums w-24 text-right">{num(c.cost)}원</span>
         <span className="text-xs tabular-nums w-24 text-right">
-          <ProfitCell value={c.gross_profit} status="ok" />
+          <ProfitCell value={c.gross_profit} low={c.gross_profit_low} high={c.gross_profit_high} status="ok" />
         </span>
       </button>
       {open && (
@@ -175,7 +200,7 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
           <Th right>전환매출</Th>
           <Th right>ROAS</Th>
           <Th right>BEP</Th>
-          <Th right>총이익</Th>
+          <Th right>총이익<span className="block text-[10px] font-normal text-gray-400">있는 그대로 / 구간</span></Th>
         </tr>
       }
     >
@@ -277,7 +302,12 @@ function AdgroupRow({
       <Td right>{num(g.conv_amt)}</Td>
       <Td right>{g.roas === null ? <span className="text-gray-400">—</span> : g.roas.toFixed(2)}</Td>
       <Td right>{g.bep_roas === null ? <span className="text-gray-400">모름</span> : g.bep_roas.toFixed(3)}</Td>
-      <Td right><ProfitCell value={g.gross_profit} status={g.profit_status} /></Td>
+      <Td right>
+        <ProfitCell
+          value={g.gross_profit} low={g.gross_profit_low} high={g.gross_profit_high}
+          status={g.profit_status}
+        />
+      </Td>
     </tr>
   );
 }
