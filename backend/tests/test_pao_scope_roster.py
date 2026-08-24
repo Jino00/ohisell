@@ -204,6 +204,91 @@ def test_profit_none_when_bep_zero_or_negative():
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# ★총이익 «구간» — 있는 그대로 + [하한, 상한] (Jino 지시 2026-08-24)
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_profit_band_primary_value_is_uncorrected():
+    """★`gross_profit`은 **보정 없는 «있는 그대로»**여야 한다.
+
+    Jino 원문: *"보정계수(1.3016)를 왜 쓰는거야? 있는 그대로를 보여줘야 하는거 아니야?"*
+    초판은 여기에 `factor_high`(상한)를 실었고, 그 결과 TPU 21일이 무보정 −864,081원인데
+    화면엔 +557,591원으로 떠 **부호가 뒤집혔다**. 기본값이 보정값으로 되돌아가면 이 테스트가
+    죽는다."""
+    band = pao_scope_roster._profit_band(
+        conv_amt=1_711_000, cost=1_000_000, bep_roas=Decimal("1.711"),
+        factor_low=Decimal("0.5"), factor_high=Decimal("2.0"),
+    )
+    # 보정 없이는 정확히 손익분기(1,711,000 / 1.711 = 1,000,000)
+    assert band["gross_profit"] == 0
+    # 구간 양끝은 그 양쪽으로 벌어진다
+    assert band["gross_profit_low"] == -500_000
+    assert band["gross_profit_high"] == 1_000_000
+    assert band["profit_status"] == "ok"
+
+
+def test_profit_band_does_not_always_contain_the_raw_value():
+    """★적대 리뷰 P2-7 채택 — 「구간」이 「있는 그대로」를 **감싸지 않는 경우가 있다**.
+
+    보정계수 구간은 `low=min(floor, point)` · `high=max(floor, point)`이고 floor=0.827이다.
+    점추정도 1 미만일 수 있어(자체 문서화된 실측 스프레드 **0.8289~0.8862**) `high < 1`이 되면
+    `gross_profit_high < gross_profit(raw)`가 된다 — 즉 큰 글씨가 자기 괄호 «밖»에 놓인다.
+
+    ★이건 결함이 아니라 **성질**이다: 보정은 「convAmt를 실매출로 환산」하는 것이라 양끝이 둘 다
+    1보다 작으면 raw보다 둘 다 작은 게 맞다. 다만 화면이 「구간이 감싼다」고 오해시키면 안 되므로
+    `NaverAdScope.ProfitCell`이 그 경우 ⚠️로 표시한다. 이 테스트는 그 성질을 **문서로 고정**한다
+    — 나중에 누가 「구간이 raw를 감싸야 한다」고 클램프를 넣으면 여기서 죽는다."""
+    # 양끝이 둘 다 1 미만 → high < raw
+    band = pao_scope_roster._profit_band(
+        conv_amt=1_000_000, cost=300_000, bep_roas=Decimal("1.5"),
+        factor_low=Decimal("0.827"), factor_high=Decimal("0.9"),
+    )
+    assert band["gross_profit"] == 366_667      # raw
+    assert band["gross_profit_high"] == 300_000  # ★raw보다 «작다»
+    assert band["gross_profit_high"] < band["gross_profit"]
+
+    # 양끝이 둘 다 1 초과 → low > raw
+    band2 = pao_scope_roster._profit_band(
+        conv_amt=1_000_000, cost=300_000, bep_roas=Decimal("1.5"),
+        factor_low=Decimal("1.1"), factor_high=Decimal("1.4"),
+    )
+    assert band2["gross_profit_low"] > band2["gross_profit"]
+
+
+def test_profit_band_all_three_are_none_when_bep_unknown():
+    """BEP를 모르면 세 값 전부 None — 구간이라고 숫자를 지어내지 않는다."""
+    band = pao_scope_roster._profit_band(
+        conv_amt=100, cost=100, bep_roas=None,
+        factor_low=Decimal("0.8"), factor_high=Decimal("1.3"),
+    )
+    assert band["gross_profit"] is None
+    assert band["gross_profit_low"] is None
+    assert band["gross_profit_high"] is None
+    assert band["profit_status"] == "bep_unknown"
+
+
+def test_surface_profit_band_reaches_the_api_response(client_and_session):
+    """★표면: 구간이 **API 응답까지** 간다 — 화면이 «얼마나 모르는지»를 그릴 수 있어야 한다.
+
+    직렬화에서 `gross_profit_low`/`_high`를 빼면 화면은 단일값만 받게 되고, 그러면
+    「채널 매출 100%가 광고 공」이라는 가정이 사실처럼 읽힌다."""
+    client, db = client_and_session
+    _seed(db)
+
+    payload = client.get(f"/api/naver/ad/scope/roster?campaign_id={CAMPAIGN}").json()
+    # 응답 헤더가 단일 value가 아니라 구간을 실어야 한다
+    assert "low" in payload["correction_factor"]
+    assert "high" in payload["correction_factor"]
+    assert "value" not in payload["correction_factor"], "단일값이 부활하면 화면이 그걸 집는다"
+
+    g = _group(payload, G_IN)
+    for key in ("gross_profit", "gross_profit_low", "gross_profit_high"):
+        assert key in g, f"응답에 {key}가 없다 — 화면이 구간을 그릴 수 없다"
+    c = _campaign(payload)
+    for key in ("gross_profit", "gross_profit_low", "gross_profit_high"):
+        assert key in c, f"캠페인 합계에 {key}가 없다"
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # ★BEP 사다리 캐시 (적대 리뷰 P2-2 상환) — «답을 바꾸지 않는다»가 안전 속성이다
 # ──────────────────────────────────────────────────────────────────────────
 

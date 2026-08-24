@@ -32,8 +32,21 @@ const ROLE_HINT: Record<PaoScopeRole, string> = {
   brake: "출혈 — 내리거나 제외할 자리",
 };
 
-/** 총이익 셀. ★null은 «0원»이 아니라 «모름»이다. */
-function ProfitCell({ value, status }: { value: number | null; status: string }) {
+/** 보정 적용값이 «있는 그대로»를 감싸는가 — 아니면 화면이 그 사실을 말해야 한다. */
+function raw_outside(raw: number, low: number, high: number): boolean {
+  return raw < Math.min(low, high) || raw > Math.max(low, high);
+}
+
+/** 총이익 셀 — ★«있는 그대로» + 구간 병기 (Jino 지시 2026-08-24).
+ *
+ *  ①null은 «0원»이 아니라 «모름»이다.
+ *  ②큰 글씨는 **보정 없는 값**이다 — 네이버가 준 전환매출 그대로.
+ *  ③작은 글씨의 [하한 ~ 상한]이 «얼마나 모르는지»다. 보정계수는 「채널 매출 100%가 광고
+ *    공」이라는 가정에 기대므로 단일값으로 보이면 그 가정이 사실처럼 읽힌다.
+ */
+function ProfitCell({
+  value, low, high, status,
+}: { value: number | null; low?: number | null; high?: number | null; status: string }) {
   if (value === null) {
     return (
       <span className="text-gray-400" title={status === "bep_unknown" ? "BEP를 해석하지 못했습니다(상품 원가 미연결)" : status}>
@@ -41,7 +54,30 @@ function ProfitCell({ value, status }: { value: number | null; status: string })
       </span>
     );
   }
-  return <span className={value < 0 ? "text-red-600" : "text-emerald-700"}>{num(value)}</span>;
+  const hasBand = low !== null && low !== undefined && high !== null && high !== undefined;
+  // ★적대 리뷰 P2-7 채택 — 「구간」이 「있는 그대로」를 «감싸지 않는» 경우가 드물지 않다.
+  //   보정계수 구간은 low=min(floor, point)·high=max(floor, point)인데 floor=0.827이고 점추정도
+  //   1 미만일 수 있어(실측 스프레드 0.8289~0.8862) high<1 → high<raw가 된다. 그때 큰 글씨가
+  //   자기 괄호 밖에 놓여 「구간이 감싼다」는 잘못된 직관을 준다 — 그 사실을 명시적으로 말한다.
+  const outside = hasBand && (raw_outside(value, low!, high!));
+  const band = hasBand ? (
+    <span
+      className={`block text-[10px] leading-tight ${outside ? "text-amber-600" : "text-gray-400"}`}
+      title={
+        outside
+          ? "⚠️ 보정 적용값이 «있는 그대로»의 한쪽에만 있습니다 — 구간이 위 숫자를 감싸지 않습니다(보정계수 양끝이 둘 다 1보다 작거나 큰 경우)."
+          : "보정 적용 범위. 하한=유입경로 라벨 근거 · 상한=채널 매출 전액을 광고 공으로 돌린 가정"
+      }
+    >
+      {outside ? "⚠ " : ""}{num(low!)} ~ {num(high!)}
+    </span>
+  ) : null;
+  return (
+    <span>
+      <span className={value < 0 ? "text-red-600" : "text-emerald-700"}>{num(value)}</span>
+      {band}
+    </span>
+  );
 }
 
 export default function NaverAdScope() {
@@ -86,7 +122,10 @@ export default function NaverAdScope() {
             <div className="px-4 pb-2 text-xs text-gray-500">
               창 {data.window.date_from} ~ {data.window.date_to} ({data.window.days}일, 오늘 제외)
               {" · "}
-              총이익 보정계수 {data.correction_factor.value.toFixed(4)}
+              <span title="큰 숫자는 보정 없는 «있는 그대로»입니다. 작은 [a ~ b]는 보정계수 구간 양끝을 적용한 값입니다.">
+                총이익 = <b>있는 그대로</b> + 구간[×{data.correction_factor.low.toFixed(3)} ~ ×
+                {data.correction_factor.high.toFixed(3)}]
+              </span>
               <span className="text-gray-400">
                 {" "}({data.correction_factor.source ?? "출처 미상"})
               </span>
@@ -141,7 +180,7 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
         </Badge>
         <span className="text-xs text-gray-500 tabular-nums w-24 text-right">{num(c.cost)}원</span>
         <span className="text-xs tabular-nums w-24 text-right">
-          <ProfitCell value={c.gross_profit} status="ok" />
+          <ProfitCell value={c.gross_profit} low={c.gross_profit_low} high={c.gross_profit_high} status="ok" />
         </span>
       </button>
       {open && (
@@ -175,7 +214,7 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
           <Th right>전환매출</Th>
           <Th right>ROAS</Th>
           <Th right>BEP</Th>
-          <Th right>총이익</Th>
+          <Th right>총이익<span className="block text-[10px] font-normal text-gray-400">있는 그대로 / 구간</span></Th>
         </tr>
       }
     >
@@ -277,7 +316,12 @@ function AdgroupRow({
       <Td right>{num(g.conv_amt)}</Td>
       <Td right>{g.roas === null ? <span className="text-gray-400">—</span> : g.roas.toFixed(2)}</Td>
       <Td right>{g.bep_roas === null ? <span className="text-gray-400">모름</span> : g.bep_roas.toFixed(3)}</Td>
-      <Td right><ProfitCell value={g.gross_profit} status={g.profit_status} /></Td>
+      <Td right>
+        <ProfitCell
+          value={g.gross_profit} low={g.gross_profit_low} high={g.gross_profit_high}
+          status={g.profit_status}
+        />
+      </Td>
     </tr>
   );
 }
