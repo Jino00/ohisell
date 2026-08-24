@@ -235,19 +235,39 @@ def _sheet_rows(upload: UploadFile, wanted: str, what: str) -> list[tuple]:
 
 @router.post("/recipes/import")
 def import_recipes(
-    cost_file: UploadFile = File(..., description="원가 정본 — 「제품 원가표」 시트"),
-    mapping_file: UploadFile = File(..., description="매핑 정본 — 「원가 매핑」 시트"),
+    cost_file: Optional[UploadFile] = File(
+        None, description="원가 정본 — 「제품 원가표」 시트"
+    ),
+    mapping_file: Optional[UploadFile] = File(
+        None, description="매핑 정본 — 「원가 매핑」 시트"
+    ),
     db: Session = Depends(get_db),
 ):
-    """두 엑셀 → 레시피·링크 **초안**(계약 §5-3 탭2).
+    """엑셀 → 레시피·링크 **초안**(계약 §5-3 탭2).
 
     ★아무것도 승인하지 않는다. 단가도 만들지 않는다 — 만들어지는 것은 `draft` 레시피와
     링크, 그리고 `unconfirmed` 부자재 종뿐이다(계약 §2-2·§3).
     ★이미 `approved`인 레시피는 **건너뛴다** — 재수입이 승인분을 덮지 않는다.
+    ★**둘 중 하나만 올려도 된다**(Jino 2026-08-24: *"여기서 둘중에 하나만도 업데이트가
+    되게 해줘"*). 어느 절반이 갱신되고 어느 절반이 그대로인지는 `updated_halves`·
+    `untouched`로 응답에 실려 나간다 — 소유권 규율은 `R.import_drafts` docstring이 정본이다.
     """
 
-    cost_rows = _sheet_rows(cost_file, "제품 원가표", "원가 정본")
-    mapping_rows = _sheet_rows(mapping_file, "원가 매핑", "매핑 정본")
+    if cost_file is None and mapping_file is None:
+        raise HTTPException(
+            status_code=400, detail="원가 정본과 매핑 정본 중 최소 하나는 올려야 한다."
+        )
+
+    cost_rows = (
+        _sheet_rows(cost_file, "제품 원가표", "원가 정본")
+        if cost_file is not None
+        else None
+    )
+    mapping_rows = (
+        _sheet_rows(mapping_file, "원가 매핑", "매핑 정본")
+        if mapping_file is not None
+        else None
+    )
     out = _guard(R.import_drafts, db, cost_rows, mapping_rows)
     db.commit()
     return out

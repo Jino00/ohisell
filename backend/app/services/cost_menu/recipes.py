@@ -194,30 +194,108 @@ def _match_draft(
 # ──────────────────────────────────────────────
 # 수입(import) — 초안 만들기
 # ──────────────────────────────────────────────
+#: 레시피 `note` JSON 중 **원가 정본(구성)이 소유하는** 키. 매핑만 올렸을 때 이 키들을
+#: 건드리면, 이미 잘 매칭돼 있던 레시피가 «구성 못 찾음»으로 퇴화한다.
+_COST_OWNED_NOTE_KEYS = (
+    "match_reason",
+    "candidates",
+    "cost_price_mode",
+    "cost_table_item",
+    "cost_table_section",
+    "excel_total_inc_vat",
+)
+#: 매핑 정본(SKU·옵션)이 소유하는 키. 원가만 올렸을 때 건드리지 않는다.
+_MAPPING_OWNED_NOTE_KEYS = ("sku_count", "option_count")
+
+
+def _note_dict(recipe: CostRecipe) -> dict:
+    """저장된 `note`를 dict로. 비었거나 깨졌으면 빈 dict — **추측해 채우지 않는다**."""
+
+    if not recipe.note:
+        return {}
+    try:
+        loaded = json.loads(recipe.note)
+    except (ValueError, TypeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def import_drafts(
     db: Session,
-    cost_rows: Iterable[Sequence[Any]],
-    mapping_rows: Iterable[Sequence[Any]],
+    cost_rows: Optional[Iterable[Sequence[Any]]] = None,
+    mapping_rows: Optional[Iterable[Sequence[Any]]] = None,
 ) -> dict:
-    """두 엑셀의 행 목록 → 레시피·링크 «초안». 파일을 여는 것은 호출자(라우터)다."""
+    """엑셀 → 레시피·링크 «초안». 파일을 여는 것은 호출자(라우터)다.
 
-    cost: ParseResult = parse_cost_table(cost_rows)
-    mapping: MappingParseResult = parse_mapping_table(mapping_rows)
+    ★**둘 중 하나만 올려도 된다** (Jino 2026-08-24: *"여기서 둘중에 하나만도 업데이트가
+    되게 해줘"*). 그런데 이건 게이트를 푸는 일이 아니라 **«안 건드릴 것»을 정하는 일**이다 —
+    두 파일이 서로 다른 절반을 만들기 때문이다:
 
-    drafts_by_form: dict[Optional[str], list[RecipeDraft]] = {}
-    for d in cost.recipes:
-        drafts_by_form.setdefault(d.form_factor, []).append(d)
+    ================  ==========================================================
+    원가 정본         부자재 **종**(이름·엑셀 참고값) + **구성**(무엇이 몇 개)
+    매핑 정본         레시피의 **(상품명 × 폼팩터)** 그룹 + **SKU 링크**
+    ================  ==========================================================
 
-    resolved = resolve_channel_codes(
-        db, (c for o in mapping.options for c in o.channel_codes)
+    ★★**위험한 자리**: 초판 루프는 «매핑 그룹»을 축으로 돌면서 `recipe.lines.clear()`와
+    `recipe.note` 통째 덮어쓰기를 했다. 매핑만 올리면 `drafts_by_form`이 비어
+    `_match_draft`가 전건 `no_recipe_match`를 돌려주므로, **그대로 두면 이미 잘 매칭돼
+    있던 레시피의 구성이 통째로 지워진다.** 그래서 소유권을 나눈다:
+
+    * 원가만  → 종 upsert + **DB의 기존 레시피**를 축으로 구성 재매칭. SKU 링크·`sku_count`
+      **불가침**(`_sync_links` 호출 안 함).
+    * 매핑만  → 그룹·링크만 갱신. `recipe.lines`·구성 note 키 **보존**(`_COST_OWNED_NOTE_KEYS`).
+    * 둘 다    → 종전 동작 그대로.
+
+    ★어느 절반이 «그대로인지»를 결과에 실어 보낸다(`updated_halves`·`untouched`) —
+    조용한 반쪽 갱신은 반쪽 갱신보다 나쁘다.
+    """
+
+    if cost_rows is None and mapping_rows is None:
+        raise CostMenuError("원가 정본과 매핑 정본 중 최소 하나는 필요하다.")
+
+    has_cost = cost_rows is not None
+    has_mapping = mapping_rows is not None
+
+    cost: Optional[ParseResult] = parse_cost_table(cost_rows) if has_cost else None
+    mapping: Optional[MappingParseResult] = (
+        parse_mapping_table(mapping_rows) if has_mapping else None
     )
 
-    materials = _upsert_materials(db, cost)
+    drafts_by_form: dict[Optional[str], list[RecipeDraft]] = {}
+    if cost is not None:
+        for d in cost.recipes:
+            drafts_by_form.setdefault(d.form_factor, []).append(d)
+
+    resolved = (
+        resolve_channel_codes(db, (c for o in mapping.options for c in o.channel_codes))
+        if mapping is not None
+        else {}
+    )
+
+    materials = _upsert_materials(db, cost) if cost is not None else {}
     db.flush()
 
     created = updated = skipped_approved = unmatched = 0
-    groups = mapping.groups()
+    groups = mapping.groups() if mapping is not None else {}
     report: list[dict] = []
+
+    if not has_mapping:
+        # ── 원가만 ── 축을 «DB의 기존 레시피»로 바꾼다. 매핑이 없으니 새 그룹은 생기지
+        #    않고, 링크는 손대지 않는다.
+        out = _reimport_composition_only(db, drafts_by_form, materials)
+        out.update(
+            {
+                "materials_seen": len(materials),
+                "cost_table_recipes": cost.recipe_count,
+                "cost_table_anomalies": cost.anomalies,
+                "mapping_options": 0,
+                "mapping_anomalies": [],
+                "groups": 0,
+                "updated_halves": ["구성"],
+                "untouched": ["SKU 링크·옵션 수 — 매핑 정본을 안 올렸으므로 그대로 둔다"],
+            }
+        )
+        return out
 
     for (product_name, form_factor), rows in sorted(groups.items()):
         skus: dict[str, Optional[Decimal]] = {}
@@ -261,6 +339,7 @@ def import_drafts(
         if match.draft and match.draft.anomalies:
             anomaly = ",".join(match.draft.anomalies)[:40]
 
+        is_new = recipe is None
         if recipe is None:
             recipe = CostRecipe(
                 product_name=product_name,
@@ -276,25 +355,51 @@ def import_drafts(
             updated += 1
             action = "updated"
 
-        recipe.anomaly_flag = anomaly
-        recipe.note = json.dumps(
-            {
-                "match_reason": match.reason,
-                "candidates": match.candidates,
-                "cost_price_mode": _d(match.cost_price_mode),
-                "cost_table_item": match.draft.item_name if match.draft else None,
-                "cost_table_section": match.draft.section if match.draft else None,
-                "excel_total_inc_vat": _d(match.draft.excel_total_inc_vat)
-                if match.draft
-                else None,
-                "sku_count": len(skus),
-                "option_count": len(rows),
-            },
-            ensure_ascii=False,
-        )
+        # ★매핑만 올린 «기존» 레시피는 구성이 원가 정본 소관이므로 손대지 않는다.
+        #   새 레시피엔 보존할 구성이 애초에 없다(`no_recipe_match`가 사실이다).
+        preserve_composition = has_cost is False and not is_new
+
+        if not preserve_composition:
+            recipe.anomaly_flag = anomaly
+        note = {
+            "match_reason": match.reason,
+            "candidates": match.candidates,
+            "cost_price_mode": _d(match.cost_price_mode),
+            "cost_table_item": match.draft.item_name if match.draft else None,
+            "cost_table_section": match.draft.section if match.draft else None,
+            "excel_total_inc_vat": _d(match.draft.excel_total_inc_vat)
+            if match.draft
+            else None,
+            "sku_count": len(skus),
+            "option_count": len(rows),
+        }
+        if preserve_composition:
+            # ★★구성 소관 키를 **저장된 값으로 되돌린다**. 이 여섯 줄이 이 슬라이스의
+            #   본체다 — 없으면 매핑만 올린 순간 모든 레시피가 「구성 못 찾음」이 되고,
+            #   오늘 A1을 연 레시피 68이 정확히 여기 걸린다.
+            saved = _note_dict(recipe)
+            for key in _COST_OWNED_NOTE_KEYS:
+                note[key] = saved.get(key)
+        recipe.note = json.dumps(note, ensure_ascii=False)
         db.flush()
 
         # 구성 라인 — 매칭됐을 때만. 못 찾았으면 **비운다**(0원짜리 구성을 만들지 않는다).
+        # ★단 «매핑만» 올린 기존 레시피는 예외다 — 비울 근거가 이번 입력에 없다.
+        if preserve_composition:
+            _sync_links(db, recipe, skus)
+            report.append(
+                {
+                    "product_name": product_name,
+                    "form_factor": form_factor,
+                    "action": action,
+                    "reason": "매핑만 갱신 — 구성은 원가 정본 소관이라 그대로 뒀다",
+                    "sku_count": len(skus),
+                    "line_count": len(recipe.lines),
+                    "anomaly_flag": recipe.anomaly_flag,
+                }
+            )
+            continue
+
         recipe.lines.clear()
         db.flush()
         if match.draft:
@@ -336,11 +441,126 @@ def import_drafts(
         "skipped_approved": skipped_approved,
         "unmatched": unmatched,
         "materials_seen": len(materials),
-        "cost_table_recipes": cost.recipe_count,
-        "cost_table_anomalies": cost.anomalies,
+        "cost_table_recipes": cost.recipe_count if cost is not None else 0,
+        "cost_table_anomalies": cost.anomalies if cost is not None else [],
         "mapping_options": len(mapping.options),
         "mapping_anomalies": mapping.anomalies,
         "groups": len(groups),
+        "report": report,
+        # ★어느 절반이 움직였고 어느 절반이 그대로인지 — 조용한 반쪽 갱신은 반쪽보다 나쁘다.
+        "updated_halves": ["구성", "SKU 링크"] if has_cost else ["SKU 링크"],
+        "untouched": []
+        if has_cost
+        else ["구성·부자재 종 — 원가 정본을 안 올렸으므로 그대로 둔다"],
+    }
+
+
+def _reimport_composition_only(
+    db: Session,
+    drafts_by_form: dict[Optional[str], list[RecipeDraft]],
+    materials: dict[str, CostMaterial],
+) -> dict:
+    """원가 정본만 올렸을 때 — **DB의 기존 레시피**를 축으로 구성만 다시 맞춘다.
+
+    ★루프 축이 매핑 그룹이 아니라 DB다. 매핑이 없으면 «어떤 상품명 × 폼팩터가 있는가»를
+    이번 입력이 말해 주지 않으므로, 이미 아는 것(DB)을 쓴다. 새 레시피는 만들지 않는다 —
+    만들 근거가 이번 입력에 없다.
+    ★`cost_price_mode`·`sku_count`는 **매핑 소관**이라 재계산하지 않고 저장된 값을 그대로
+    쓴다(`_match_draft`가 그 둘을 입력으로 받는다). 링크는 아예 손대지 않는다.
+    """
+
+    updated = skipped_approved = unmatched = 0
+    report: list[dict] = []
+
+    for recipe in db.query(CostRecipe).order_by(CostRecipe.product_name).all():
+        if recipe.status == "approved":
+            skipped_approved += 1
+            continue
+
+        saved = _note_dict(recipe)
+        mode = saved.get("cost_price_mode")
+        sku_count = saved.get("sku_count") or 0
+        # ★저장된 mode가 없으면 매칭의 입력이 없다 — «못 찾았다»가 아니라 **판단 불가**라
+        #   구성을 비우지 않고 건너뛴다(§2-7: 모르는 것을 0으로 만들지 않는다).
+        if mode is None:
+            report.append(
+                {
+                    "product_name": recipe.product_name,
+                    "form_factor": recipe.form_factor,
+                    "action": "skipped_no_basis",
+                    "reason": "저장된 cost_price_mode가 없다 — 매핑 정본을 함께 올려야 판단할 수 있다",
+                    "sku_count": sku_count,
+                    "line_count": len(recipe.lines),
+                    "anomaly_flag": recipe.anomaly_flag,
+                }
+            )
+            continue
+
+        match = _match_draft(
+            form_factor=recipe.form_factor,
+            cost_prices=[Decimal(str(mode))],
+            drafts_by_form=drafts_by_form,
+            sku_count=sku_count,
+        )
+
+        note = dict(saved)
+        note.update(
+            {
+                "match_reason": match.reason,
+                "candidates": match.candidates,
+                "cost_price_mode": _d(match.cost_price_mode),
+                "cost_table_item": match.draft.item_name if match.draft else None,
+                "cost_table_section": match.draft.section if match.draft else None,
+                "excel_total_inc_vat": _d(match.draft.excel_total_inc_vat)
+                if match.draft
+                else None,
+            }
+        )
+        # ★매핑 소관 키는 저장된 값 그대로 — 위 `dict(saved)`가 이미 실어 왔다.
+        for key in _MAPPING_OWNED_NOTE_KEYS:
+            note[key] = saved.get(key)
+
+        recipe.anomaly_flag = None if match.draft else "no_recipe_match"
+        if match.draft and match.draft.anomalies:
+            recipe.anomaly_flag = ",".join(match.draft.anomalies)[:40]
+        recipe.note = json.dumps(note, ensure_ascii=False)
+        db.flush()
+
+        recipe.lines.clear()
+        db.flush()
+        if match.draft:
+            for line in match.draft.lines:
+                material = materials.get(line.key.display_name)
+                if material is None:
+                    continue
+                recipe.lines.append(
+                    CostRecipeLine(
+                        material_id=material.id,
+                        quantity=line.quantity,
+                        note=f"원가표 열 「{line.source_column}」",
+                    )
+                )
+        else:
+            unmatched += 1
+
+        updated += 1
+        report.append(
+            {
+                "product_name": recipe.product_name,
+                "form_factor": recipe.form_factor,
+                "action": "updated",
+                "reason": match.reason,
+                "sku_count": sku_count,
+                "line_count": len(match.draft.lines) if match.draft else 0,
+                "anomaly_flag": recipe.anomaly_flag,
+            }
+        )
+
+    return {
+        "recipes_created": 0,
+        "recipes_updated": updated,
+        "skipped_approved": skipped_approved,
+        "unmatched": unmatched,
         "report": report,
     }
 

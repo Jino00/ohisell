@@ -1274,32 +1274,56 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(within(mappingZone).queryByText("report.csv")).toBeNull();
     });
 
-    it("비활성 사유가 문장으로 보이고, 둘 다 고르면 사라지며 버튼이 활성화된다", async () => {
+    // ★규칙이 바뀌었다 (Jino 2026-08-24: *"여기서 둘중에 하나만도 업데이트가 되게 해줘"*).
+    //   막는 경우는 «아무것도 안 고른» 하나뿐이고, **한쪽만 고르면 버튼이 열린다.**
+    //   ★대신 «무엇이 그대로인지»를 누르기 «전»에 말해야 한다 — 조용한 반쪽 갱신은
+    //   반쪽 갱신보다 나쁘다(사람이 「다 됐다」고 믿는다). 그 문구도 여기서 함께 잰다.
+    it("아무것도 안 고르면 막히고, 한쪽만 골라도 열리며, 무엇이 그대로인지 말한다", async () => {
       await openRecipesTab();
-      // 처음엔 둘 다 없다 — 「엑셀 2종을 모두 고르세요」
       expect(screen.getByTestId("import-disabled-reason").textContent).toMatch(
-        /엑셀 2종을 모두 고르세요/,
+        /하나만 올려도 됩니다/,
       );
       const importBtn = screen.getByRole("button", {
         name: "초안 만들기",
       }) as HTMLButtonElement;
       expect(importBtn.disabled).toBe(true);
+      expect(screen.queryByTestId("import-half-notice")).toBeNull();
 
       fireEvent.change(screen.getByLabelText("원가 정본 파일"), {
         target: { files: [makeXlsx("MD_원가 계산_1.xlsx")] },
       });
-      // 원가 정본만 있으면 「매핑 정본을 아직 고르지 않았습니다」
-      expect(screen.getByTestId("import-disabled-reason").textContent).toMatch(
-        /매핑 정본을 아직 고르지 않았습니다/,
-      );
-      expect(importBtn.disabled).toBe(true);
+      // ★원가 정본«만»으로도 버튼이 열린다 — 이게 이 슬라이스의 요점이다.
+      expect(screen.queryByTestId("import-disabled-reason")).toBeNull();
+      expect(importBtn.disabled).toBe(false);
+      // ★그리고 화면이 **SKU 링크는 그대로**라고 미리 말한다.
+      const notice = screen.getByTestId("import-half-notice").textContent ?? "";
+      expect(notice).toContain("원가 정본만");
+      expect(notice).toContain("SKU 링크");
+      expect(notice).toContain("그대로");
 
       fireEvent.change(screen.getByLabelText("매핑 정본 파일"), {
         target: { files: [makeXlsx("ohisell_mapping_template_1.xlsx")] },
       });
-      // 둘 다 고르면 안내가 사라지고 버튼이 활성화된다.
+      // 둘 다 고르면 «그대로 두는 것»이 없으므로 안내가 사라진다.
       expect(screen.queryByTestId("import-disabled-reason")).toBeNull();
+      expect(screen.queryByTestId("import-half-notice")).toBeNull();
       expect(importBtn.disabled).toBe(false);
+    });
+
+    it("★매핑 정본만 골라도 열리고, 구성이 그대로라고 말한다", async () => {
+      await openRecipesTab();
+      fireEvent.change(screen.getByLabelText("매핑 정본 파일"), {
+        target: { files: [makeXlsx("ohisell_mapping_template_1.xlsx")] },
+      });
+      const importBtn = screen.getByRole("button", {
+        name: "초안 만들기",
+      }) as HTMLButtonElement;
+      expect(importBtn.disabled).toBe(false);
+      const notice = screen.getByTestId("import-half-notice").textContent ?? "";
+      expect(notice).toContain("매핑 정본만");
+      // ★★이 단어가 이 슬라이스의 위험을 가리킨다 — 구성을 지우지 않는다는 약속이다.
+      expect(notice).toContain("구성");
+      expect(notice).toContain("그대로");
     });
 
     it("카드 밖 드롭은 조용히 무시된다 — 페이지 이탈용 브라우저 기본 동작이 안 뜬다", async () => {
@@ -1333,8 +1357,13 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
 
       // 고른 파일이 화면에 «보여야» 한다 — 상태만 바뀌고 안 그려지면 사람은 모른다.
       expect(await within(costZone).findByText("MD_원가 계산_260822.xlsx")).toBeTruthy();
-      // 그리고 그 선택이 다음 단계로 «이어져야» 한다: 남은 비활성 사유는 매핑 정본 하나뿐.
-      expect(screen.getByTestId("import-disabled-reason").textContent).toContain("매핑 정본");
+      // ★그리고 그 선택이 다음 단계로 «이어져야» 한다. 규칙이 바뀌어(한쪽만 허용) 이제
+      //   그 증거는 「남은 비활성 사유」가 아니라 **버튼이 열리고 반쪽 안내가 뜨는 것**이다.
+      expect(screen.queryByTestId("import-disabled-reason")).toBeNull();
+      expect(
+        (screen.getByRole("button", { name: "초안 만들기" }) as HTMLButtonElement).disabled,
+      ).toBe(false);
+      expect(screen.getByTestId("import-half-notice").textContent).toContain("원가 정본만");
     });
 
     it("잘못된 파일을 «드롭»해도 그 자리에서 거부된다 — 클릭 경로와 같은 판정을 탄다", async () => {

@@ -985,11 +985,25 @@ export function formatFileSize(bytes: number): string {
   return `${(kb / 1024).toFixed(2)}MB`;
 }
 
-/** 「초안 만들기」가 왜 비활성인지 — 흐려지기만 하면 사람은 무엇을 해야 할지 모른다. */
+/** 「초안 만들기」가 왜 비활성인지 — 흐려지기만 하면 사람은 무엇을 해야 할지 모른다.
+ *
+ * ★**한쪽만으로도 된다** (Jino 2026-08-24: *"여기서 둘중에 하나만도 업데이트가 되게 해줘"*).
+ * 그러니 막는 경우는 «아무것도 안 고른» 하나뿐이다. */
 export function importDisabledReason(cost: File | null, mapping: File | null): string | null {
-  if (!cost && !mapping) return "엑셀 2종을 모두 고르세요 — 원가 정본 · 매핑 정본";
-  if (!cost) return "원가 정본을 아직 고르지 않았습니다";
-  if (!mapping) return "매핑 정본을 아직 고르지 않았습니다";
+  if (!cost && !mapping) return "엑셀을 고르세요 — 원가 정본·매핑 정본 중 하나만 올려도 됩니다";
+  return null;
+}
+
+/** 한쪽만 고른 상태에서 «무엇이 갱신되고 무엇이 그대로인지» — 누르기 «전»에 말한다.
+ *
+ * ★백엔드 응답의 `updated_halves`·`untouched`와 **같은 사실**을 눌러 보기 전에 미리 보여
+ * 준다. 조용한 반쪽 갱신은 반쪽 갱신보다 나쁘다 — 사람이 「다 됐다」고 믿기 때문이다. */
+export function importHalfNotice(cost: File | null, mapping: File | null): string | null {
+  if (cost && mapping) return null;
+  if (cost)
+    return "원가 정본만 올립니다 — 부자재 종과 구성이 갱신되고, SKU 링크·옵션 수는 그대로 둡니다.";
+  if (mapping)
+    return "매핑 정본만 올립니다 — SKU 링크가 갱신되고, 구성·부자재 종은 그대로 둡니다.";
   return null;
 }
 
@@ -1161,7 +1175,7 @@ export function RecipeImportPanel({
   result,
 }: {
   busy: boolean;
-  onImport: (cost: File, mapping: File) => void;
+  onImport: (cost: File | null, mapping: File | null) => void;
   result: CostImportResult | null;
 }) {
   const [cost, setCost] = useState<File | null>(null);
@@ -1182,6 +1196,7 @@ export function RecipeImportPanel({
   };
 
   const disabledReason = importDisabledReason(cost, mapping);
+  const halfNotice = importHalfNotice(cost, mapping);
 
   return (
     <section
@@ -1234,10 +1249,17 @@ export function RecipeImportPanel({
           {disabledReason}
         </div>
       ) : null}
+      {/* ★한쪽만 고른 상태에서 «무엇이 그대로인지»를 누르기 «전»에 말한다.
+          조용한 반쪽 갱신은 반쪽 갱신보다 나쁘다 — 사람이 「다 됐다」고 믿기 때문이다. */}
+      {halfNotice ? (
+        <div className="mt-2 text-xs text-blue-700" data-testid="import-half-notice">
+          {halfNotice}
+        </div>
+      ) : null}
       <button
         className="mt-2 text-xs px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-40"
-        disabled={busy || !cost || !mapping}
-        onClick={() => cost && mapping && onImport(cost, mapping)}
+        disabled={busy || (!cost && !mapping)}
+        onClick={() => (cost || mapping) && onImport(cost, mapping)}
       >
         초안 만들기
       </button>
@@ -1249,6 +1271,13 @@ export function RecipeImportPanel({
             승인분 건너뜀 <b>{result.skipped_approved}</b> · 구성 못 찾음{" "}
             <b>{result.unmatched}</b> (묶음 {result.groups})
           </div>
+          {/* ★어느 절반이 «그대로인지»를 결과에도 남긴다 — 누르기 전 안내와 같은 사실이지만,
+              누른 «뒤»에 확인할 곳이 없으면 나중에 「다 갱신된 줄 알았다」가 된다. */}
+          {result.untouched?.length ? (
+            <div className="text-blue-700" data-testid="import-untouched">
+              그대로 둔 것: {result.untouched.join(" · ")}
+            </div>
+          ) : null}
           {/* ★이상은 숨기지 않는다 — 「몇 건 파싱됨」만 보이면 무엇이 빠졌는지 모른다. */}
           {result.cost_table_anomalies.length ? (
             <details>

@@ -390,6 +390,100 @@ def test_reimport_does_not_overwrite_approved(client):
     assert still["standard"]["std_cost_inc_vat"] == "2350.70"
 
 
+# ──────────────────────────────────────────────
+# 한쪽만 업로드 (Jino 2026-08-24: *"여기서 둘중에 하나만도 업데이트가 되게 해줘"*)
+#
+# ★이건 게이트를 푸는 일이 아니라 **«안 건드릴 것»을 정하는 일**이다 — 두 파일이 서로 다른
+#   절반을 만들고, 초판 루프는 매핑 그룹을 축으로 돌면서 구성을 통째로 지웠다.
+# ──────────────────────────────────────────────
+def _import_one(client, *, cost: bool = False, mapping: bool = False):
+    files = {}
+    if cost:
+        files["cost_file"] = (
+            "cost.xlsx",
+            _xlsx(cost_sheet_rows(), "제품 원가표"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    if mapping:
+        files["mapping_file"] = (
+            "map.xlsx",
+            _xlsx(mapping_sheet_rows(), "원가 매핑"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    return client.post("/api/cost/recipes/import", files=files)
+
+
+def test_mapping_only_does_not_wipe_composition(client):
+    """★★이 슬라이스의 본체 — 매핑만 올려도 **구성이 살아남는다.**
+
+    초판이라면 `drafts_by_form`이 비어 `_match_draft`가 전건 `no_recipe_match`를 돌려주고,
+    그 값이 `recipe.lines`와 구성 note를 통째로 덮었다. 그러면 이미 잘 매칭돼 있던
+    레시피가 «구성 못 찾음»으로 퇴화한다 — prod에서 A1을 연 레시피가 정확히 여기 걸린다.
+    """
+
+    _import(client)
+    before = _bar_recipe(client)
+    assert before["line_count"] == 9, "전제: 두 파일로 올리면 구성 9줄이 선다"
+    assert before["match"]["cost_price_mode"] == "2350.70"
+
+    r = _import_one(client, mapping=True)
+    assert r.status_code == 200, r.text
+
+    after = _bar_recipe(client)
+    # ★구성이 그대로다 — 줄 수도, 매칭 근거도.
+    assert after["line_count"] == 9
+    assert after["match"]["cost_price_mode"] == "2350.70"
+    assert after["match"]["cost_table_item"] == before["match"]["cost_table_item"]
+    assert after["anomaly_flag"] == before["anomaly_flag"]
+    # ★화면이 «무엇이 그대로인지»를 말한다 — 조용한 반쪽 갱신은 반쪽보다 나쁘다.
+    assert r.json()["updated_halves"] == ["SKU 링크"]
+    assert any("원가 정본" in s for s in r.json()["untouched"])
+
+
+def test_cost_only_updates_composition_and_leaves_links_alone(client):
+    """★원가만 올리면 구성은 다시 맞추되 **SKU 링크는 손대지 않는다.**"""
+
+    _import(client)
+    before = _bar_recipe(client)
+    before_links = before["link_count"]
+    before_skus = before["match"]["sku_count"]
+
+    r = _import_one(client, cost=True)
+    assert r.status_code == 200, r.text
+
+    after = _bar_recipe(client)
+    assert after["line_count"] == 9
+    # ★링크·옵션 수는 매핑 소관이라 그대로다.
+    assert after["link_count"] == before_links
+    assert after["match"]["sku_count"] == before_skus
+    assert r.json()["updated_halves"] == ["구성"]
+    assert r.json()["recipes_created"] == 0, "매핑이 없으면 새 레시피를 만들 근거가 없다"
+
+
+def test_cost_only_still_skips_approved(client):
+    """★한쪽만 올려도 승인분 보호는 그대로다 — 예외를 만들면 그 길로 샌다."""
+
+    _import(client)
+    rid = _bar_recipe(client)["id"]
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices")
+
+    r = _import_one(client, cost=True)
+    assert r.status_code == 200, r.text
+    assert r.json()["skipped_approved"] >= 1
+    still = _bar_recipe(client)
+    assert still["status"] == "approved"
+    assert still["standard"]["std_cost_inc_vat"] == "2350.70"
+
+
+def test_uploading_neither_file_is_rejected(client):
+    """★«아무것도 안 올림»은 «한쪽만»이 아니다 — 400으로 거절하고 이유를 말한다."""
+
+    r = client.post("/api/cost/recipes/import", files={})
+    assert r.status_code == 400
+    assert "최소 하나" in r.json()["detail"]
+
+
 def test_adopt_does_not_overwrite_existing_price(client):
     """★원장 파생 단가를 엑셀 값으로 덮지 않는다(계약 §2-1)."""
 
