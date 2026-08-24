@@ -48,7 +48,7 @@
 - ⚠️ **ssh heredoc은 따옴표를 먹는다** — SQL은 파일로 `scp` 후 `sqlite3 ... < file`
 - ⚠️ ★**공유 메인 체크아웃은 origin/main보다 크게 뒤처져 있다**(착수 시 198커밋). **코드 사실은 항상 워크트리 또는 `git show origin/main:`에서 읽는다.**
 - ⚠️ `frontend/node_modules`는 다른 워크트리(`accel-opening`)로의 **심볼릭 링크**다.
-- ⚠️ ★**CI는 죽어 있다** — GitHub Actions 결제 정지. 잡이 2초 만에 「fail」로 뜨지만 `gh api "repos/Jino00/ohisell/actions/jobs/<id>" --jq '.steps|length'` → **0**이면 실행 자체가 안 된 것이다. `origin/main` run도 똑같이 빨갛다. **빨간불을 코드 신호로 읽지 마라**(교훈 #123).
+- ✅ ★**CI는 살아 있다(2026-08-24 03:4x 복구)** — 아래 「결제 정지」 서술은 **틀렸다**(정정 13:0x). 실제 원인은 시한폭탄 테스트 2건 + 린트 게이트(`ec6f6c01`). 원문 보존: ~~CI는 죽어 있다 — GitHub Actions 결제 정지.~~ 잡이 2초 만에 「fail」로 뜨지만 `gh api "repos/Jino00/ohisell/actions/jobs/<id>" --jq '.steps|length'` → **0**이면 실행 자체가 안 된 것이다. `origin/main` run도 똑같이 빨갛다. **빨간불을 코드 신호로 읽지 마라**(교훈 #123).
 - ★**측정 스크립트가 이제 저장소에 있다**: `scripts/measurements/` — 읽기 전용(`mode=ro` URI), README에 실행법과 「배포 전 검증」 방법(sys.modules 인메모리) 포함.
 
 ---
@@ -111,6 +111,7 @@ sim: direction=up · recommended_bid=80 · economic_ceiling=0 · basis=interval_
 ### 2-4. 배포 (2026-08-24 08:1x~08:2x KST)
 
 - PR **#393 병합 `acb1c832`** — ⚠️`scripts/safe_merge.sh 393 **--force**`
+  ★**정정(13:0x)**: 아래 자백의 «관측»은 맞고 «원인»은 틀렸다. `steps=0`은 사실이었으나 그 원인을 「결제 정지」라 한 것은 **n=42 인계를 실측 없이 물려받은 것**이다(실제: 시한폭탄 테스트 + 린트 게이트, `ec6f6c01`로 수정). ⇒ **안전 게이트를 «검증 안 한 이유»로 우회했다**(PR #393·#400). 결과는 무해했으나(로컬 6,427 passed·리뷰 2R PASS·현재 CI 통과) 사실은 남는다. 교훈 #123(빨간불을 코드 신호로 읽지 마라)과 위키 `handoff-lists-must-be-remeasured`가 **같은 자리에서 동시에** 걸린다. 원문 보존 ↓
   **자백 근거**: CI 잡 3개 전부 `steps=0`(실행 자체가 안 됨) + `origin/main` run도 동일 실패 = Actions 결제 정지. 대체 증거 = 로컬 백엔드 6,427 passed/2 기존부채 · 프론트 804 · tsc 0 · 리뷰 2R PASS. 기록 `$TMPDIR/safe_merge.log`. **완료 QA가 이 자백의 근거를 독립 확인했다**(merge 커밋·비관련 커밋 둘 다 `steps=0`).
 - 백엔드 `naver_ad` **10파일** 무중단 재시작(블루-그린, **다운타임 0초**, 활성 :8001)
 - 프론트 dist(백업 `dist_backup_20260824_0821`) — 번들 해시 일치 `index-Dyl3SWok.js`, 스탬프 `78e5d1e4`
