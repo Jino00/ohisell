@@ -287,9 +287,13 @@ describe("★합격 1의 표면 — 로트별 단가 2건이 화면에 그려진
     expect(screen.queryByText("0원")).toBeNull();
   });
 
-  it("출처가 원장인지 수동인지 화면이 말한다", () => {
+  // ★D-CPP-56(2026-08-24)로 어휘가 「원장(로트)」→「원장」, 「수동 입력」→「등록가」가 됐다.
+  //   단가 이력 표와 레시피 상태 열이 **같은 함수 하나**(`priceSourceLabel`)를 쓰므로, 이
+  //   단언이 그 «한 벌» 성질을 지킨다 — 누가 상태 열만 고치고 여기를 두면 이 줄이 깨진다.
+  it("출처가 원장인지 등록가인지 화면이 말한다", () => {
     render(<MaterialPriceHistory material={KIT} imported />);
-    expect(screen.getAllByText("원장(로트)").length).toBe(2);
+    expect(screen.getAllByText("원장").length).toBe(2);
+    expect(screen.queryByText("원장(로트)")).toBeNull();
   });
 });
 

@@ -2401,6 +2401,107 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     });
   });
 
+  // ★D-CPP-56 (Jino 2026-08-24): *"이미 확인되어서 승인된 부자재 단가는 표시를 해주자.
+  //   그러면 다른 제품을 레시피에서 볼때 확인된 단가라는걸 쉽게 알아볼 수 있잖아?"*
+  //   ⇒ 판정 표면은 **레시피 상세의 상태 열**이다. 「값이 있다」가 아니라 「사람이 그것을
+  //   확인된 단가로 알아본다」가 합격선이므로, 단언은 전부 App 경로(`renderApp`)를 지난다 —
+  //   n=6 실측: 컴포넌트를 직접 렌더하는 테스트는 **호출부 변이를 원리적으로 못 잡는다.**
+  describe("★H: 확인된 단가임이 «한눈에» 보인다 (D-CPP-56)", () => {
+    async function openRecipeDetail() {
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      return screen.findByTestId("recipe-detail-panel");
+    }
+
+    it("쓸 수 있는 단가 줄엔 「확인됨」 배지가 붙는다 — 다른 제품 레시피에서도 같은 값을 알아본다", async () => {
+      const panel = await openRecipeDetail();
+      // 픽스처의 usable 라인 2개 «전부»에 붙는다. 하나만 붙으면 「한쪽만 고친다」의 재발이다.
+      expect(within(panel).getByTestId("breakdown-confirmed-0").textContent).toBe("확인됨");
+      expect(within(panel).getByTestId("breakdown-confirmed-1").textContent).toBe("확인됨");
+    });
+
+    // ★★이 단언이 초판의 실제 결함을 겨눈다 — 상태 열이 영어 `manual`을 날문자로 그렸다.
+    //   번역표는 이미 있었는데 «단가 없음» 가지에만 연결돼 있었다.
+    it("★상태 열에 영어 날문자(`manual`·`ledger`)가 남지 않는다", async () => {
+      const panel = await openRecipeDetail();
+      expect(within(panel).queryByText("manual")).toBeNull();
+      expect(within(panel).queryByText("ledger")).toBeNull();
+      // 출처는 «지워지지» 않고 한국어로 남는다 — 없애면 목표 카드 ③·합격 12가 깨진다.
+      expect(within(panel).getAllByText("등록가").length).toBe(2);
+    });
+
+    // ★배지가 «아무 데나» 붙지 않는다는 것까지 잰다. 이걸 안 재면 「전부 확인됨으로 칠하는」
+    //   변이가 초록으로 살아남고, 화면이 단가 없는 줄까지 확인됐다고 말하게 된다.
+    it("★단가가 없는 줄엔 배지가 «없고» 사유가 그대로 뜬다", async () => {
+      vi.mocked(fetchCostRecipes).mockResolvedValue({
+        items: [
+          {
+            ...RECIPE,
+            standard: {
+              ...RECIPE.standard,
+              computable: false,
+              std_cost_ex_vat: null,
+              std_cost_inc_vat: null,
+              reason: "단가 없음 (1건: 패키지 (bar))",
+              unresolved: ["패키지 (bar)"],
+              line_count: 1,
+              lines: [
+                {
+                  ...RECIPE.standard.lines[1],
+                  unit_price_ex_vat: null,
+                  unit_price_inc_vat: null,
+                  amount_ex_vat: null,
+                  amount_inc_vat: null,
+                  price_status: "missing",
+                  price_source: null,
+                  usable: false,
+                },
+              ],
+            },
+          },
+        ],
+      });
+      try {
+        const panel = await openRecipeDetail();
+        expect(within(panel).queryByTestId("breakdown-confirmed-0")).toBeNull();
+        expect(within(panel).queryByText("확인됨")).toBeNull();
+        expect(within(panel).getByText("단가 없음")).toBeTruthy();
+      } finally {
+        vi.mocked(fetchCostRecipes).mockResolvedValue({
+          items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+        });
+      }
+    });
+
+    // ★원장 파생도 «확인됨»이다 — D-CPP-56이 둘을 서열화하지 않기로 정했다. 다만 출처는
+    //   구별돼 보인다(같은 배지 · 다른 출처 문자열).
+    it("★원장 파생 단가도 같은 「확인됨」 배지를 받되 출처는 「원장」으로 갈린다", async () => {
+      vi.mocked(fetchCostRecipes).mockResolvedValue({
+        items: [
+          {
+            ...RECIPE,
+            standard: {
+              ...RECIPE.standard,
+              line_count: 1,
+              lines: [{ ...RECIPE.standard.lines[0], price_status: "ok", price_source: "ledger" }],
+            },
+          },
+        ],
+      });
+      try {
+        const panel = await openRecipeDetail();
+        expect(within(panel).getByTestId("breakdown-confirmed-0").textContent).toBe("확인됨");
+        expect(within(panel).getByText("원장")).toBeTruthy();
+        expect(within(panel).queryByText("등록가")).toBeNull();
+      } finally {
+        vi.mocked(fetchCostRecipes).mockResolvedValue({
+          items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+        });
+      }
+    });
+  });
+
   describe("★F·G: 최초 진입 깜빡임 · 0건일 때 오른쪽 문구", () => {
     // ⚠️**F는 jsdom에서 원리적으로 못 잰다.** `useEffect`↔`useLayoutEffect`의 차이는
     //    «브라우저 페인트 전인가»인데 jsdom은 페인트를 하지 않고, RTL의 `act`가 passive
