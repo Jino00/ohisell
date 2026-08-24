@@ -164,6 +164,24 @@ const KIT: CostMaterial = {
       },
     },
   ],
+  // ★사용처 — prod 모양 재현(D-CPP-56 후속). 「어느 제품에 들어가나」 + 승인 여부.
+  used_by: [
+    {
+      recipe_id: 7,
+      product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+      form_factor: "bar",
+      status: "approved",
+      quantity: "1.000",
+    },
+    {
+      recipe_id: 8,
+      product_name: "오하이 빛반사, 지문방지 매트 필름 2매",
+      form_factor: "bar",
+      status: "draft",
+      quantity: "1.000",
+    },
+  ],
+  used_by_count: 2,
 };
 
 // ── N5: prod의 **다수파** — 단가는 없고 엑셀 참고값만 있는 종(128/129가 이 모양이다).
@@ -190,6 +208,8 @@ const FILM_WITH_REF: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_source: null,
   prices: [],
+  used_by: [],
+  used_by_count: 0,
 };
 
 // `part`가 비어 있는 종 — prod에선 **83/129가 이 모양**이다. 화면이 그 사실을 숨기면
@@ -213,6 +233,8 @@ const JIG_NO_PART: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_source: null,
   prices: [],
+  used_by: [],
+  used_by_count: 0,
 };
 
 // ★2R P1-1용 — 「+ 종 추가」가 성공했을 때 백엔드가 실제로 돌려주는 모양을 흉내낸다.
@@ -240,6 +262,8 @@ function createdMaterialFixture(name: string): CostMaterial {
     latest_price_inc_vat: null,
     latest_price_source: null,
     prices: [],
+    used_by: [],
+    used_by_count: 0,
   };
 }
 
@@ -2204,6 +2228,27 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     //   이력이 있어야 할거고"*. 조작은 **실재했는데** 화면이 「덮어쓰지 않고 쌓인다」를
     //   한 번도 말하지 않아 「수정하는 곳이 없다」로 읽혔다. 문구를 지우면 그 오해가
     //   그대로 돌아오므로 **문구 자체를 표면으로 붙든다.**
+    // ★★Jino 2026-08-24: *"각 부자재가 어느 제품에 들어가는지도 나오면 좋겠고"*.
+    //   백엔드가 `used_by`를 실어 보내도 **화면이 안 그리면 없는 것과 같다** — 이 저장소가
+    //   반복해 밟은 자리라 App 경로에서 픽셀을 직접 잰다.
+    it("★부자재 상세가 «어느 제품에 들어가는지»를 그린다 — 승인 여부까지", async () => {
+      await openMaterialsTab();
+      const usage = await screen.findByTestId("material-usage");
+      expect(usage.textContent).toContain("이 부자재를 쓰는 제품");
+      expect(usage.textContent).toContain("오하이 빛반사, 지문방지 매트 필름 3매");
+      expect(usage.textContent).toContain("오하이 빛반사, 지문방지 매트 필름 2매");
+      // ★「들어간다」만으로는 계산에 쓰이는지 모른다 — 승인 여부가 함께 보여야 한다.
+      expect(usage.textContent).toContain("승인됨");
+      expect(usage.textContent).toContain("미확인 — 계산 안 함");
+    });
+
+    it("★아무도 안 쓰는 종은 «0건»이라고 말한다 — 빈 칸으로 두지 않는다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      const usage = await screen.findByTestId("material-usage");
+      expect(usage.textContent).toContain("아직 어느 레시피도 이 종을 쓰지 않는다");
+    });
+
     it("★단가 입력이 «덮어쓰기가 아니라 이력으로 쌓인다»고 화면이 말한다", async () => {
       await openMaterialsTab();
       fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));

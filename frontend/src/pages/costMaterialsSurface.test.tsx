@@ -130,6 +130,24 @@ const KIT: CostMaterial = {
       },
     },
   ],
+  // ★사용처 — prod 모양 재현(D-CPP-56 후속). 「어느 제품에 들어가나」 + 승인 여부.
+  used_by: [
+    {
+      recipe_id: 7,
+      product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+      form_factor: "bar",
+      status: "approved",
+      quantity: "1.000",
+    },
+    {
+      recipe_id: 8,
+      product_name: "오하이 빛반사, 지문방지 매트 필름 2매",
+      form_factor: "bar",
+      status: "draft",
+      quantity: "1.000",
+    },
+  ],
+  used_by_count: 2,
 };
 
 const EMPTY_KIT: CostMaterial = {

@@ -476,6 +476,60 @@ def test_cost_only_still_skips_approved(client):
     assert still["standard"]["std_cost_inc_vat"] == "2350.70"
 
 
+# ──────────────────────────────────────────────
+# 사용처 (Jino 2026-08-24: *"각 부자재가 어느 제품에 들어가는지도 나오면 좋겠고"*)
+# ──────────────────────────────────────────────
+def test_material_says_which_products_use_it(client):
+    """★부자재 payload가 **어느 레시피에 들어가는지**를 싣는다 — HTTP body로 단언한다."""
+
+    _import(client)
+    mats = client.get("/api/cost/materials").json()["items"]
+    pkg = next(m for m in mats if m["name"].startswith("패키지"))
+
+    assert pkg["used_by_count"] >= 1
+    names = {u["product_name"] for u in pkg["used_by"]}
+    assert TARGET in names
+    one = next(u for u in pkg["used_by"] if u["product_name"] == TARGET)
+    # ★수량·폼팩터·승인 여부까지 — 「들어간다」만으로는 계산에 쓰이는지 모른다(계약 §2-2).
+    assert one["form_factor"] == "bar"
+    assert one["status"] in ("draft", "approved")
+    assert one["quantity"] is not None
+    assert one["recipe_id"]
+
+
+def test_usage_is_the_same_on_the_single_material_endpoint(client):
+    """★★목록과 상세가 **같은 사실**을 말한다.
+
+    호출부가 7곳이라 하나만 고치면 그 화면만 「사용처 0건」이라 조용히 거짓말한다 —
+    `used_by`를 필수 인자로 둔 이유이고, 이 테스트가 그 규율을 밖에서 한 번 더 잡는다.
+    """
+
+    _import(client)
+    mats = client.get("/api/cost/materials").json()["items"]
+    pkg = next(m for m in mats if m["name"].startswith("패키지"))
+
+    detail = client.get(f"/api/cost/materials/{pkg['id']}").json()
+    assert detail["used_by_count"] == pkg["used_by_count"]
+    assert detail["used_by"] == pkg["used_by"]
+
+    # 쓰기 응답도 같은 사실을 실어야 한다 — 승인 직후 화면이 사용처를 잃으면 안 된다.
+    patched = client.patch(
+        f"/api/cost/materials/{pkg['id']}", json={"status": "approved"}
+    ).json()
+    assert patched["used_by_count"] == pkg["used_by_count"]
+
+
+def test_unused_material_says_zero_not_missing(client):
+    """★어느 레시피도 안 쓰는 종은 **0건**이다 — «미상»이 아니라 사실이다(§2-7)."""
+
+    _import(client)
+    created = client.post(
+        "/api/cost/materials", json={"name": "아무도 안 쓰는 종 (테스트)"}
+    ).json()
+    assert created["used_by"] == []
+    assert created["used_by_count"] == 0
+
+
 def test_uploading_neither_file_is_rejected(client):
     """★«아무것도 안 올림»은 «한쪽만»이 아니다 — 400으로 거절하고 이유를 말한다."""
 
