@@ -998,7 +998,11 @@ export function importDisabledReason(cost: File | null, mapping: File | null): s
  *
  * ★백엔드 응답의 `updated_halves`·`untouched`와 **같은 사실**을 눌러 보기 전에 미리 보여
  * 준다. 조용한 반쪽 갱신은 반쪽 갱신보다 나쁘다 — 사람이 「다 됐다」고 믿기 때문이다. */
-export function importHalfNotice(cost: File | null, mapping: File | null): string | null {
+// ★`export`하지 않는다 — 이 파일에서 컴포넌트가 아닌 것을 export할 때마다
+//   `react-refresh/only-export-components` 경고가 하나씩 붙고, CI 상한(96)이 딱 차 있어서
+//   **이 한 줄이 빌드를 빨갛게 만들었다**(97 problems). 판정은 화면 표면
+//   (`import-half-notice`)으로 하므로 직접 import할 이유가 없다.
+function importHalfNotice(cost: File | null, mapping: File | null): string | null {
   if (cost && mapping) return null;
   if (cost)
     // ★「갱신」이라고만 쓰면 «늘어나기만 한다»로 읽힌다(적대 리뷰 P2 채택). 재매칭이
