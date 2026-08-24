@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -199,6 +201,93 @@ def test_profit_none_when_bep_zero_or_negative():
     """0·음수 BEP로 나누지 않는다(ZeroDivision·부호 뒤집힘 방지)."""
     assert pao_scope_roster._profit(1, 1, factor=Decimal(1), bep_roas=Decimal(0))[0] is None
     assert pao_scope_roster._profit(1, 1, factor=Decimal(1), bep_roas=None)[0] is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ★BEP 사다리 캐시 (적대 리뷰 P2-2 상환) — «답을 바꾸지 않는다»가 안전 속성이다
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_bep_cache_does_not_change_the_answer(client_and_session):
+    """캐시를 넘기든 안 넘기든 **같은 값**이 나와야 한다.
+
+    성능 최적화가 값을 바꾸면 그건 최적화가 아니라 버그다. prod 실측 10.1초를 줄이려고
+    요청 단위 메모를 넣었는데, 그 메모가 답을 흔들면 총이익이 화면마다 달라진다."""
+    from app.services.naver_ad import exploration
+
+    client, db = client_and_session
+    _seed(db)
+
+    for gid in (G_IN, G_OUT):
+        no_cache = exploration.resolve_exploration_bep_roas(db, CAMPAIGN, gid)
+        with_cache = exploration.resolve_exploration_bep_roas(db, CAMPAIGN, gid, cache={})
+        assert no_cache == with_cache
+
+
+def test_bep_cache_default_is_no_cache(client_and_session):
+    """★기본값이 None이라 기존 호출부(레인)는 동작이 «완전히» 그대로다 — 소급 0.
+
+    레인처럼 오래 도는 경로에 장수 캐시가 붙으면 그 사이 바뀐 BEP를 못 본다. 그래서 캐시는
+    옵트인이고, 넘길지는 호출부가 정한다."""
+    from app.services.naver_ad import exploration
+    import inspect
+
+    sig = inspect.signature(exploration.resolve_exploration_bep_roas)
+    assert sig.parameters["cache"].default is None
+
+
+def test_bep_cache_is_reused_across_groups(client_and_session):
+    """캐시가 실제로 재사용되는가 — 캠페인·계정 tier 조회가 그룹 수만큼 반복되지 않는다.
+
+    ★적대 리뷰 P2-6 채택: 초판은 **계정 tier 호출 횟수만** 셌다. 캠페인 tier도 같이 세어
+    비대칭을 없앤다 — 한쪽만 재면 나머지 tier의 캐시 로직 회귀를 못 잡는다."""
+    from app.services.naver_ad import campaign_target_resolver, exploration
+
+    client, db = client_and_session
+    _seed(db)
+    cache: dict = {}
+    with patch.object(
+        campaign_target_resolver, "weighted_product_value_for_campaign", return_value=None
+    ) as mock_camp, patch.object(
+        campaign_target_resolver, "account_default_bep_roas", return_value=None
+    ) as mock_acct:
+        for gid in (G_IN, G_OUT):
+            exploration.resolve_exploration_bep_roas(db, CAMPAIGN, gid, cache=cache)
+    # 그룹 2개를 돌았지만 캠페인·계정 tier 조회는 각 1회여야 한다
+    assert mock_camp.call_count == 1
+    assert mock_acct.call_count == 1
+
+
+def test_shared_cache_does_not_leak_group_tier_across_groups(client_and_session):
+    """★★적대 리뷰 P2-5 채택 — 이 파일에서 가장 중요한 테스트.
+
+    실사용(`pao_scope_roster.build_roster`)은 **한 캠페인 안 여러 그룹이 «같은» cache dict를
+    공유**한다. 그런데 초판 테스트는 그룹마다 `cache={}`를 새로 만들어 비교해서, 그 공유
+    상황을 한 번도 재현하지 않았다.
+
+    리뷰가 변이로 증명했다: 「①그룹 tier를 캠페인 단위 키로 캐싱」(설계가 명시적으로 금지한
+    바로 그 실수)을 주입하니 **324건이 전부 생존**했고, 실제로는 그룹 B가 그룹 A의 BEP를
+    돌려받는다. 캐시가 답을 바꾸는 회귀가 실재 가능한데 아무도 안 보고 있었던 것이다.
+
+    ⇒ 두 그룹에 **서로 다른** 그룹 tier BEP를 주고 같은 cache로 연달아 부른 뒤,
+    **각자 자기 값**이 나오는지 단언한다. 그룹 tier를 캐시하는 순간 이 테스트가 죽는다."""
+    from decimal import Decimal as D
+
+    from app.services.naver_ad import campaign_target_resolver, exploration
+
+    client, db = client_and_session
+    _seed(db)
+
+    per_group = {G_IN: D("2.5"), G_OUT: D("3.3")}
+    cache: dict = {}
+    with patch.object(
+        campaign_target_resolver, "weighted_product_value_for_adgroup",
+        side_effect=lambda _db, adgroup_id, _col: per_group[adgroup_id],
+    ):
+        got_in = exploration.resolve_exploration_bep_roas(db, CAMPAIGN, G_IN, cache=cache)
+        got_out = exploration.resolve_exploration_bep_roas(db, CAMPAIGN, G_OUT, cache=cache)
+
+    assert got_in == D("2.5")
+    assert got_out == D("3.3"), "그룹 tier가 캐시로 오염됐다 — 두 그룹이 같은 BEP를 받았다"
 
 
 # ──────────────────────────────────────────────────────────────────────────
