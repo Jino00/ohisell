@@ -106,7 +106,33 @@
 
 ## 2-3. 착지
 
-(Step 6에서 채움)
+**두 갈래로 착지했다** — 코드(D-NAO-242)와 기록물(이 HANDOFF)이 각각 별도 PR이다.
+
+**① 코드 — D-NAO-242**
+- 완료 단계: 커밋 → push → PR → **적대 리뷰 PASS(P1=0)** → 상환 커밋 → **머지 → prod 배포** (전 단계 완주)
+- 좌표: 커밋 `6ddfde42`(구현) · `587dc95c`(리뷰 P2-1 상환) · **PR #411** · 머지 **`006d17a6`**
+- CI: `backend(py3.10)·backend(py3.14)·frontend` **3/3 SUCCESS** — **`--force` 미사용**
+- 리뷰 판정: **PASS(P1 0)** · 변이 6종 전부 사망 · ★표면 절단 변이 F7 **생존** → P2-1 채택 상환(재주입으로 사망 확인)
+- 배포: `safe_deploy.sh --restart` — 무중단 블루-그린(`:8011→:8001`), 다운타임 0초. prod 파일에 `not_serving`·`_EXPLORATION_MAX_BLIND_STEPS`·`explored_not_serving` 존재 확인
+- 멈춘 단계: **없음**
+
+**② 기록물 — 이 HANDOFF + 체인 등록부**
+- 완료 단계: 커밋 → push → PR → **리뷰 생략(기록물만)** → 머지 (완주)
+- 좌표: 커밋 **`ba7f8c4f`** · **PR #413** · 머지 **`37f4d96c`**
+- 리뷰 판정: **⚠️ 리뷰 생략: 기록물만 — `HANDOFF_keyword-accel-plan+canary-withdrawn_20260824.md` · `.claude/memory/chains/pao-논의.jsonl`**(코드 0파일)
+- 멈춘 단계: **없음**
+
+**③ 정리**
+- **「저장소를 main에 세워둔다」 생략** — 착지 전제 검사 **L5**: 로컬 `main`이 공유 메인 폴더(`.../Ohiselling`)에 체크아웃돼 있다(전역 §6 예외 조항). 다음 세션은 `git switch -c <새> origin/main`처럼 **원격을 명시**해 브랜치를 딸 것.
+- 착지 전제 검사 결과: **L1 예**(살아 있는 체인은 `sellc-원가-메뉴` n=8 하나뿐 — 내 대상과 무관, 내 브랜치는 이번 세션이 `origin/main`에서 판 것) · **L2 경로 지정 커밋**(`git add -A` 미사용) · **L3 내 워크트리 전용** · **L4 0**(origin/main 앞서지 않음) · **L5 아니오 → 생략**
+
+**재개 명령**: 해당 없음(양쪽 다 완주). 검증하려면:
+```
+gh pr view 411 --json state,mergeCommit && gh pr view 413 --json state,mergeCommit
+ssh sellc.ohitech.co.kr 'grep -c "_EXPLORATION_MAX_BLIND_STEPS" /home/ubuntu/ohisell/backend/app/services/naver_ad/exploration.py'
+ssh sellc.ohitech.co.kr 'sqlite3 -readonly "file:/home/ubuntu/ohisell/backend/ohisell.db?mode=ro" "SELECT campaign_id,optimizer,auto_operate FROM naver_campaign_settings;"'
+```
+마지막 명령은 **9행 전부 `none`/`0`**이 나와야 한다(카나리 철회 확인).
 
 ---
 
