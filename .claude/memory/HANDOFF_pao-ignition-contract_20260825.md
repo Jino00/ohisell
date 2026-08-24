@@ -132,7 +132,14 @@
 
 ## 2-3. 착지
 
-(Step 6에서 채움)
+- **완료 단계**: 커밋 → push → PR **#429** → ⚠️리뷰 생략(기록물만) → **머지 완료**
+- **멈춘 단계**: 없음
+- **재개 명령**: 해당 없음
+- **좌표**: 커밋 `dc8da776`(첫) ~ `9f2d1c0`(HANDOFF, 16건) · PR https://github.com/Jino00/ohisell/pull/429 · **머지 `01e24b8b`**
+- **리뷰 판정**: `⚠️ 리뷰 생략: 기록물만 — docs/contracts/CONTRACT_pao_ignition_canary.md · docs/references/96_bid_response_curve_census_20260824.md · docs/tracks/active/track_naver-ad-optimization.md · .claude/memory/HANDOFF_pao-ignition-contract_20260825.md · .claude/memory/chains/pao-논의.jsonl` (코드 **0파일**)
+- **CI**: backend(py3.10) pass 9m8s · backend(py3.14) pass 8m5s · frontend pass 52s — **3/3 실통과**, `--force` 미사용
+- **검증 명령**: `gh pr view 429` · `git log origin/main --oneline -3`
+- ⚠️ **L5로 「저장소를 main에 세워둔다」 생략** — 로컬 main이 공유 폴더에 체크아웃돼 있다. 다음 세션은 `git switch -c <새> origin/main`으로 원격을 명시해 갈라져라
 
 ---
 
