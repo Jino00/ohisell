@@ -34,6 +34,7 @@ import {
   ledgerCheckText,
   lotCountText,
   materialStatusLabel,
+  priceSourceLabel,
   valuationBadgeText,
 } from "./CostPage";
 import type {
@@ -294,6 +295,17 @@ describe("★합격 1의 표면 — 로트별 단가 2건이 화면에 그려진
     render(<MaterialPriceHistory material={KIT} imported />);
     expect(screen.getAllByText("원장").length).toBe(2);
     expect(screen.queryByText("원장(로트)")).toBeNull();
+  });
+
+  // ★적대 리뷰 1R P2 **채택**(2026-08-24) — 「null 가드를 지워도 135건이 전부 초록」이었다.
+  //   가드가 지키는 상태(`source`가 비어 오는 것)는 현재 백엔드에서 도달 불가로 «보이지만»,
+  //   그건 추정이고 가드가 조용히 사라지는 것을 막는 비용은 이 세 줄뿐이다.
+  //   ★단언은 「빈 문자열이 아니다」에 무게가 있다 — 가드가 없으면 화면에 **빈 칸**이 남고,
+  //   이 화면에서 빈 칸은 「깜빡 잊었나」와 구별되지 않는다(계약 §2-7의 같은 결).
+  it("★출처가 비어 오면 빈 칸이 아니라 「출처 미상」이라고 말한다", () => {
+    expect(priceSourceLabel(null)).toBe("출처 미상");
+    expect(priceSourceLabel(undefined)).toBe("출처 미상");
+    expect(priceSourceLabel("")).toBe("출처 미상");
   });
 });
 
