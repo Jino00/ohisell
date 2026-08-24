@@ -2190,7 +2190,8 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       const promptSpy = vi
         .spyOn(window, "prompt")
         .mockReturnValueOnce("1000")
-        .mockReturnValueOnce("조아테크");
+        .mockReturnValueOnce("조아테크")
+        .mockReturnValueOnce("2026-08-24");
       fireEvent.click(manualBtn);
       promptSpy.mockRestore();
 
@@ -2198,8 +2199,62 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         expect(vi.mocked(addCostManualPrice)).toHaveBeenCalledWith(FILM_WITH_REF.id, {
           unit_price_ex_vat: "1000",
           supplier: "조아테크",
+          effective_date: "2026-08-24",
         });
       });
+    });
+
+    // ── D-CPP-55 (2026-08-24) ────────────────────────────────────────────────
+    // ★**발효일이 없으면 이 버튼은 아무 일도 안 한 것과 같다.** 서버의 「최신 단가」는
+    //   `(effective_date, id)` 내림차순이고 `null`은 맨 뒤로 간다 — 채택분(발효일 있음)이
+    //   있는 종에 날짜 없는 단가를 넣으면 이력에만 남고 계산엔 영영 안 쓰인다
+    //   (백엔드 `test_price_without_effective_date_never_becomes_latest`가 그 사실을 잠근다).
+    //   초판이 정확히 그 상태였다: 단가와 공급처만 보냈다. 그래서 전파(D-CPP-55)를 다 고쳐도
+    //   **Jino가 화면에서 값을 바꾸면 보드가 안 움직였을 것**이다 — 합격 14는 화면 표면으로
+    //   판정되므로 이 한 칸이 빠지면 슬라이스 전체가 «API로만 되는» 상태가 된다.
+    it("D-CPP-55: 수동 단가는 **발효일과 함께** 보낸다 — 없으면 그 값은 최신이 못 되어 표준원가가 안 움직인다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      const manualBtn = await screen.findByRole("button", { name: "+ 수동 단가 입력" });
+
+      vi.mocked(addCostManualPrice).mockClear();
+      // 세 번째 물음(발효일)에 **오늘이 미리 채워져** 나온다 — 사람이 보고 고칠 수 있게.
+      const promptSpy = vi
+        .spyOn(window, "prompt")
+        .mockReturnValueOnce("1000")
+        .mockReturnValueOnce("")
+        .mockImplementationOnce((_msg?: string, dflt?: string) => dflt ?? null);
+      fireEvent.click(manualBtn);
+
+      await waitFor(() => {
+        expect(vi.mocked(addCostManualPrice)).toHaveBeenCalledTimes(1);
+      });
+      const [, body] = vi.mocked(addCostManualPrice).mock.calls[0];
+      // 날짜가 «있다»는 것이 이 테스트의 전부다 — 빠지면 화면에서 값이 안 움직인다.
+      expect(body.effective_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      // 세 번째 물음의 기본값이 오늘이어야 한다(사람이 매번 타이핑하게 두면 안 넣는다).
+      const askedDefault = promptSpy.mock.calls[2]?.[1];
+      expect(askedDefault).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(body.effective_date).toBe(askedDefault);
+      promptSpy.mockRestore();
+    });
+
+    it("D-CPP-55: 발효일 물음을 취소하면 **아무것도 저장하지 않는다** — 날짜 없는 단가를 몰래 만들지 않는다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      const manualBtn = await screen.findByRole("button", { name: "+ 수동 단가 입력" });
+
+      vi.mocked(addCostManualPrice).mockClear();
+      const promptSpy = vi
+        .spyOn(window, "prompt")
+        .mockReturnValueOnce("1000")
+        .mockReturnValueOnce("조아테크")
+        .mockReturnValueOnce(null); // 취소
+      fireEvent.click(manualBtn);
+      promptSpy.mockRestore();
+
+      await new Promise((r) => setTimeout(r, 0));
+      expect(vi.mocked(addCostManualPrice)).not.toHaveBeenCalled();
     });
   });
 

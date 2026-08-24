@@ -2081,13 +2081,27 @@ export default function CostPage() {
                     const v = window.prompt("수동 단가 (VAT 제외, 원). 모르면 취소한다.");
                     if (!v) return;
                     const supplier = window.prompt("공급처 (예: 조아테크). 없으면 비워 둔다.");
+                    // ★**발효일을 반드시 함께 보낸다** (D-CPP-55 · 합격 14).
+                    //   초판은 단가와 공급처만 보냈고 발효일이 `null`로 저장됐다. 그런데
+                    //   「최신 단가」는 `(effective_date, id)` 내림차순으로 고르고 `null`은
+                    //   맨 뒤로 간다 — 즉 **채택분(발효일 있음)이 있으면 새로 입력한 단가가
+                    //   영영 최신이 못 되어, 사람이 값을 바꿔도 표준원가가 안 움직인다.**
+                    //   서버가 오늘로 채우게 하지 않는 이유는 §2-7(«모름»을 지어내지 않는다)이라,
+                    //   **사람에게 보여 주고 고칠 수 있게** 오늘을 미리 채워 묻는다.
+                    const today = new Date().toLocaleDateString("sv-SE"); // KST 기준 YYYY-MM-DD
+                    const eff = window.prompt(
+                      "이 단가는 언제부터인가? (YYYY-MM-DD) — 이 날짜가 「최신 단가」를 정한다.",
+                      today,
+                    );
+                    if (!eff) return;
                     void run(
                       () =>
                         addCostManualPrice(selected.id, {
                           unit_price_ex_vat: v,
                           supplier: supplier || null,
+                          effective_date: eff,
                         }),
-                      "수동 단가를 입력했다",
+                      "수동 단가를 입력했다 — 이 종을 쓰는 표준원가가 함께 갱신된다",
                     );
                   }}
                 >

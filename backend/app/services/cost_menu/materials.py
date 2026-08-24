@@ -344,6 +344,27 @@ def list_settings(db: Session) -> list[dict]:
 # ──────────────────────────────────────────────
 # 쓰기
 # ──────────────────────────────────────────────
+def _propagate(db: Session, material_id: int) -> list[int]:
+    """단가·승인상태가 바뀐 뒤 **표준원가를 따라가게** 한다 (D-CPP-55, 계약 §6 S5 · §2-5).
+
+    ★계약 §2 판단기준 5가 *"표준원가의 갱신 주체는 항상 원장이다 — 사람이 아니다"*라고 정했고
+    Jino가 그것을 다시 못 박았다(2026-08-24: *"같은 부자재를 어디서 바꾸던지 그 부자재의 가격은
+    모두 동일한거니까 그때부터는 모든 원가에 같이 적용되어야지"*). 그 전까지 이 모듈의 단가
+    쓰기 4경로 어디에도 재계산이 없어서, **레시피 상세는 새 단가로 바뀌는데 표준원가 보드는
+    옛 값이 남았다.**
+
+    ★**이 함수는 트리거를 «부르기»만 한다** — 재계산 규칙 자체는 `recipes.recompute_for_material`
+    한 벌뿐이다(사본을 두면 다음 경로가 또 한쪽만 고쳐진다).
+
+    지연 임포트인 이유: `recipes`는 이 모듈을 모르고 이 모듈도 `recipes`를 모르는 편이 층 구조에
+    맞다. 여기 한 곳에서만 필요하므로 순환 위험을 원천 차단한다.
+    """
+
+    from app.services.cost_menu import recipes as R  # 지연 임포트 — 위 docstring 참조
+
+    return R.recompute_for_material(db, material_id)
+
+
 def create_material(db: Session, **fields) -> CostMaterial:
     name = (fields.get("name") or "").strip()
     if not name:
@@ -376,6 +397,10 @@ def update_material(db: Session, material_id: int, **fields) -> CostMaterial:
     for k, v in fields.items():
         setattr(m, k, v)
     db.flush()
+    # 종 승인/해제는 **계산 결과를 바꾼다** — 미승인 종의 단가는 `_line_inputs`가 계산에서
+    # 빼기 때문이다. 이름·라벨 변경은 산술에 안 닿으므로 필요 없는 쓰기를 만들지 않는다.
+    if "status" in fields:
+        _propagate(db, m.id)
     return m
 
 
@@ -450,6 +475,7 @@ def link_ledger_line(
     )
     db.add(p)
     db.flush()
+    _propagate(db, m.id)  # D-CPP-55 경로 1
     return p
 
 
@@ -517,6 +543,7 @@ def refresh_ledger_price(
     p.linked_item_name = line.item_name
     p.linked_shipment_id = line.shipment_id
     db.flush()
+    _propagate(db, p.material_id)  # D-CPP-55 경로 2
     return p, c
 
 
@@ -554,6 +581,7 @@ def add_manual_price(
     )
     db.add(p)
     db.flush()
+    _propagate(db, m.id)  # D-CPP-55 경로 3
     return p
 
 
@@ -571,3 +599,6 @@ def delete_price(db: Session, material_id: int, price_id: int) -> None:
         raise CostMenuError(f"단가 행 id={price_id}이 이 종에 없다.")
     db.delete(p)
     db.flush()
+    # ★전파는 «올라갈 때»만이 아니라 «내려갈 때»도 돈다 — 단가가 사라지면 표준원가도
+    #   「—」로 돌아가야 한다(0으로 채우지 않는다, 계약 §2-7 · 합격 15).
+    _propagate(db, material_id)  # D-CPP-55 경로 4
