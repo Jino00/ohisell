@@ -563,15 +563,31 @@ def recompute_for_material(db: Session, material_id: int) -> list[int]:
     유효한 답이다: 그 종을 쓰는 승인 레시피가 없다는 사실).
     """
 
-    material = db.get(CostMaterial, material_id)
-    if material is not None:
-        db.expire(material, ["prices"])
+    return recompute_for_materials(db, [material_id])
+
+
+def recompute_for_materials(db: Session, material_ids: Sequence[int]) -> list[int]:
+    """여러 종을 **한 번에** — 같은 레시피를 두 번 재계산하지 않는다 (적대 리뷰 1R P2-1).
+
+    채택은 한 번에 9종의 단가를 만드는데 종마다 따로 돌리면 그 9종을 다 쓰는 레시피가
+    **아홉 번** 재계산된다(멱등이라 결과는 같지만 필요 없는 쓰기다). 종 집합을 먼저 모아
+    레시피를 한 번만 고른다.
+    """
+
+    ids = [int(i) for i in dict.fromkeys(material_ids)]
+    if not ids:
+        return []
+
+    for mid in ids:
+        material = db.get(CostMaterial, mid)
+        if material is not None:
+            db.expire(material, ["prices"])
 
     recipes = (
         db.query(CostRecipe)
         .join(CostRecipeLine, CostRecipeLine.recipe_id == CostRecipe.id)
         .filter(
-            CostRecipeLine.material_id == material_id,
+            CostRecipeLine.material_id.in_(ids),
             CostRecipe.status == "approved",
         )
         .distinct()
@@ -669,9 +685,8 @@ def adopt_excel_prices(db: Session, recipe_id: int, note: Optional[str] = None) 
     db.flush()
     result = recompute(db, recipe)
     # 그 종을 쓰는 «다른» 승인 레시피들 — 이 레시피는 바로 위에서 이미 계산했다.
-    also: set[int] = set()
-    for mid in adopted_ids:
-        also.update(recompute_for_material(db, mid))
+    # 종 전체를 한 번에 넘긴다(1R P2-1: 종마다 돌리면 같은 레시피를 아홉 번 재계산한다).
+    also = set(recompute_for_materials(db, adopted_ids))
     also.discard(recipe.id)
     return {
         "adopted": adopted,

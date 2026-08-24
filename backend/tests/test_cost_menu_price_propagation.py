@@ -424,3 +424,112 @@ def test_price_without_effective_date_never_becomes_latest(client):
     assert len(client.get(f"/api/cost/materials/{pkg['id']}").json()["prices"]) == 2
     # 그러나 계산은 «날짜 있는» 채택분(98원)을 계속 쓴다.
     assert _board_std(client, ra) == {"2350.70"}
+
+
+# ══════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R P1-1 — 경로 1·2(원장 연결·refresh)가 안전망 밖이었다
+# ══════════════════════════════════════════════════════════════════
+# ★리뷰어 재현: `link_ledger_line`·`refresh_ledger_price`의 `_propagate` 한 줄을 각각 지워도
+#   cost_menu 스위트 **91 passed**. 즉 커밋 메시지의 *"호출부 한 줄만 지워도 깨진다"*가
+#   **6경로 중 4경로에서만** 참이었다 — 이 슬라이스가 고치려던 「한쪽만 고친다」가 정확히
+#   이 파일 안에서 재생산돼 있었다. 코드가 나머지 4경로와 구조적으로 같아 «작동할 개연성»은
+#   높았지만 그건 추정이고, 격리 성공은 충분조건이 아니다.
+#
+# ★여기서 쓰는 단언은 **「보드(저장 행) == 상세(조회 시점 계산)」**다. 이 슬라이스가 고친 병이
+#   바로 그 둘이 갈라지는 것이므로, 값을 손으로 계산해 박는 것보다 이 등식이 정확히 그 병을
+#   겨눈다(반올림 규칙이 바뀌어도 등식은 유효하다).
+#
+# ★로트는 **prod 실측값(LOT_JUL)을 임포트해** 쓴다 — 복사하면 한 벌이 낡는다. 통관일만 오늘로
+#   두는데, 「최신 단가」가 발효일 내림차순이라 과거 통관일이면 채택분(오늘)을 못 이겨
+#   **전파가 돌아도 화면이 안 바뀌는** 시나리오가 되기 때문이다.
+try:  # pytest는 rootdir에 따라 둘 중 하나로 잡는다
+    from tests.test_cost_menu_http import LOT_JUL
+except ImportError:  # pragma: no cover
+    from test_cost_menu_http import LOT_JUL
+
+
+def _confirmed_material_lot(client) -> tuple[dict, dict]:
+    today = date.today().isoformat()
+    body = {
+        **LOT_JUL,
+        "hbl_no": "TEST-PROP-1",
+        "invoice_no": "SO-PROP-1",
+        "declaration_no": "00000-26-000000M",
+        "declaration_date": today,
+        "eta": today,
+    }
+    r = client.post("/api/import-cost/shipments", json=body)
+    assert r.status_code == 201, r.text
+    sid = r.json()["id"]
+    r = client.post(f"/api/import-cost/shipments/{sid}/confirm")
+    assert r.status_code == 200, r.text
+    assert r.json()["confirm_result"]["confirmed"] is True, r.json()["confirm_result"]
+    return client.get(f"/api/import-cost/shipments/{sid}").json(), body
+
+
+def _material_line(ship: dict) -> dict:
+    return next(x for x in ship["invoice_lines"] if x["line_type"] == "material")
+
+
+def _assert_board_matches_detail(client, recipe_id: int) -> None:
+    """★이 슬라이스의 불변식 — **저장 행과 조회 시점 계산이 갈라지지 않는다.**"""
+
+    detail = client.get(f"/api/cost/recipes/{recipe_id}").json()["standard"]
+    assert _board_std(client, recipe_id) == {detail["std_cost_inc_vat"]}, (
+        f"보드와 상세가 갈라졌다 — recipe_id={recipe_id}"
+    )
+
+
+def test_linking_a_ledger_line_reaches_the_board(client):
+    """★경로 1(원장 연결) — 원장에서 온 단가가 «모든» 승인 레시피의 보드에 닿는다."""
+
+    ra, rb = _ready(client)
+    ship, _body = _confirmed_material_lot(client)
+    line = _material_line(ship)
+    pkg = _material(client, "패키지")
+
+    r = client.post(f"/api/cost/materials/{pkg['id']}/prices/link",
+                    json={"import_invoice_line_id": line["id"]})
+    assert r.status_code == 201, r.text
+
+    # 원장 값이 실제로 「최신」이 됐다 — 이게 아니면 시나리오 자체가 성립 안 한다.
+    mat = client.get(f"/api/cost/materials/{pkg['id']}").json()
+    assert mat["latest_price_ex_vat"] == line["unit_cost_ex_vat"], mat["prices"]
+
+    assert _board_std(client, ra) != {"2350.70"}, "원장 단가가 보드에 안 닿았다"
+    assert _board_std(client, rb) != {"1690.70"}, "공유 종인데 한쪽만 움직였다"
+    _assert_board_matches_detail(client, ra)
+    _assert_board_matches_detail(client, rb)
+
+
+def test_refreshing_a_ledger_price_reaches_the_board(client):
+    """★경로 2(refresh) — 원장이 스스로 고친 값도 «모든» 승인 레시피의 보드에 닿는다."""
+
+    ra, rb = _ready(client)
+    ship, body = _confirmed_material_lot(client)
+    line = _material_line(ship)
+    pkg = _material(client, "패키지")
+
+    linked = client.post(f"/api/cost/materials/{pkg['id']}/prices/link",
+                         json={"import_invoice_line_id": line["id"]})
+    assert linked.status_code == 201, linked.text
+    price_id = linked.json()["linked_price_id"]
+    after_link = _board_std(client, ra)
+
+    # 환율 정정 → 재확정. 원장 값이 바뀌고 저장 행은 「어긋남」이 된다.
+    assert client.post(f"/api/import-cost/shipments/{ship['id']}/reopen").status_code == 200
+    assert client.put(f"/api/import-cost/shipments/{ship['id']}",
+                      json={**body, "fx_rate": "250.00"}).status_code == 200
+    again = client.post(f"/api/import-cost/shipments/{ship['id']}/confirm").json()
+    assert again["confirm_result"]["confirmed"] is True
+    new_ex = _material_line(again)["unit_cost_ex_vat"]
+    assert new_ex != line["unit_cost_ex_vat"], "환율을 고쳤는데 원장 단가가 그대로면 시나리오 무효"
+
+    # 사람이 화면에서 「갱신」을 누른다.
+    r = client.post(f"/api/cost/materials/{pkg['id']}/prices/{price_id}/refresh")
+    assert r.status_code == 200, r.text
+    assert r.json()["material"]["latest_price_ex_vat"] == new_ex
+
+    assert _board_std(client, ra) != after_link, "갱신된 원장 값이 보드에 안 닿았다"
+    _assert_board_matches_detail(client, ra)
+    _assert_board_matches_detail(client, rb)
