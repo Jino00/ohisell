@@ -1001,7 +1001,10 @@ export function importDisabledReason(cost: File | null, mapping: File | null): s
 export function importHalfNotice(cost: File | null, mapping: File | null): string | null {
   if (cost && mapping) return null;
   if (cost)
-    return "원가 정본만 올립니다 — 부자재 종과 구성이 갱신되고, SKU 링크·옵션 수는 그대로 둡니다.";
+    // ★「갱신」이라고만 쓰면 «늘어나기만 한다»로 읽힌다(적대 리뷰 P2 채택). 재매칭이
+    //   실패하면 그 레시피의 구성은 **비워진다** — 두 파일 경로와 같은 규칙이지만,
+    //   말하지 않으면 사람은 그 가능성을 모른 채 누른다.
+    return "원가 정본만 올립니다 — 부자재 종과 구성이 다시 맞춰집니다(원가표에서 못 찾은 레시피는 구성이 비워집니다). SKU 링크·옵션 수는 그대로 둡니다.";
   if (mapping)
     return "매핑 정본만 올립니다 — SKU 링크가 갱신되고, 구성·부자재 종은 그대로 둡니다.";
   return null;
