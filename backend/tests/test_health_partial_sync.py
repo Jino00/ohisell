@@ -53,10 +53,17 @@ class _Sched:
         return []
 
 
-def _log(db, *, msg: str | None, age_h: float = 1, status: str = "success"):
+def _log(db, *, msg: str | None, age_h: float = 1, status: str = "success",
+         base: datetime = NOW):
+    # ★`base`를 여는 이유: 순수 코어 테스트는 `build_health(..., NOW)`로 시계를 **주입**하지만,
+    #   HTTP 경계 테스트가 타는 라우트는 `kst_now()`(실제 시각)를 쓴다(routers/scheduler.py).
+    #   그래서 고정 상수 NOW로 심으면 벽시계가 창(PARTIAL_SYNC_WINDOW_HOURS=24)을 지나는 순간
+    #   행이 조용히 창 밖으로 밀려 «부분수집 0건»이 되어 테스트가 썩는다 — 2026-08-24 실측:
+    #   CI가 결제 차단으로 2주 멈춘 사이 이 테스트가 그 방식으로 죽어 있었다.
+    #   HTTP 경계 테스트는 **라우트와 같은 시계**로 심어야 언제 돌려도 같은 결과가 난다.
+    at = base - timedelta(hours=age_h)
     db.add(SyncLog(channel_id=6, sync_type="orders", status=status, records_synced=336,
-                   error_message=msg, started_at=NOW - timedelta(hours=age_h),
-                   completed_at=NOW - timedelta(hours=age_h)))
+                   error_message=msg, started_at=at, completed_at=at))
     db.commit()
 
 
@@ -132,8 +139,12 @@ def test_health_route_actually_returns_partial_sync(db):
 
     from app.database import get_db  # noqa: PLC0415
     from app.main import app  # noqa: PLC0415
+    from app.utils.kst import kst_now  # noqa: PLC0415
 
-    _log(db, msg=f"{PARTIAL_SYNC_MARKER} 변경상태 스윕 미완주 1일: 2026-08-18")
+    # ★라우트가 쓰는 시계(`kst_now()`)를 기준으로 심는다 — NOW 상수로 심으면 벽시계가 24시간
+    #   창을 지난 뒤부터 영구 실패한다(위 `_log` 주석 참조).
+    _log(db, msg=f"{PARTIAL_SYNC_MARKER} 변경상태 스윕 미완주 1일: 2026-08-18",
+         base=kst_now())
 
     app.dependency_overrides[get_db] = lambda: db
     try:
