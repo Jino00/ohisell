@@ -5566,6 +5566,10 @@ export interface CostImportResult {
   mapping_anomalies: string[];
   groups: number;
   report: CostImportReportRow[];
+  /** 이번 업로드가 «움직인» 절반들. 한쪽만 올렸을 때 한 항목이다(D-CPP-56 후속). */
+  updated_halves?: string[];
+  /** 이번 업로드가 «손대지 않은» 것 — 조용한 반쪽 갱신을 막는 자백 필드. */
+  untouched?: string[];
 }
 
 export function fetchCostRecipes(formFactor?: string): Promise<{ items: CostRecipe[] }> {
@@ -5580,14 +5584,17 @@ export function fetchCostRecipe(recipeId: number): Promise<CostRecipe> {
 /** 두 엑셀 업로드 → 초안. **아무것도 승인하지 않고 단가도 만들지 않는다**(계약 §2-2·§3).
  *
  * ★`headers`를 **빈 객체로 덮는다** — `fetchApi`의 기본 `Content-Type: application/json`이
- * 그대로 가면 multipart 경계(boundary)가 안 붙어 서버가 파일을 못 읽는다. */
+ * 그대로 가면 multipart 경계(boundary)가 안 붙어 서버가 파일을 못 읽는다.
+ *
+ * ★**한쪽만 보내도 된다**(Jino 2026-08-24). 안 고른 슬롯은 **아예 안 붙인다** —
+ * 빈 문자열이나 빈 Blob을 붙이면 서버가 「올렸는데 파싱 실패」로 읽어 400이 난다. */
 export function importCostRecipes(
-  costFile: File,
-  mappingFile: File,
+  costFile: File | null,
+  mappingFile: File | null,
 ): Promise<CostImportResult> {
   const form = new FormData();
-  form.append("cost_file", costFile);
-  form.append("mapping_file", mappingFile);
+  if (costFile) form.append("cost_file", costFile);
+  if (mappingFile) form.append("mapping_file", mappingFile);
   return fetchApi("/api/cost/recipes/import", {
     method: "POST",
     headers: {},
