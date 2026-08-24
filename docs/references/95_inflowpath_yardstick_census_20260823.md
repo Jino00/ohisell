@@ -358,15 +358,42 @@ accel_gate:        gate_end "factor_low" · accel_total 221 · brake_total 663
                    ratio_selection 3.0 · ratio_after_gate_low 3.4 · ratio_after_gate_high 3.0
 ```
 
-| 항목 | 배포 전 | 배포 후 |
+| 항목 | 배포 전 (08-23 22:5x) | **배포 후 (08-24 08:2x)** |
 |---|---|---|
-| `factor_low` | 1.0 | `[배포 후 채움]` |
-| `factor_high` | 1.3318 | `[배포 후 채움]` |
-| `window_revenue` | 45,945,760 | `[배포 후 채움]` |
-| `window_conv_amt` | 34,499,980 | `[배포 후 채움]` |
-| `accel_total` / `brake_total` | 221 / 663 | `[배포 후 채움]` |
-| `survive_low` / `survive_high` | 195 / 221 | `[배포 후 채움]` |
-| `ratio_selection` / `ratio_after_gate_low` / `ratio_after_gate_high` | 3.0 / 3.4 / 3.0 | `[배포 후 채움]` |
+| `factor_low` | 1.0 | ★**0.827** |
+| `factor_high` | 1.3318 | 1.3092 |
+| `window_revenue` | 45,945,760 | 45,105,560 |
+| `window_conv_amt` | 34,499,980 | 34,453,520 |
+| `accel_total` / `brake_total` | 221 / 663 | 218 / 660 |
+| `survive_low` / `survive_high` | 195 / 221 | 170 / **218** |
+| `ratio_selection` / `ratio_after_gate_low` / `ratio_after_gate_high` | 3.0 / 3.4 / 3.0 | 3.028 / 3.882 / **3.028** |
+| `gate_end` | `factor_low` | ★**`factor_high`** |
+| 하한 근거 필드 | 없음 | ★**5종 실림** — `factor_low_source`·`_window`·`_evidence`·`_caveat`·`_window_spread` |
+
+**읽는 법 — 무엇이 «변경의 효과»이고 무엇이 «창 이동»인가**:
+- **변경의 효과**: `factor_low` 1.0→0.827 · `gate_end` `factor_low`→`factor_high` · 근거 5종 신설.
+  그리고 **게이트가 상한을 쓰므로 통과 건수는 `survive_high`(218)** — 하한을 썼다면 170이었다
+  (같은 응답 안에 `survive_low`로 병기돼 있어 사후 재구성이 된다). **48건이 ⓐ 재배정으로 산 것**이다.
+- **창 이동**: 창이 07-25~08-23 → **07-26~08-24**로 하루 굴렀다. `factor_high` 1.3318→1.3092,
+  `window_*`·`accel_total`·`brake_total`의 소폭 변화는 전부 이 롤링 창 재계산 때문이지 이 배포의
+  효과가 아니다(§9 「창 표류 주의」의 폭 안). **두 열을 빼서 「배포로 −3건」이라 읽으면 안 된다.**
+
+### ★배포 후 라이브 재측정 — D-NAO-236이 prod에서 실제로 그렇게 도는가 (08-24 08:2x KST)
+
+§9-3의 검증은 «인메모리로 얹은» 새 코드였다. 이제 **배포된 코드 그대로** 같은 측정을 다시 돌렸다
+(`/tmp/measure_floor_blocks.py`, `mode=ro`, 창 08-09~23·후보 913건):
+
+| | 하한 1.0 | 하한 0.827 | |
+|---|---|---|---|
+| `basis="interval_floor_blocks_up"` | **0** | **0** | ★prod에서 이 basis가 사라졌다 |
+| `basis="interval_floor_min_step"` | 51 | 117 | 새 분기가 실제로 돈다 |
+| 액셀 `up` | 354 | **354** | ★**완전 불변** |
+| 브레이크 `down` | 557 | 557 | 불변 |
+| `hold` | 2 | 2 | 불변 |
+| `up → 非up` 뒤집힘 | — | **0건** | ★§9-2의 71건이 0이 됐다 |
+
+⇒ §9-3의 배포 전 예측(354/557/2 동일)이 **배포 후 라이브에서 그대로 재현**됐다. 예측과 관측이
+어긋난 항목 **0건**.
 
 **창 표류 주의**: 같은 날 22:24 KST에 잰 같은 엔드포인트는 `factor 1.3314 · window_revenue
 45,932,860`이었다 — 롤링 30일 창이 조회 시각마다 재계산되므로 이 정도(소수 넷째자리·
