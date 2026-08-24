@@ -34,7 +34,7 @@ import type {
 //   «자신»을 vi.fn()으로 잡아야 한다(아래 vi.mock 팩토리에서 오버라이드).
 //   fetchCostRecipes도 테스트별로 응답을 바꿔치기하려고 함께 들여온다.
 import { approveCostRecipe, fetchCostRecipes, unapproveCostRecipe } from "../lib/api";
-// ★2R(적대 리뷰) P1-1·P1-2용 — 부자재 탭의 「+ 종 추가」·「승인」·「+ 수동 단가 입력」이
+// ★2R(적대 리뷰) P1-1·P1-2용 — 부자재 탭의 「+ 종 추가」·「승인」·「+ 단가 입력·수정」이
 //   실제로 그 id·이름으로 백엔드를 부르는지 재려면 이 셋도 vi.fn()으로 잡아야 한다
 //   (위 approveCostRecipe와 같은 사정 — 아래 vi.mock 팩토리에서 오버라이드).
 //   `fetchCostMaterials`는 P1-1 테스트가 「생성 뒤 재조회」를 흉내내려고 큐에 얹는다.
@@ -1935,7 +1935,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(note.textContent).toContain("600원");         // 값
       expect(note.textContent).toContain("정본");           // 무엇인지 (「단가가 아니다」가 아니다)
       expect(note.textContent).toContain("레시피");         // 어디에 그 조작이 있는지
-      expect(note.textContent).toContain("수동 단가 입력");
+      expect(note.textContent).toContain("단가 입력·수정");
       // ★없는 길을 가리키지 않는다 — 이 종엔 원장 부자재 라인이 0건이다.
       expect(note.textContent).not.toContain("원장 부자재 라인");
     });
@@ -2005,7 +2005,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       // ★핵심 — **원장 연결을 안내하지 않는다.** 그 길은 이 종에 0건이라 영영 안 온다.
       expect(note).not.toContain("원장 부자재 라인");
       expect(note).toContain("엑셀 참고값을 단가로 채택");
-      expect(note).toContain("수동 단가 입력");
+      expect(note).toContain("단가 입력·수정");
     });
 
     it("★수입 종은 엑셀 값을 «대조값»이라 부르고 원장 연결을 안내한다 (합격 12)", () => {
@@ -2019,7 +2019,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(lotCountText(bare, true)).toBe("단가 없음 — 원장 연결 또는 수동 입력 필요");
       // 비수입 종에게 「원장 연결」은 없는 길이다 — 말하지 않는다.
       expect(lotCountText(bare, false)).not.toContain("원장 연결");
-      expect(lotCountText(bare, false)).toContain("수동 단가 입력");
+      expect(lotCountText(bare, false)).toContain("단가 입력·수정");
     });
   });
 
@@ -2126,7 +2126,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
 
   // ── 적대 리뷰 2R P1-2 채택 (2026-08-23) ────────────────────────────────────
   // M20(승인 버튼 텍스트→{null})·M23(<MaterialList> 호출부의 onApprove 배선 제거)·
-  // M22(「+ 수동 단가 입력」 버튼 제거)가 767건 전부 초록으로 살아남았다. 직전 라운드의
+  // M22(「+ 단가 입력·수정」 버튼 제거)가 767건 전부 초록으로 살아남았다. 직전 라운드의
   // P1(레시피 「승인」 버튼 절단)과 같은 모양인데 «부자재 탭»만 안 지켜지고 있었다 —
   // `lotCountText`가 화면에서 사람을 그 버튼으로 보내는데(`원장 연결 또는 수동 입력
   // 필요`), 그 버튼이 사라져도 스위트는 조용했다.
@@ -2137,10 +2137,10 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     });
 
     // M20·M23을 죽인다 — 버튼 텍스트가 사라지거나 onApprove 배선이 빠지면 이 단언이 운다.
-    it("미승인 종 — 목록 줄에 「승인」 버튼이 있고 누르면 그 종 id로 patchCostMaterial({status:'approved'})가 불린다", async () => {
+    it("미승인 종 — 목록 줄에 「이 단가를 승인」 버튼이 있고 누르면 그 종 id로 patchCostMaterial({status:'approved'})가 불린다", async () => {
       await openMaterialsTab();
       const row = screen.getByTestId(`material-${FILM_WITH_REF.id}`);
-      const approveBtn = within(row).getByRole("button", { name: "승인" }) as HTMLButtonElement;
+      const approveBtn = within(row).getByRole("button", { name: "이 단가를 승인" }) as HTMLButtonElement;
       expect(approveBtn.disabled).toBe(false);
 
       fireEvent.click(approveBtn);
@@ -2168,22 +2168,36 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         />,
       );
       const row = screen.getByTestId(`material-${FILM_WITH_REF.id}`);
-      expect(within(row).queryByRole("button", { name: "승인" })).toBeNull();
+      expect(within(row).queryByRole("button", { name: "이 단가를 승인" })).toBeNull();
+    });
+
+    // ★★Jino 2026-08-24: *"부자재 단가를 수정 … 할 수 있는 곳이 전혀 없어. 수정했을때는
+    //   이력이 있어야 할거고"*. 조작은 **실재했는데** 화면이 「덮어쓰지 않고 쌓인다」를
+    //   한 번도 말하지 않아 「수정하는 곳이 없다」로 읽혔다. 문구를 지우면 그 오해가
+    //   그대로 돌아오므로 **문구 자체를 표면으로 붙든다.**
+    it("★단가 입력이 «덮어쓰기가 아니라 이력으로 쌓인다»고 화면이 말한다", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      const note = await screen.findByTestId("manual-price-append-note");
+      expect(note.textContent).toContain("덮어쓰지 않고");
+      expect(note.textContent).toContain("새 발효일");
+      // ★「이전 값이 남는다」까지 말해야 «이력»에 대한 답이 된다 — 앞부분만 남기는 변이를 막는다.
+      expect(note.textContent).toContain("이전 값은");
     });
 
     // M22를 죽인다. ★안내 문구와 버튼의 실재를 «한 테스트에서 함께» 잰다 —
     //   문구가 가리키는 대상이 실제로 있는지를 같이 재면, 둘 중 하나가 사라질 때 운다.
     //   ★2026-08-24 S4 ㉯: 비수입 종의 안내가 ③ 번호 매김을 안 쓰게 바뀌었지만
     //   **가드의 본질은 「가리킨 버튼이 실재하는가」**라 그대로 유효하다 — 문자열만 옮겼다.
-    it("「+ 수동 단가 입력」 버튼이 실재하고, 안내 문구가 가리키는 대상과 일치한다 — 누르면 그 종 id로 addCostManualPrice가 불린다", async () => {
+    it("「+ 단가 입력·수정」 버튼이 실재하고, 안내 문구가 가리키는 대상과 일치한다 — 누르면 그 종 id로 addCostManualPrice가 불린다", async () => {
       await openMaterialsTab();
       fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
       const note = await screen.findByTestId("material-excel-ref-note");
-      expect(note.textContent).toContain("「+ 수동 단가 입력」");
+      expect(note.textContent).toContain("「+ 단가 입력·수정」");
 
       // ★버튼이 «실재»한다 — 안내가 가리키는 대상이 화면에 없으면 그 자체가 거짓말이다.
       const manualBtn = screen.getByRole("button", {
-        name: "+ 수동 단가 입력",
+        name: "+ 단가 입력·수정",
       }) as HTMLButtonElement;
       expect(manualBtn.disabled).toBe(false);
 
@@ -2215,7 +2229,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     it("D-CPP-55: 수동 단가는 **발효일과 함께** 보낸다 — 없으면 그 값은 최신이 못 되어 표준원가가 안 움직인다", async () => {
       await openMaterialsTab();
       fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
-      const manualBtn = await screen.findByRole("button", { name: "+ 수동 단가 입력" });
+      const manualBtn = await screen.findByRole("button", { name: "+ 단가 입력·수정" });
 
       vi.mocked(addCostManualPrice).mockClear();
       // 세 번째 물음(발효일)에 **오늘이 미리 채워져** 나온다 — 사람이 보고 고칠 수 있게.
@@ -2242,7 +2256,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     it("D-CPP-55: 발효일 물음을 취소하면 **아무것도 저장하지 않는다** — 날짜 없는 단가를 몰래 만들지 않는다", async () => {
       await openMaterialsTab();
       fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
-      const manualBtn = await screen.findByRole("button", { name: "+ 수동 단가 입력" });
+      const manualBtn = await screen.findByRole("button", { name: "+ 단가 입력·수정" });
 
       vi.mocked(addCostManualPrice).mockClear();
       const promptSpy = vi
@@ -2307,7 +2321,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       // 재조회를 일으킨다 — 선택 안 한 다른 종(FILM_WITH_REF)의 「승인」을 누른다.
       fireEvent.click(
         within(screen.getByTestId(`material-${FILM_WITH_REF.id}`)).getByRole("button", {
-          name: "승인",
+          name: "이 단가를 승인",
         }),
       );
       await screen.findByText("「지문방지필름 TPU 3매 · 필름 (bar)」 승인됨");

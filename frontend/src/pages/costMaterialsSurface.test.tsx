@@ -319,15 +319,26 @@ describe("부자재 목록 — 미확인 상태와 최신 단가가 보인다", 
     expect(within(row).getByText("미확인")).toBeTruthy();
     expect(screen.getByTestId("material-1-latest").textContent).toBe("209.9원");
     expect(within(row).getByText(/로트 2건/)).toBeTruthy();
+    // ★적대 리뷰 P2 **채택**(2026-08-24) — 출처 `<span>`을 통째로 지워도 137건이 전부
+    //   초록이었다(변이 6 SURVIVED). 이 저장소의 상습 패턴 그대로다: **함수는 값을 만드는데
+    //   화면엔 안 뜬다.** `priceSourceLabel`의 단위 테스트만으로는 「카드 안에 그려지는가」를
+    //   못 묻는다 — 그래서 여기서 **렌더된 카드 안**을 본다.
+    expect(within(row).getByText("원장")).toBeTruthy();
   });
 
-  it("★단가가 없는 종은 「—」로 보인다 — 0원으로 보이면 안 된다", () => {
+  // ★문구가 「—」 → **「단가 없음」**으로 바뀌었다 (D-CPP-56 후속, Jino 2026-08-24:
+  //   *"현재 단가 … 좀 더 직관적이었으면 좋겠어"*). **이 테스트의 의도는 그대로다** —
+  //   재는 것은 「0원으로 보이지 않는다」이고, 회색 「—」보다 「단가 없음」이 그 의도를
+  //   더 강하게 만족한다. 아래 `queryByText(/0원/)` 줄이 그 원래 단언이다.
+  it("★단가가 없는 종은 「단가 없음」이라고 말한다 — 0원으로 보이면 안 된다", () => {
     render(
       <MaterialList materials={[EMPTY_KIT]} selectedId={1} onSelect={() => {}} importedIds={new Set()} />,
     );
-    expect(screen.getByTestId("material-1-latest").textContent).toBe("—");
+    expect(screen.getByTestId("material-1-latest").textContent).toBe("단가 없음");
     const row = screen.getByTestId("material-1");
     expect(within(row).queryByText(/0원/)).toBeNull();
+    // ★회색 「—」로 되돌아가면 이 줄이 깨진다 — 「없다」를 «말하는» 것이 이 항목의 요점이다.
+    expect(screen.getByTestId("material-1-latest").textContent).not.toBe("—");
   });
 });
 

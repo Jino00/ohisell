@@ -217,7 +217,7 @@ export function lotCountText(
       //   말인데 실제로는 **아직 «넣지» 않았을 뿐**이다. 그리고 원장은 이 종에 영영 안 온다.
       return m.excel_ref_price
         ? `엑셀 단가(미확정) ${formatCostWon(m.excel_ref_price)} — 값은 있고 아직 확정만 안 했다`
-        : "단가 없음 — 「+ 수동 단가 입력」으로 넣는다 (수입 종이 아니라 원장에서 올 값이 없다)";
+        : "단가 없음 — 「+ 단가 입력·수정」으로 넣는다 (수입 종이 아니라 원장에서 올 값이 없다)";
     }
     return m.excel_ref_price
       ? `단가 없음 — 엑셀 참고값 ${formatCostWon(m.excel_ref_price)}은 있다(대조값)`
@@ -274,14 +274,14 @@ export function excelRefNoteText(
     return (
       `엑셀 단가(미확정) ${value} — 이 종은 수입 종이 아니라 **엑셀 값이 정본**이다(계약 §0-C). ` +
       `아직 확정만 안 한 상태다. 확정하는 길: 이 종을 쓰는 레시피의 상세 화면에서 ` +
-      `「엑셀 참고값을 단가로 채택」, 또는 값이 다르면 「+ 수동 단가 입력」. ` +
+      `「엑셀 참고값을 단가로 채택」, 또는 값이 다르면 「+ 단가 입력·수정」. ` +
       `이 탭에는 채택 버튼이 없다 — 채택은 레시피 단위 동작이기 때문이다.`
     );
   }
   return (
     `엑셀 참고값 ${value} — 이 종은 **수입 종**이라 정본은 원장이고 이 값은 대조값이다(계약 §3). ` +
     `단가로 만드는 길 셋: ①이 종을 쓰는 레시피의 상세 화면에서 「엑셀 참고값을 단가로 채택」 ` +
-    `②아래 「원장 부자재 라인」에서 연결 ③「+ 수동 단가 입력」. ` +
+    `②아래 「원장 부자재 라인」에서 연결 ③「+ 단가 입력·수정」. ` +
     `이 탭에는 채택 버튼이 없다 — 채택은 레시피 단위 동작이기 때문이다.`
   );
 }
@@ -351,7 +351,7 @@ export function MaterialPriceHistory({
       <div className="text-sm text-gray-500 py-3">
         {imported
           ? "단가 이력이 없다 — 아래 「원장 부자재 라인」에서 연결하거나 수동 단가를 입력한다."
-          : "단가 이력이 없다 — 이 종을 쓰는 레시피 상세에서 「엑셀 참고값을 단가로 채택」하거나 「+ 수동 단가 입력」으로 넣는다."}
+          : "단가 이력이 없다 — 이 종을 쓰는 레시피 상세에서 「엑셀 참고값을 단가로 채택」하거나 「+ 단가 입력·수정」으로 넣는다."}
         <span className="text-gray-400"> (빈 칸이지 0원이 아니다)</span>
       </div>
     );
@@ -512,26 +512,50 @@ export function MaterialList({
               {materialStatusLabel(m.status)}
             </span>
           </div>
-          <div className="text-xs text-gray-500 mt-0.5">
-            {/* 최신 단가 칸 — 없으면 「—」다(계약 §2-7). 테스트가 이 칸을 집는다. */}
-            <span data-testid={`material-${m.id}-latest`}>
-              {formatCostWon(m.latest_price_inc_vat)}
+          {/* ★현재 단가를 «주인공»으로 (Jino 2026-08-24: *"현재 단가, 수동입력가능한 버튼이
+              좀 더 직관적이었으면 좋겠어"*). 초판은 이 값이 `text-xs text-gray-500`이라
+              옆의 긴 로트 설명문과 **같은 크기**였고, 값이 없을 땐 회색 「—」여서 화면에서
+              가장 중요한 숫자가 가장 안 보였다.
+              ★없을 때 「—」가 아니라 **「단가 없음」이라고 말한다** — 기존 테스트의 의도는
+              «0원으로 보이면 안 된다»였고 그 의도는 그대로 지켜진다(오히려 더 명확하다). */}
+          <div className="mt-1 flex items-baseline gap-1.5 flex-wrap">
+            <span className="text-[11px] text-gray-500">현재 단가</span>
+            <span
+              className={`text-sm font-semibold ${
+                m.latest_price_inc_vat === null ? "text-gray-400" : "text-gray-900"
+              }`}
+              data-testid={`material-${m.id}-latest`}
+            >
+              {m.latest_price_inc_vat === null
+                ? "단가 없음"
+                : formatCostWon(m.latest_price_inc_vat)}
             </span>
-            <span className={m.stale_count > 0 ? "text-amber-700" : "text-gray-400"}>
-              {" "}
-              · {lotCountText(m, importedIds.has(m.id))}
-            </span>
+            {m.latest_price_source ? (
+              <span className="text-[11px] text-gray-500">
+                {priceSourceLabel(m.latest_price_source)}
+              </span>
+            ) : null}
+          </div>
+          <div
+            className={`text-xs mt-0.5 ${
+              m.stale_count > 0 ? "text-amber-700" : "text-gray-400"
+            }`}
+          >
+            {lotCountText(m, importedIds.has(m.id))}
           </div>
           {onApprove && m.status !== "approved" ? (
+            /* ★조작을 «조작처럼» 보이게 — 초판은 `text-[11px] text-blue-600 hover:underline`이라
+               본문 각주와 구별되지 않았고, Jino가 *"confirm 할 수 있는 곳이 전혀 없어"*라고
+               읽었다. 있는데 못 찾으면 없는 것이다(목표 카드 「판정 표면」). */
             <button
-              className="mt-1 text-[11px] text-blue-600 hover:underline disabled:opacity-40"
+              className="mt-1.5 text-[11px] px-2 py-1 rounded border border-gray-300 bg-white font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 disabled:opacity-40"
               disabled={busy}
               onClick={(e) => {
                 e.stopPropagation();
                 onApprove(m);
               }}
             >
-              승인
+              이 단가를 승인
             </button>
           ) : null}
         </li>
@@ -2104,7 +2128,7 @@ export default function CostPage() {
                   />
                 </div>
                 <button
-                  className="mt-2 text-xs text-blue-600 hover:underline disabled:opacity-40"
+                  className="mt-2 text-xs px-3 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-40"
                   disabled={busy}
                   onClick={() => {
                     const v = window.prompt("수동 단가 (VAT 제외, 원). 모르면 취소한다.");
@@ -2134,8 +2158,21 @@ export default function CostPage() {
                     );
                   }}
                 >
-                  + 수동 단가 입력
+                  + 단가 입력·수정
                 </button>
+                {/* ★★화면이 **append-only라는 사실을 말한다** (Jino 2026-08-24:
+                    *"부자재 단가를 수정 … 할 수 있는 곳이 전혀 없어. 수정했을때는 이력이
+                    있어야 할거고"*). 「수정」 버튼이 없어 보였던 진짜 이유는 이 화면이
+                    **한 번도 「덮어쓰지 않고 쌓인다」고 말하지 않았기 때문**이다 —
+                    설계는 맞는데 말을 안 했다. 값을 고치는 방법이 「새로 넣는 것」임을
+                    여기서 밝히면 「수정하는 곳이 없다」는 오해가 사라진다. */}
+                <p
+                  className="mt-1.5 text-[11px] text-gray-500"
+                  data-testid="manual-price-append-note"
+                >
+                  입력하면 <b>덮어쓰지 않고 새 발효일로 쌓인다</b> — 최신값이 계산에 쓰이고
+                  이전 값은 위 이력에 그대로 남는다.
+                </p>
 
                 {/* ★S4 ㉯ 합격 12 — 원장 표는 **이 종의 라인만** 그린다. 초판은 확정 라인
                     전건을 무필터로 그려, 필름 종을 골라도 `cleaning kits`가 떴다
