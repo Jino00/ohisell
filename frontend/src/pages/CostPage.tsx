@@ -63,9 +63,19 @@ export function materialStatusLabel(status: string): string {
   return status === "approved" ? "승인" : "미확인";
 }
 
-/** 단가 출처 라벨 — 「이 값이 어디서 왔나」가 한 칸으로 보여야 추적이 끊기지 않는다. */
-export function priceSourceLabel(source: string): string {
-  return source === "ledger" ? "원장(로트)" : "수동 입력";
+/** 단가 출처 라벨 — 「이 값이 어디서 왔나」가 한 칸으로 보여야 추적이 끊기지 않는다.
+ *
+ * ★D-CPP-56(2026-08-24)로 어휘가 바뀌었다. 초판의 「수동 입력」은 «누가 손으로 넣은 값»으로
+ * 읽혀서, 다른 제품 레시피를 열었을 때 그 단가가 **이미 확인·승인된 공용 값**이라는 사실이
+ * 전달되지 않았다. Jino 결정: *"지금 등록이 되어 있는 엑셀값을 공식 가격으로 쓰자."*
+ * ⇒ 「등록가」. 원장 파생과 **서열이 아니다** — 둘 다 확인된 공식 단가이고 이 문자열은
+ * 「어디서 왔나」만 말한다.
+ *
+ * ★함수를 **하나만** 둔다. 상태 열과 단가 이력 표가 같은 어휘를 쓰게 하려는 것이고,
+ * 사본을 두면 다음에 한쪽만 바뀐다(이 저장소가 반복해 밟은 자리). */
+export function priceSourceLabel(source: string | null | undefined): string {
+  if (!source) return "출처 미상";
+  return source === "ledger" ? "원장" : "등록가";
 }
 
 /** 엑셀 대응 라벨. **비어 있으면 「미확정」이라고 자백한다**(계약 §9-3).
@@ -885,6 +895,9 @@ export function priceStatusLabel(status: string): string {
   return PRICE_STATUS_LABEL[status] ?? status;
 }
 
+/* ★단가 출처 라벨(`priceSourceLabel`)은 이 파일 위쪽에 **이미 있다**(D-CPP-56에서 어휘 개정).
+   여기에 두 번째 사본을 만들지 않는다 — 그게 이 저장소가 반복해 밟는 자리다. */
+
 /** 매칭 근거 한 줄. 제안이지 확정이 아님을 문장이 스스로 말한다. */
 export function matchReasonText(match: CostRecipeMatch | null): string {
   if (!match || !match.match_reason) return "매칭 근거 없음";
@@ -1365,9 +1378,25 @@ export function StandardBreakdown({ standard }: { standard: CostStandard }) {
                 {/* ★유도했다는 사실이 화면까지 온다 — ×1.1은 «실제로 낸 부가세»가 아니다. */}
                 {ln.inc_derived ? <span className="text-gray-400"> (유도)</span> : null}
               </td>
+              {/* ★확인된 단가임을 «한눈에» — Jino 원문(2026-08-24): *"이미 확인되어서 승인된
+                  부자재 단가는 표시를 해주자. 그러면 다른 제품을 레시피에서 볼때 확인된
+                  단가라는걸 쉽게 알아볼 수 있잖아?"*. 다른 제품 레시피를 열면 이 종들이 이미
+                  단가를 갖고 있는데, 초판은 그것을 영어 `manual`로만 말해 「내가 손으로 넣은
+                  값인가」와 「이미 확인된 공용 단가인가」가 구별되지 않았다.
+                  ★`usable === true`는 곧 «종이 승인됐고 쓸 수 있는 단가가 있다»이다 —
+                  미승인 종은 단가가 있어도 `material_unapproved`로 떨어져 이 가지에 못 온다
+                  (`recipes._recipe_lines`). 그래서 이 배지는 승인 사실을 다시 조회하지 않는다. */}
               <td className="py-1">
                 {ln.usable ? (
-                  <span className="text-gray-500">{ln.price_source ?? ln.price_status}</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span
+                      className="text-[10px] px-1.5 py-0.5 rounded border bg-green-50 text-green-700 border-green-200"
+                      data-testid={`breakdown-confirmed-${i}`}
+                    >
+                      확인됨
+                    </span>
+                    <span className="text-gray-500">{priceSourceLabel(ln.price_source)}</span>
+                  </span>
                 ) : (
                   <span className="text-amber-700">{priceStatusLabel(ln.price_status)}</span>
                 )}
