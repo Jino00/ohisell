@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, hierarchical_pooling, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import adgroup_scope, bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, hierarchical_pooling, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -339,6 +339,28 @@ def _auto_operate_now(db: Session, campaign_id: str) -> bool:
             )
         ).first()
     return bool(row and row[0])
+
+
+def _scope_hold_reason(db: Session, p) -> str | None:
+    """D-NAO-244 스코프 «생성측» 검사 — 스코프 밖이면 hold 사유 문자열, 안이면 None.
+
+    ★이건 «죽은 카드 방지»이지 안전장치가 아니다. 잠김의 증거는 harness.execute()의
+    ScopeGuardError 쪽에 있다 — 생성측에만 두면 pending이 영원히 0이 되어 「막혔다」와
+    「애초에 안 만들어졌다」를 구별할 수 없다(2026-08-21 실사고, M2-c). 여기서 막는 이유는
+    레인이 스코프 밖 제안을 approved로 커밋한 뒤 harness가 거부해 status=approved인 채
+    실행 실패로 남는 걸 피하려는 것뿐이다.
+
+    ★두 지점이 **같은 리졸버**(adgroup_scope.in_scope_now)를 읽는 것이 핵심이다 — 각자
+    조건을 쓰면 반드시 갈라진다(D-NAO-125 "두 상수는 항상 같이 움직여야 한다"와 같은 결).
+    """
+    if not adgroup_scope.blocked_by_scope(db, p.campaign_id, p.adgroup_id):
+        return None
+    if p.adgroup_id is None:
+        return (
+            "자동운영 스코프 — 캠페인 레벨 액션은 그룹 귀속 불가로 hold(D-NAO-244). "
+            "예산을 올리면 스코프 밖 그룹의 노출까지 같이 움직인다."
+        )
+    return f"자동운영 스코프 밖 광고그룹({p.adgroup_id}) — D-NAO-244"
 
 
 def _extract_rationale_clk(rationale: str | None) -> int | None:
@@ -828,6 +850,16 @@ def _run_budget_envelope_lane(
                 adgroup_id=p.adgroup_id, action=p.proposal_type, event_type="kill_switch",
             )
             continue
+        # D-NAO-244 스코프 검사 — 예산은 캠페인 레벨이라 스코프가 있으면 항상 여기서 걸린다.
+        scope_hold = _scope_hold_reason(db, p)
+        if scope_hold is not None:
+            result["held"].append({"id": p.id, "reason": scope_hold})
+            _record_blocked(
+                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=scope_hold,
+                now=now, target_type=p.target_type, target_id=p.target_id,
+                adgroup_id=p.adgroup_id, action=p.proposal_type,
+            )
+            continue
         p.status = "approved"
         p.approval_source = APPROVAL_SOURCE_DAILY
         db.commit()
@@ -997,6 +1029,17 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
                 db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
                 now=now, target_type=p.target_type, target_id=p.target_id,
                 adgroup_id=p.adgroup_id, action=p.proposal_type, event_type="kill_switch",
+            )
+            continue
+
+        # D-NAO-244 스코프 검사(킬스위치와 나란히 — 원인이 다르면 사유도 다르게 남긴다).
+        scope_hold = _scope_hold_reason(db, p)
+        if scope_hold is not None:
+            result["held"].append({"id": p.id, "reason": scope_hold})
+            _record_blocked(
+                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=scope_hold,
+                now=now, target_type=p.target_type, target_id=p.target_id,
+                adgroup_id=p.adgroup_id, action=p.proposal_type,
             )
             continue
 

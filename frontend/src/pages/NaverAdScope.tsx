@@ -1,0 +1,283 @@
+// NaverAdScope.tsx — 「PAO 스코프」. 어떤 캠페인·광고그룹을 엔진에 맡길지 + 그 성과 (D-NAO-244).
+//
+// Jino 원문 2026-08-24: *"ohisell에 PAO 메뉴를 만들어서 어떤 캠페인 - 광고그룹 을 돌릴지,
+// 그 성과는 어떻게 나오는지 보여주는 대시보드를 같이 만들자"*
+//
+// ★이 화면이 지키는 정직 규칙 셋 (D-47-h "0이면 0이라고 말하라, 모르면 0이라 말하지 마라"):
+//   ①총이익이 null이면 «모름»으로 그린다 — 0원으로 그리면 적자 그룹이 손익분기로 보인다.
+//   ②스코프를 지정해도 캠페인이 꺼져 있으면 **아무것도 실행되지 않는다** — 그 사실을 상단에
+//     크게 말한다. 「맡겼다」와 「돌고 있다」를 화면이 뭉치면 n=45의 사고가 화면에서 재발한다.
+//   ③스코프 «해제»와 «끄기»는 결과가 정반대다(해제=전 그룹 복귀 / 끄기=그 그룹만 제외).
+//     확인창이 그 차이를 말한다.
+// ★조회 + 스코프 설정만 한다. 이 화면에 **엔진을 켜는 버튼은 없다**(auto_operate는 별도 결정).
+import { useState } from "react";
+import {
+  Card, Table, Th, Td, Badge, Loading, EmptyState, LayerNav,
+} from "../components/ui";
+import { useAsyncData } from "../lib/useAsyncData";
+import { num } from "../lib/format";
+import {
+  fetchPaoScopeRoster, putPaoScopeAdgroup, deletePaoScopeAdgroup,
+  type PaoScopeCampaign, type PaoScopeAdgroup, type PaoScopeRole,
+} from "../lib/api";
+
+const ROLE_LABEL: Record<PaoScopeRole, string> = {
+  accel: "액셀",
+  boundary: "경계",
+  brake: "브레이크",
+};
+const ROLE_HINT: Record<PaoScopeRole, string> = {
+  accel: "고ROAS·저지출 — 올릴 자리",
+  boundary: "BEP 부근 — ROAS는 내려도 총이익이 느는 구간",
+  brake: "출혈 — 내리거나 제외할 자리",
+};
+
+/** 총이익 셀. ★null은 «0원»이 아니라 «모름»이다. */
+function ProfitCell({ value, status }: { value: number | null; status: string }) {
+  if (value === null) {
+    return (
+      <span className="text-gray-400" title={status === "bep_unknown" ? "BEP를 해석하지 못했습니다(상품 원가 미연결)" : status}>
+        모름
+      </span>
+    );
+  }
+  return <span className={value < 0 ? "text-red-600" : "text-emerald-700"}>{num(value)}</span>;
+}
+
+export default function NaverAdScope() {
+  const [days, setDays] = useState(21);
+  const [reloadKey, setReloadKey] = useState(0);
+  const { data, error } = useAsyncData(() => fetchPaoScopeRoster({ days }), [days, reloadKey]);
+
+  return (
+    <div className="space-y-4">
+      <LayerNav />
+      <Card
+        title="PAO 스코프 — 무엇을 엔진에 맡길까"
+        right={
+          <div className="flex items-center gap-1">
+            {[7, 21, 51].map((d) => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => setDays(d)}
+                className={`px-2 py-0.5 text-xs rounded-full ${
+                  days === d ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                {d}일
+              </button>
+            ))}
+          </div>
+        }
+      >
+        {error ? (
+          <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 서버 로그를 확인하세요." />
+        ) : data === null ? (
+          <Loading />
+        ) : data.campaigns.length === 0 ? (
+          <EmptyState
+            reason="이 창에 집행된 광고가 없습니다."
+            hint="기간을 넓히거나 수집 상태를 확인하세요."
+          />
+        ) : (
+          <>
+            <EngineStateNotice campaigns={data.campaigns} />
+            <div className="px-4 pb-2 text-xs text-gray-500">
+              창 {data.window.date_from} ~ {data.window.date_to} ({data.window.days}일, 오늘 제외)
+              {" · "}
+              총이익 보정계수 {data.correction_factor.value.toFixed(4)}
+              <span className="text-gray-400">
+                {" "}({data.correction_factor.source ?? "출처 미상"})
+              </span>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {data.campaigns.map((c) => (
+                <CampaignBlock key={c.campaign_id} c={c} onChanged={() => setReloadKey((k) => k + 1)} />
+              ))}
+            </div>
+          </>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/** ★「맡겼다」 ≠ 「돌고 있다」 — 스코프가 있는데 엔진이 꺼져 있으면 크게 말한다. */
+function EngineStateNotice({ campaigns }: { campaigns: PaoScopeCampaign[] }) {
+  const scoped = campaigns.filter((c) => c.has_scope);
+  if (scoped.length === 0) return null;
+  const running = scoped.filter((c) => c.auto_operate && c.optimizer === "ours");
+  if (running.length === scoped.length) return null;
+  const stopped = scoped.filter((c) => !(c.auto_operate && c.optimizer === "ours"));
+  return (
+    <div className="mx-4 mt-3 mb-1 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
+      <b>스코프는 지정돼 있지만 엔진은 이 캠페인에서 돌지 않습니다</b> —{" "}
+      {stopped.map((c) => c.name).join(", ")}. 스코프는 캠페인 스위치{" "}
+      <span className="font-mono">auto_operate</span> «아래»의 축이라, 캠페인이 꺼져 있으면 실행은 0입니다.
+      켜는 것은 이 화면이 아니라 별도 결정입니다.
+    </div>
+  );
+}
+
+function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => void }) {
+  const [open, setOpen] = useState(c.has_scope);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50"
+      >
+        <span className="text-gray-400 text-xs w-3">{open ? "▾" : "▸"}</span>
+        <span className="text-sm font-medium text-gray-900 flex-1 min-w-0 truncate">{c.name}</span>
+        {c.has_scope ? (
+          <Badge tone="owner">스코프 {c.scoped_count}/{c.adgroup_count}</Badge>
+        ) : (
+          <Badge tone="neutral">전 그룹</Badge>
+        )}
+        <Badge tone={c.auto_operate && c.optimizer === "ours" ? "good" : "neutral"}>
+          {c.optimizer === "ours" ? (c.auto_operate ? "가동" : "우리·정지") : c.optimizer === "mop" ? "MOP" : "수동"}
+        </Badge>
+        <span className="text-xs text-gray-500 tabular-nums w-24 text-right">{num(c.cost)}원</span>
+        <span className="text-xs tabular-nums w-24 text-right">
+          <ProfitCell value={c.gross_profit} status="ok" />
+        </span>
+      </button>
+      {open && (
+        <div className="pb-3">
+          {c.has_scope && (
+            <p className="px-4 pb-2 text-xs text-gray-500">
+              ★이 캠페인은 «일부 그룹만» 맡긴 상태라 <b>캠페인 예산 조정은 엔진이 하지 않습니다</b> —
+              예산은 광고그룹으로 나눌 수 없어서, 열어두면 스코프 밖 그룹의 노출까지 같이 움직입니다.
+            </p>
+          )}
+          <AdgroupTable c={c} onChanged={onChanged} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => void }) {
+  if (c.adgroups.length === 0) {
+    return <EmptyState reason="이 창에 집행된 광고그룹이 없습니다." />;
+  }
+  return (
+    <Table
+      head={
+        <tr>
+          <Th>광고그룹</Th>
+          <Th>맡김</Th>
+          <Th>역할</Th>
+          <Th right>광고비</Th>
+          <Th right>클릭</Th>
+          <Th right>전환매출</Th>
+          <Th right>ROAS</Th>
+          <Th right>BEP</Th>
+          <Th right>총이익</Th>
+        </tr>
+      }
+    >
+      {c.adgroups.map((g) => (
+        <AdgroupRow key={g.adgroup_id} campaignId={c.campaign_id} g={g} onChanged={onChanged} />
+      ))}
+    </Table>
+  );
+}
+
+function AdgroupRow({
+  campaignId, g, onChanged,
+}: { campaignId: string; g: PaoScopeAdgroup; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  async function setScope(role: PaoScopeRole | null, enabled: boolean) {
+    setBusy(true);
+    try {
+      await putPaoScopeAdgroup({ campaign_id: campaignId, adgroup_id: g.adgroup_id, role, enabled });
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeScope() {
+    // ★해제와 끄기는 결과가 정반대다 — 마지막 행을 지우면 캠페인이 «전 그룹 대상»으로 돌아간다.
+    const ok = window.confirm(
+      `「${g.name}」을 스코프에서 완전히 뺍니다.\n\n` +
+        "⚠️ 이 캠페인의 마지막 스코프 행이면, 캠페인이 «전 그룹 대상»으로 돌아갑니다\n" +
+        "(엔진이 켜지면 이 캠페인의 모든 광고그룹이 대상이 됩니다).\n\n" +
+        "그 그룹만 쉬게 하려면 «해제»가 아니라 «끄기»를 쓰세요.",
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const r = await deletePaoScopeAdgroup(campaignId, g.adgroup_id);
+      if (r.campaign_now_unrestricted) {
+        window.alert("이 캠페인의 스코프가 모두 사라져 «전 그룹 대상»으로 돌아갔습니다.");
+      }
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const scoped = g.scope_enabled !== null && g.scope_enabled !== undefined;
+
+  return (
+    <tr className={g.in_scope ? "bg-blue-50/40" : undefined}>
+      <Td>
+        <span className="font-medium text-gray-900">{g.name}</span>
+        {g.status && g.status !== "on" && (
+          <span className="ml-2 text-xs text-gray-400">{g.status}</span>
+        )}
+      </Td>
+      <Td>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => (g.in_scope ? setScope(g.scope_role, false) : setScope(g.scope_role, true))}
+            className={`px-2 py-0.5 text-xs rounded-full ${
+              g.in_scope ? "bg-blue-100 text-blue-800 font-semibold" : "bg-gray-100 text-gray-600"
+            } disabled:opacity-40`}
+            title={g.in_scope ? "이 그룹을 끕니다(행은 남습니다)" : "이 그룹을 엔진에 맡깁니다"}
+          >
+            {g.in_scope ? "맡김" : scoped ? "꺼짐" : "안 맡김"}
+          </button>
+          {scoped && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={removeScope}
+              className="px-1 text-xs text-gray-400 hover:text-red-600 disabled:opacity-40"
+              title="스코프에서 완전히 뺍니다(끄기와 결과가 다릅니다)"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </Td>
+      <Td>
+        <select
+          disabled={busy}
+          value={g.scope_role ?? ""}
+          onChange={(e) => setScope((e.target.value || null) as PaoScopeRole | null, g.scope_enabled ?? true)}
+          className="text-xs border border-gray-200 rounded px-1 py-0.5 disabled:opacity-40"
+          title={g.scope_role ? ROLE_HINT[g.scope_role] : "역할을 정하면 판정과 가드가 같은 것을 가리킵니다"}
+        >
+          <option value="">—</option>
+          {(Object.keys(ROLE_LABEL) as PaoScopeRole[]).map((r) => (
+            <option key={r} value={r}>{ROLE_LABEL[r]}</option>
+          ))}
+        </select>
+      </Td>
+      <Td right>{num(g.cost)}</Td>
+      <Td right>{num(g.clk)}</Td>
+      <Td right>{num(g.conv_amt)}</Td>
+      <Td right>{g.roas === null ? <span className="text-gray-400">—</span> : g.roas.toFixed(2)}</Td>
+      <Td right>{g.bep_roas === null ? <span className="text-gray-400">모름</span> : g.bep_roas.toFixed(3)}</Td>
+      <Td right><ProfitCell value={g.gross_profit} status={g.profit_status} /></Td>
+    </tr>
+  );
+}

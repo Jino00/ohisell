@@ -2442,6 +2442,48 @@ class NaverCampaignSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class NaverAdgroupScope(Base):
+    """자동운영 스코프의 «광고그룹» 축 (D-NAO-244). 캠페인 축(NaverCampaignSettings.auto_operate)
+    아래에 한 단계를 더 두어, 캠페인 안 일부 광고그룹만 엔진에 맡기고 나머지는 손대지 않는 것을
+    구조로 강제한다. Jino 원문 2026-08-24: *"우리 엔진의 스코프는 캠페인, 광고그룹 모두 포함해야해"*.
+
+    ★결합 규칙은 «캠페인 마스터 ∧ 그룹 제한»이다 — 진리표(adgroup_scope.in_scope_now 단일 소스):
+
+    | auto_operate | 이 캠페인의 스코프 행 | 그룹 g 판정 |
+    |---|---|---|
+    | OFF          | 무엇이든              | **전 그룹 OFF** (마스터 킬 불변 — 07-30 "모두 정지시켜줘"의 집행 경로) |
+    | ON           | 없음                  | 전 그룹 ON (**기존 캠페인 행위 불변 — 소급 0**) |
+    | ON           | 있음, g ∈ enabled     | ON |
+    | ON           | 있음, g ∉ enabled     | **OFF** |
+
+    「캠페인 OFF인데 그룹만 ON」은 지원하지 않는다 — 끄는 방향이 항상 이겨야(fail-safe) 하고,
+    캠페인 OFF가 마스터 킬이 아니게 되는 순간 킬스위치의 의미가 흐려진다.
+
+    ★행이 0개면 배포해도 행위 변화 0 — B3 카나리 게이트(AD_BID_CANARY_CAMPAIGNS)가 세운
+    「기본값은 아무것도 안 열림」 원칙을 테이블로 옮긴 것이다. 개시(행 삽입)는 별도 계약.
+
+    role: accel/boundary/brake — «이 그룹에 무엇을 기대하는가»의 라벨. 판정과 역할별 가드가
+    같은 것을 가리키게 하려고 데이터에 둔다. 엔진 산출 규칙 자체는 전역이고 이 라벨은
+    판정·가드·화면용이지 입찰 로직의 분기가 아니다.
+    """
+
+    __tablename__ = "naver_adgroup_scope"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "adgroup_id", name="uq_naver_adgroup_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    # accel(액셀·상향 기대) / boundary(경계·BEP 부근 볼륨 확장) / brake(브레이크·하향 기대)
+    role: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
+    # False = 행은 남기되 잠시 끔(되돌리기 사다리의 첫 칸 — UPDATE 1문, 배포 불요)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class NaverHourlySnapshot(Base):
     """시간별 캠페인 스냅샷 — 빠른 루프(관찰·페이싱) (D-NAO-4, 계획서 §2). 7일 롤링 보관.
 

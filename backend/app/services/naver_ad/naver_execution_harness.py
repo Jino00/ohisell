@@ -116,6 +116,13 @@ class OptimizerGuardError(Exception):
     """optimizer!='ours' 캠페인에 대한 실행 시도 — D-NAO-13 하드체크 위반."""
 
 
+class ScopeGuardError(Exception):
+    """자동운영 스코프 «밖» 광고그룹(또는 스코프 캠페인의 캠페인 레벨 액션)에 대한 엔진 실행
+    시도 — D-NAO-244. 킬스위치(auto_operate OFF)와 구별한다: 킬스위치는 「이 캠페인 전체가
+    꺼졌다」이고 이건 「캠페인은 켜져 있으나 이 그룹은 우리 몫이 아니다」라, 원인이 다르면
+    타입도 달라야 사후 채굴이 둘을 안 섞는다."""
+
+
 class ActionNotExecutableError(Exception):
     """정보성 제안(anomaly/anomaly_freshness/account_brief/trigger_*)에 대한 실행 시도 —
     이런 제안은 target 액션 자체가 없어 실행 대상이 아니다(D-3, proposal_writer 문서 참조)."""
@@ -2565,6 +2572,49 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             raise KillSwitchEngagedError(
                 f"proposal_id={proposal.id} campaign_id={proposal.campaign_id} — "
                 f"auto_operate=False(킬스위치 OFF, 쓰기 직전 재확인)"
+            )
+
+        # ★D-NAO-244 스코프 게이트 — «계약의 증거»가 서는 자리.
+        # 스코프 판정을 여기(실쓰기 초크포인트)에 두는 이유: 생성측에만 두면 pending이 영원히
+        # 0이 되어 「막혔다」와 「애초에 안 만들어졌다」를 구별할 수 없다(2026-08-21 실사고).
+        # 생성측 필터(auto_operator)는 죽은 카드를 안 만드는 «소음 제거»이고, 잠김의 증거는
+        # 이 지점이다 — 둘 다 adgroup_scope 단일 리졸버를 읽으므로 갈라질 수 없다.
+        #
+        # ★적용 대상이 `approval_source is not None`(엔진 승인분)인 것은 의도다 — 바로 위
+        # 킬스위치 가드와 동일 경계다. 스코프는 «엔진의 자율 범위»를 좁히는 장치이지 사람의
+        # 손을 묶는 게이트가 아니다(수동 콘솔 승인 approval_source=NULL은 이 블록 밖).
+        # 전역 §1 "사고가 나도 게이트를 새로 세우지 않는다" — 사람 경로에 새 게이트를 두지 않는다.
+        #
+        # adgroup_id=None(캠페인 레벨 액션 — 예산 등)은 in_scope_now가 False로 떨어뜨린다:
+        # 예산은 광고그룹으로 귀속이 원리적으로 불가능해, 스코프를 쓰는 동안 이 레버가 열려
+        # 있으면 스코프 «밖» 그룹의 노출까지 같이 움직여 경계가 통째로 뚫린다.
+        from app.services.naver_ad import adgroup_scope as _adgroup_scope
+
+        if _adgroup_scope.blocked_by_scope(db, proposal.campaign_id, proposal.adgroup_id):
+            log.warning(
+                "naver_execution_harness: 스코프 밖 — proposal_id=%s(approval_source=%s, "
+                "campaign_id=%s adgroup_id=%s) 실행 거부(쓰기·change_log 없음, D-NAO-244)",
+                proposal.id, proposal.approval_source, proposal.campaign_id, proposal.adgroup_id,
+            )
+            # 킬스위치 가드와 동일한 fail-open 일기(인자 평가까지 try 안 — 독립 리뷰 P2-1 관례).
+            try:
+                diary.write_diary_entry(
+                    db, "blocked", proposal.campaign_id,
+                    actor=diary.actor_from_approval_source(proposal.approval_source),
+                    target_type=proposal.target_type, target_id=proposal.target_id,
+                    adgroup_id=proposal.adgroup_id, action=log_action,
+                    rationale=(
+                        "자동운영 스코프 밖(쓰기 직전 재확인)"
+                        if proposal.adgroup_id is not None
+                        else "스코프 캠페인의 캠페인 레벨 액션 — 그룹 귀속 불가로 hold"
+                    ),
+                    now=now,
+                )
+            except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
+                log.warning("naver_execution_harness: diary 기록 실패(fail-open): %s", diary_err)
+            raise ScopeGuardError(
+                f"proposal_id={proposal.id} campaign_id={proposal.campaign_id} "
+                f"adgroup_id={proposal.adgroup_id} — 자동운영 스코프 밖(D-NAO-244)"
             )
 
     effective_dry_run = dry_run or action not in OPEN_ACTIONS
