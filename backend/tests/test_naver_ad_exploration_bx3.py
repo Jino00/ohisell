@@ -824,3 +824,67 @@ def test_lane_stop_observe_deduped_across_repeated_runs(db):
         OpsDiaryEntry.action == diary.OBSERVE_STOP,
     ).all()
     assert len(obs) == 1  # 4회 발동 → 1행(상태 지속 dedup)
+
+
+# ══════════ D-NAO-242 무노출 탐색 종료(not_serving) — 레인 배선 ══════════
+# 라이브 실증(2026-07-17~30): 전 기간 노출 0인 6그룹에 스텝 63건이 나갔고 그 창 실행 스텝의
+# 100%가 bid_up_explore였다. 유령 게이트(rank>5)는 순위 관측을 전제해 imp=0에 도달 못 한다.
+
+def _blind_window(db, *, adgroup_id=GRP):
+    """이 그룹의 관측창 노출을 전부 0으로 — 「사도 안 보이는 그룹」 재현(행은 존재하되 imp=0)."""
+    for row in db.query(NaverAdDaily).filter(NaverAdDaily.adgroup_id == adgroup_id).all():
+        row.imp = 0
+    db.commit()
+
+
+def test_lane_not_serving_after_blind_steps(db):
+    """★무노출 상향이 상한에 닿으면 레인이 실쓰기 없이 종결하고 카운터에 남긴다."""
+    _setup(db)
+    _blind_window(db)
+    for i in range(exploration._EXPLORATION_MAX_BLIND_STEPS):
+        _prior_step(db, changed_at=NOW - timedelta(days=2, hours=i))
+    curve = [_hour(5, imp=0, clk=0, cost=0), _hour(6, imp=0, clk=0, cost=0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0
+    assert result["explored_not_serving"] == 1
+    mock_exec.assert_not_called()          # ★실쓰기 0 — 이게 7월에 63건 나가던 자리다
+    assert any("서빙 불가" in h["reason"] for h in result["held"])
+
+
+def test_lane_still_explores_below_blind_cap(db):
+    """상한 미만이면 종전대로 스텝이 나간다 — 「첫 몇 번은 정보를 산다」가 죽지 않았는지."""
+    _setup(db)
+    _blind_window(db)
+    for i in range(exploration._EXPLORATION_MAX_BLIND_STEPS - 1):
+        _prior_step(db, changed_at=NOW - timedelta(days=2, hours=i))
+    curve = [_hour(5, imp=0, clk=0, cost=0), _hour(6, imp=0, clk=0, cost=0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored_not_serving"] == 0
+    assert result["explored"] == 1
+    mock_exec.assert_called_once()
+
+
+def test_lane_blind_streak_resets_when_exposure_returns(db):
+    """★자가 치유: 창 안에 노출이 한 번이라도 잡히면 종결하지 않는다(계절·경쟁으로 지면이
+    열리는 그룹을 영구히 막지 않는다)."""
+    _setup(db)
+    _blind_window(db)
+    for i in range(exploration._EXPLORATION_MAX_BLIND_STEPS + 2):
+        _prior_step(db, changed_at=NOW - timedelta(days=2, hours=i))
+    # 창 안 하루에 노출이 돌아왔다 → streak 소멸
+    row = db.query(NaverAdDaily).filter(NaverAdDaily.adgroup_id == GRP).first()
+    row.imp = 40
+    db.commit()
+    curve = [_hour(5, imp=0, clk=0, cost=0), _hour(6, imp=0, clk=0, cost=0)]
+    result, _mock = _run(db, curve)
+    assert result["explored_not_serving"] == 0
+
+
+def test_blind_steps_helper_fails_toward_step_when_no_rows(db):
+    """★관측 행 자체가 없으면(신규 그룹) 0을 반환 — 눈먼 첫 스텝을 조기 종결하지 않는다."""
+    _setup(db)
+    db.query(NaverAdDaily).filter(NaverAdDaily.adgroup_id == GRP).delete()
+    db.commit()
+    for i in range(exploration._EXPLORATION_MAX_BLIND_STEPS + 1):
+        _prior_step(db, changed_at=NOW - timedelta(days=2, hours=i))
+    assert auto_operator._exploration_blind_steps(db, GRP, TODAY) == 0

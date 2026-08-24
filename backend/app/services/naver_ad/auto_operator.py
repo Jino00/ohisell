@@ -2208,6 +2208,59 @@ def _exploration_last_step(db: Session, adgroup_id: str) -> dict | None:
     }
 
 
+def _exploration_blind_steps(db: Session, adgroup_id: str, today: date) -> int:
+    """★D-NAO-242 무노출 탐색 스텝 수 — 관측창 누적 노출이 **0일 때만** 센 그 창의 탐색 UP
+    성공 실쓰기 횟수. 노출이 한 번이라도 잡혔으면 0(=streak 없음, 자가 치유).
+
+    왜 필요한가: 유령 스텝 금지(VF, D-NAO-83)는 `rank > _GHOST_RANK`로 판정하는데 순위는
+    노출이 있어야 관측된다 — imp=0 그룹은 avg_rank=None이라 그 게이트에 원리적으로 도달하지
+    못하고 `step_up`을 무한 반복했다(exploration.py 상수 주석의 라이브 실증 63건 참조).
+    ladder_judgment가 이 값을 받아 상한 도달 시 'not_serving'으로 판정을 닫는다.
+
+    창: 최근 `_EXPLORATION_BLIND_LOOKBACK_DAYS`일(오늘 포함). 노출 출처는 `NaverAdDaily`
+    (adgroup grain), 스텝 출처는 `_exploration_last_step`과 **동일 관례**
+    (NaverProposal.adgroup_id ⋈ change_log, proposal_type∈EXPLORATION_STEP_TYPES,
+    action='update_bid', after_value 존재 = 성공 실쓰기만 — 가드 실패 행은 after_value가
+    없어 자연 제외). tz도 동일하게 changed_at(KST naive)을 쓴다.
+
+    ★fail-toward-step(관대) 방향을 택한 이유: 노출 데이터가 아직 안 들어온 신규 그룹을
+    「서빙 불가」로 조기 종결하면 VT4 플로어 그룹의 눈먼 첫 스텝이 회귀한다(§0 금지선 4).
+    그래서 «노출 행이 없다»가 아니라 «노출 행이 있고 합이 0»일 때만 센다 — 창 안에
+    naver_ad_daily 행 자체가 0건이면 판정 불가로 보고 0을 반환한다.
+    """
+    since = today - timedelta(days=exploration._EXPLORATION_BLIND_LOOKBACK_DAYS - 1)
+    imp_row = (
+        db.query(
+            sqlfunc.count(NaverAdDaily.id),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.imp), 0),
+        )
+        .filter(
+            NaverAdDaily.adgroup_id == adgroup_id,
+            NaverAdDaily.ad_date >= since,
+            NaverAdDaily.ad_date <= today,
+        )
+        .one()
+    )
+    row_count, imp_sum = int(imp_row[0] or 0), int(imp_row[1] or 0)
+    if row_count == 0 or imp_sum > 0:
+        return 0  # 판정 불가(관측 행 없음) 또는 노출 실재 → streak 없음
+
+    step_since = datetime.combine(since, datetime.min.time())
+    return int(
+        db.query(sqlfunc.count(NaverChangeLog.id))
+        .join(NaverProposal, NaverChangeLog.proposal_id == NaverProposal.id)
+        .filter(
+            NaverProposal.adgroup_id == adgroup_id,
+            NaverProposal.proposal_type.in_(tuple(EXPLORATION_STEP_TYPES)),
+            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.changed_at >= step_since,
+        )
+        .scalar() or 0
+    )
+
+
 def _exploration_yesterday_flow(db: Session, adgroup_id: str, yesterday: date, from_hour: int) -> int | None:
     """어제 [from_hour, 23] 시간대 이 그룹 clk 합(롤링 24h 창의 어제 부분, codex P1 자정 리셋 +
     신규 P1 유닛-레벨 교차확인). 반환 int=확정 clk / None=확정 불가(fail-toward-hold 신호).
@@ -2497,11 +2550,22 @@ def _run_exploration_for_campaign(
         # P4 밴드 동적화(D-NAO-85 §4-3): 자기 표본·보정ROAS·slope 증거가 충분한 그룹은 정적 2.5
         # 밴드 천장을 해제하고 상향 지속(한계 ROAS→BEP 동적 경계). 기본 False → 기존 판정 불변.
         deep_ok = _deep_expansion_ok(db, campaign_id, adgroup_id, today, settled_clk, response_priors)
+        # ★D-NAO-242: 무노출 상향 누적(관측창 노출 0일 때만 >0) — 상한 도달 시 'not_serving'.
+        blind_steps = _exploration_blind_steps(db, adgroup_id, today)
         verdict, vreason = exploration.ladder_judgment(
             ladder_probe, obs["since"], ceiling, step_base,
             recent_flow_clk=obs["flow_clk"], settled_clk=settled_clk, flow_available=obs["flow_available"],
-            evidence_active=win["active"], deep_ok=deep_ok,
+            evidence_active=win["active"], deep_ok=deep_ok, blind_step_streak=blind_steps,
         )
+
+        # ★D-NAO-242 무노출 탐색 종료 — 실쓰기 0(hold류). not_rank와 동형으로 진단 종료 기록.
+        if verdict == "not_serving":
+            result["explored_not_serving"] += 1
+            result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE, reason=vreason,
+                            now=now, target_type=exec_target_type, target_id=exec_target_id,
+                            adgroup_id=adgroup_id, action="bid_up")
+            continue
 
         # VF(D-NAO-83): 유령 지면(rank>5)·증거창 비활성 → 스텝 금지(기록만·실쓰기 0). 시간당
         # 관측 라인으로도 수집(ghost_hold_groups) — 일 레인 브리핑과 별개(각자 자기 런에서 파생).
@@ -3064,6 +3128,9 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         # VF(D-NAO-83 가시성 우선) 카운터·관측(라이브 관측용):
         "explored_ghost_hold": 0,  # 유령 지면(rank>5)·증거창 비활성 → 스텝 금지
         "ghost_hold_groups": [],   # 유령∧창 비활성 그룹 관측 라인(adgroup/rank/bid/사유)
+        # ★D-NAO-242 무노출 탐색 종료 카운터 — 유령 게이트가 순위 관측을 전제해 못 잡던
+        # imp=0 그룹(07-17~30 실행 스텝의 100%가 이 자리로 샜다)의 종결 수.
+        "explored_not_serving": 0,
         # VT2(D-NAO-81 B축 스파이럴 복원) 카운터(라이브 관측용):
         "vitality_alerts": 0,   # S1∧S2 스파이럴 경보 캠페인 수
         "vitality_fired": 0,    # 복원 UP 실쓰기(execute 성공) 수

@@ -113,6 +113,27 @@ _EXPLORATION_BID_INCREMENT = 10  # 10원 단위(스텝 반올림 = floor //10*10
 # 이 값 이하 입찰 ∧ 판정 표본 미달(clk<10) 그룹 = 아직 밴드 진입 안 한 방치된 신수요 후보.
 _EXPLORATION_FLOOR_BID_MAX = 100
 
+# ── ★무노출 탐색 종료(D-NAO-242, 2026-08-24) ──
+# 결함이었던 것: 유령 스텝 금지(VF, D-NAO-83)는 `rank > _GHOST_RANK`로 판정하는데, **순위는
+# 노출이 있어야 관측된다**(imp=0 → avg_rank=None). 그래서 「보이지만 나쁜 자리(rank 6)」는
+# 차단되고 「아예 안 보이는 자리(imp=0)」는 그 게이트에 원리적으로 도달하지 못해 통과했다 —
+# 더 나쁜 쪽이 더 관대하게 취급되는 역설. ladder_judgment ⓪·⑥의 기존 주석이 이 우회를
+# 명시적으로 인정하고 있었다("rank None(imp=0 콜드)은 유령 판정 불가 → 기존 경로 유지").
+# 라이브 실증(2026-07-17~30, prod `naver_change_log` 재현): 전 기간 노출 0인 6개 그룹
+# (13미니·12미니·15 각 17스텝 · Z플립1·Z폴드1·S8플러스 각 4스텝 = 63건)에 스텝이 나갔고,
+# 그 63건이 그 창 실행 스텝의 **100%가 `bid_up_explore`**였다. 50→620원까지 올려도 노출 0.
+# ★손실은 «돈»이 아니라 «정보»다: 클릭이 0이면 CPC 과금도 0이라 스톱로스(`unconverted_spend`)가
+#   볼 지출 자체가 없다 — 봉투가 못 막은 게 아니라 막을 대상이 없었다. 대신 탐색 쓰기 슬롯과
+#   2시간 쿨다운 사이클이 정보가치 0인 곳에 전량 소모됐다(그 14일의 실패 본체).
+# 처방: 연속 무노출 상향이 이 상한에 닿으면 「서빙 불가」로 **판정을 닫는다**(hold가 아니라
+# 진단 종료 — not_rank와 동형). 3은 실측값이 아니라 제안값이다(오늘 데이터는 15~17회가
+# 과하다는 것까지만 말한다) — 근거가 쌓이면 재조정한다.
+# ★자가 치유: 관측창 안에 노출이 한 번이라도 잡히면 streak가 0으로 돌아가 탐색이 재개된다
+#   (계절·경쟁 변화로 지면이 열리는 경우를 영구히 막지 않는다).
+_EXPLORATION_MAX_BLIND_STEPS = 3
+# 무노출 판정 관측창(일) — 이 창의 누적 노출이 0일 때만 blind streak를 센다.
+_EXPLORATION_BLIND_LOOKBACK_DAYS = 14
+
 
 def _apply_bm_anchor(target: Decimal, current_bid: int, bm_prior: int | None) -> Decimal:
     """BM P4(D-NAO-78) 초기입찰 프라이어 — 기울기 부재(콜드/첫 스텝/무근거) 구간에서만 사용.
@@ -566,13 +587,16 @@ def ladder_judgment(
     last_probe: dict | None, since_step_stats: dict, ceiling: int, current_bid: int,
     *, recent_flow_clk: int = 0, settled_clk: int = 0, flow_available: bool = True,
     evidence_active: bool | None = None, deep_ok: bool = False,
+    blind_step_streak: int = 0,
 ) -> tuple[str, str]:
     """사이클 래더 판정(순수·PLAN §1 가드4, D-NAO-71 18:56+19:01) — **순위 피드백 상태 기계**.
     매 탐색 사이클(≥2h)마다 직전 스텝 이후의 순위·클릭으로 다음 수를 정한다(D+1 고정 아님).
 
-    verdict ∈ {'start','step_up','reactivate','stop_observe','capped','not_rank','ghost_hold'}
+    verdict ∈ {'start','step_up','reactivate','stop_observe','capped','not_rank','ghost_hold',
+    'not_serving'}
     (BX3/VF 카운터 매핑: start/step_up/reactivate→explored 실쓰기 / stop_observe→explored_held /
-    capped→explored_capped / not_rank→explored_not_rank / ghost_hold→explored_ghost_hold).
+    capped→explored_capped / not_rank→explored_not_rank / ghost_hold→explored_ghost_hold /
+    not_serving→explored_not_serving).
 
     evidence_active(VF D-NAO-83): 증거 구매 창 활성 여부(visibility.evidence_window). 유령 지면
     (rank>_GHOST_RANK=5)에서 창이 비활성이면 스텝 금지('ghost_hold' — "보이는 자리를 사거나,
@@ -591,6 +615,10 @@ def ladder_judgment(
       settled_clk: 정착창(D-8~D-2) 클릭 합(과거 클릭 이력 = hold 상태 신호).
       flow_available: 롤링 24h 창을 실제로 확정했는지(어제 시간별 데이터 가용). False면 정체를
          확언할 수 없어 fail-toward-hold(스텝 대신 관측 — codex P1 안전 방향).
+      blind_step_streak: **무노출 관측창(_EXPLORATION_BLIND_LOOKBACK_DAYS)의 누적 노출이 0일 때만**
+         센 그 창의 탐색 상향 스텝 수(호출측이 조회·주입, 노출이 한 번이라도 있으면 0). 상한
+         (_EXPLORATION_MAX_BLIND_STEPS)에 닿으면 'not_serving'. 미주입(0)이면 기존 동작 그대로
+         (회귀 0 — 레인은 항상 명시 주입한다).
 
     상태 기계(우선순위 순):
       ⓪ last_probe None(첫 탐색): 유령(rank>_GHOST_RANK=5)∧창 비활성이면 'ghost_hold'(첫 스텝
@@ -603,6 +631,10 @@ def ladder_judgment(
          진단 종료 — 상한까지 낭비 상향 차단, 파워링크 병리와 동형).
       ③ 무클릭 ∧ 2.5<rank≤4(밴드 도달) → 'stop_observe'(상향 정지·클릭 흐름 관측 — 과열밴드
          진입 금지).
+      ③-b ★무클릭 ∧ rank None(imp=0) ∧ blind_step_streak ≥ _EXPLORATION_MAX_BLIND_STEPS →
+         'not_serving'(서빙 불가 판정·탐색 종료, D-NAO-242). 유령 게이트가 순위 관측을 전제해
+         imp=0을 원리적으로 못 잡던 구멍을 막는다 — rank가 관측되는 그룹(rank>4 밴드 밖 포함)은
+         이 분기에 도달하지 않으므로 회귀 0.
       ④ 무클릭 ∧ 밴드 밖(rank>4 또는 imp=0) ∧ 최근 24h 클릭 흐름 있음(recent_flow_clk>0) →
          'stop_observe'(흐름 살아있으면 이번 사이클 무클릭이어도 상향 정지, codex P1 자정 리셋 수정).
          흐름 확정 불가(flow_available False)도 'stop_observe'(fail-toward-hold).
@@ -675,6 +707,19 @@ def ladder_judgment(
                 f"유령 지면(순위 {float(r):.2f}>{visibility._GHOST_RANK})·증거창 비활성 — 스텝 금지"
                 "(보이는 자리를 사거나 아예 안 사거나, D-NAO-83)",
             )
+
+    # ③-b ★무노출 탐색 종료(D-NAO-242): rank None = 이 사이클 imp 0. 관측창 누적 노출이 0인
+    # 채로 상향을 상한만큼 반복했으면 「사도 안 보인다」가 확정된 것이므로 판정을 닫는다.
+    # 유령 게이트(rank>5)는 순위 관측을 전제해 여기에 원리적으로 도달하지 못했다 — 그 구멍이
+    # 07-17~30에 노출 0인 6개 그룹으로 실행 스텝의 100%를 흘려보냈다(위 상수 주석 참조).
+    # rank가 관측되는 그룹은 이 분기에 안 걸린다(밴드 밖 rank>4 포함) → 기존 동작 회귀 0.
+    if rank is None and blind_step_streak >= _EXPLORATION_MAX_BLIND_STEPS:
+        return (
+            "not_serving",
+            f"무노출 상향 {blind_step_streak}회 누적(상한 {_EXPLORATION_MAX_BLIND_STEPS})·이번 사이클도 "
+            f"노출 0 — 서빙 불가 판정, 탐색 종료(최근 {_EXPLORATION_BLIND_LOOKBACK_DAYS}일 누적 노출 0, "
+            "D-NAO-242)",
+        )
 
     # 밴드 밖(rank>4) 또는 imp=0(rank None) · 이번 사이클 무클릭 — 상향 여지 판정.
     # ④ 최근 24h 클릭 흐름 있음 → 상향 정지·관측(흐름 살아있으면 이번 사이클 무클릭이어도 hold;
