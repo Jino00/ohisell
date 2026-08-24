@@ -151,3 +151,20 @@ def test_hourly_job_has_5min_misfire_grace_not_global_1hour():
     assert scheduler_service.job_kwargs_for("run_naver_auto_operator_daily") == {}
     src = inspect.getsource(scheduler_service.start_scheduler)
     assert "job_kwargs_for(state.job_name)" in src
+
+
+def test_hourly_log_surfaces_not_serving_counter():
+    """★D-NAO-242 표면 가드(적대 리뷰 P2-1 채택, 2026-08-24).
+
+    왜 이 테스트가 있나: 적대 리뷰의 «표면 절단 변이»(scheduler 로그에서 not_serving 인자를
+    통째로 제거)가 **살아남았다** — 카운터 자체는 레인 테스트가 잡지만 「그 값이 사람이 보는
+    로그에 실제로 실리는가」는 아무 테스트도 안 봤다. 그런데 이 기능의 존재 이유가 바로
+    「07-17~30에 63건이 아무 로그에도 안 잡혀 몰랐다」이고, 코드 주석이 스스로 D-NAO-85
+    관측 갭①·D-NAO-130을 「이미 두 번 났다」고 적어 뒀다. 세 번째를 여기서 막는다.
+
+    단위 테스트는 「함수가 값을 만드나」를 묻지 「사람이 그걸 보나」를 못 묻는다 — 그래서
+    포맷 문자열과 인자 «둘 다»의 존재를 본다(하나만 보면 반쪽 변이가 통과한다).
+    """
+    src = inspect.getsource(scheduler_service.run_naver_auto_operator_hourly_job)
+    assert "not_serving=%s" in src, "시간당 레인 로그에서 not_serving 포맷이 사라졌다"
+    assert 'result["explored_not_serving"]' in src, "not_serving 카운터가 로그 인자에서 빠졌다"
