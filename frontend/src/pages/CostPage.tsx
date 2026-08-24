@@ -565,6 +565,46 @@ export function MaterialList({
   );
 }
 
+/** 이 부자재가 «어느 제품에 들어가는가» (Jino 2026-08-24:
+ *  *"각 부자재가 어느 제품에 들어가는지도 나오면 좋겠고"*).
+ *
+ * ★단가를 고치기 «전»에 **파급 범위**를 보는 자리다 — 이 종 하나를 바꾸면 아래 목록의
+ * 승인 레시피 전부가 다시 계산된다(D-CPP-55의 전파). 그걸 모르고 고치면 파급이 놀라움이 된다.
+ * ★0건은 «미상»이 아니라 사실이다 — 그렇게 말한다(계약 §2-7). */
+export function MaterialUsage({ material }: { material: CostMaterial }) {
+  const rows = material.used_by ?? [];
+  return (
+    <div className="mt-2 text-xs" data-testid="material-usage">
+      <div className="text-gray-600">
+        이 부자재를 쓰는 제품 <b>{material.used_by_count ?? rows.length}</b>건
+        {rows.length === 0 ? " — 아직 어느 레시피도 이 종을 쓰지 않는다" : null}
+      </div>
+      {rows.length ? (
+        <ul className="mt-1 space-y-0.5">
+          {rows.map((u) => (
+            <li key={`${u.recipe_id}`} className="text-gray-700">
+              <span className="text-gray-400">·</span> {u.product_name}
+              <span className="text-gray-500"> ({u.form_factor ?? "폼팩터 미상"})</span>
+              <span className="text-gray-500"> × {u.quantity ?? "—"}</span>{" "}
+              {/* ★승인 여부를 붙인다 — 「들어간다」만으로는 **계산에 쓰이는지**를 모른다.
+                  미승인 레시피는 단가를 바꿔도 표준원가가 안 움직인다(계약 §2-2). */}
+              <span
+                className={
+                  u.status === "approved"
+                    ? "text-green-700"
+                    : "text-amber-700"
+                }
+              >
+                {u.status === "approved" ? "승인됨" : "미확인 — 계산 안 함"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 /** 원장의 부자재 라인 — **미매칭도 빠짐없이 그린다.**
  *
  * ★「연결」 버튼이 이 화면의 요점이다: 제안은 이유를 적어 줄 뿐이고, 링크는 사람이 누를 때만
@@ -2129,6 +2169,7 @@ export default function CostPage() {
                     ? `수입 종 — 원장 부자재 라인 ${selectedLedgerLines.length}건. 정본은 원장이고 엑셀 값은 대조값이다.`
                     : "비수입 종 — 원장 부자재 라인 0건. 정본은 엑셀이다(계약 §0-C)."}
                 </div>
+                <MaterialUsage material={selected} />
                 {/* ★D — 참고값이 «있다는 사실»과 «그 값»과 «단가가 되는 길»을 말한다.
                     참고값이 없으면 이 줄 자체가 없다(해당 없음 — 빈 칸이 아니다). */}
                 {excelRefNoteText(selected, selectedImported) ? (

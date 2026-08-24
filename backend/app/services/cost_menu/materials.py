@@ -38,6 +38,8 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import (
     CostMaterial,
     CostMaterialPrice,
+    CostRecipe,
+    CostRecipeLine,
     CostSetting,
     ImportInvoiceLine,
     ImportShipment,
@@ -159,8 +161,15 @@ def _shipment_ref(p: CostMaterialPrice) -> dict | None:
     }
 
 
-def material_payload(m: CostMaterial, prices: list[CostMaterialPrice]) -> dict:
-    """부자재 1종 + 단가 이력.
+def material_payload(
+    m: CostMaterial, prices: list[CostMaterialPrice], used_by: list[dict]
+) -> dict:
+    """부자재 1종 + 단가 이력 + **사용처**.
+
+    ★`used_by`는 **필수 인자다**(기본값을 두지 않는다). Jino 2026-08-24: *"각 부자재가 어느
+    제품에 들어가는지도 나오면 좋겠고"*. 호출부가 7곳이라 기본값을 두면 그중 하나만 고쳐도
+    타입이 통과하고, 그 화면만 「사용처 0건」이라 조용히 거짓말을 한다 — 이 저장소가 반복해
+    밟은 「한쪽만 고친다」다. 필수로 두면 **빠뜨린 호출부가 즉시 터진다.**
 
     ★`latest_price_*`는 **로트가 하나도 없으면 None이다 — 0이 아니다**(계약 §2-7).
     ★`lot_count`를 같이 낸다: 「이 표준의 근거는 로트 N건」을 화면이 말해야 표본 부족이
@@ -209,6 +218,10 @@ def material_payload(m: CostMaterial, prices: list[CostMaterialPrice]) -> dict:
         "latest_price_inc_vat": _d(latest.unit_price_inc_vat) if latest else None,
         "latest_price_source": latest.source if latest else None,
         "prices": [price_payload(p, checks[p.id]) for p in ordered],
+        # ★사용처 — 「이 부자재가 어느 제품에 들어가는가」. 없으면 빈 목록이고, 그건
+        #   «아직 어느 레시피도 이 종을 안 쓴다»는 사실이지 미상이 아니다.
+        "used_by": used_by,
+        "used_by_count": len(used_by),
     }
 
 
@@ -242,9 +255,49 @@ def get_material(db: Session, material_id: int) -> CostMaterial:
     return m
 
 
+def usage_map(db: Session, material_ids: list[int]) -> dict[int, list[dict]]:
+    """종 → 그 종을 쓰는 레시피들. **한 번의 질의**로 전건을 모은다(N+1 금지).
+
+    ★승인 여부를 함께 싣는다 — 「어느 제품에 들어가나」의 답은 «승인된 것»과 «초안»이
+    섞여 있고, 그 둘은 계산에 들어가는지가 다르다(계약 §2-2).
+    """
+
+    if not material_ids:
+        return {}
+    rows = (
+        db.query(CostRecipeLine, CostRecipe)
+        .join(CostRecipe, CostRecipeLine.recipe_id == CostRecipe.id)
+        .filter(CostRecipeLine.material_id.in_(material_ids))
+        .order_by(CostRecipe.product_name, CostRecipe.form_factor)
+        .all()
+    )
+    out: dict[int, list[dict]] = {}
+    for line, recipe in rows:
+        out.setdefault(line.material_id, []).append(
+            {
+                "recipe_id": recipe.id,
+                "product_name": recipe.product_name,
+                "form_factor": recipe.form_factor,
+                "status": recipe.status,
+                "quantity": _d(line.quantity),
+            }
+        )
+    return out
+
+
+def payload_with_usage(db: Session, m: CostMaterial) -> dict:
+    """단일 종 payload — 사용처를 «여기서» 붙인다.
+
+    ★라우터의 단일 종 응답 7곳이 전부 이 함수를 지나게 한다. 각자 `usage_map`을 부르면
+    그중 하나가 빠지고, 그 화면만 사용처가 비어 보인다."""
+
+    return material_payload(m, list(m.prices), usage_map(db, [m.id]).get(m.id, []))
+
+
 def list_materials(db: Session) -> list[dict]:
     rows = _materials_query(db).order_by(CostMaterial.name).all()
-    return [material_payload(m, list(m.prices)) for m in rows]
+    usage = usage_map(db, [m.id for m in rows])
+    return [material_payload(m, list(m.prices), usage.get(m.id, [])) for m in rows]
 
 
 def ledger_material_lines(db: Session) -> list[dict]:

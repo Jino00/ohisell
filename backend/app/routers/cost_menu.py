@@ -121,7 +121,7 @@ def list_materials(db: Session = Depends(get_db)):
 def create_material(body: MaterialIn, db: Session = Depends(get_db)):
     m = _guard(M.create_material, db, **body.model_dump())
     db.commit()
-    return M.material_payload(M.get_material(db, m.id), list(m.prices))
+    return M.payload_with_usage(db, M.get_material(db, m.id))
 
 
 @router.get("/materials/{material_id}")
@@ -130,7 +130,7 @@ def get_material(material_id: int, db: Session = Depends(get_db)):
         m = M.get_material(db, material_id)
     except M.CostMenuError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return M.material_payload(m, list(m.prices))
+    return M.payload_with_usage(db, m)
 
 
 @router.patch("/materials/{material_id}")
@@ -141,7 +141,7 @@ def patch_material(material_id: int, body: MaterialPatch, db: Session = Depends(
     m = _guard(M.update_material, db, material_id, **fields)
     db.commit()
     m = M.get_material(db, material_id)
-    return M.material_payload(m, list(m.prices))
+    return M.payload_with_usage(db, m)
 
 
 @router.get("/ledger-material-lines")
@@ -162,7 +162,7 @@ def link_price(material_id: int, body: LinkIn, db: Session = Depends(get_db)):
     )
     db.commit()
     m = M.get_material(db, material_id)
-    return {"linked_price_id": p.id, "material": M.material_payload(m, list(m.prices))}
+    return {"linked_price_id": p.id, "material": M.payload_with_usage(db, m)}
 
 
 @router.post("/materials/{material_id}/prices/{price_id}/refresh")
@@ -181,7 +181,7 @@ def refresh_price(material_id: int, price_id: int, db: Session = Depends(get_db)
         "price_id": p.id,
         # 갱신 «전» 판정을 함께 낸다 — 화면이 「무엇이 어긋나 있었나」를 말할 수 있어야 한다.
         "was": M.check_payload(before),
-        "material": M.material_payload(m, list(m.prices)),
+        "material": M.payload_with_usage(db, m),
     }
 
 
@@ -190,7 +190,7 @@ def add_manual_price(material_id: int, body: ManualPriceIn, db: Session = Depend
     p = _guard(M.add_manual_price, db, material_id, **body.model_dump())
     db.commit()
     m = M.get_material(db, material_id)
-    return {"price_id": p.id, "material": M.material_payload(m, list(m.prices))}
+    return {"price_id": p.id, "material": M.payload_with_usage(db, m)}
 
 
 @router.delete("/materials/{material_id}/prices/{price_id}")
@@ -198,7 +198,7 @@ def delete_price(material_id: int, price_id: int, db: Session = Depends(get_db))
     _guard(M.delete_price, db, material_id, price_id)
     db.commit()
     m = M.get_material(db, material_id)
-    return {"deleted": True, "id": price_id, "material": M.material_payload(m, list(m.prices))}
+    return {"deleted": True, "id": price_id, "material": M.payload_with_usage(db, m)}
 
 
 @router.get("/settings")

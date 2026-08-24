@@ -5329,6 +5329,20 @@ export interface CostMaterial {
   latest_price_inc_vat: string | null;
   latest_price_source: "ledger" | "manual" | null;
   prices: CostMaterialPrice[];
+  /** ★이 부자재가 «어느 제품에 들어가는가» (Jino 2026-08-24). 빈 배열은 «아직 어느
+   *  레시피도 안 쓴다»는 **사실**이지 미상이 아니다. */
+  used_by: CostMaterialUsage[];
+  used_by_count: number;
+}
+
+/** 부자재 → 그 종을 쓰는 레시피 한 줄. */
+export interface CostMaterialUsage {
+  recipe_id: number;
+  product_name: string;
+  form_factor: string | null;
+  /** ★승인 여부를 같이 싣는다 — 「들어간다」만으로는 **계산에 쓰이는지**를 모른다(계약 §2-2). */
+  status: "draft" | "approved";
+  quantity: string | null;
 }
 
 export interface CostLedgerSuggestion {
