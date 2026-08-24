@@ -350,8 +350,19 @@ def test_health_route_actually_returns_conservation(db):
     응답엔 없음 → 배선 테스트 6건 전부 생존). `SchedulerHealthOut`에서
     `vendor_item_conservation`를 빼면 여기서 죽는다.
     """
-    _seed_summary(db, "2026-08-05", 188800)
-    vis.ingest_vendor_item_sales(db, ACC, [_row("2026-08-05", "111", 100000, 5)])
+    from datetime import timedelta  # noqa: PLC0415
+
+    from app.utils.kst import kst_today  # noqa: PLC0415
+
+    # ★고정 날짜로 심으면 안 된다: 이 테스트가 타는 라우트는 `kst_now()`를 쓰고
+    #   (routers/scheduler.py), 대조창은 `now.date() - CONSERVATION_WINDOW_DAYS`(7일)다.
+    #   벽시계가 그 창을 지나는 순간 심은 행이 창 밖으로 밀려 `mismatch`가 빈 리스트가 되고
+    #   테스트는 IndexError로 죽는다 — 2026-08-24 실측: CI가 결제 차단으로 2주 멈춘 사이
+    #   이 테스트가 정확히 그 방식으로 썩어 있었다(심은 날짜 08-05, 창 08-17~08-24).
+    #   창 안이면 어느 날이든 성립하는 검사이므로 **어제**로 상대화한다.
+    day = (kst_today() - timedelta(days=1)).isoformat()
+    _seed_summary(db, day, 188800)
+    vis.ingest_vendor_item_sales(db, ACC, [_row(day, "111", 100000, 5)])
     try:
         r = _client(db).get("/api/scheduler/health")
         assert r.status_code == 200
