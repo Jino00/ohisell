@@ -226,6 +226,34 @@ def test_profit_band_primary_value_is_uncorrected():
     assert band["profit_status"] == "ok"
 
 
+def test_profit_band_does_not_always_contain_the_raw_value():
+    """★적대 리뷰 P2-7 채택 — 「구간」이 「있는 그대로」를 **감싸지 않는 경우가 있다**.
+
+    보정계수 구간은 `low=min(floor, point)` · `high=max(floor, point)`이고 floor=0.827이다.
+    점추정도 1 미만일 수 있어(자체 문서화된 실측 스프레드 **0.8289~0.8862**) `high < 1`이 되면
+    `gross_profit_high < gross_profit(raw)`가 된다 — 즉 큰 글씨가 자기 괄호 «밖»에 놓인다.
+
+    ★이건 결함이 아니라 **성질**이다: 보정은 「convAmt를 실매출로 환산」하는 것이라 양끝이 둘 다
+    1보다 작으면 raw보다 둘 다 작은 게 맞다. 다만 화면이 「구간이 감싼다」고 오해시키면 안 되므로
+    `NaverAdScope.ProfitCell`이 그 경우 ⚠️로 표시한다. 이 테스트는 그 성질을 **문서로 고정**한다
+    — 나중에 누가 「구간이 raw를 감싸야 한다」고 클램프를 넣으면 여기서 죽는다."""
+    # 양끝이 둘 다 1 미만 → high < raw
+    band = pao_scope_roster._profit_band(
+        conv_amt=1_000_000, cost=300_000, bep_roas=Decimal("1.5"),
+        factor_low=Decimal("0.827"), factor_high=Decimal("0.9"),
+    )
+    assert band["gross_profit"] == 366_667      # raw
+    assert band["gross_profit_high"] == 300_000  # ★raw보다 «작다»
+    assert band["gross_profit_high"] < band["gross_profit"]
+
+    # 양끝이 둘 다 1 초과 → low > raw
+    band2 = pao_scope_roster._profit_band(
+        conv_amt=1_000_000, cost=300_000, bep_roas=Decimal("1.5"),
+        factor_low=Decimal("1.1"), factor_high=Decimal("1.4"),
+    )
+    assert band2["gross_profit_low"] > band2["gross_profit"]
+
+
 def test_profit_band_all_three_are_none_when_bep_unknown():
     """BEP를 모르면 세 값 전부 None — 구간이라고 숫자를 지어내지 않는다."""
     band = pao_scope_roster._profit_band(

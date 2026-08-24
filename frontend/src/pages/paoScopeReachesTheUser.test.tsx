@@ -167,6 +167,13 @@ describe("★「🎛️ PAO 스코프」가 사람에게 닿는 경로 — 라�
     expect(await screen.findByText(/구간\[×0\.827 ~ ×1\.302\]/)).toBeTruthy();
   });
 
+  it("★SUR-6: 캠페인 «요약 행»의 구간도 화면에 뜬다 (적대 리뷰 P2-8 채택)", async () => {
+    // 리뷰가 변이로 잡았다: 캠페인 요약 행의 low/high prop을 제거해도 828건이 전부 생존했다.
+    // 그룹 행만 지켜지고 요약 행은 아무도 안 보고 있었다.
+    await renderApp();
+    expect(await screen.findByText(/-60,000 ~ 10,000/)).toBeTruthy();
+  });
+
   it("★스코프가 있는 캠페인은 「예산은 엔진이 안 만진다」를 화면에서 밝힌다", async () => {
     await renderApp();
     expect(await screen.findByText(/캠페인 예산 조정은 엔진이 하지 않습니다/)).toBeTruthy();

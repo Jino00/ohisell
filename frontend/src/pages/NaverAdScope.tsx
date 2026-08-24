@@ -32,6 +32,11 @@ const ROLE_HINT: Record<PaoScopeRole, string> = {
   brake: "출혈 — 내리거나 제외할 자리",
 };
 
+/** 보정 적용값이 «있는 그대로»를 감싸는가 — 아니면 화면이 그 사실을 말해야 한다. */
+function raw_outside(raw: number, low: number, high: number): boolean {
+  return raw < Math.min(low, high) || raw > Math.max(low, high);
+}
+
 /** 총이익 셀 — ★«있는 그대로» + 구간 병기 (Jino 지시 2026-08-24).
  *
  *  ①null은 «0원»이 아니라 «모름»이다.
@@ -49,15 +54,24 @@ function ProfitCell({
       </span>
     );
   }
-  const band =
-    low !== null && low !== undefined && high !== null && high !== undefined ? (
-      <span
-        className="block text-[10px] text-gray-400 leading-tight"
-        title="보정계수 구간 양끝. 하한=유입경로 라벨 근거 · 상한=채널 매출 전액을 광고 공으로 돌린 가정"
-      >
-        {num(low)} ~ {num(high)}
-      </span>
-    ) : null;
+  const hasBand = low !== null && low !== undefined && high !== null && high !== undefined;
+  // ★적대 리뷰 P2-7 채택 — 「구간」이 「있는 그대로」를 «감싸지 않는» 경우가 드물지 않다.
+  //   보정계수 구간은 low=min(floor, point)·high=max(floor, point)인데 floor=0.827이고 점추정도
+  //   1 미만일 수 있어(실측 스프레드 0.8289~0.8862) high<1 → high<raw가 된다. 그때 큰 글씨가
+  //   자기 괄호 밖에 놓여 「구간이 감싼다」는 잘못된 직관을 준다 — 그 사실을 명시적으로 말한다.
+  const outside = hasBand && (raw_outside(value, low!, high!));
+  const band = hasBand ? (
+    <span
+      className={`block text-[10px] leading-tight ${outside ? "text-amber-600" : "text-gray-400"}`}
+      title={
+        outside
+          ? "⚠️ 보정 적용값이 «있는 그대로»의 한쪽에만 있습니다 — 구간이 위 숫자를 감싸지 않습니다(보정계수 양끝이 둘 다 1보다 작거나 큰 경우)."
+          : "보정 적용 범위. 하한=유입경로 라벨 근거 · 상한=채널 매출 전액을 광고 공으로 돌린 가정"
+      }
+    >
+      {outside ? "⚠ " : ""}{num(low!)} ~ {num(high!)}
+    </span>
+  ) : null;
   return (
     <span>
       <span className={value < 0 ? "text-red-600" : "text-emerald-700"}>{num(value)}</span>
