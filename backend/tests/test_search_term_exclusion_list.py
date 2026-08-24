@@ -30,6 +30,25 @@ AS_OF = NOW.date()
 IN_WINDOW = AS_OF - timedelta(days=10)
 IN_MATURITY = AS_OF - timedelta(days=1)  # 판정에서 빠져야 하는 최근 구간
 
+
+def live_in_window() -> date:
+    """**실제 벽시계** 기준으로 창 한가운데인 날짜.
+
+    ★왜 필요한가: 이 파일의 대부분은 `_build()`가 `now=NOW`를 **주입**하므로 고정 상수로
+      심어도 안전하다. 그러나 HTTP 경계 테스트는 라우터를 타는데, 라우터는 `now`를 넘기지
+      않아(`routers/naver_ad.py` `get_search_term_exclusion_list`) 서비스가
+      `now = now or kst_now()`로 **실제 시각**에 떨어진다(`search_term_exclusion_list.py:145`).
+      그 경로에서 창은 `[as_of-32, as_of-3]`인데 고정 `IN_WINDOW`(2026-08-01)는 벽시계가
+      2026-09-03을 지나는 순간 창 밖으로 밀려 `candidates`가 비고 `IndexError`로 죽는다.
+      즉 **날짜가 박힌 시한폭탄**이었다(2026-08-24 적대 리뷰 P2-1 실측: +9일 통과 / +10일 실패).
+      HTTP 경계 테스트는 **라우트와 같은 시계**로 심어야 언제 돌려도 같은 결과가 난다.
+    ★-10일을 고른 이유: 창 `[as_of-32, as_of-3]`의 한가운데 쪽이라 옛쪽 22일·새쪽 7일 여유가
+      있다. 자정을 넘어가도, 성숙도 지연(3일)이 늘어나도 곧바로 깨지지 않는다.
+    """
+    from app.utils.kst import kst_today  # noqa: PLC0415
+
+    return kst_today() - timedelta(days=10)
+
 CAMPAIGN = "cmp-1"
 ADGROUP = "grp-1"
 
@@ -303,7 +322,9 @@ def test_route_returns_list_with_names(db):
     from app.models import NaverEntity
 
     _product(db, cpid="p1", bep="1.7")
-    _term(db, "적자검색어", cost=100_000, amt=0)
+    # ★고정 IN_WINDOW가 아니라 **실제 벽시계** 기준으로 심는다 — 이 테스트만 라우터를 타고,
+    #   라우터는 now를 안 넘겨 서비스가 kst_now()에 떨어진다(`live_in_window()` 주석 참조).
+    _term(db, "적자검색어", cost=100_000, amt=0, ad_date=live_in_window())
     db.add(NaverEntity(entity_type="campaign", entity_id=CAMPAIGN, name="01. 갤럭시_지문방지_TPU",
                        campaign_id=CAMPAIGN))
     db.add(NaverEntity(entity_type="adgroup", entity_id=ADGROUP, name="폴드8_사생활",
