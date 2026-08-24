@@ -49,6 +49,7 @@ def live_in_window() -> date:
 
     return kst_today() - timedelta(days=10)
 
+
 CAMPAIGN = "cmp-1"
 ADGROUP = "grp-1"
 
