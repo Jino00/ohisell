@@ -319,6 +319,11 @@ describe("부자재 목록 — 미확인 상태와 최신 단가가 보인다", 
     expect(within(row).getByText("미확인")).toBeTruthy();
     expect(screen.getByTestId("material-1-latest").textContent).toBe("209.9원");
     expect(within(row).getByText(/로트 2건/)).toBeTruthy();
+    // ★적대 리뷰 P2 **채택**(2026-08-24) — 출처 `<span>`을 통째로 지워도 137건이 전부
+    //   초록이었다(변이 6 SURVIVED). 이 저장소의 상습 패턴 그대로다: **함수는 값을 만드는데
+    //   화면엔 안 뜬다.** `priceSourceLabel`의 단위 테스트만으로는 「카드 안에 그려지는가」를
+    //   못 묻는다 — 그래서 여기서 **렌더된 카드 안**을 본다.
+    expect(within(row).getByText("원장")).toBeTruthy();
   });
 
   // ★문구가 「—」 → **「단가 없음」**으로 바뀌었다 (D-CPP-56 후속, Jino 2026-08-24:
