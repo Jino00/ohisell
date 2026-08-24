@@ -114,6 +114,17 @@ def test_ignores_clean_success(db):
     assert compute_scheduler_health(db, _Sched(), NOW)["partial_sync"] == []
 
 
+def test_window_size_is_pinned():
+    """★창 «크기» 자체를 못 박는다 — 아래 두 창 테스트는 `age_h`를 상수 자신으로부터
+    계산하므로 상수를 8760(1년)으로 늘려도 **둘 다 통과한다**(2026-08-24 적대 리뷰 P2-3
+    변이 (f) 생존 실측). 그러면 «옛 부분수집이 배너를 영원히 켜 둔다»는 바로 그 사고를
+    아무 테스트도 막지 못한다. `CONSERVATION_WINDOW_DAYS`는 이미 같은 방식으로 고정돼 있고
+    (`test_vendor_item_axis.py`), 그 덕에 대응 변이가 잡혔다 — 비대칭을 없앤다.
+    ★값을 바꾸려면 이 줄과 함께 «왜 24가 아니어야 하는가»를 근거로 남길 것.
+    """
+    assert PARTIAL_SYNC_WINDOW_HOURS == 24
+
+
 def test_window_excludes_old_rows(db):
     """옛 부분수집이 영원히 배너를 켜 두면 배너가 배경음이 되고 다음 사고가 묻힌다."""
     _log(db, msg=f"{PARTIAL_SYNC_MARKER} 옛것", age_h=PARTIAL_SYNC_WINDOW_HOURS + 1)
