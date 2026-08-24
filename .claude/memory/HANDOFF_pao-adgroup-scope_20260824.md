@@ -101,7 +101,35 @@
 
 ## 2-3. 착지
 
-(Step 6에서 채움)
+**두 갈래로 완주했다** — 코드 3건과 기록물 1건.
+
+**① 코드 (전 단계 완주)**
+- **PR #422** 머지 `a09b6662` — 스코프 축 + PAO 대시보드. 적대 리뷰 **1R FAIL(P1-1) → 2R PASS**. 마이그 `d5e6f7a8b9c0` 적용 후 코드 배포(`--migrate --restart`)
+- **PR #423** 머지 `f40e1930` — BEP 사다리 캐시. 리뷰 **PASS**(P2-5·P2-6 채택)
+- **PR #424** 머지 `fc035293` — 총이익 구간 병기. 리뷰 **PASS**(P2-7·P2-8 채택)
+- CI: 3건 전부 `backend(py3.10)·backend(py3.14)·frontend` **3/3 SUCCESS** — **`--force` 미사용**
+- 배포: `safe_deploy.sh` 무중단 블루-그린 3회, **다운타임 0초**. 최종 활성 **:8011**
+- 멈춘 단계: **없음**
+
+**② 기록물**
+- **PR #425** 머지 `ef2a09df` — HANDOFF·MEMORY 인덱스·체인 등록부·트랙 확인줄 2건
+- 리뷰 판정: **⚠️ 리뷰 생략: 기록물만** — `HANDOFF_pao-adgroup-scope_20260824.md` · `MEMORY.md` · `chains/pao-논의.jsonl` · `track_naver-ad-optimization.md`(코드 0파일)
+- 멈춘 단계: **없음**
+
+**③ 정리**
+- ★**「저장소를 main에 세워둔다」 생략** — 착지 전제 검사 **L5**: 로컬 `main`이 공유 메인 폴더에 체크아웃돼 있다. 다음 세션은 **`git switch -c <새> origin/main`**처럼 원격을 명시할 것
+- 착지 전제 검사: **L1 예**(살아 있는 `sellc-원가-메뉴` n=8은 다른 체인·다른 트랙이고, 내 브랜치 커밋은 전부 이번 세션 소산) · **L2 경로 지정 커밋**(`git add -A` 미사용) · **L3 내 워크트리 전용** · **L4 0** · **L5 아니오 → 생략**
+
+**★릴레이 실증(2026-08-24 23:0x KST)**: `origin/main`에서 ①HANDOFF 실존 ②체인 n=47의 `handoff` 경로 일치 ③그 경로가 실제로 열림(211줄) — 3단 확인 완료.
+
+**재개 명령**: 해당 없음(전 갈래 완주). 검증하려면:
+```
+gh pr view 422 --json state,mergeCommit && gh pr view 425 --json state,mergeCommit
+ssh sellc.ohitech.co.kr 'sqlite3 -readonly "file:/home/ubuntu/ohisell/backend/ohisell.db?mode=ro" \
+  "SELECT (SELECT COUNT(*) FROM naver_adgroup_scope) AS 스코프행, \
+          (SELECT COUNT(*) FROM naver_campaign_settings WHERE auto_operate=1) AS 켜진캠페인;"'
+```
+위 명령은 **스코프행 0 · 켜진캠페인 0**이 나와야 한다(「행 0개면 행위 변화 0」·「엔진 안 켰다」).
 
 ---
 
