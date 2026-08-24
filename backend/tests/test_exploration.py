@@ -542,3 +542,60 @@ def test_vt4_03_iphone17pro_mirror_end_to_end(db):
     assert verdict == "start"
     step = exploration.adaptive_step(50, 6.39, _BAND, None, exploration._EXPLORATION_STEP_PCT)
     assert step == 60
+
+
+# ══════════════ D-NAO-242 무노출 탐색 종료(not_serving) ══════════════
+# 왜 필요했나: 유령 스텝 금지(VF, D-NAO-83)는 rank>_GHOST_RANK로 판정하는데 순위는 노출이
+# 있어야 관측된다 → imp=0(avg_rank=None) 그룹은 그 게이트에 원리적으로 도달 못 하고 step_up을
+# 무한 반복했다. 라이브(2026-07-17~30): 전 기간 노출 0인 6그룹에 63스텝, 그 창 실행 스텝의
+# 100%가 bid_up_explore. 50→620원까지 올려도 노출 0.
+
+def test_ladder_not_serving_when_blind_streak_at_cap():
+    """무노출 상향이 상한에 닿으면 서빙 불가 판정으로 탐색 종료(실쓰기 0)."""
+    verdict, reason = exploration.ladder_judgment(
+        {"bid": 500}, {"clk": 0, "imp": 0, "avg_rank": None}, ceiling=1600, current_bid=560,
+        blind_step_streak=exploration._EXPLORATION_MAX_BLIND_STEPS,
+    )
+    assert verdict == "not_serving"
+    assert "서빙 불가" in reason and "탐색 종료" in reason
+
+
+def test_ladder_still_steps_below_blind_cap():
+    """상한 미만이면 기존 동작 그대로 — 첫 몇 번은 «정보를 사보는» 것이 정당하다."""
+    verdict, _ = exploration.ladder_judgment(
+        {"bid": 500}, {"clk": 0, "imp": 0, "avg_rank": None}, ceiling=1600, current_bid=560,
+        blind_step_streak=exploration._EXPLORATION_MAX_BLIND_STEPS - 1,
+    )
+    assert verdict == "step_up"
+
+
+def test_ladder_blind_gate_untouched_when_rank_observed():
+    """★회귀 0 증명: 순위가 관측되는 그룹은 streak가 아무리 높아도 이 분기에 안 걸린다.
+    (rank>4 = 밴드 밖 — imp=0과 같은 ④⑤⑥ 경로를 타지만 rank가 있으므로 not_serving 불가.)"""
+    verdict, _ = exploration.ladder_judgment(
+        {"bid": 500}, {"clk": 0, "imp": 120, "avg_rank": 6.0}, ceiling=1600, current_bid=560,
+        recent_flow_clk=0, flow_available=True,
+        blind_step_streak=exploration._EXPLORATION_MAX_BLIND_STEPS + 10,
+    )
+    assert verdict == "step_up"
+
+
+def test_ladder_blind_default_preserves_legacy_behavior():
+    """미주입(레거시 호출·기존 테스트)은 streak=0 → 종전 step_up 그대로(회귀 0)."""
+    verdict, _ = exploration.ladder_judgment(
+        {"bid": 900, "rank": None}, {"clk": 0, "avg_rank": None}, ceiling=1600, current_bid=1000)
+    assert verdict == "step_up"
+
+
+def test_ladder_blind_cap_reproduces_july_runaway_when_absent():
+    """★변이 방어(7월 재현): 이 조항이 없으면(streak가 안 세지면) 50→620원 램프가 계속 나간다.
+    같은 입력에서 streak만 0 vs 상한으로 갈랐을 때 판정이 실제로 갈리는지 — 조항이 지워지면
+    두 케이스가 같아져 이 테스트가 죽는다."""
+    args = ({"bid": 560}, {"clk": 0, "imp": 0, "avg_rank": None})
+    kw = dict(ceiling=1600, current_bid=620)
+    runaway, _ = exploration.ladder_judgment(*args, **kw, blind_step_streak=0)
+    stopped, _ = exploration.ladder_judgment(
+        *args, **kw, blind_step_streak=exploration._EXPLORATION_MAX_BLIND_STEPS)
+    assert runaway == "step_up"
+    assert stopped == "not_serving"
+    assert runaway != stopped

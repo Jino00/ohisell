@@ -1004,12 +1004,17 @@ def run_naver_auto_operator_hourly_job():
         log.info(
             "[스케줄러] naver auto_operator hourly: reviewed=%s approved=%s executed=%s "
             "held=%s skipped=%s failed=%s probed=%s | explored=%s explored_held=%s "
-            "explored_capped=%s explored_not_rank=%s ghost_hold=%s(groups=%s)",
+            "explored_capped=%s explored_not_rank=%s ghost_hold=%s(groups=%s) "
+            "not_serving=%s",
             result["reviewed"], result["approved"], result["executed"],
             len(result["held"]), result["skipped"], result["failed"], result["probed"],
             result["explored"], result["explored_held"], result["explored_capped"],
             result["explored_not_rank"], result["explored_ghost_hold"],
             len(result["ghost_hold_groups"]),
+            # ★D-NAO-242: 이 카운터가 로그에 없으면 「무노출 종결이 실제로 도는가」를 라이브에서
+            # 확인할 방법이 없다 — 같은 종류의 관측 구멍(D-NAO-85 관측 갭①·D-NAO-130)이 이미
+            # 두 번 났으므로 신설과 동시에 로그에 싣는다.
+            result["explored_not_serving"],
         )
         # ★D-NAO-130 관측 구멍 수정(2026-07-29 실측): 소재 자동 실행 카운터 4종이 어느 로그
         # 라인에도 없어서, 레인 캡이 걸렸는지·중복으로 skip됐는지를 **로그로 알 수 없었다**
