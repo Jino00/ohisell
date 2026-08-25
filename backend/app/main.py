@@ -16,6 +16,7 @@ from app.routers import rocket_1p_pnl_audit
 from app.routers import import_cost
 from app.routers import cost_menu
 from app.routers import rg_pnl
+from app.routers import otao_po
 
 # ── 앱 로깅 구성(D-NAO-85 관측 갭①) ──────────────────────────────────────────────
 # 그동안 이 앱은 로깅 레벨/핸들러를 전혀 구성하지 않아, root logger가 기본 WARNING인 채로 남았다.
@@ -95,6 +96,7 @@ app.include_router(rocket_1p_pnl_audit.router)
 app.include_router(import_cost.router)  # 수입건 원장(landed cost) — D-CPP-48
 app.include_router(cost_menu.router)  # 원가 메뉴·표준원가 — D-CPP-53 (S1: 부자재 층)
 app.include_router(rg_pnl.router)  # RG 상품 단위 일별 손익 HTTP 경계 — D-CPP-54
+app.include_router(otao_po.router)  # OTAO 발주 로스터(3칸) — 계약 §4 S1 · D-INV-1~4
 
 
 # ★두 경로에 같은 핸들러를 단다:

@@ -295,6 +295,10 @@ const NAV_ITEMS = [
   { to: "/product-connection-map", label: "상품 연결맵", icon: "🔗" },
   // 로켓1P 화면 3개는 ROCKET_1P_GROUP(대시보드 하위)으로 옮겼다 — 최상위에서 제거.
   { to: "/inventory", label: "재고 관리", icon: "🏭" },
+  // 발주(OTAO) — SKU별 발주 누계·픽업 누계·예약 잔량 3칸(계약 §4 S1 · D-INV-1~4).
+  //   ★재고 «바로 뒤»다: 같은 물류 축이고 「창고에 무엇이 있나」 다음 질문이
+  //   「OTAO에 무엇을 시켜 뒀나」이기 때문이다.
+  { to: "/otao-po", label: "발주 (OTAO)", icon: "📦" },
   { to: "/import-cost", label: "수입건 원장", icon: "📥" },
   // 원가 메뉴 — D-CPP-53 / 계약 `docs/PLAN_cost-menu-standard-cost.md`.
   // 수입건 원장 바로 뒤다: 단가가 원장에서 흘러오는 순서가 곧 메뉴 순서다.
