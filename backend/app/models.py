@@ -1,7 +1,7 @@
 # models.py — SQLAlchemy 모델 (ohisell 전체 테이블)
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -4984,6 +4984,165 @@ class CostSetting(Base):
     )
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OTAO 발주 원장 (계약 `CONTRACT_inventory_unified.md` §4 S1 · 트랙 D-INV-1·3)
+#
+# 왜 «새» 테이블인가: 발주 축의 SKU 라인은 **어디에도 없었다.** ECOUNT 발주서조회 API는
+# 헤더 그레인이라 `PROD_CD`를 안 준다(S0-a 판정, 1,622건 전건). SKU 단위 원천은 발주서
+# PDF뿐인데 그 PDF는 Jino의 Google Drive 로컬 동기화 폴더에 있어 **prod가 못 읽는다.**
+# 그래서 파싱 결과를 원장으로 «심는다» — 이 테이블이 S1 「발주 누계」 칸의 유일한 뿌리다.
+#
+# ★수입 원장(`import_invoice_line`)과 섞지 않는다: 저쪽은 계약 A′/B 소관이고 우리는 **읽기
+#   전용 소비자**다(계약 §3-8). 이쪽은 본 계약 소유다. 둘의 만남은 «조인»이지 «병합»이 아니다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class OtaoPurchaseOrder(Base):
+    """발주서(Purchasing order) PDF 한 장 = 한 행. **파일 단위**로 담는다.
+
+    ★같은 `serial`이 여러 파일로 존재한다(실측: 121파일 → 고유 발주번호 66, 중복 보유 28건).
+    그중 수량까지 다른 «개정본»이 4건 있었다(예: `20260107-2` 5,700 vs 1,300). 그래서 정본
+    하나만 남기고 버리지 않고 **전부 담되 `is_authoritative`로 가른다** — 버리면 「왜 이 숫자인가」를
+    나중에 아무도 못 되짚고, 개정 이력 자체가 인사이트이기 때문이다(근거 보존).
+
+    **정본 규칙 (D-INV-3)** — 집계는 항상 `is_authoritative=True`만 센다:
+      ① ECOUNT 사본(`source_kind='ecount'`)이 있으면 그것이 정본이다.
+         근거는 Jino 목표 원문이다 — *"**ecount에 있는** 우리가 발주한 수량 … 대비해서"*.
+         라이브 대조도 같은 답을 냈다: `20260107-2`의 통관 원장 실입고가 **정확히 1,300**으로
+         ECOUNT 사본과 일치했고 5,700본과는 4,400 어긋났다.
+      ② ECOUNT 사본이 없으면(2023~2024년분) 로컬 파일 중 `Revise_` 접두 또는 후행 사본.
+         Jino 2026-08-25 23:13 *"revise가 있는건 개정본이겠지?"*
+      ③ 중복은 항상 `serial`로 접는다. 파일명으로 접으면 최상위 18개가 연도 폴더와 중복 계상된다.
+
+    ★`header_qty`·`total_amount`는 **검산 재료**다(PDF가 스스로 적어 둔 합계). 라인 합과
+      어긋나면 파싱이 틀렸거나 문서가 특이한 것이므로, 그 자체를 저장해 두고 대조에 쓴다.
+    """
+
+    __tablename__ = "otao_purchase_order"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # "20260812-1" — 발주서 상단 `Serial No.`. 발주일이 앞 8자리에 박혀 있다.
+    serial: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    order_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
+
+    # 'ecount' = ECOUNT에서 내려받은 사본(해시형 파일명) / 'local' = 우리가 만들어 보낸 원본
+    source_kind: Mapped[str] = mapped_column(String(12), nullable=False, default="local")
+    # 발주 폴더 기준 상대경로. 절대경로를 넣지 않는다 — 계정·머신마다 다르다.
+    source_file: Mapped[str] = mapped_column(String(300), nullable=False)
+    # 파일 내용 해시. 같은 파일 재적재를 멱등으로 만든다.
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # ★집계는 이것이 True인 행만 센다. 규칙은 클래스 docstring.
+    is_authoritative: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false(), index=True
+    )
+    # 정본이 아니면 왜 아닌지 한 줄 — 화면에서 「왜 이 숫자인가」를 되짚을 수 있어야 한다.
+    supersede_reason: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    # ── 문서가 스스로 적은 합계 (검산 재료, 라인 합과 대조한다) ──
+    header_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2), nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    remarks: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    parsed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    lines: Mapped[list["OtaoPurchaseOrderLine"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        # 같은 파일을 두 번 심지 않는다. serial은 중복이 정상이므로 unique를 걸지 않는다.
+        UniqueConstraint("content_sha256", name="uq_otao_po_sha"),
+    )
+
+
+class OtaoPurchaseOrderLine(Base):
+    """발주서의 품목 한 줄. ★`product_code`가 이 트랙 전체의 라벨 공간 정본이다.
+
+    발주서에 `Product Code` 칸이 실재한다(`GAPIP15PR`·`PGAPIP16PR` …). 그래서 SKU 라벨을
+    문자열 휴리스틱으로 «추론»할 필요가 없다 — **문서가 직접 적어 준다.**
+
+    ★열 구성이 두 가지다(실측):
+      A형 `Product Code | Product(한글) | 영문상품명 | Quantity | …` — `name_en`이 있다
+      B형 `Product Code | Product(한글) | Quantity | …`            — `name_en`이 **없다**
+    B형에서 `name_en`은 NULL이다. 없는 값을 한글명에서 지어내지 않는다 — 그게 매핑 오염이다.
+
+    ★`name_en`이 값을 가질 때 그것은 통관 원장 `import_invoice_line.item_name`과 **글자 그대로
+      같다**(예: `Glass_iP15 pro`·`Privacy Glass_iP16 Pro 2ea`). 즉 이 컬럼이 곧
+      「원장 품목명 → 상품코드」 사전이고, D-INV-1이 본 계약 범위로 편입한 그 매핑의 재료다.
+
+    ★수량 단위 주의: 이 품목군은 상품 자체가 「2매입」이다(Jino 2026-08-25 22:50). `quantity`는
+      **상품 단위**(2매입 팩 수)이지 낱장 수가 아니다 — 라고 읽는 것이 자연스러우나 원장 쪽
+      단위와의 일치는 **[미상]**이다. 화면은 단위를 명시하고, 두 해석을 합산하지 않는다.
+    ★그리고 수량이 **50의 배수라는 보장은 없다**(D-INV-4): `20251210-1`에 12·395·420이 실재하고
+      헤더 검산과 맞는다. 「50의 배수만 유효」 같은 필터를 넣으면 실제 발주를 버린다.
+    """
+
+    __tablename__ = "otao_purchase_order_line"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(
+        ForeignKey("otao_purchase_order.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    name_ko: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    name_en: Mapped[Optional[str]] = mapped_column(String(300), nullable=True, index=True)
+
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    unit_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 4), nullable=True)
+    amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2), nullable=True)
+
+    order: Mapped[OtaoPurchaseOrder] = relationship(back_populates="lines")
+
+    __table_args__ = (
+        UniqueConstraint("order_id", "seq", name="uq_otao_po_line_seq"),
+    )
+
+
+class OtaoItemNameMap(Base):
+    """통관 원장 품목명 → 상품코드 사전. **D-INV-1으로 본 계약 범위에 편입된 그 매핑이다.**
+
+    왜 별도 테이블인가: `import_invoice_line.internal_sku`가 prod 실측 **0/158(0%)**이라
+    픽업 누계를 SKU별로 셀 수 없었다. 그런데 그 컬럼을 우리가 채우는 것은 계약 A′ 소관이라
+    금지선 8에 걸린다(§3-8). 그래서 **원장은 읽기 전용으로 두고 사전을 이쪽에 둔다.**
+
+    ★A′가 나중에 `internal_sku`를 채우면 **그쪽이 정본이 되고 이 테이블은 검산 축으로 내려간다.**
+      이원화를 영구화하지 않는다는 것이 D-INV-1의 조건이었다.
+
+    **Jino 확정 규칙 3 (D-INV-2)** — 이것이 정본이고 추론이 아니다:
+      1. `screen protector` 접미는 상품 구분이 아니다 — `Glass_Ip16 Pro` ≡ 같은 이름 + 그 접미
+      2. 공용 표기 ≡ 단일 표기 — `For iP15/16/14Pro` ≡ `Glass_iP15 pro` (6.1" 필름 하나)
+      3. `2ea` = 2매입 포장 — 상품의 포장 규격이지 별개 상품이 아니다
+
+    ★`product_code`가 NULL이면 «아직 못 붙였다»는 뜻이고, 그 상태는 **화면에 「매핑 필요」로
+      드러내야 한다**(계약 §2-9·§3-6). 조용히 빼면 발주 누락, 조용히 넣으면 발주 오염이다.
+    """
+
+    __tablename__ = "otao_item_name_map"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # 원장에 적힌 그대로. 정규화 전 원문을 키로 둔다 — 정규화 규칙이 바뀌어도 출처가 남는다.
+    raw_name: Mapped[str] = mapped_column(String(300), unique=True, nullable=False)
+    # NULL = 미확정. 0이나 빈 문자열로 대체하지 않는다(«모름»과 «없음»을 가른다).
+    product_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+
+    # 'exact_en'(발주서 영문명 일치) / 'exact_ko' / 'normalized'(규칙 3 적용 후 일치)
+    # / 'manual'(사람이 확정) / 'unmatched'
+    match_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="unmatched")
+    # 어떤 발주서 라인을 근거로 붙였는지 — 되짚기용.
+    evidence: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )

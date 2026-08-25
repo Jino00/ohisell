@@ -6081,3 +6081,49 @@ export function deletePaoScopeAdgroup(
   const q = new URLSearchParams({ campaign_id: campaignId, adgroup_id: adgroupId });
   return fetchApi(`/api/naver/ad/scope/adgroup?${q.toString()}`, { method: "DELETE" });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTAO 발주 로스터 — 계약 `CONTRACT_inventory_unified.md` §4 S1 (D-INV-1~4)
+//
+// ★3칸을 합산한 파생 총계 필드를 **여기에 만들지 않는다**(계약 §3-9 금지선). 합치는 순간
+//   ②픽업 결정이 화면에서 사라진다. 백엔드도 그 필드를 안 준다 — 타입에도 두지 않는다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface OtaoRosterRow {
+  product_code: string;
+  /** 발주 누계 — 통관 원장이 덮는 창 «안»의 정본 발주분만 */
+  ordered: number;
+  /** 픽업 누계 — 통관 원장 × 품목명 사전 */
+  picked: number;
+  /** 예약 잔량 = ordered − picked. ★음수가 정상적으로 나온다(창 어긋남 신호) — 0으로 깎지 말 것 */
+  reserved: number;
+  /** 창보다 이른 발주분. 잔량 계산에서 «뺀» 몫이라 화면이 이것을 따로 자백해야 한다 */
+  out_of_window_ordered: number;
+  last_order_date: string | null;
+  /** 이 SKU가 실린 정본 발주서 «건수»(발주일수가 아니다 — 같은 날 복수 발주가 실재한다) */
+  order_count: number;
+}
+
+export interface OtaoRoster {
+  /** ★true = 적재를 안 돌린 것. 「발주가 0이다」와 **다른 상태**라 0을 그리면 거짓말이 된다 */
+  ledger_empty: boolean;
+  /** 통관 원장이 덮기 시작하는 날. null = 원장 자체가 비어 있다 */
+  window_start: string | null;
+  rows: OtaoRosterRow[];
+  totals: Record<string, number>;
+  /** 상품코드에 못 붙은 원장 품목명 — 수량과 함께. 숨기면 그만큼이 발주 누락이다(계약 §2-9) */
+  unmapped: { item_name: string; quantity: number }[];
+  notes: string[];
+  source: {
+    orders_total: number;
+    orders_authoritative: number;
+    orders_superseded: number;
+    last_order_date: string | null;
+    name_map_total: number;
+    name_map_resolved: number;
+  };
+}
+
+export function fetchOtaoRoster(): Promise<OtaoRoster> {
+  return fetchApi<OtaoRoster>("/api/otao-po/roster");
+}
