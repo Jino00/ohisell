@@ -946,9 +946,10 @@ def pick_cost_table_item(db: Session, recipe_id: int, item_id: int) -> CostRecip
         }
     )
     recipe.note = json.dumps(note, ensure_ascii=False)
+    # ★커밋은 **라우터가 한다** (적대 리뷰 1R P2-2 채택) — `approve_recipe`·`adopt_excel_prices`와
+    #   같은 관례다. 서비스가 스스로 커밋하면 이 함수를 다른 경로가 재사용할 때 이중 커밋·
+    #   부분 커밋의 자리가 생긴다.
     db.flush()
-    db.commit()
-    db.refresh(recipe)
     return recipe
 
 
@@ -979,9 +980,10 @@ def unpick_cost_table_item(db: Session, recipe_id: int) -> CostRecipe:
         }
     )
     recipe.note = json.dumps(note, ensure_ascii=False)
+    # ★커밋은 **라우터가 한다** (적대 리뷰 1R P2-2 채택) — `approve_recipe`·`adopt_excel_prices`와
+    #   같은 관례다. 서비스가 스스로 커밋하면 이 함수를 다른 경로가 재사용할 때 이중 커밋·
+    #   부분 커밋의 자리가 생긴다.
     db.flush()
-    db.commit()
-    db.refresh(recipe)
     return recipe
 
 
@@ -997,10 +999,29 @@ def confirm_cost_table_absent(
     """
 
     recipe = get_recipe(db, recipe_id)
-    if recipe.picked_item_id is not None or recipe.picked_item_key is not None:
+    # ★**살아 있는 픽만** 막는다 (적대 리뷰 1R P1-1).
+    #
+    #   초판은 `picked_item_key`가 남아 있기만 해도 거부했다. 그런데 `_resolve_pins`는 핀이
+    #   끊길 때(`pin_lost`·`pin_ambiguous`) `picked_item_id`만 비우고 **키는 남긴다** — 그게
+    #   재업로드 안전망의 근거이기 때문이다. 그래서 화면이 「다시 고르거나 「원가표에 없음」을
+    #   확인한다」고 말하는 바로 그 상태에서 확인이 **항상 409로 거부**됐다.
+    #   ⇒ 이 슬라이스가 고치려던 병(§0-E-1 ③ 「화면이 없는 길을 지시한다」)을 슬라이스 «안»에서
+    #   재생산한 것이다. 판정 기준을 「키가 있나」가 아니라 «지금 가리키는 항목이 있나»로 옮긴다.
+    if recipe.picked_item_id is not None:
         raise CostMenuConflict(
             "이미 원가표 항목이 픽돼 있다 — 「없음」과 동시에 참일 수 없다. 먼저 픽을 되돌린다."
         )
+    if recipe.picked_item_key is not None:
+        # 끊긴 핀을 **사람이 「없음」으로 처분한다.** 그 항목은 이번 원가표에 없으므로 그것이
+        # 만든 구성도 함께 거둔다 — 남겨 두면 「원가표에 없음」이라 적힌 레시피가 «사라진
+        # 항목의 구성»으로 계산되는, 서로 모순인 상태가 된다.
+        recipe.lines.clear()
+        recipe.picked_item_key = None
+        recipe.picked_at = None
+        if recipe.anomaly_flag in (PIN_LOST, PIN_AMBIGUOUS):
+            recipe.anomaly_flag = None
+        db.flush()
+
     recipe.absent_confirmed_at = datetime.now()
     recipe.absent_note = (note_text or "").strip() or None
 
@@ -1009,9 +1030,10 @@ def confirm_cost_table_absent(
         f" ({recipe.absent_note})" if recipe.absent_note else ""
     )
     recipe.note = json.dumps(note, ensure_ascii=False)
+    # ★커밋은 **라우터가 한다** (적대 리뷰 1R P2-2 채택) — `approve_recipe`·`adopt_excel_prices`와
+    #   같은 관례다. 서비스가 스스로 커밋하면 이 함수를 다른 경로가 재사용할 때 이중 커밋·
+    #   부분 커밋의 자리가 생긴다.
     db.flush()
-    db.commit()
-    db.refresh(recipe)
     return recipe
 
 

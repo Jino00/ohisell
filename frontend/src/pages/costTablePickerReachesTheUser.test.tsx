@@ -32,6 +32,7 @@ import {
   fetchCostRecipes,
   fetchCostTableItems,
   pickCostTableItem,
+  unpickCostTableItem,
 } from "../lib/api";
 
 const SETTINGS: CostSetting[] = [
@@ -257,7 +258,8 @@ describe("★원가표 픽이 사람에게 닿는 경로 — 라우트·페이�
   it("PICK-5: 「골랐다」와 「없다고 확인함」이 **서로 다른 모양으로** 보인다 (합격 19)", async () => {
     vi.mocked(fetchCostRecipes).mockResolvedValueOnce({ items: [PICKED] });
     await openRecipeTab();
-    expect(screen.getByTestId("pick-state-picked")).toBeTruthy();
+    // ★목록 행과 상세 패널 **양쪽**에 뜬다(P1-2 수정 이후) — 개수가 아니라 존재를 잰다.
+    expect(screen.getAllByTestId("pick-state-picked").length).toBeGreaterThan(0);
     expect(screen.getByTestId("picker-picked-item").textContent).toContain(
       "지문방지_내부3매+외부3매",
     );
@@ -267,7 +269,7 @@ describe("★원가표 픽이 사람에게 닿는 경로 — 라우트·페이�
     cleanup();
     vi.mocked(fetchCostRecipes).mockResolvedValueOnce({ items: [ABSENT] });
     await openRecipeTab();
-    expect(screen.getByTestId("pick-state-absent")).toBeTruthy();
+    expect(screen.getAllByTestId("pick-state-absent").length).toBeGreaterThan(0);
     expect(screen.getByTestId("picker-absent-confirmed").textContent).toContain(
       "필름이 아니라 사입 상품이다",
     );
@@ -285,8 +287,103 @@ describe("★원가표 픽이 사람에게 닿는 경로 — 라우트·페이�
       items: [{ ...PICKED, picked: { ...PICKED.picked, state: "pin_lost" } }],
     });
     await openRecipeTab();
-    expect(screen.getByTestId("pick-state-pin_lost")).toBeTruthy();
+    expect(screen.getAllByTestId("pick-state-pin_lost").length).toBeGreaterThan(0);
     expect(screen.getByTestId("picker-pin-broken").textContent).toContain("구성은 그대로 두었다");
+  });
+
+  // ── 적대 리뷰 1R P1-2 — 합격 19의 «목록» 절반 ──────────────────────────────
+  it("★P1-2: 「없음 확인」과 「아직 안 봄」이 **목록에서** 갈린다 (합격 19)", async () => {
+    vi.mocked(fetchCostRecipes).mockResolvedValueOnce({
+      items: [
+        { ...ABSENT, id: 34, product_name: "사람이 확인한 것" },
+        { ...STUCK, id: 44, product_name: "아무도 안 본 것" },
+      ],
+    });
+    await openRecipeTab();
+
+    // 상세를 열지 않고 «목록 행»에서 구별된다 — 100건에서 상세를 일일이 여는 것은
+    // 사실상 「안 보이는 것」과 같다.
+    const looked = screen.getByTestId("recipe-row-34");
+    const never = screen.getByTestId("recipe-row-44");
+    expect(looked.textContent).toContain("원가표에 없음 — 확인함");
+    expect(never.textContent).not.toContain("원가표에 없음");
+    // 사유·시각도 목록에서 보인다 — 다음 사람이 같은 판단을 다시 안 하도록.
+    expect(screen.getByTestId("recipe-row-absent-34").textContent).toContain(
+      "필름이 아니라 사입 상품이다",
+    );
+  });
+
+  it("★P1-2: 핀이 끊긴 레시피도 **목록에서** 사람 말로 보인다 (날문자 금지)", async () => {
+    vi.mocked(fetchCostRecipes).mockResolvedValueOnce({
+      items: [
+        {
+          ...PICKED,
+          id: 51,
+          anomaly_flag: "pin_lost",
+          picked: { ...PICKED.picked, state: "pin_lost" },
+        },
+      ],
+    });
+    await openRecipeTab();
+    const row = screen.getByTestId("recipe-row-51");
+    expect(row.textContent).toContain("고른 항목이 사라졌다");
+    // ★영어 날문자가 화면에 뜨면 안 된다 — D-CPP-56에서 `manual`·`ledger`로 겪은 자리다.
+    expect(row.textContent).not.toContain("pin_lost");
+  });
+
+  // ── 적대 리뷰 1R P1-1 — 끊긴 핀에서 «시키는 길»이 실제로 열려 있다 ────────────
+  it("★P1-1: 핀이 끊긴 상태에서 「끊긴 픽 지우기」가 실재하고 백엔드를 부른다", async () => {
+    vi.mocked(fetchCostRecipes).mockResolvedValueOnce({
+      items: [{ ...PICKED, picked: { ...PICKED.picked, state: "pin_lost" } }],
+    });
+    await openRecipeTab();
+
+    fireEvent.click(screen.getByTestId("picker-unpick-broken"));
+    await waitFor(() => expect(unpickCostTableItem).toHaveBeenCalledWith(34));
+  });
+
+  it("★P1-1: 핀이 끊긴 상태에서 「원가표에 없음 — 확인」 버튼이 **뜬다**", async () => {
+    vi.mocked(fetchCostRecipes).mockResolvedValueOnce({
+      items: [{ ...PICKED, picked: { ...PICKED.picked, state: "pin_lost" } }],
+    });
+    await openRecipeTab();
+    fireEvent.click(screen.getByTestId("picker-load"));
+
+    // 화면이 「다시 고르거나 「원가표에 없음」을 확인한다」고 말하므로 그 버튼이 있어야 한다.
+    // (서버가 그것을 받는지는 백엔드 테스트가 잰다 —
+    //  `test_absent_confirmation_works_when_the_pin_is_broken`.)
+    expect(await screen.findByTestId("picker-absent")).toBeTruthy();
+  });
+
+  // ── 적대 리뷰 1R P2-1 채택 — 재업로드 «직후» 핀 현황 ────────────────────────
+  it("★P2-1: 재업로드 결과에 핀 유지·소실 건수가 뜬다 (합격 20)", async () => {
+    const { RecipeImportPanel } = await import("./CostPage");
+    render(
+      <RecipeImportPanel
+        busy={false}
+        onImport={() => {}}
+        result={{
+          recipes_created: 0,
+          recipes_updated: 83,
+          skipped_approved: 3,
+          unmatched: 68,
+          materials_seen: 123,
+          cost_table_recipes: 40,
+          cost_table_anomalies: [],
+          mapping_options: 0,
+          mapping_anomalies: [],
+          groups: 0,
+          report: [],
+          skipped_pinned: 12,
+          cost_table_items: 40,
+          pins: { relinked: 11, lost: 1, ambiguous: 0 },
+        }}
+      />,
+    );
+    const el = screen.getByTestId("import-pins");
+    expect(el.textContent).toContain("유지");
+    expect(el.textContent).toContain("대상 사라짐 1");
+    expect(el.textContent).toContain("구성은 그대로 두었다");
   });
 
   it("★승인된 레시피에서는 픽 버튼이 잠긴다 — 승인분을 픽이 갈아치우지 않는다", async () => {

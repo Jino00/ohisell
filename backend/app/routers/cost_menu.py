@@ -353,6 +353,7 @@ def pick_cost_table_item(recipe_id: int, body: PickIn, db: Session = Depends(get
     ★픽은 승인이 아니다(status는 draft 유지) — §2-2의 사람 확정 지점을 한 클릭에 접지 않는다.
     """
     recipe = _guard(R.pick_cost_table_item, db, recipe_id, body.item_id)
+    db.commit()
     return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
 
 
@@ -360,6 +361,7 @@ def pick_cost_table_item(recipe_id: int, body: PickIn, db: Session = Depends(get
 def unpick_cost_table_item(recipe_id: int, db: Session = Depends(get_db)):
     """픽을 되돌린다 — 되돌릴 길이 없으면 사람이 고르기를 주저한다."""
     recipe = _guard(R.unpick_cost_table_item, db, recipe_id)
+    db.commit()
     return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
 
 
@@ -374,6 +376,7 @@ def confirm_cost_table_absent(
     recipe = _guard(
         R.confirm_cost_table_absent, db, recipe_id, body.note if body else None
     )
+    db.commit()
     return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
 
 

@@ -439,6 +439,79 @@ def test_reimport_flags_an_ambiguous_pin_and_does_not_choose(db_session):
     assert len(after.lines) > 0
 
 
+def test_absent_confirmation_works_when_the_pin_is_broken(db_session):
+    """★적대 리뷰 1R P1-1 — 끊긴 핀에서 화면이 시키는 길이 **실제로 열려 있다**.
+
+    초판은 `picked_item_key`가 남아 있기만 해도 거부했다. 그런데 `_resolve_pins`는 핀이 끊길 때
+    키를 **일부러 남긴다**(재업로드 안전망의 근거). 그래서 화면이 「다시 고르거나 「원가표에
+    없음」을 확인한다」고 말하는 바로 그 상태에서 확인이 **항상 409**였다 — 이 슬라이스가
+    고치려던 병(§0-E-1 ③)을 슬라이스 안에서 재생산한 자리다.
+    """
+
+    _reimport(db_session, _cost_rows())
+    item = db_session.query(CostTableItem).one()
+    recipe = _recipe(db_session, form_factor="flip")
+    db_session.commit()
+    R.pick_cost_table_item(db_session, recipe.id, item.id)
+    db_session.commit()
+
+    _reimport(db_session, _cost_rows(item_name="완전히 다른 품목"))
+    db_session.expire_all()
+    assert R.get_recipe(db_session, recipe.id).anomaly_flag == R.PIN_LOST
+
+    after = R.confirm_cost_table_absent(db_session, recipe.id, "원가표에서 빠졌다")
+    db_session.commit()
+
+    assert after.absent_confirmed_at is not None
+    assert after.absent_note == "원가표에서 빠졌다"
+    # ★끊긴 핀은 함께 거둔다 — 안 거두면 `_pick_payload`가 `pin_lost`를 계속 내보내
+    #   방금 사람이 한 판정이 화면에 안 뜬다(상태가 서로 모순이 된다).
+    assert after.picked_item_key is None
+    assert after.anomaly_flag != R.PIN_LOST
+    assert R._pick_payload(after)["state"] == "absent"
+    # 사라진 항목이 만든 구성도 함께 거둔다 — 「없음」이라 적힌 레시피가 그 구성으로
+    # 계산되면 서로 모순인 상태다.
+    assert len(after.lines) == 0
+
+
+def test_absent_confirmation_still_refused_while_a_live_pick_stands(db_session):
+    """가드를 좁혔다고 «살아 있는 픽»까지 뚫리면 안 된다 — 좁힘의 경계를 잰다."""
+
+    _reimport(db_session, _cost_rows())
+    item = db_session.query(CostTableItem).one()
+    recipe = _recipe(db_session, form_factor="flip")
+    db_session.commit()
+    R.pick_cost_table_item(db_session, recipe.id, item.id)
+    db_session.commit()
+
+    with pytest.raises(Exception) as exc:
+        R.confirm_cost_table_absent(db_session, recipe.id, "억지로")
+    assert "픽" in str(exc.value)
+
+
+def test_recipe_list_payload_carries_pick_state_for_every_row(client, db_session):
+    """★적대 리뷰 1R P1-2의 백엔드 절반 — **목록** 응답이 행마다 픽 상태를 싣는다.
+
+    계약 합격 19는 「**목록에** 표시되고」라고 썼다. 화면이 그리려면 목록 응답에 그 필드가
+    있어야 하고, 이 단언이 그 계약(HTTP body)을 잠근다 — `recipe_payload`에서 `picked` 키가
+    빠지면 화면은 조용히 침묵한다(교훈 #321의 자리).
+    """
+
+    looked = _recipe(db_session, product_name="사람이 확인한 것")
+    _recipe(db_session, product_name="아무도 안 본 것")
+    db_session.commit()
+    client.post(
+        f"/api/cost/recipes/{looked.id}/confirm-cost-table-absent",
+        json={"note": "필름이 아니라 사입 상품이다"},
+    )
+
+    rows = client.get("/api/cost/recipes").json()["items"]
+    by_name = {r["product_name"]: r for r in rows}
+    assert by_name["사람이 확인한 것"]["picked"]["state"] == "absent"
+    assert by_name["사람이 확인한 것"]["picked"]["absent_note"] == "필름이 아니라 사입 상품이다"
+    assert by_name["아무도 안 본 것"]["picked"]["state"] == "none"
+
+
 def test_reimport_replaces_the_stored_cost_table_items(db_session):
     """항목 테이블은 «현재 단면»이다 — 지워진 품목이 목록에 남으면 사람이 없는 것을 고른다."""
 

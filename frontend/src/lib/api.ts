@@ -5763,6 +5763,12 @@ export interface CostImportResult {
   updated_halves?: string[];
   /** 이번 업로드가 «손대지 않은» 것 — 조용한 반쪽 갱신을 막는 자백 필드. */
   untouched?: string[];
+  /** 사람이 고른 픽이 붙어 있어 가격 매칭이 «건드리지 않은» 레시피 수 (D-CPP-59 · 합격 20). */
+  skipped_pinned?: number;
+  /** 저장된 원가표 항목 수 — 픽 목록의 모수다. 0이면 고를 것이 없다는 뜻이다. */
+  cost_table_items?: number;
+  /** 핀 재해석 결과. `lost`·`ambiguous`가 0이 아니면 **화면이 말해야 한다**(조용한 소실 금지). */
+  pins?: { relinked: number; lost: number; ambiguous: number };
 }
 
 export function fetchCostRecipes(formFactor?: string): Promise<{ items: CostRecipe[] }> {

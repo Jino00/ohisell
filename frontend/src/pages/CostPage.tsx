@@ -1325,6 +1325,31 @@ export function RecipeImportPanel({
             승인분 건너뜀 <b>{result.skipped_approved}</b> · 구성 못 찾음{" "}
             <b>{result.unmatched}</b> (묶음 {result.groups})
           </div>
+          {/* ★핀 현황 — 재업로드 «직후»에 「내 픽이 살아남았나」를 여기서 본다 (합격 20 ·
+              적대 리뷰 1R P2-1 채택). 상세 패널의 배지만으로도 알 수는 있지만, 그건 레시피를
+              하나씩 열어야 보이므로 100건에서는 사실상 안 보이는 것과 같다. */}
+          {result.pins ? (
+            <div
+              className={
+                result.pins.lost || result.pins.ambiguous
+                  ? "text-amber-800"
+                  : "text-gray-600"
+              }
+              data-testid="import-pins"
+            >
+              사람이 고른 픽 — 유지 <b>{result.skipped_pinned ?? 0}</b> · 다시 이음{" "}
+              <b>{result.pins.relinked}</b>
+              {result.pins.lost ? (
+                <> · <b>대상 사라짐 {result.pins.lost}</b>(구성은 그대로 두었다)</>
+              ) : null}
+              {result.pins.ambiguous ? (
+                <> · <b>동명 2건 이상 {result.pins.ambiguous}</b>(다시 골라야 한다)</>
+              ) : null}
+              {result.cost_table_items !== undefined
+                ? ` · 저장된 원가표 항목 ${result.cost_table_items}건`
+                : ""}
+            </div>
+          ) : null}
           {/* ★어느 절반이 «그대로인지»를 결과에도 남긴다 — 누르기 전 안내와 같은 사실이지만,
               누른 «뒤»에 확인할 곳이 없으면 나중에 「다 갱신된 줄 알았다」가 된다. */}
           {result.untouched?.length ? (
@@ -1421,13 +1446,33 @@ export function RecipeList({
             </div>
             <div className="mt-1 flex items-center gap-2 flex-wrap">
               <RecipeStatusBadge recipe={r} />
+              {/* ★계약 합격 19가 요구하는 «목록» 표면 (적대 리뷰 1R P1-2).
+                  초판은 이 배지를 상세 패널에만 뒀는데, 합격 19 원문은 「**목록에** 표시되고」다.
+                  상세를 일일이 열지 않으면 「사람이 없다고 확인한 것」과 「아직 아무도 안 본 것」이
+                  100건 목록에서 똑같이 보인다 — 침묵과 판정이 다시 뭉개지는 자리였다. */}
+              <PickStateBadge pick={r.picked} />
               <span className="text-xs text-gray-500">
                 구성 {r.line_count} · SKU {r.link_count}
               </span>
               <span className="text-xs font-medium">
                 {formatCostWon(r.standard.std_cost_inc_vat)}
               </span>
-              {r.anomaly_flag ? (
+              {/* 「없음 확인」은 시각·사유까지 목록에서 보인다 — 사유가 있어야 다음 사람이
+                  같은 판단을 다시 안 한다(계약 §0-E-4의 비필름 48건 오확정 완화). */}
+              {r.picked?.state === "absent" ? (
+                <span
+                  className="text-xs text-gray-500"
+                  data-testid={`recipe-row-absent-${r.id}`}
+                >
+                  {r.picked.absent_confirmed_at?.slice(0, 10)}
+                  {r.picked.absent_note ? ` · ${r.picked.absent_note}` : ""}
+                </span>
+              ) : null}
+              {/* ★핀 상태는 위 배지가 이미 사람 말로 말한다 — 날문자 `pin_lost`를 겹쳐 그리면
+                  화면에 영어가 뜬다(D-CPP-56에서 `manual`·`ledger`로 겪은 자리). */}
+              {r.anomaly_flag &&
+              r.anomaly_flag !== "pin_lost" &&
+              r.anomaly_flag !== "pin_ambiguous" ? (
                 <span className="text-xs text-amber-700">⚠ {r.anomaly_flag}</span>
               ) : null}
             </div>
@@ -1678,6 +1723,17 @@ export function CostTablePicker({
           {pick.state === "pin_lost"
             ? "고른 원가표 항목이 이번 파일에 없다 — 구성은 그대로 두었다. 다시 고르거나 「원가표에 없음」을 확인한다."
             : "같은 이름의 원가표 항목이 2건 이상이다 — 시스템이 고르지 않는다. 아래에서 다시 고른다."}
+          {/* ★적대 리뷰 1R P1-1 — 이 상태에서 위 문장이 시키는 두 길 중 하나(「없음」 확인)가
+              서버에서 409로 막혀 있었고, 되돌리기 버튼조차 안 떴다. 「화면이 없는 길을
+              지시한다」를 그 병을 고치는 슬라이스 안에서 재생산한 자리다. 길을 연다. */}
+          <button
+            className="mt-1 text-[11px] px-2 py-1 rounded border bg-white disabled:opacity-40"
+            disabled={busy || approved}
+            onClick={onUnpick}
+            data-testid="picker-unpick-broken"
+          >
+            끊긴 픽 지우기
+          </button>
         </div>
       ) : null}
 
