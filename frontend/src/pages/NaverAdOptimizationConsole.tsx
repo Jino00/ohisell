@@ -1276,7 +1276,15 @@ export default function NaverAdOptimizationConsole() {
                       </span>
                     )}
                   </div>
-                  {p.rationale && <p className="text-sm text-gray-700 mt-1.5">{p.rationale}</p>}
+                  {/* ★D-NAO-250 `whitespace-pre-line` — 근거문은 원래부터 여러 줄이었는데(지혜 원칙 /
+                      제안 / 승률 근거, 이제 조건 대조군까지) HTML 기본 white-space가 개행을 공백
+                      하나로 접어 **네 사실이 한 덩어리 문장으로 붙어 있었다.** 값은 실려 있는데 사람이
+                      가르지 못하는 상태다. 승인 카드는 사람이 파라미터 변경을 «결정»하는 최종 표면이라
+                      이건 표시 취향이 아니라 판단 재료의 문제다(적대 리뷰 1R·2R이 두 라운드 연속
+                      「콘솔 렌더 미확인」으로 남긴 자리). */}
+                  {p.rationale && (
+                    <p className="text-sm text-gray-700 mt-1.5 whitespace-pre-line">{p.rationale}</p>
+                  )}
                   {p.expected_effect && <p className="text-xs text-gray-500 mt-1">예상 효과: {p.expected_effect}</p>}
                   {actionMsg[p.id] && (
                     <p className={`text-xs mt-1.5 ${actionMsgIsError[p.id] ? "text-red-600" : "text-green-600"}`}>

@@ -4692,6 +4692,79 @@ class CostMaterialPrice(Base):
     )
 
 
+class CostTableItem(Base):
+    """업로드된 **원가 정본(엑셀) 항목 1건** — 「섹션 × 품목」 (계약 §0-E-3, D-CPP-59).
+
+    ★**왜 저장하나**: 개정 4 전까지 원가표 초안은 업로드 시점에 파싱해 매칭에만 쓰고
+    **버려졌다**(`recipes.import_drafts`). 그래서 매칭이 실패한 레시피에 대해 화면이
+    「후보 N건 — 사람이 고른다」고 말하면서도 **고를 목록이 시스템에 없었다.** 이 테이블이
+    그 목록이다.
+
+    ★**자연 키(section·item_name·form_factor)에 유니크를 걸지 않는다** — 계약 §9-9①의
+    폴드 중복 정의(행 42 6,089.6 vs 행 105 4,604.6, **같은 이름**)가 원가표에 실재하기
+    때문이다. 유니크를 걸면 파서가 «진짜 사실»을 못 싣고 한쪽을 조용히 버린다. 중복은
+    숨기는 것이 아니라 픽 목록에 나란히 세워 사람이 처분한다.
+
+    ★`total_inc_vat`은 **참고·대조값**이다(엑셀 「제품원가(+VAT)」). 계산이 읽는 것은
+    `cost_material_price`뿐이므로 이 값이 표준원가에 유입될 경로는 없다(계약 §3).
+    """
+
+    __tablename__ = "cost_table_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    section: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    item_name: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
+    #: 조립형은 값이 있고 **수입 완제품·매입품은 NULL**이다 — 0이나 자리표시자로 채우지 않는다.
+    form_factor: Mapped[Optional[str]] = mapped_column(String(24), nullable=True, index=True)
+    recipe_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="assembly", server_default="assembly"
+    )
+    total_inc_vat: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    #: 엑셀 행 번호 — 동명 중복(§9-9①)을 사람이 원본과 대조할 수 있게 하는 유일한 좌표다.
+    row_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    anomalies: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    lines: Mapped[list[CostTableItemLine]] = relationship(
+        back_populates="item", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    @property
+    def natural_key(self) -> str:
+        """`section\\x1Fitem_name\\x1Fform_factor` — pin 스냅샷이 저장하는 문자열.
+
+        구분자가 `\\x1F`(unit separator)인 이유: 품목명·섹션명에 공백·쉼표·슬래시가 흔해서
+        흔한 구분자를 쓰면 키가 조용히 어긋난다.
+        """
+
+        return "\x1f".join([self.section, self.item_name, self.form_factor or ""])
+
+
+class CostTableItemLine(Base):
+    """원가표 항목의 구성 한 줄 — 「무엇이 몇 개」 (계약 §0-E-3).
+
+    ★**JSON으로 접지 않는 이유**: 라인 단위 필터·대조가 구조로 불가해지기 때문이다
+    (§5-1이 공급처를 `note`에 안 접은 것과 같은 논리).
+
+    ★`ref_price`는 **참고값**이다 — `RecipeLineDraft.excel_ref_price`와 같은 지위이고,
+    픽이 만든 `cost_recipe_line`에 단가로 유입되지 않는다(계약 §0-E-7 금지선).
+    """
+
+    __tablename__ = "cost_table_item_line"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(
+        ForeignKey("cost_table_item.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: 부자재 종의 **표시 이름 원문**(`MaterialKey.display_name`) — 이 이름으로 `cost_material`에 잇는다.
+    material_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    ref_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 4), nullable=True)
+    source_column: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    item: Mapped[CostTableItem] = relationship(back_populates="lines")
+
+
 class CostRecipe(Base):
     """구성 헤더 — grain은 **「상품명 × 폼팩터」**다(계약 §0-B, Jino가 키를 바꿨다).
 
@@ -4729,6 +4802,23 @@ class CostRecipe(Base):
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
+    # ── 개정 4 (D-CPP-59) — 사람이 고른 원가표 항목 ────────────────────────────
+    # ★`picked_item_id`만 두지 않는 이유: 재업로드가 항목 «행»을 통째로 교체하므로 FK만
+    #   믿으면 S1 적대 리뷰 1R P1(**rowid 재사용**으로 cleaning kit의 근거가 다른 품목으로
+    #   바뀐 사고)이 그대로 재발한다. 자연 키 스냅샷을 함께 저장해 **조회 시점에 재검사**한다
+    #   (S1의 처방을 그대로 계승 — 계약 §0-E-3).
+    picked_item_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("cost_table_item.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: `section\x1Fitem_name\x1Fform_factor` — 사람이 고른 «그 항목»의 자연 키 원문.
+    picked_item_key: Mapped[Optional[str]] = mapped_column(String(600), nullable=True)
+    picked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # ── 「원가표에 없음」의 «명시» 처분 (계약 합격 19) ─────────────────────────
+    # ★암묵 판정을 금지하는 칸이다: 이게 없으면 「사람이 보고 없다고 판정했다」와
+    #   「아직 아무도 안 봤다」가 화면에서 같은 모습이 된다(§2-7의 같은 결).
+    absent_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    absent_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -4737,6 +4827,7 @@ class CostRecipe(Base):
     lines: Mapped[list[CostRecipeLine]] = relationship(
         back_populates="recipe", cascade="all, delete-orphan"
     )
+    picked_item: Mapped[Optional[CostTableItem]] = relationship(lazy="selectin")
 
     __table_args__ = (
         # ⚠️ SQL에서 NULL끼리는 같지 않다 — `form_factor`가 NULL인 행(수입 완제품·매입품)은

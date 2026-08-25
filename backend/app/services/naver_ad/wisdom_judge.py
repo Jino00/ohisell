@@ -34,7 +34,8 @@ _JUDGE_TIMEOUT_S = 120
 _TTL_DAYS = 14           # first_seen_at부터 이만큼 지나면 숙성(단발이 아니라 유지된 패턴)
 _OCCURRENCE_GATE = 3     # 또는 유사 패턴 3회 재등장
 _MAX_PER_RUN = 5         # 회당 판사 상한(나머지는 익일)
-_MAX_SIBLINGS = 8        # 같은 액션의 형제 버킷 재료 상한(프롬프트 비대화 방지, occurrences desc)
+_MAX_SIBLINGS = 8        # condition_controls 상한(프롬프트 비대화 방지, occurrences desc)
+_MAX_OTHER_TYPES = 4     # other_campaign_types 상한
 
 # ★D-NAO-248 §4-B(B7-2) — param을 자유 텍스트가 아니라 SPECS 화이트리스트 enum으로 좁힌다.
 #   판사가 무엇을 고를 수 있는지(키·이름·근거·범위)를 프롬프트에 그대로 실어 보낸다 — 코드
@@ -68,11 +69,22 @@ _SYSTEM = (
     f"화이트리스트({len(guardrail_params.SPECS)}종, 이 안에서만 고를 수 있습니다):\n{_PARAM_KEYS_DESC}\n"
     'param_suggestion을 채울 때 형식: {"param": 위 화이트리스트 키 중 정확히 하나(자유 텍스트 '
     '금지 — 목록에 없는 값은 코드가 자동으로 미매핑 처리해 반영되지 않습니다), '
-    '"scope": "unconditional" 또는 "conditional" 중 하나 — 이 지혜가 **항상**(요일·계절 등 '
-    '조건과 무관하게) 적용돼야 한다고 판단하면 "unconditional", 특정 조건(주말·계절·출시창 '
-    '등)에서만 유효하다고 판단하면 "conditional"입니다. 판단이 서지 않으면 "conditional"을 '
-    '쓰세요(우기지 마세요 — scope가 unconditional이 아니면 코드가 이 제안을 자동으로 반영하지 '
-    '않을 뿐, 지혜 자체가 버려지는 것은 아닙니다), '
+    '"scope": "unconditional" 또는 "conditional" 중 하나. ★이 필드가 묻는 것은 «이 지혜가 항상 '
+    '참인가»가 아니라 **«이 파라미터를 전역으로 바꿨을 때, 이 후보가 다루지 않는 다른 조건들이 '
+    '손해를 보는가»**입니다. 화이트리스트 3종은 요일·계절·출시창·캠페인유형을 가리지 않고 모든 '
+    '집행에 걸리는 전역 상수이기 때문입니다. 재료의 sibling_buckets.condition_controls(조건 '
+    '대조군 — 캠페인유형이 같고 실험배치가 없으며 환경 차원만 다른 형제, differs_in이 어느 '
+    '차원이 다른지 알려줍니다)를 근거로 판단하세요: 대조군들이 같은 방향을 가리키면 전역 반영이 '
+    '그 조건들을 해치지 않는다는 근거이므로 "unconditional"을 쓸 수 있습니다. 대조군이 반대 '
+    '방향이거나, 대조군이 없거나, 판단이 서지 않으면 "conditional"입니다. '
+    '★sibling_buckets.other_campaign_types는 대조군이 아닙니다 — 같은 액션 이름이라도 캠페인유형이 '
+    '다르면 레버의 의미가 달라 승률을 직접 비교할 수 없습니다. 그러나 전역 상수는 그 유형들에도 '
+    '걸립니다 — 즉 당신이 비교할 수 있는 범위는 이 파라미터가 실제로 미치는 범위보다 좁습니다. '
+    '그 남는 불확실성이 크다고 보면 "conditional"을 쓰세요. '
+    '★sibling_buckets.excluded_from_controls는 대조군에서 뺀 형제의 건수와 사유입니다(실험배치·'
+    '레거시 grain·경계 미상) — 재료의 한계를 알리는 숫자이니 참고만 하고 근거로 쓰지 마세요. '
+    '"unconditional"을 우기지 마세요 — scope가 unconditional이 아니면 코드가 이 제안을 자동으로 '
+    '반영하지 않을 뿐, 지혜 자체가 버려지는 것은 아닙니다(브리핑에는 그대로 실립니다), '
     '"direction": "up"|"down"|"review" 중 하나, "note": 왜 그렇게 조정해야 하는지 한 문장}. '
     "★scope='conditional'이거나 param이 화이트리스트 밖이면 이 제안은 파라미터에 자동 반영되지 "
     "않습니다 — 전역 상수(화이트리스트 3종)에 조건부 지혜를 반영하면 「주말에만 맞는 지혜가 "
@@ -104,32 +116,110 @@ def _is_ripe(cand: OpsWisdomCandidate, now: datetime) -> bool:
     return cand.first_seen_at is not None and cand.first_seen_at <= now - timedelta(days=_TTL_DAYS)
 
 
-def _sibling_buckets(db: Session, cand: OpsWisdomCandidate) -> list[dict]:
-    """같은 action의 다른 후보(버킷)들 — n/good/bad/win_rate. D-NAO-248 §1: 판사가 「이 조건
-    에서만 특이한 값인지, 다른 환경/유형에서도 재현되는지」를 대조할 재료(occurrences 상위
-    _MAX_SIBLINGS건, 프롬프트 비대화 방지). 자기 자신은 제외한다."""
+def _sibling_row(r: OpsWisdomCandidate, differs_in: list[str]) -> dict:
+    good = r.good_count or 0
+    bad = r.bad_count or 0
+    total = good + bad
+    return {
+        "signature": r.signature, "grain": r.grain,
+        "campaign_type": r.campaign_type, "experiment_batch": r.experiment_batch,
+        "env_bucket": json.loads(r.env_bucket_json) if r.env_bucket_json else {},
+        "n": total, "good": good, "bad": bad,
+        "win_rate": round(good / total, 3) if total else None,
+        "differs_in": differs_in,
+    }
+
+
+def _sibling_buckets(db: Session, cand: OpsWisdomCandidate) -> dict:
+    """같은 action의 형제 후보들을 «조건 대조군 여부»로 분류한다(D-NAO-248 §2, 계약
+    「질문이 답을 막았다」의 재료 교정). 판사가 여태 묻던 「이 지혜가 항상 참인가」가 아니라
+    「조건 대조군들이 같은 방향을 가리키는가」를 대조할 수 있게, 형제를 다음 넷으로 나눈다:
+
+    - condition_controls: 후보와 캠페인유형이 같고·실험배치가 없으며·환경 차원만 다른 형제
+      (진짜 조건 대조군, occurrences=n desc 상위 _MAX_SIBLINGS건).
+    - other_campaign_types: 캠페인유형이 달라 비교 불가한 형제(대조군 아님, 상위 _MAX_OTHER_TYPES건).
+    - excluded_from_controls: 대조군에서 뺀 «전수» 건수(실험배치·레거시 grain·경계미상·
+      candidate_not_eligible) — 상한에 잘리기 전 전수 기준으로 센다(「창에 갇힌 숫자」가 되지
+      않도록).
+    - truncated: 상한(8·4)에 잘려 나간 건수.
+
+    ★후보 자신이 grain != 'global'이거나 experiment_batch를 가지면(레거시·실험 후보) 대조군
+    개념이 성립하지 않으므로 condition_controls는 항상 빈 리스트로 둔다(fail-closed, 규칙 0).
+    그렇다고 그 형제들이 «어디에도 안 잡힌 채 사라지지» 않는다 — 규칙 1~3에 안 걸린 형제(=
+    후보가 적격이었다면 조건 대조군이 됐을 형제)는 excluded_from_controls["candidate_not_eligible"]
+    로 센다(P2-1: 「침묵」과 「0건」은 다르다 — 카운터가 있어야 침묵을 본다).
+    db가 없거나 cand.action이 없으면 4키 전부 빈 값(리스트 []·카운터 0)인 dict를 돌려준다
+    (None·빈 dict 금지 — 키 부재와 0건은 다르다).
+    """
+    empty: dict = {
+        "condition_controls": [], "other_campaign_types": [],
+        "excluded_from_controls": {
+            "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0,
+            "candidate_not_eligible": 0,
+        },
+        "truncated": {"condition_controls": 0, "other_campaign_types": 0},
+    }
     if db is None or not cand.action:
-        return []
+        return empty
+
     rows = (
         db.query(OpsWisdomCandidate)
         .filter(OpsWisdomCandidate.action == cand.action, OpsWisdomCandidate.id != cand.id)
-        .order_by(OpsWisdomCandidate.occurrences.desc())
-        .limit(_MAX_SIBLINGS)
         .all()
     )
-    siblings = []
+
+    cand_env = json.loads(cand.env_bucket_json) if cand.env_bucket_json else {}
+    cand_can_have_controls = cand.grain == "global" and cand.experiment_batch is None
+
+    condition_controls: list[dict] = []
+    other_campaign_types: list[dict] = []
+    excluded = {
+        "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0,
+        "candidate_not_eligible": 0,
+    }
+
     for r in rows:
-        good = r.good_count or 0
-        bad = r.bad_count or 0
-        total = good + bad
-        siblings.append({
-            "signature": r.signature, "grain": r.grain,
-            "campaign_type": r.campaign_type, "experiment_batch": r.experiment_batch,
-            "env_bucket": json.loads(r.env_bucket_json) if r.env_bucket_json else {},
-            "n": total, "good": good, "bad": bad,
-            "win_rate": round(good / total, 3) if total else None,
-        })
-    return siblings
+        # 규칙 1 — 레거시(grain != 'global'): 전역 후보의 by_campaign 분해와 같은 일기 행을
+        #   센다(중복 표본). signature가 "g?"로 시작하면 경계 미상 분리로 따로 센다.
+        if r.grain != "global":
+            if (r.signature or "").startswith("g?"):
+                excluded["unknown_boundary"] += 1
+            else:
+                excluded["legacy_grain"] += 1
+            continue
+        # 규칙 2 — 실험 배치: 풀링 경계(계약 §2). 섞으면 학습 오염.
+        if r.experiment_batch is not None:
+            excluded["experiment_batch"] += 1
+            continue
+        # 규칙 3 — 캠페인유형이 다르면 대조군이 아니라 비교 불가 유형.
+        if r.campaign_type != cand.campaign_type:
+            other_campaign_types.append(_sibling_row(r, []))
+            continue
+        # 규칙 0 — 후보 자신이 대조군을 가질 수 없으면 규칙 4(condition_controls)를 적용하지
+        #   않는다. 이 형제는 규칙 1~3 어디에도 안 걸리지 않았다(= 후보가 적격이었다면 조건
+        #   대조군이 됐을 형제) — 어느 버킷에도 안 잡힌 채 버려지지 않도록 candidate_not_eligible로
+        #   센다(P2-1: 「대조군 없음」과 「대조를 하지 않았다」는 다르다).
+        if not cand_can_have_controls:
+            excluded["candidate_not_eligible"] += 1
+            continue
+        # 규칙 4 — 나머지는 조건 대조군. differs_in = env_bucket 키 합집합 중 값이 다른 키.
+        r_env = json.loads(r.env_bucket_json) if r.env_bucket_json else {}
+        keys = set(cand_env.keys()) | set(r_env.keys())
+        differs = sorted(k for k in keys if cand_env.get(k) != r_env.get(k))
+        condition_controls.append(_sibling_row(r, differs))
+
+    condition_controls.sort(key=lambda s: s["n"], reverse=True)
+    other_campaign_types.sort(key=lambda s: s["n"], reverse=True)
+    truncated = {
+        "condition_controls": max(0, len(condition_controls) - _MAX_SIBLINGS),
+        "other_campaign_types": max(0, len(other_campaign_types) - _MAX_OTHER_TYPES),
+    }
+    return {
+        "condition_controls": condition_controls[:_MAX_SIBLINGS],
+        "other_campaign_types": other_campaign_types[:_MAX_OTHER_TYPES],
+        "excluded_from_controls": excluded,
+        "truncated": truncated,
+    }
 
 
 def _prompt(cand: OpsWisdomCandidate, now: datetime, db: Session | None = None) -> str:
@@ -156,8 +246,12 @@ def _prompt(cand: OpsWisdomCandidate, now: datetime, db: Session | None = None) 
     return (
         "아래는 지혜 승격 후보 1건입니다(JSON). good_count/bad_count는 이 조건에서 결과가 "
         "target 이상(good)/미만(bad)이었던 관찰 수, win_rate=good/(good+bad)입니다. "
-        "by_campaign은 이 후보(전역 시그니처)가 합친 캠페인별 분해, sibling_buckets는 같은 "
-        "액션의 다른 환경/유형 후보들입니다(참고 재료 — 자동 강제 아님). "
+        "by_campaign은 이 후보(전역 시그니처)가 합친 캠페인별 분해입니다. sibling_buckets는 "
+        "같은 액션의 형제 후보를 condition_controls(조건 대조군 — 캠페인유형이 같고 실험배치가 "
+        "없으며 환경 차원만 다른 형제, differs_in이 어느 차원이 다른지 알려줍니다)와 "
+        "other_campaign_types(캠페인유형이 달라 비교 불가한 형제 — 대조군 아님)로 분류하고, "
+        "excluded_from_controls(대조군에서 뺀 건수 — 실험배치·레거시 grain·경계미상)와 "
+        "truncated(상한에 잘린 건수)를 함께 담습니다(참고 재료 — 자동 강제 아님). "
         "이 안의 정보만 근거로 판정하세요.\n\n"
         f"{json.dumps(view, ensure_ascii=False, default=str)}"
     )
