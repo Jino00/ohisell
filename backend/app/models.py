@@ -2439,6 +2439,12 @@ class NaverCampaignSettings(Base):
     # (BP 레인이 그날 첫 평가에서 현재 예산으로 시드 — 사람이 콘솔에서 바꾼 값도 이때 흡수).
     # ★쓰기 주체는 BP 레인(auto_operator._run_budget_pacing_lane) 하나뿐.
     base_daily_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # D-NAO-248 부록 Q3(풀링 경계 축 ⓑ): 실험 배치 라벨(A/B·MOP 열·대조군·홀드아웃). 지혜
+    # 수확기(wisdom_candidates)의 전역 시그니처가 이 값을 못 봤다면 그 캠페인 관찰은 전역 풀에
+    # 흡수되고, MOP 열 같은 대조군 관찰이 「우리 정책」 학습으로 오염된다. NULL=실험 배치 아님
+    # (=전역 풀 참여 자격). 쓰기는 이 마이그레이션의 1행 시드(cmp-...8492582=MOP 열) 하나뿐 —
+    # 이후 배치 지정은 사람이 콘솔/직접 UPDATE로 한다(자동 레인은 이 값을 안 씀).
+    experiment_batch: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
@@ -2756,6 +2762,11 @@ class NaverProposal(Base):
     target_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # X1b: pause/resume 제안의 목표 userLock(true=정지, false=재개)
     target_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # P1(D-NAO-42-f): budget_up/budget_down의 목표 일예산(원, dailyBudget) — 실행자는 이 컬럼만 읽는다(rationale 텍스트 파싱 금지)
     budget_auto_eligible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # P1(D-NAO-42-f): 라운드 봉투 분류(Jino "넣어" 2026-07-13) — True=자율(위임 시 자동)/False=회당 라운드 캡 초과분(승인대기)/None=예산제안 아님
+    # D-NAO-248 §4-A — 다음 단계(「승인=적용」 사슬)가 쓸 자리만 먼저 둔다. 이번 스프린트는
+    # 컬럼·모델만 추가하고 쓰기 로직은 만들지 않는다(전부 nullable, 기존 행 무영향).
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 승인/반려 확정 시각
+    decided_by: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 결정 주체(사람 id/레인 이름)
+    decision_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 결정 근거 메모
 
 
 class NaverRetroSignal(Base):
@@ -4082,6 +4093,13 @@ class OpsWisdomCandidate(Base):
     status: pending|promoted|rejected|hidden. 시그니처는 signature(unique)로 멱등 재수확한다 —
     promoted/rejected는 재수확 대상이 아니지만(판사가 이미 판정), hidden은 시그니처가 재등장하면
     pending으로 부활한다(Ebbinghaus 재노출 강화 — 연 1회 iphone_window 패턴이 해를 넘겨 누적됨).
+
+    ★D-NAO-248(2026-08-25, 부록 Q2 처분 (b′)) — 옛 시그니처(campaign_id 선두)는 표본을
+    캠페인 수만큼 쪼갰다(§1: 4캠페인 합 91회가 45/38/5/3으로 갈려 전부 rejected). 이후
+    harvest_candidates는 **전역 시그니처**(campaign_id 미포함, 접두사로 구분 — "g|"=전역/
+    실험분리, "g?|"=fail-closed 미상분리)를 쓴다. grain/campaign_type/experiment_batch/
+    by_campaign_json 4컬럼이 이 신형을 표시한다 — **기존 27행은 grain=NULL로 그대로 남는다**
+    (소급 재계산 아님, 소급 «재수확»: 같은 90일 일기 위에 새 grain의 새 행만 생긴다).
     """
 
     __tablename__ = "ops_wisdom_candidates"
@@ -4104,6 +4122,18 @@ class OpsWisdomCandidate(Base):
     judge_verdict_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 판사 응답(verdict/principle/rationale)
     importance: Mapped[int] = mapped_column(Integer, nullable=False, default=5)  # Ebbinghaus 가중(0~10)
     strength: Mapped[float] = mapped_column(Float, nullable=False, default=7.0)  # Ebbinghaus 시상수(일수)
+    # D-NAO-248 §1(끊김 1 수리) — 이 4컬럼이 있어야 grain='global' 신형 시그니처가 캠페인
+    # 단위가 아니라 (유형×액션×환경[×실험배치]) 단위로 표본을 합칠 수 있다. 전부 nullable —
+    # 기존 27행은 전부 NULL(=레거시 캠페인 grain, 손대지 않는다).
+    # grain은 «이 후보가 실제로 무엇을 묶었나»다 — 시그니처와 반드시 일치한다.
+    #   NULL='레거시'(D-NAO-248 이전, 캠페인 단위) / 'global'=전역 풀·실험배치 분리(`g|`) /
+    #   'campaign'=fail-closed 미상분리(`g?|`, 캠페인 1개 단위. settings 행 부재나 유형 미상).
+    #   ★'global'을 미상분리에도 붙이면 라벨과 실체가 모순이고 소비층이 grain으로 거를 때
+    #   미상분리분이 전역 통계에 섞인다. 값은 String(12)에 맞춰 짧게 유지할 것.
+    grain: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
+    campaign_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 경계 축 ⓐ(부록 Q3)
+    experiment_batch: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)  # 경계 축 ⓑ — 있으면 전역 풀과 분리
+    by_campaign_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 캠페인별 good/bad 분해(판사에게 이질성 병기)
 
     __table_args__ = (
         Index("ux_ops_wisdom_candidates_signature", "signature", unique=True),

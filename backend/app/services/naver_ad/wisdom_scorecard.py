@@ -30,9 +30,11 @@ from app.models import (
     NaverChangeLog,
     NaverProductBep,
     NaverProposal,
+    OpsWisdomCandidate,
     OpsWisdomEntry,
 )
 from app.services.naver_ad import reflection_health
+from app.services.naver_ad.wisdom_candidates import RETRO_HARVEST_LABEL
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -50,6 +52,19 @@ _ATTRIBUTION_LIMIT = (
     "wisdom_apply.active_wisdom_prefix()는 지혜를 «자유 텍스트»로 전문가 브리핑에 주입하므로, "
     "그 지혜를 참고해 나온 이후 제안·조치에는 지혜 id가 원천적으로 남지 않는다. "
     "따라서 이 성적표의 롤업은 지혜 기여의 «하한»이다 — 0이라고 해서 기여가 없었다는 뜻이 아니다."
+)
+
+# ★D-NAO-248 §4-A(A7② 브리핑 주입 여부) — wisdom_apply.active_wisdom_prefix()가 실제로 쓰는
+#   질의(status=active·promoted_at desc·limit)를 여기서 «재현»한다(그 함수를 호출하면 문자열만
+#   돌아와 지혜 id 단위로 역파싱해야 하는데, truncate(500자)·동일 텍스트 중복이 있으면
+#   역파싱이 깨진다 — 그래서 같은 질의를 다시 짜는 쪽이 더 정직하다. 이 저장소의 기존 관례:
+#   proposal_pipeline.py가 retro_scorer._gamma_for를 같은 이유로 재현한다).
+#   ★값은 wisdom_apply._PREFIX_LIMIT(=10)과 반드시 같아야 한다 — 갈라지면 이 표시가 거짓말이
+#   된다. 바뀌면 두 곳을 함께 고친다.
+_BRIEFING_INJECT_LIMIT = 10
+_BRIEFING_ATTRIBUTION_NOTE = (
+    "주입 여부만 관측한다 — active_wisdom_prefix()는 지혜를 자유 텍스트로 브리핑에 얹을 뿐이라 "
+    "«주입됐다»가 «그 덕에 좋은 결과가 났다»를 뜻하지 않는다(위 attribution.limitation과 같은 한계)."
 )
 
 
@@ -297,7 +312,39 @@ def _rollup_changes(rows: list[NaverChangeLog]) -> dict:
     }
 
 
-def _score_entry(db: Session, entry: OpsWisdomEntry) -> dict:
+def _proposal_decision(p: NaverProposal) -> dict:
+    """A7① 결정 메타 — D-NAO-248 §4-A가 심은 decided_at/decided_by/decision_note 3컬럼은
+    이번 스프린트 신설(전부 nullable, 기존 행 무영향)이라 그 이전 결정분은 컬럼 자체가 없던
+    시절에 결정됐다. decided_at IS NULL을 «아직 결정 안 됨»으로 읽으면 거짓이다 — 그 제안은
+    실제로 승인/반려됐을 수 있다(예: 2314는 07-26 rejected). 그래서 일반 규칙(entry id를
+    코드에 박지 않는다)으로 NULL을 「기록 없음(컬럼 신설 전)」이라고 명시한다."""
+    if p.decided_at is None:
+        return {
+            "decided_at": None,
+            "decided_by": None,
+            "decision_note": "기록 없음(컬럼 신설 전)",
+        }
+    return {
+        "decided_at": _iso(p.decided_at),
+        "decided_by": p.decided_by,
+        "decision_note": p.decision_note,
+    }
+
+
+def _briefing_injected_ids(db: Session, *, limit: int = _BRIEFING_INJECT_LIMIT) -> set[int]:
+    """A7② — wisdom_apply.active_wisdom_prefix()가 브리핑에 실제로 얹는 지혜 id 집합.
+    같은 질의(status=active, promoted_at desc, id desc, limit)를 재현한다(위 상수 주석 참조)."""
+    rows = (
+        db.query(OpsWisdomEntry.id)
+        .filter(OpsWisdomEntry.status == "active")
+        .order_by(OpsWisdomEntry.promoted_at.desc(), OpsWisdomEntry.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {r[0] for r in rows}
+
+
+def _score_entry(db: Session, entry: OpsWisdomEntry, injected_ids: set[int]) -> dict:
     proposal_ids = [entry.param_proposal_id] if entry.param_proposal_id else []
     proposals = (
         db.query(NaverProposal).filter(NaverProposal.id.in_(proposal_ids)).all()
@@ -339,14 +386,95 @@ def _score_entry(db: Session, entry: OpsWisdomEntry) -> dict:
         "promoted_at": _iso(entry.promoted_at),
         "source_candidate_id": entry.source_candidate_id,
         "linked_proposals": [
-            {"proposal_id": p.id, "proposal_type": p.proposal_type, "status": p.status,
-             "campaign_id": p.campaign_id, "executed_change_log_id": p.executed_change_log_id}
+            {
+                "proposal_id": p.id, "proposal_type": p.proposal_type, "status": p.status,
+                "campaign_id": p.campaign_id, "executed_change_log_id": p.executed_change_log_id,
+                **_proposal_decision(p),  # A7① decided_at/decided_by/decision_note(또는 「기록 없음」)
+            }
             for p in proposals
         ],
         "linked_proposal_count": len(proposals),
+        # A7② — 이 지혜가 «지금» 전문가 브리핑 자유 텍스트에 실리는가(위 attribution.limitation과
+        # 같은 이유로 «주입=성과»가 아니다 — 성적은 여전히 rollup으로만 잰다).
+        "briefing_injected": entry.id in injected_ids,
+        "briefing_injection_note": _BRIEFING_ATTRIBUTION_NOTE,
         "has_evidence": rollup["changes_scored_profit"] > 0,
         "evidence_gap": gap,
         **rollup,
+    }
+
+
+def _candidate_bucket(c: OpsWisdomCandidate) -> str:
+    """A2 경계 분리 판별 — D-NAO-248이 시그니처 접두사로 구조적으로 분리한 세 버킷 +
+    옛(레거시) 캠페인 grain을 후보 «행» 하나로부터 판독한다(새 테이블 없이, wisdom_candidates
+    의 접두사 규약을 그대로 문자열로 대조 — harvest_candidates._build_signature 참조).
+    ⚠️grain='global'은 전역 풀·실험분리·미상분리 «셋 다»에 붙는다(harvest_candidates.py가
+    known 여부와 무관하게 grain="global"을 쓴다) — 그래서 grain만으로는 못 가르고 signature
+    접두사(+experiment_batch)까지 봐야 한다."""
+    if c.grain is None:
+        return "legacy"
+    sig = c.signature or ""
+    if sig.startswith("g?|"):
+        return "separated_unknown"
+    if c.experiment_batch:
+        return "separated_experiment"
+    return "global_pool"
+
+
+_BUCKET_LABELS = {
+    "legacy": "레거시(캠페인 grain, D-NAO-248 이전)",
+    "global_pool": "전역 풀(캠페인 통합)",
+    "separated_experiment": "실험배치 분리(전역 풀과 안 섞임)",
+    "separated_unknown": "라벨미상 fail-closed 분리(캠페인 단위 고립)",
+}
+
+
+def _candidate_status(db: Session) -> dict:
+    """A2 관측 표면 — 지혜 승격 «후보»(OpsWisdomCandidate) 현황. wisdom_scorecard의 나머지는
+    이미 승격된 지혜(OpsWisdomEntry)만 보므로, 승격 전 파이프라인(harvest_candidates가 매일
+    쌓는 27+N행)은 이 성적표 어디에도 없었다 — 그 공백을 메운다(계약 §4 A2).
+
+    ★읽기 전용 스냅샷이다: harvest_candidates()가 실행 «시점»에 세는 totals(이벤트 단위 카운터,
+    회차마다 리셋)와 다르게, 이건 **현재 저장된 후보 행**을 매번 다시 세므로 재현 가능하고
+    회차 사이에도 최신값을 낸다(계약이 새 테이블을 금지했으므로 D-NAO-248이 심은 4컬럼만
+    읽어 파생한다 — 부록 Q2 "합치되 이질성은 판사에게 보인다"를 화면에서도 지킨다)."""
+    cands = db.query(OpsWisdomCandidate).order_by(OpsWisdomCandidate.id.desc()).all()
+    bucket_counts: dict[str, int] = {k: 0 for k in _BUCKET_LABELS}
+    rows = []
+    for c in cands:
+        bucket = _candidate_bucket(c)
+        bucket_counts[bucket] += 1
+        by_campaign = json.loads(c.by_campaign_json) if c.by_campaign_json else {}
+        # ★레거시 행은 by_campaign_json이 없다(컬럼 신설 전 — 항상 NULL). 시그니처 자체가
+        #   캠페인 1개 단위였으므로 campaign_id가 있으면 1로 파생한다(그 이상은 지어내지 않는다).
+        campaign_count = len(by_campaign) if by_campaign else (1 if c.campaign_id else 0)
+        rows.append({
+            "candidate_id": c.id,
+            "signature": c.signature,
+            "status": c.status,
+            "grain": c.grain,  # None=레거시(D-NAO-248 이전) / 'global'=신형
+            "bucket": bucket,
+            "bucket_label": _BUCKET_LABELS[bucket],
+            "campaign_type": c.campaign_type,
+            "experiment_batch": c.experiment_batch,
+            "action": c.action,
+            "occurrences": c.occurrences,
+            "good_count": c.good_count,
+            "bad_count": c.bad_count,
+            "campaign_count": campaign_count,
+            "by_campaign": by_campaign,  # {} = 레거시(캠페인 1개, 분해 없음) / {campaign_id: {good,bad}}
+            "observation": c.observation,
+            "first_seen_at": _iso(c.first_seen_at),
+            "last_seen_at": _iso(c.last_seen_at),
+        })
+    return {
+        "candidates_total": len(cands),
+        "bucket_counts": bucket_counts,
+        "bucket_labels": _BUCKET_LABELS,
+        # A2 「기존 재료 재집계」 라벨 — harvest_candidates.RETRO_HARVEST_LABEL과 문자열 동일
+        # (한 곳에서만 정의 — wisdom_candidates.py 참조).
+        "retro_harvest_label": RETRO_HARVEST_LABEL,
+        "candidates": rows,
     }
 
 
@@ -356,7 +484,8 @@ def build(db: Session, *, wisdom_id: int | None = None) -> dict:
     if wisdom_id is not None:
         q = q.filter(OpsWisdomEntry.id == wisdom_id)
     entries = q.all()
-    rows = [_score_entry(db, e) for e in entries]
+    injected_ids = _briefing_injected_ids(db)
+    rows = [_score_entry(db, e, injected_ids) for e in entries]
 
     return {
         "generated_at_kst": kst_now().isoformat(sep=" ", timespec="seconds"),
@@ -383,4 +512,7 @@ def build(db: Session, *, wisdom_id: int | None = None) -> dict:
         #   실제로 2026-07-18~08-22 결번 19일이 로그에서도 전부 'ok'로 보였다(계약 §3).
         "reflection_health": reflection_health.build_reflection_health(db),
         "wisdom": rows,
+        # ★계약 §4 A2 — 승격 «전» 후보 파이프라인 관측 표면. wisdom_id 필터와 무관하게 항상
+        #   전체를 낸다(후보는 특정 지혜 1건에 속하지 않는다 — 승격 전 상태라 1:1 링크가 없다).
+        "candidate_status": _candidate_status(db),
     }

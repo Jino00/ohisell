@@ -15,7 +15,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
+    NaverCampaignSettings,
     NaverChangeLog,
+    NaverEntity,
     NaverProposal,
     OpsDiaryEntry,
     OpsWisdomCandidate,
@@ -88,6 +90,27 @@ def _bad():
     return {"d7": {"cost": 1000, "clk": 10, "conv": 500, "roas_c": 0.5}}
 
 
+def _settings(db, campaign_id, *, experiment_batch=None):
+    """D-NAO-248 전역 풀 참여 자격 — naver_campaign_settings 행이 있어야(fail-closed 미상분리를
+    피하려면) 하고, experiment_batch가 NULL이어야 전역 풀에 참여한다(값이 있으면 분리 버킷)."""
+    s = NaverCampaignSettings(campaign_id=campaign_id, experiment_batch=experiment_batch)
+    db.add(s)
+    db.flush()
+    return s
+
+
+def _entity(db, campaign_id, *, campaign_type="WEB_SITE"):
+    """D-NAO-248 경계 축 ⓐ — naver_entity(entity_type='campaign') 행이 있어야 campaign_type을
+    읽는다(없으면 fail-closed 미상분리)."""
+    e = NaverEntity(
+        entity_type="campaign", entity_id=campaign_id, parent_id="", campaign_id=campaign_id,
+        campaign_type=campaign_type, name=campaign_id, status="on",
+    )
+    db.add(e)
+    db.flush()
+    return e
+
+
 # ══════════════════════════ candidate_sa ══════════════════════════
 
 
@@ -125,16 +148,26 @@ def test_harvest_skip_does_not_revive_hidden_candidate(db):
 
 
 def test_harvest_creates_new_candidate_with_signature(db):
+    """★D-NAO-248 이후: 픽스처 campaign_id="cmp1"에 naver_campaign_settings 행이 없으므로
+    fail-closed 미상분리 버킷("g?|"접두사, 캠페인 단위 고립)으로 간다 — 전역 풀 형식은
+    test_harvest_pools_across_campaigns_by_global_signature 참조."""
     _diary(db, outcome=_good())
     res = wisdom_candidates.harvest_candidates(db, now=NOW)
     assert res["new"] == 1
+    assert res["separated_unknown"] == 1
     cand = db.query(OpsWisdomCandidate).one()
-    # signature = 조건만(campaign|action|day_class|season|iphone_window) — 방향은 tally로(리뷰 P2-2)
-    assert cand.signature == "cmp1|bid_up|weekend|summer|unknown"
+    # 시그니처 = 조건만(방향 제외, 리뷰 P2-2) — "g?|"는 fail-closed 미상분리(캠페인 단위)
+    assert cand.signature == "g?|cmp1|bid_up|weekend|summer|unknown"
     assert cand.occurrences == 1
     assert cand.good_count == 1 and cand.bad_count == 0
     assert cand.status == "pending"
     assert json.loads(cand.source_entry_ids_json) == [1]
+    # ★grain은 시그니처와 «일치»해야 한다 — 이 픽스처엔 naver_campaign_settings 행이 없어
+    #   fail-closed 미상분리(`g?|`, 캠페인 1개 단위)를 탄다. 여기에 "global"을 적으면 라벨과
+    #   실체가 모순이고, 소비층이 grain으로 거를 때 미상분리분이 전역 통계에 섞인다.
+    assert cand.grain == "campaign"
+    assert cand.campaign_id == "cmp1"  # 미상분리 후보만 캠페인 id를 남긴다
+    assert json.loads(cand.by_campaign_json) == {"cmp1": {"good": 1, "bad": 0}}
 
 
 def test_harvest_reoccurrence_increments_occurrences(db):
@@ -234,18 +267,150 @@ def test_harvest_only_execute_blocked_and_needs_outcome(db):
     assert res["new"] == 0
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# D-NAO-248(2026-08-25) — 전역 시그니처(끊김 1 수리): 계약 부록 Q2 처분 (b′)
+# 「전역 시그니처 «단일» grain + 캠페인별 분해를 후보 «안에» 병기」
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_harvest_pools_across_campaigns_by_global_signature(db):
+    """합산 — 서로 다른 캠페인 3개의 같은(유형·액션·환경) 일기가 후보 1행으로 합쳐지고
+    occurrences가 합계와 같다(§1의 91회 4캠페인 분산 문제를 정면으로 되짚는 케이스)."""
+    for cid in ("cA", "cB", "cC"):
+        _settings(db, cid)  # experiment_batch=NULL → 전역 풀 참여 자격
+        _entity(db, cid, campaign_type="WEB_SITE")
+    _diary(db, campaign_id="cA", outcome=_good())
+    _diary(db, campaign_id="cB", action_date=date(2026, 7, 13), outcome=_good())
+    _diary(db, campaign_id="cC", action_date=date(2026, 7, 14), outcome=_bad())
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+
+    assert res["new"] == 1 and res["updated"] == 2  # 1건 신규 + 2건 같은 후보 갱신
+    assert res["separated_experiment"] == 0 and res["separated_unknown"] == 0
+    cand = db.query(OpsWisdomCandidate).one()
+    assert cand.signature == "g|WEB_SITE|bid_up|weekend|summer|unknown|"
+    assert cand.grain == "global" and cand.campaign_type == "WEB_SITE"
+    assert cand.experiment_batch is None
+    assert cand.campaign_id == ""  # 전역 후보는 캠페인 ID를 담지 않는다
+    assert cand.occurrences == 3
+    assert cand.good_count == 2 and cand.bad_count == 1
+    by_campaign = json.loads(cand.by_campaign_json)
+    assert by_campaign == {
+        "cA": {"good": 1, "bad": 0}, "cB": {"good": 1, "bad": 0}, "cC": {"good": 0, "bad": 1},
+    }
+    assert "cmp" not in cand.observation and "cA" not in cand.observation  # 캠페인 ID가 요약문에 안 박힌다
+
+
+def test_harvest_separates_experiment_batch_from_global_pool(db):
+    """경계 축 ⓑ — experiment_batch가 붙은 캠페인의 일기는 전역 풀에 안 섞이고 분리 후보로
+    가며 separated_experiment 카운터가 오른다. 같은(유형·액션·환경) 조건이라도 배치 없는
+    캠페인과 signature가 갈린다(대조군 오염 방지, 부록 Q3)."""
+    _settings(db, "cMop", experiment_batch="iphone-philosophy-ab:mop")
+    _entity(db, "cMop", campaign_type="WEB_SITE")
+    _settings(db, "cOurs")  # experiment_batch=NULL → 전역 풀
+    _entity(db, "cOurs", campaign_type="WEB_SITE")
+
+    _diary(db, campaign_id="cMop", outcome=_good())
+    _diary(db, campaign_id="cOurs", action_date=date(2026, 7, 13), outcome=_good())
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+
+    assert res["new"] == 2
+    assert res["separated_experiment"] == 1
+    cands = {c.experiment_batch: c for c in db.query(OpsWisdomCandidate).all()}
+    assert set(cands.keys()) == {None, "iphone-philosophy-ab:mop"}
+    mop_cand = cands["iphone-philosophy-ab:mop"]
+    pool_cand = cands[None]
+    assert mop_cand.signature != pool_cand.signature
+    assert mop_cand.signature == "g|WEB_SITE|bid_up|weekend|summer|unknown|iphone-philosophy-ab:mop"
+    assert mop_cand.occurrences == 1 and pool_cand.occurrences == 1  # 안 섞였다
+
+
+def test_harvest_unknown_campaign_fails_closed_and_separates(db):
+    """경계 미상 — naver_campaign_settings 행이 아예 없는 캠페인은 전역 풀에 넣지 않고
+    fail-closed 분리 버킷("g?|")으로 가며 separated_unknown 카운터가 오른다. campaign_type이
+    없어 못 읽는 경우(설정 행은 있는데 entity 행이 없는 경우)도 같은 카운터로 잡힌다."""
+    _settings(db, "cKnown")
+    _entity(db, "cKnown", campaign_type="SHOPPING")
+    _diary(db, campaign_id="cKnown", outcome=_good())              # 전역 풀
+    _diary(db, campaign_id="cNoSettings", action_date=date(2026, 7, 13), outcome=_good())  # settings 행 없음
+    _settings(db, "cNoEntity")  # settings는 있지만 naver_entity 행이 없다
+    _diary(db, campaign_id="cNoEntity", action_date=date(2026, 7, 14), outcome=_good())
+
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+
+    assert res["separated_unknown"] == 2  # cNoSettings + cNoEntity
+    assert res["separated_experiment"] == 0
+    sigs = {c.campaign_id: c.signature for c in db.query(OpsWisdomCandidate).all() if c.campaign_id}
+    assert sigs["cNoSettings"] == "g?|cNoSettings|bid_up|weekend|summer|unknown"
+    assert sigs["cNoEntity"] == "g?|cNoEntity|bid_up|weekend|summer|unknown"
+    # 전역 풀(cKnown)과 fail-closed 분리(cNoSettings/cNoEntity)는 별개 행 3건
+    assert db.query(OpsWisdomCandidate).count() == 3
+
+
+def test_harvest_global_signature_reharvest_is_idempotent(db):
+    """멱등 재수확 — 같은 일기를 두 번 수확해도 occurrences가 안 부풀고 by_campaign_json도
+    안 부푼다(entry id dedup은 전역 시그니처에서도 그대로 유효해야 한다)."""
+    _settings(db, "cA")
+    _entity(db, "cA", campaign_type="WEB_SITE")
+    _diary(db, campaign_id="cA", outcome=_good())
+    wisdom_candidates.harvest_candidates(db, now=NOW)
+    res2 = wisdom_candidates.harvest_candidates(db, now=NOW)  # 같은 행 재스캔
+
+    assert res2["new"] == 0 and res2["updated"] == 0
+    cand = db.query(OpsWisdomCandidate).one()
+    assert cand.occurrences == 1
+    assert json.loads(cand.by_campaign_json) == {"cA": {"good": 1, "bad": 0}}
+
+
+def test_harvest_leaves_legacy_promoted_rejected_untouched(db):
+    """이력 보존 — status가 promoted/rejected인 레거시(grain=NULL, campaign_id 선두 시그니처)
+    후보 행은 재수확 후에도 카운트·status가 그대로다. 새 grain='global' 행만 별개로 생긴다
+    (기존 27건 = 그대로 둔다 — 소급 재계산이 아니라 소급 재수확)."""
+    legacy_promoted = OpsWisdomCandidate(
+        signature="cA|bid_up|weekend|summer|unknown", campaign_id="cA", action="bid_up",
+        env_bucket_json="{}", observation="레거시 승격 지혜", occurrences=5, good_count=5, bad_count=0,
+        first_seen_at=NOW, last_seen_at=NOW, source_entry_ids_json="[901,902,903,904,905]",
+        status="promoted", importance=5, strength=7.0, grain=None,
+    )
+    legacy_rejected = OpsWisdomCandidate(
+        signature="cB|bid_up|weekend|summer|unknown", campaign_id="cB", action="bid_up",
+        env_bucket_json="{}", observation="레거시 기각", occurrences=3, good_count=1, bad_count=2,
+        first_seen_at=NOW, last_seen_at=NOW, source_entry_ids_json="[801,802,803]",
+        status="rejected", importance=5, strength=7.0, grain=None,
+    )
+    db.add_all([legacy_promoted, legacy_rejected])
+    db.commit()
+
+    _settings(db, "cA")
+    _entity(db, "cA", campaign_type="WEB_SITE")
+    _diary(db, campaign_id="cA", outcome=_good())  # 신형 harvester가 다시 스캔
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+
+    assert res["new"] == 1  # 새 grain='global' 행 1건만 생긴다(레거시 재사용 안 됨)
+    db.refresh(legacy_promoted)
+    db.refresh(legacy_rejected)
+    assert legacy_promoted.occurrences == 5 and legacy_promoted.status == "promoted"
+    assert legacy_rejected.occurrences == 3 and legacy_rejected.status == "rejected"
+    assert legacy_promoted.source_entry_ids_json == "[901,902,903,904,905]"  # 손 안 댐
+    global_cand = db.query(OpsWisdomCandidate).filter(OpsWisdomCandidate.grain == "global").one()
+    assert global_cand.signature != legacy_promoted.signature  # 접두사가 달라 겹칠 수 없다
+    assert db.query(OpsWisdomCandidate).count() == 3  # 레거시 2건 + 신형 1건
+
+
 # ══════════════════════════ judge_sa ══════════════════════════
 
 
 def _cand(db, *, signature="s", occurrences=1, first_seen=NOW, status="pending", env=None,
-          good_count=0, bad_count=0):
+          good_count=0, bad_count=0, action="bid_up", grain=None, campaign_type=None,
+          experiment_batch=None, by_campaign_json=None):
     c = OpsWisdomCandidate(
-        signature=signature, campaign_id="cmp1", action="bid_up",
+        signature=signature, campaign_id="cmp1", action=action,
         env_bucket_json=json.dumps(env or {"day_class": "weekday", "season": "summer",
                                             "iphone_window": "normal"}),
         observation="obs", occurrences=occurrences, good_count=good_count, bad_count=bad_count,
         first_seen_at=first_seen,
         last_seen_at=first_seen, source_entry_ids_json="[1]", status=status,
+        grain=grain, campaign_type=campaign_type, experiment_batch=experiment_batch,
+        by_campaign_json=by_campaign_json,
     )
     db.add(c)
     db.flush()
@@ -328,6 +493,27 @@ def test_judge_prompt_exposes_win_rate_and_tally(db):
     assert '"good_count": 3' in prompt
     assert '"bad_count": 10' in prompt
     assert '"win_rate": 0.231' in prompt  # 3/13
+
+
+def test_judge_prompt_exposes_sibling_buckets_and_by_campaign(db):
+    """★D-NAO-248 §1 — 판사 재료에 형제 버킷(같은 액션의 다른 후보)과 by_campaign 분해가
+    실린다(이질성 가시화, 부록 Q2). db가 없으면(레거시 호출부 호환) sibling_buckets=[]."""
+    target = _cand(
+        db, signature="g|WEB_SITE|bid_up|weekday|summer|normal|", occurrences=3,
+        good_count=2, bad_count=1, grain="global", campaign_type="WEB_SITE",
+        by_campaign_json=json.dumps({"cA": {"good": 2, "bad": 0}, "cB": {"good": 0, "bad": 1}}),
+    )
+    _cand(db, signature="sib1", occurrences=5, good_count=1, bad_count=4,
+          env={"day_class": "holiday", "season": "summer", "iphone_window": "normal"})
+    db.commit()
+
+    prompt_with_db = wisdom_judge._prompt(target, NOW, db)
+    assert '"signature": "sib1"' in prompt_with_db
+    assert '"n": 5' in prompt_with_db
+    assert '"cA": {"good": 2, "bad": 0}' in prompt_with_db  # by_campaign 병기
+
+    prompt_without_db = wisdom_judge._prompt(target, NOW)  # db 생략 — 레거시 호출부 호환
+    assert '"sibling_buckets": []' in prompt_without_db
 
 
 # ══════════════════════════ writer_sa ══════════════════════════

@@ -79,6 +79,8 @@ const ROW_BASE = {
   source_candidate_id: 3,
   linked_proposals: [],
   linked_proposal_count: 1,
+  briefing_injected: false,
+  briefing_injection_note: "주입 여부만 관측한다 — «주입됐다»가 «효과가 났다»를 뜻하지 않는다.",
   has_evidence: false,
   evidence_gap: "제안은 났으나 실집행 조치가 0건이다 (제안 상태: rejected).",
   changes_total: 0,
@@ -113,11 +115,30 @@ const REFLECTION_HEALTH = {
   material_note: "재료 = 실집행 일기의 D-1·D-2·D-8. L3 정지 중에는 반성이 안 도는 것이 정상이다.",
 };
 
-const card = (row: Record<string, unknown>, reflectionHealth: unknown = REFLECTION_HEALTH) => ({
+// A2 후보 현황(D-NAO-248 §4-A) — 기본은 «후보 0건»(빈 상태도 화면에 명시돼야 한다).
+const CANDIDATE_STATUS_EMPTY = {
+  candidates_total: 0,
+  bucket_counts: { legacy: 0, global_pool: 0, separated_experiment: 0, separated_unknown: 0 },
+  bucket_labels: {
+    legacy: "레거시(캠페인 grain, D-NAO-248 이전)",
+    global_pool: "전역 풀(캠페인 통합)",
+    separated_experiment: "실험배치 분리(전역 풀과 안 섞임)",
+    separated_unknown: "라벨미상 fail-closed 분리(캠페인 단위 고립)",
+  },
+  retro_harvest_label: "diary 90일 lookback 재집계 — 새 grain 신설이 곧 새 관찰 생성은 아니다",
+  candidates: [],
+};
+
+const card = (
+  row: Record<string, unknown>,
+  reflectionHealth: unknown = REFLECTION_HEALTH,
+  candidateStatus: unknown = CANDIDATE_STATUS_EMPTY,
+) => ({
   generated_at_kst: "2026-08-22 18:00:00",
   wisdom_total: 1,
   wisdom_active: 1,
   wisdom_with_evidence: row.has_evidence ? 1 : 0,
+  candidate_status: candidateStatus,
   value_definition: VALUE_DEF,
   attribution: ATTRIBUTION,
   reflection_health: reflectionHealth,
@@ -282,5 +303,134 @@ describe("지혜 성적표 패널 — 사람 눈에 닿는가", () => {
     h.wisdomFails = true;
     renderPage();
     await waitFor(() => expect(screen.getByText(/지혜 조회 실패/)).toBeTruthy());
+  });
+
+  // ── ★D-NAO-248 §4-A2: 후보 현황(승격 전) 블록 ──────────────────────────────
+  describe("A2 후보 현황 블록", () => {
+    it("후보 0건이면 «아직 수확된 후보가 없습니다»를 낸다 (침묵 방지)", async () => {
+      h.wisdom = card(ROW_BASE);
+      renderPage();
+      expect(await screen.findByText(/아직 수확된 후보가 없습니다/)).toBeTruthy();
+      // 버킷 라벨은 0건이어도 항상 뜬다
+      expect(screen.getByText(/전역 풀\(캠페인 통합\) 0건/)).toBeTruthy();
+    });
+
+    it("시그니처·캠페인별 분해·「기존 재료 재집계」 라벨이 화면에 뜬다", async () => {
+      h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+        ...CANDIDATE_STATUS_EMPTY,
+        candidates_total: 1,
+        bucket_counts: { ...CANDIDATE_STATUS_EMPTY.bucket_counts, global_pool: 1 },
+        candidates: [
+          {
+            candidate_id: 30,
+            signature: "g|SHOPPING|bid_up|weekday|summer|normal|",
+            status: "pending",
+            grain: "global",
+            bucket: "global_pool",
+            bucket_label: "전역 풀(캠페인 통합)",
+            campaign_type: "SHOPPING",
+            experiment_batch: null,
+            action: "bid_up",
+            occurrences: 91,
+            good_count: 60,
+            bad_count: 31,
+            campaign_count: 2,
+            by_campaign: { cmp1: { good: 45, bad: 20 }, cmp2: { good: 15, bad: 11 } },
+            observation: "[패턴·전역] SHOPPING 유형의 bid_up",
+            first_seen_at: "2026-07-01 00:00:00",
+            last_seen_at: "2026-08-20 00:00:00",
+          },
+        ],
+      });
+      renderPage();
+      expect(await screen.findByText(/g\|SHOPPING\|bid_up\|weekday\|summer\|normal\|/)).toBeTruthy();
+      expect(screen.getByText(/관찰 91회\(good 60\/bad 31\)/)).toBeTruthy();
+      expect(screen.getByText(/캠페인 2개/)).toBeTruthy();
+      expect(screen.getByText(/cmp1\(45\/20\), cmp2\(15\/11\)/)).toBeTruthy();
+      // 「기존 재료 재집계」 라벨 — 없으면 새 배움처럼 읽힌다(계약 판단기준)
+      expect(screen.getByText(/재집계/)).toBeTruthy();
+    });
+
+    it("레거시(캠페인 grain) 후보와 전역 후보가 라벨로 구별된다", async () => {
+      h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+        ...CANDIDATE_STATUS_EMPTY,
+        candidates_total: 2,
+        bucket_counts: { legacy: 1, global_pool: 1, separated_experiment: 0, separated_unknown: 0 },
+        candidates: [
+          {
+            candidate_id: 1, signature: "cmp1|bid_up|weekday|summer|normal", status: "rejected",
+            grain: null, bucket: "legacy", bucket_label: "레거시(캠페인 grain, D-NAO-248 이전)",
+            campaign_type: null, experiment_batch: null, action: "bid_up",
+            occurrences: 45, good_count: 20, bad_count: 25, campaign_count: 1, by_campaign: {},
+            observation: "[패턴] 캠페인 cmp1의 bid_up", first_seen_at: null, last_seen_at: null,
+          },
+          {
+            candidate_id: 31, signature: "g|SHOPPING|bid_up|weekday|summer|normal|", status: "pending",
+            grain: "global", bucket: "global_pool", bucket_label: "전역 풀(캠페인 통합)",
+            campaign_type: "SHOPPING", experiment_batch: null, action: "bid_up",
+            occurrences: 91, good_count: 60, bad_count: 31, campaign_count: 2,
+            by_campaign: { cmp1: { good: 45, bad: 20 }, cmp2: { good: 15, bad: 11 } },
+            observation: "[패턴·전역] SHOPPING 유형의 bid_up", first_seen_at: null, last_seen_at: null,
+          },
+        ],
+      });
+      renderPage();
+      // 같은 라벨이 요약 줄(버킷별 건수)과 후보별 항목 줄 «두 곳」에 뜨므로 findAllByText로 잰다.
+      expect((await screen.findAllByText(/레거시\(캠페인 grain, D-NAO-248 이전\)/)).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/전역 풀\(캠페인 통합\)/).length).toBeGreaterThan(0);
+    });
+  });
+
+  // ── ★D-NAO-248 §4-A7: 소비 현황(브리핑 주입·제안 결정 메타) ────────────────
+  describe("A7 소비 현황", () => {
+    it("브리핑 주입 여부가 배지로 뜬다", async () => {
+      h.wisdom = card({ ...ROW_BASE, briefing_injected: true });
+      renderPage();
+      expect(await screen.findByText(/브리핑 주입 됨/)).toBeTruthy();
+    });
+
+    it("브리핑 미주입은 «안 됨»으로 뜬다 (침묵이 아니라 명시)", async () => {
+      h.wisdom = card({ ...ROW_BASE, briefing_injected: false });
+      renderPage();
+      expect(await screen.findByText(/브리핑 주입 안 됨/)).toBeTruthy();
+    });
+
+    it("★기존 제안(컬럼 신설 전 결정)은 «기록 없음»으로 뜬다 — 사유를 지어내지 않는다", async () => {
+      h.wisdom = card({
+        ...ROW_BASE,
+        linked_proposals: [
+          {
+            proposal_id: 2314, proposal_type: "param_change", status: "rejected",
+            campaign_id: "cmp1", executed_change_log_id: null,
+            decided_at: null, decided_by: null, decision_note: "기록 없음(컬럼 신설 전)",
+          },
+        ],
+      });
+      renderPage();
+      expect(await screen.findByText(/제안 #2314\(param_change\) · rejected/)).toBeTruthy();
+      expect(screen.getByText(/기록 없음\(컬럼 신설 전\)/)).toBeTruthy();
+    });
+
+    it("결정 메타가 있으면 결정일·주체·사유가 그대로 뜬다", async () => {
+      h.wisdom = card({
+        ...ROW_BASE,
+        linked_proposals: [
+          {
+            proposal_id: 500, proposal_type: "param_change", status: "approved",
+            campaign_id: "cmp1", executed_change_log_id: 50,
+            decided_at: "2026-08-25 09:00:00", decided_by: "console:jino",
+            decision_note: "승인 — 근거 충분",
+          },
+        ],
+      });
+      renderPage();
+      expect(await screen.findByText(/결정 2026-08-25 \(console:jino\): 승인 — 근거 충분/)).toBeTruthy();
+    });
+
+    it("이 지혜가 낳은 제안이 없으면 명시적으로 「없음」을 낸다", async () => {
+      h.wisdom = card({ ...ROW_BASE, linked_proposals: [] });
+      renderPage();
+      expect(await screen.findByText(/이 지혜가 낳은 제안 없음/)).toBeTruthy();
+    });
   });
 });

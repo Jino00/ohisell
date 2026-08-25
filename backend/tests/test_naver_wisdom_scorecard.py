@@ -16,8 +16,10 @@ from app.models import (
     NaverChangeLog,
     NaverProductBep,
     NaverProposal,
+    OpsWisdomCandidate,
     OpsWisdomEntry,
 )
+from app.services.naver_ad import wisdom_candidates
 from app.services.naver_ad import wisdom_scorecard as ws
 
 
@@ -568,6 +570,155 @@ def test_profit_buckets_cover_every_row_exactly_once(db):
     assert row["profit_pairs"] == 1
     assert row["profit_unavailable"] == 2
     assert row["profit_unjudged"] == 1
+
+
+# ── ★D-NAO-248 §4-A2 회귀: 후보 현황 블록 ────────────────────────────────────
+def _candidate(db, *, cid, signature, grain=None, campaign_type=None, experiment_batch=None,
+               campaign_id="", by_campaign=None, status="pending", occurrences=1,
+               good_count=1, bad_count=0):
+    import json as _json
+    c = OpsWisdomCandidate(
+        id=cid, signature=signature, campaign_id=campaign_id, action="bid_up",
+        env_bucket_json="{}", observation="관찰 요약", occurrences=occurrences,
+        good_count=good_count, bad_count=bad_count, status=status,
+        importance=5, strength=7.0, grain=grain, campaign_type=campaign_type,
+        experiment_batch=experiment_batch,
+        by_campaign_json=_json.dumps(by_campaign, ensure_ascii=False) if by_campaign else None,
+    )
+    db.add(c)
+    db.commit()
+    return c
+
+
+def test_candidate_status_distinguishes_legacy_from_global(db):
+    """레거시(grain=NULL, D-NAO-248 이전) 27행류와 신형 전역 후보가 화면에서 갈라져야 한다."""
+    _candidate(db, cid=1, signature="cmp1|bid_up|weekday|summer|normal", grain=None,
+               campaign_id="cmp1")
+    _candidate(db, cid=2, signature="g|WEB_SITE|bid_up|weekday|summer|normal|",
+               grain="global", campaign_type="WEB_SITE",
+               by_campaign={"cmp1": {"good": 3, "bad": 1}, "cmp2": {"good": 2, "bad": 0}})
+
+    out = ws.build(db)["candidate_status"]
+    assert out["candidates_total"] == 2
+    by_id = {r["candidate_id"]: r for r in out["candidates"]}
+    assert by_id[1]["grain"] is None
+    assert by_id[1]["bucket"] == "legacy"
+    assert by_id[1]["campaign_count"] == 1  # 레거시는 항상 캠페인 1개(파생값, by_campaign 없음)
+    assert by_id[2]["grain"] == "global"
+    assert by_id[2]["bucket"] == "global_pool"
+    # 캠페인별 분해가 그대로 실려야 한다(부록 Q2: 합치되 이질성은 판사에게 보인다)
+    assert by_id[2]["campaign_count"] == 2
+    assert by_id[2]["by_campaign"] == {"cmp1": {"good": 3, "bad": 1}, "cmp2": {"good": 2, "bad": 0}}
+    assert out["bucket_counts"]["legacy"] == 1
+    assert out["bucket_counts"]["global_pool"] == 1
+
+
+def test_candidate_status_separates_experiment_and_unknown_buckets(db):
+    """경계 분리 건수(부록 Q3) — 실험배치 분리와 fail-closed 미상분리가 전역 풀과 각각 다른
+    버킷 카운터에 잡혀야 한다."""
+    _candidate(db, cid=10, signature="g|SHOPPING|bid_up|weekday|summer|normal|",
+               grain="global", campaign_type="SHOPPING", experiment_batch=None,
+               by_campaign={"cmp1": {"good": 1, "bad": 0}})
+    _candidate(db, cid=11, signature="g|SHOPPING|bid_up|weekday|summer|normal|MOP열",
+               grain="global", campaign_type="SHOPPING", experiment_batch="MOP열",
+               by_campaign={"cmp2": {"good": 1, "bad": 0}})
+    _candidate(db, cid=12, signature="g?|cmp3|bid_up|weekday|summer|normal",
+               grain="global", campaign_id="cmp3",
+               by_campaign={"cmp3": {"good": 1, "bad": 0}})
+
+    out = ws.build(db)["candidate_status"]
+    assert out["bucket_counts"] == {
+        "legacy": 0, "global_pool": 1, "separated_experiment": 1, "separated_unknown": 1,
+    }
+    by_id = {r["candidate_id"]: r for r in out["candidates"]}
+    assert by_id[11]["bucket"] == "separated_experiment"
+    assert by_id[12]["bucket"] == "separated_unknown"
+    # 「기존 재료 재집계」 라벨이 wisdom_candidates의 상수와 문자 그대로 같아야 한다
+    assert out["retro_harvest_label"] == wisdom_candidates.RETRO_HARVEST_LABEL
+    assert "재집계" in out["retro_harvest_label"]
+
+
+def test_candidate_status_is_unfiltered_by_wisdom_id(db):
+    """후보는 특정 지혜 1건에 속하지 않는다(승격 전) — wisdom_id로 걸러도 전체가 나와야 한다."""
+    _wisdom(db, wid=1)
+    _wisdom(db, wid=2, text="다른 지혜")
+    _candidate(db, cid=1, signature="cmp1|bid_up|weekday|summer|normal", grain=None,
+               campaign_id="cmp1")
+
+    out = ws.build(db, wisdom_id=2)
+    assert out["wisdom_total"] == 1  # wisdom_id 필터는 여전히 먹는다
+    assert out["candidate_status"]["candidates_total"] == 1  # 후보는 안 걸린다
+
+
+def test_candidate_status_present_even_with_zero_candidates(db):
+    """후보 0건이어도 블록 자체는 항상 나와야 한다(침묵 방지)."""
+    out = ws.build(db)["candidate_status"]
+    assert out["candidates_total"] == 0
+    assert out["candidates"] == []
+    assert out["retro_harvest_label"]
+
+
+# ── ★D-NAO-248 §4-A7 회귀: 지혜별 소비 현황(결정 메타·브리핑 주입) ──────────────
+def test_proposal_decision_meta_is_recorded_when_present(db):
+    _proposal(db, pid=100, status="approved", change_log_id=None)
+    p = db.get(NaverProposal, 100)
+    p.decided_at = datetime(2026, 8, 25, 9, 0)
+    p.decided_by = "console:jino"
+    p.decision_note = "승인 — 근거 충분"
+    db.commit()
+    _wisdom(db, wid=1, proposal_id=100)
+
+    row = ws.build(db)["wisdom"][0]
+    lp = row["linked_proposals"][0]
+    assert lp["decided_at"] == "2026-08-25 09:00:00"
+    assert lp["decided_by"] == "console:jino"
+    assert lp["decision_note"] == "승인 — 근거 충분"
+
+
+def test_legacy_decision_without_new_columns_shows_record_missing_not_undecided(db):
+    """★기존 제안(예: 2314, 07-26 rejected)은 decided_at 컬럼 신설 «전»에 결정났다.
+    NULL을 «아직 결정 안 됨»으로 읽으면 거짓말이 된다(그 제안은 이미 rejected다) — 코드에
+    id를 박지 않는 일반 규칙(decided_at IS NULL → 「기록 없음」)으로 이 케이스가 저절로
+    맞게 뜨는지를 검사한다."""
+    _proposal(db, pid=2314, status="rejected", change_log_id=None)
+    _wisdom(db, wid=1, proposal_id=2314)
+
+    row = ws.build(db)["wisdom"][0]
+    lp = row["linked_proposals"][0]
+    assert lp["proposal_id"] == 2314
+    assert lp["status"] == "rejected"
+    assert lp["decided_at"] is None
+    assert lp["decided_by"] is None
+    assert lp["decision_note"] == "기록 없음(컬럼 신설 전)"
+
+
+def test_briefing_injected_flag_reflects_active_wisdom_prefix_query(db):
+    """브리핑 주입 여부는 wisdom_apply.active_wisdom_prefix()와 같은 질의(active·promoted_at
+    desc·limit 10)를 재현한 것이어야 한다 — retired는 주입되지 않는다."""
+    _wisdom(db, wid=1, text="주입되는 지혜")
+    e2 = _wisdom(db, wid=2, text="철회된 지혜")
+    e2.status = "retired"
+    db.commit()
+
+    out = ws.build(db)["wisdom"]
+    by_id = {r["wisdom_id"]: r for r in out}
+    assert by_id[1]["briefing_injected"] is True
+    assert by_id[2]["briefing_injected"] is False
+    assert "성과" in by_id[1]["briefing_injection_note"] or "결과" in by_id[1]["briefing_injection_note"]
+
+
+def test_briefing_injected_flag_respects_limit(db):
+    """limit(10) 밖의 오래된 지혜는 주입되지 않는다고 표시돼야 한다."""
+    for i in range(1, 13):
+        _wisdom(db, wid=i, text=f"지혜{i}")
+        e = db.get(OpsWisdomEntry, i)
+        e.promoted_at = datetime(2026, 8, i, 8, 45)
+        db.commit()
+
+    out = {r["wisdom_id"]: r for r in ws.build(db)["wisdom"]}
+    # promoted_at 내림차순 상위 10건(3~12)만 주입, 1~2는 밖
+    injected = {wid for wid, r in out.items() if r["briefing_injected"]}
+    assert injected == set(range(3, 13))
 
 
 def test_unjudged_count_reaches_the_gap_text_when_no_verdict_row_exists(db):
