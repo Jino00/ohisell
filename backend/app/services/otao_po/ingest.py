@@ -351,6 +351,11 @@ def sync_name_map(session: Session, *, report: IngestReport | None = None) -> In
             rep.map_manual_kept += 1
             if row.product_code:
                 rep.map_resolved += 1
+            else:
+                # ★적대 리뷰 P2-7 — 사람이 「아직 모르겠다」로 남긴 행(manual + code 없음)도
+                #   **「매핑 필요」 목록에 실린다.** 안 실으면 사람이 손댔다는 이유만으로
+                #   미해결 항목이 리포트에서 사라진다 — 계약 §2-9 「조용히 빼면 발주 누락」 그 자체다.
+                rep.map_unresolved.append(entry.raw_name)
             continue
         if row is None:
             row = OtaoItemNameMap(raw_name=entry.raw_name)
