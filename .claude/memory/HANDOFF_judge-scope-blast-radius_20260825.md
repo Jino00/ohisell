@@ -126,7 +126,33 @@ n=49가 기록한 「같은 액션·같은 계절의 평일판이 45/38/5/3으�
 
 ## 2-3. 착지
 
-(Step 6에서 채움)
+**착지 전제 검사(전부 읽기 전용)**
+- **L1** 체인 등록부 전수 — `ALIVE`는 `pao-논의 n=52`(= **나 자신** `9057fc29`)와 `sellc-원가-메뉴 n=11`(`29495d7f`, **다른 트랙·다른 브랜치**). 내 대상 `feat/pao-n52`는 **이번 세션이 만든 브랜치**(커밋 전건 내 것) ⇒ **«예»**
+- **L2** 워킹트리 clean · 커밋 전건 **경로 지정**(`git add -- <경로>`, `-A`·`-a` 미사용)
+- **L3** `feat/pao-n52`는 내 워크트리 단독 ⇒ push·PR·머지 진행
+- **L4** 착수 시 `behind 3` → `git merge origin/main`으로 갱신 후 진행(충돌 0)
+- **L5** 로컬 `main`이 **공유 메인 폴더에 체크아웃돼 있음** ⇒ 「저장소를 main에 세워둔다」 **생략**. 다음 세션은 `git switch -c <새> origin/main`
+
+**완료 단계** — 커밋 → push → PR → 리뷰 → 머지 **전부 완주**(2회전)
+
+| 회전 | 내용 | 커밋 | PR | CI | 리뷰 | 머지 |
+|---|---|---|---|---|---|---|
+| ①코드 | D-NAO-250 판사 scope + 조건 대조군 + 프론트 개행 | `a383d927`·`ef96bd25`·`a8c11d4b`·병합 `11e61e3a` | **#453** | **3/3 pass**(py3.10 10m27s · py3.14 8m38s · frontend 1m6s) | **1R FAIL(P1 1건) → 2R PASS(P1=0)** | **`825b35b7`** |
+| ②기록 | HANDOFF · 교훈 #358 · 체인 등록부 | (아래 3파일) | **#457** | 전건 통과 | ⚠️ **리뷰 생략: 기록물만** — `HANDOFF_judge-scope-blast-radius_20260825.md` · `LESSONS_LEARNED.md` · `chains/pao-논의.jsonl` (코드 **0파일**) | **`1d77c13a`** |
+
+- **`--force` 미사용**(양쪽 다). `safe_merge.sh`의 exit 0을 믿지 않고 **`gh pr view`로 교차 확인** — 둘 다 `state=MERGED` + 머지 커밋 해시 일치.
+- **prod 배포**: 백엔드 `safe_deploy.sh backend/app/services/naver_ad/{wisdom_judge,wisdom_apply}.py --restart` — CAS 2파일 통과 · 블루-그린 `8011→8001` · **다운타임 0초**. 프론트 `--frontend` — **1차 CAS 거부**(prod가 내 역사에 없는 커밋 `01032eac`에서 배포됨) → `git merge origin/main` → **재빌드** → 성공(번들 `index-Ck9U-p3Z.js`, 백업 `dist_backup_20260825_1810`). **신규 마이그레이션 0건**(`--migrate` 미사용).
+- **멈춘 단계**: **없음**
+- **재개 명령**: 해당 없음
+- **검증 명령**(다음 세션이 이 절의 주장을 그대로 확인할 수 있다):
+  ```
+  gh pr view 453 --json state,mergeCommit ; gh pr view 457 --json state,mergeCommit
+  git log --oneline 825b35b7 1d77c13a
+  ssh sellc.ohitech.co.kr 'grep -c "condition_controls" /home/ubuntu/ohisell/backend/app/services/naver_ad/wisdom_judge.py'
+  curl -s https://sellc.ohitech.co.kr/ | grep -o 'index-[A-Za-z0-9_-]*\.js'
+  ```
+
+⚠️ **정직한 한 줄**: `end_kst`는 규격상 「마지막으로 쓰는 순간」에 채워야 하는데, 이 절과 `end_kst`가 같은 커밋에 들어간다(그 커밋의 머지가 이 세션의 마지막 쓰기다). 무한 회귀를 피한 결과이고, 그 사이 창(≈CI 1회전)에는 **내 브랜치만** 건드린다.
 
 ---
 
