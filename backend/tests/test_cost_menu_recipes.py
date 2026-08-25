@@ -17,6 +17,8 @@ from __future__ import annotations
 from decimal import Decimal as D
 from io import BytesIO
 
+from datetime import date
+
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
@@ -28,7 +30,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import Channel, ProductChannelMapping, ProductMaster
 from app.services.cost_menu.mapping_parser import parse_mapping_table, propose_form_factor
-from app.services.cost_menu.recipe_parser import parse_cost_table
+from app.services.cost_menu.recipe_parser import CLEANING_KIT_NAME, parse_cost_table
 from app.services.cost_menu.standard_cost import (
     RecipeLineInput,
     compute_standard_cost,
@@ -166,6 +168,48 @@ def _import(client) -> dict:
     )
     assert r.status_code == 200, r.text
     return r.json()
+
+
+# ★D-CPP-58: cleaning kit은 «원장이 단가의 정본»인 종이라 엑셀 채택 경로를 안 탄다.
+#   prod에는 수입 로트 7건이 붙어 있고 최신이 190.82/209.90(2026-08-18 로트)이다. 픽스처가
+#   그 모양을 재현하지 않으면 표준원가가 영영 «계산 불가»로 남아, 테스트가 «병합 후의 prod»가
+#   아니라 존재하지 않는 상태를 검사하게 된다(교훈: 픽스처는 prod 세션과 같아야 한다).
+KIT_EX = D("190.82")
+KIT_INC = D("209.90")
+
+#: 병합 후 골든 — 옛 2,137/2,350.70에서 밀대외 22를 빼고 kit 190.82를 넣은 값.
+#: ★엑셀 「제품원가」 2,350.70과 **더는 같지 않다.** 그게 이 계약의 요점이다(엑셀이 과소).
+BAR_STD_EX = D("2305.82")        # 2137 − 22 + 190.82
+BAR_STD_INC = D("2536.40")       # ×1.1
+
+
+def _seed_cleaning_kit_ledger_price(client) -> None:
+    """import 뒤 cleaning kit 종에 «원장 파생» 단가를 심고 승인한다 — prod 상태의 재현."""
+
+    from app.models import CostMaterial, CostMaterialPrice
+    from app.services.cost_menu.recipe_parser import CLEANING_KIT_NAME
+
+    with client.testing_session() as s:
+        m = s.query(CostMaterial).filter(CostMaterial.name == CLEANING_KIT_NAME).one()
+        # ★층2가 뚫리면 여기서 죽는다 — 엑셀 22원이 종의 참고값으로 새면 화면이 190.82 옆에
+        #   22를 세우고 「채택」이 그걸 권유로 만든다.
+        assert m.excel_ref_price is None, "엑셀 22원이 cleaning kit의 참고값으로 샜다(층2 실패)"
+        # ★`source="manual"`인 이유: `ledger` 행은 **조회 시점에 원장과 다시 맞춰 보므로**
+        #   (`materials.ledger_check`) 수입건·품목 라인 없이 심으면 「연결이 없다」로 판정돼
+        #   단가가 계산에서 빠진다. 이 파일의 관심사는 «파싱 → 승인 → 채택 → 골든값»이고,
+        #   원장 파생 단가가 실제로 보드에 닿는지는 `test_cost_menu_price_propagation.py`가
+        #   **진짜 수입건 라인을 만들어** 잰다. 여기서 중요한 건 단가의 출처가 아니라
+        #   **엑셀이 아니라는 것**이다(값은 prod 2026-08-18 로트의 실측값 그대로 쓴다).
+        m.prices.append(
+            CostMaterialPrice(
+                source="manual",
+                unit_price_ex_vat=KIT_EX,
+                unit_price_inc_vat=KIT_INC,
+                effective_date=date(2026, 8, 18),
+            )
+        )
+        m.status = "approved"
+        s.commit()
 
 
 def _bar_recipe(client) -> dict:
@@ -337,30 +381,42 @@ def test_import_creates_drafts_only(client):
 
 
 def test_approve_then_adopt_reaches_golden_value(client):
-    """★계약 §7 합격 3의 시나리오 — 승인 → 채택 → 2,350.70 이 여러 SKU에 전파."""
+    """★계약 §7 합격 3의 시나리오 — 승인 → 채택 → 골든값이 여러 SKU에 전파.
+
+    ★D-CPP-58로 골든이 2,350.70 → **2,536.40**으로 바뀌었다. 엑셀 「제품원가」 2,350.70과
+    **더는 같지 않은 것이 정상**이다: 부자재 한 줄(밀대외 22원)이 원장 파생 cleaning kit
+    190.82원으로 대체됐고, 그게 GOAL 카드의 「엑셀은 실제보다 과소」와 같은 방향이다.
+    ⇒ 그래서 `gap_pct == 0`도 더는 참이 아니다 — `cost_price`(2350.7)와 벌어지는 것이 사실이다.
+    """
 
     _import(client)
+    _seed_cleaning_kit_ledger_price(client)
     rid = _bar_recipe(client)["id"]
 
     approved = client.post(f"/api/cost/recipes/{rid}/approve").json()
     assert approved["status"] == "approved"
     # 종이 아직 미승인이라 계산은 여전히 «없음» — 승인만으로 값이 생기지 않는다.
+    # (cleaning kit 하나만 승인·단가 보유여도 나머지 8종이 막는다.)
     assert approved["standard"]["std_cost_inc_vat"] is None
 
     adopted = client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices").json()
-    assert len(adopted["adopted"]) == 9
+    # ★8이다 — cleaning kit은 **엑셀 참고값이 없어** 채택 대상이 아니다(층2). 9였다가 8이
+    #   되는 이 숫자가, 「단가의 정본이 엑셀에서 원장으로 옮겨졌다」의 가장 짧은 증거다.
+    assert len(adopted["adopted"]) == 8
+    assert CLEANING_KIT_NAME not in adopted["adopted"]
     std = adopted["recipe"]["standard"]
     assert std["computable"] is True
-    assert std["std_cost_ex_vat"] == "2137.00"
-    assert std["std_cost_inc_vat"] == "2350.70"
-    assert std["line_count"] == 9               # 계산 내역 9종(합격 4)
+    assert std["std_cost_ex_vat"] == str(BAR_STD_EX)
+    assert std["std_cost_inc_vat"] == str(BAR_STD_INC)
+    assert std["line_count"] == 9               # 계산 내역은 여전히 9종(합격 4)
 
     board = client.get("/api/cost/board").json()
     bar_rows = [r for r in board["items"] if r["recipe_id"] == rid]
     assert {r["internal_sku"] for r in bar_rows} == {"OHI-B1", "OHI-B2", "OHI-B3"}
     # ★서로 다른 SKU 2건 이상에서 «같은 값»
-    assert {r["std_cost_inc_vat"] for r in bar_rows} == {"2350.70"}
-    assert all(r["gap_pct"] == 0.0 for r in bar_rows)
+    assert {r["std_cost_inc_vat"] for r in bar_rows} == {str(BAR_STD_INC)}
+    # ★`cost_price`(2350.7)보다 표준원가가 높다 — 등록가가 실제보다 낮다는 사실이 화면에 뜬다.
+    assert all(r["gap_pct"] > 0 for r in bar_rows)
 
 
 def test_board_shows_uncomputed_rows_with_reason(client):
@@ -379,6 +435,7 @@ def test_reimport_does_not_overwrite_approved(client):
     """★재수입이 승인분을 덮지 않는다 — 덮으면 승인의 의미가 사라진다."""
 
     _import(client)
+    _seed_cleaning_kit_ledger_price(client)
     rid = _bar_recipe(client)["id"]
     client.post(f"/api/cost/recipes/{rid}/approve")
     client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices")
@@ -387,7 +444,7 @@ def test_reimport_does_not_overwrite_approved(client):
     assert again["skipped_approved"] >= 1
     still = _bar_recipe(client)
     assert still["status"] == "approved"
-    assert still["standard"]["std_cost_inc_vat"] == "2350.70"
+    assert still["standard"]["std_cost_inc_vat"] == str(BAR_STD_INC)
 
 
 # ──────────────────────────────────────────────
@@ -464,6 +521,7 @@ def test_cost_only_still_skips_approved(client):
     """★한쪽만 올려도 승인분 보호는 그대로다 — 예외를 만들면 그 길로 샌다."""
 
     _import(client)
+    _seed_cleaning_kit_ledger_price(client)
     rid = _bar_recipe(client)["id"]
     client.post(f"/api/cost/recipes/{rid}/approve")
     client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices")
@@ -473,7 +531,7 @@ def test_cost_only_still_skips_approved(client):
     assert r.json()["skipped_approved"] >= 1
     still = _bar_recipe(client)
     assert still["status"] == "approved"
-    assert still["standard"]["std_cost_inc_vat"] == "2350.70"
+    assert still["standard"]["std_cost_inc_vat"] == str(BAR_STD_INC)
 
 
 # ──────────────────────────────────────────────
@@ -557,10 +615,11 @@ def test_adopt_does_not_overwrite_existing_price(client):
 
 def test_unapprove_removes_stored_standard(client):
     _import(client)
+    _seed_cleaning_kit_ledger_price(client)
     rid = _bar_recipe(client)["id"]
     client.post(f"/api/cost/recipes/{rid}/approve")
     client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices")
-    assert _bar_recipe(client)["standard"]["std_cost_inc_vat"] == "2350.70"
+    assert _bar_recipe(client)["standard"]["std_cost_inc_vat"] == str(BAR_STD_INC)
 
     client.post(f"/api/cost/recipes/{rid}/unapprove")
     board = client.get("/api/cost/board").json()
@@ -749,3 +808,64 @@ def test_column_roles_are_classified():
     assert ("내부 필름", "price", "내부") in roles
     assert ("내부 필름*매입", "derived", "내부") in roles      # ★유도값은 수량이 아니다
     assert ("패키지", "flat", None) in roles
+
+
+# ──────────────────────────────────────────────
+# D-CPP-58 층2 — 재유입 차단. ★계약 §6 마지막 항목이 「진짜 합격선」이라 지목한 자리다.
+#   층1(데이터 병합)만 하고 여기가 비면, 고친 것이 **다음 엑셀 업로드에 원복된다.**
+# ──────────────────────────────────────────────
+def _material_names(client) -> list[str]:
+    return [m["name"] for m in client.get("/api/cost/materials").json()["items"]]
+
+
+def test_excel_import_folds_squeegee_into_cleaning_kit(client):
+    """★엑셀에 「부자재 (밀대외)」 열이 있어도 그 이름의 종은 **생기지 않는다.**"""
+
+    _import(client)
+    names = _material_names(client)
+    assert not [n for n in names if "밀대외" in n], names
+    assert CLEANING_KIT_NAME in names
+    # 폼팩터가 안 붙는다 — bar·flip 두 섹션이 같은 한 종으로 접힌다.
+    assert len([n for n in names if n == CLEANING_KIT_NAME]) == 1
+    kit = next(m for m in client.get("/api/cost/materials").json()["items"]
+               if m["name"] == CLEANING_KIT_NAME)
+    # ★엑셀 22원이 «참고값»으로도 새지 않는다 — 새면 화면이 190.82 옆에 22를 세운다.
+    assert kit["excel_ref_price"] is None, kit
+
+
+def test_reimport_does_not_resurrect_the_squeegee_species(client):
+    """★★**이게 진짜 합격선이다**(계약 §6 마지막). 병합해 놓고 층2가 없으면 다음 업로드에
+    6종이 되살아난다 — 이 저장소가 반복해 밟은 「고쳤는데 다음 주에 원복된다」의 자리다."""
+
+    _import(client)
+    _seed_cleaning_kit_ledger_price(client)
+    rid = _bar_recipe(client)["id"]
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices")
+    before = client.get(f"/api/cost/recipes/{rid}").json()["standard"]["std_cost_inc_vat"]
+    assert before == str(BAR_STD_INC)
+
+    _import(client)          # 같은 엑셀을 다시 올린다 — 사람이 매주 하는 일이다
+    _import(client)          # 두 번 더 올려도 마찬가지여야 한다
+
+    names = _material_names(client)
+    assert not [n for n in names if "밀대외" in n], names
+    assert names.count(CLEANING_KIT_NAME) == 1
+    # 승인분의 표준원가도 그대로다 — 재업로드가 값을 되돌리지 않는다.
+    after = client.get(f"/api/cost/recipes/{rid}").json()["standard"]["std_cost_inc_vat"]
+    assert after == before
+
+
+def test_squeegee_label_variants_all_fold(client):
+    """★공백·줄바꿈 변형이 전부 접힌다 — 이름 매칭이 공백 하나에 지면 층2가 조용히 뚫린다.
+
+    실측 픽스처엔 `"부자재\\n(밀대외)"`가 있고, 시트마다 공백이 다르게 들어온다.
+    """
+
+    from app.services.cost_menu.recipe_parser import is_cleaning_kit_label
+
+    for variant in ("부자재 (밀대외)", "부자재(밀대외)", "부자재\n(밀대외)", " 부자재  (밀대외) "):
+        assert is_cleaning_kit_label(variant), variant
+    # ★넓히지 않는다 — 폼팩터마다 값이 «실제로» 다른 종들은 접으면 원가가 틀어진다(§0-F).
+    for other in ("패키지", "부착 안내문", "알콜솜 2EA", "부착 지그", "밀대", ""):
+        assert not is_cleaning_kit_label(other), other

@@ -153,6 +153,39 @@ class MaterialKey:
         return f"{self.label} ({' · '.join(bits)})" if bits else self.label
 
 
+# ──────────────────────────────────────────────
+# cleaning kit 별칭 (D-CPP-58 층2) — 폼팩터를 «가르지 않는» 유일한 예외
+# ──────────────────────────────────────────────
+#: 원장 파생 종의 이름. **prod의 `cost_material.id=1`과 문자열이 완전히 같아야 한다** —
+#: `_upsert_materials`가 이름으로 upsert하므로, 한 글자만 달라도 새 종이 하나 더 생긴다.
+CLEANING_KIT_NAME = "cleaning kit"
+
+#: 폼팩터·부위 **둘 다 None**이다. MaterialKey docstring이 「폼팩터가 다르면 다른 물건」이라
+#: 적어 둔 것의 **명시적 예외**이고, 근거는 규칙이 아니라 사실이다 — Jino 2026-08-25 11:32:
+#: *"기종별 부자재와 cleaning kit가 따로 있는데 이게 모두 같은 cleaning kit야"*.
+#: 같은 물건이므로 규격이 갈리지 않고, 단가는 수입 로트 하나에서 나온다.
+#: ★이 예외를 다른 라벨로 넓히지 마라 — 패키지(98/370/550)·부착 안내문(30/40/55)은 폼팩터마다
+#: 값이 «실제로» 달라 접으면 원가가 틀어진다(계약 §0-F 실측).
+CLEANING_KIT_KEY = MaterialKey(None, None, CLEANING_KIT_NAME)
+
+#: 엑셀 원가표가 이 물건을 부르는 이름들. 실측 라벨은 「부자재 (밀대외)」 하나지만,
+#: 시트마다 줄바꿈·공백이 다르게 들어온다(테스트 픽스처에 `"부자재\n(밀대외)"`가 실재).
+_CLEANING_KIT_ALIASES = frozenset({"부자재(밀대외)"})
+
+
+def is_cleaning_kit_label(label: str) -> bool:
+    """엑셀 열 이름이 cleaning kit을 가리키는가.
+
+    ★공백·줄바꿈을 **전부 지우고** 비교한다 — 「부자재 (밀대외)」·「부자재(밀대외)」·
+    「부자재\\n(밀대외)」가 같은 열이기 때문이다. 이름 매칭이 공백 하나에 지면 층2가 조용히
+    뚫리고, 그때 증상은 «다음 엑셀 업로드에 6종이 되살아난다»로 나타난다(계약 §2-4).
+    """
+
+    if not label:
+        return False
+    return "".join(str(label).split()) in _CLEANING_KIT_ALIASES
+
+
 @dataclass(frozen=True)
 class RecipeLineDraft:
     """구성 한 줄의 초안. `excel_ref_price`는 **참고값**이지 단가가 아니다(§3 금지선)."""
@@ -374,6 +407,16 @@ def _build_recipe(
             anomalies.append(f"price_conflict:{spec.label}:{prior}≠{value}")
         if value is not None:
             seen_keys.setdefault(key, value)
+
+        # ★별칭은 «신원이 정해지고 이상 검사가 끝난 뒤» 적용한다(D-CPP-58 층2).
+        #   순서가 중요하다 — 접기 전에 검사해야 `price_conflict`가 원래 열 이름으로 뜬다.
+        #
+        # ★★`excel_ref_price`는 **그대로 22를 싣는다.** 접었다고 22를 버리면
+        #   `computed_ex_vat`(구성 합 = 엑셀 「제품원가」인가)라는 **검산이 통째로 죽는다** —
+        #   시트를 잘못 읽어도 아무도 모르게 된다. 22가 «종의 단가»로 새는 것은 여기가 아니라
+        #   `recipes._upsert_materials`에서 막는다(그 자리가 종을 만드는 유일한 자리다).
+        if not is_film and is_cleaning_kit_label(spec.label):
+            key = CLEANING_KIT_KEY
 
         lines.append(
             RecipeLineDraft(
