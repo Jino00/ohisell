@@ -1314,3 +1314,38 @@ def test_judge_prompt_carries_prior_judgments_on_rejudge(db):
     fresh = _cand(db, signature="fresh", occurrences=3)
     db.commit()
     assert wisdom_judge._prior_judgments_view(fresh) is None
+
+
+def test_reopen_ready_respects_rejudge_cap_on_its_own(db):
+    """★적대 리뷰 P2 — `_reopen_ready`는 «자기 혼자서도» 재심 상한을 지켜야 한다.
+
+    harvest 안에서는 상한 검사가 위쪽 가드에 가려 이 분기가 안 밟히지만, 성적표의
+    `reopen_ready` 필드는 이 함수를 **직접** 부른다. 화면이 「재개방 가능」이라고 말하는데
+    실제로는 상한 소진이라 영원히 안 열리는 상태를 막는다(표면과 실체의 불일치 금지).
+    """
+    c = _cand(db, signature="capped", occurrences=99, status="rejected")
+    c.judged_occurrences = 1          # 문턱은 넉넉히 넘는다
+    c.rejudge_count = wisdom_candidates._MAX_REJUDGE
+    db.commit()
+    assert wisdom_candidates._reopen_ready(c) is False   # 상한이 이긴다
+    c.rejudge_count = wisdom_candidates._MAX_REJUDGE - 1
+    assert wisdom_candidates._reopen_ready(c) is True
+
+
+def test_reopen_ready_boundary_zero_and_negative_baseline(db):
+    """★적대 리뷰 지적 — 기준선이 0이거나 occurrences가 줄어든 경우의 경계.
+
+    judged_occurrences=0이면 「0의 2배 = 0」이라 배수 조건은 자동 통과하는데, 그때 문턱을
+    지키는 것은 절대 증분(+5)뿐이다 — 그 둘을 `and`로 묶은 이유가 여기 있다.
+    """
+    c = _cand(db, signature="zero", occurrences=4, status="rejected")
+    c.judged_occurrences = 0
+    db.commit()
+    assert wisdom_candidates._reopen_ready(c) is False   # 4 < 0+5
+    c.occurrences = 5
+    assert wisdom_candidates._reopen_ready(c) is True    # 5 ≥ 0+5
+
+    c2 = _cand(db, signature="shrunk", occurrences=2, status="rejected")
+    c2.judged_occurrences = 10        # 관측이 줄어든 비정상 상태
+    db.commit()
+    assert wisdom_candidates._reopen_ready(c2) is False

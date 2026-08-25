@@ -740,3 +740,119 @@ describe("지혜 성적표 — 대칭·탐색 관측(B5)", () => {
     expect(screen.getByText(/경계 2026-08-20 09:00:00/)).toBeTruthy();
   });
 });
+
+// ── ★D-NAO-251 증거보전: 판사 대기열 적체 + 기각분 재개방 상태 ──
+// 계약 §5 ③-b가 지목한 «사용자가 보는 표면»이 이 콘솔 패널이다. 백엔드가 값을 만들어도
+// 화면이 안 읽으면 「만드는 데까지」에서 합격이 난다(적대 리뷰 1R P1-1이 잡은 자리).
+describe("지혜 성적표 — 판사 대기열·재개방 상태(D-NAO-251)", () => {
+  const BACKLOG = {
+    pending_total: 20,
+    pending_ripe: 17,
+    cap_next_run: 15,
+    days_to_drain: 2,
+    cron: "08:45 KST 1일 1회 (캐치업 크론 없음 — 적체는 회차 상한으로 흡수)",
+    assumption: "days_to_drain은 신규 후보 유입 0 가정. 실제로는 매일 새 후보가 생긴다.",
+  };
+
+  it("적체 지표가 화면에 뜨고, 소화 일수의 «가정»도 함께 보인다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      judge_backlog: BACKLOG,
+    });
+    renderPage();
+    expect(await screen.findByText(/판사 대기열 · 숙성 17건 \/ 대기 20건/)).toBeTruthy();
+    expect(screen.getByText(/다음 회차 상한 15건/)).toBeTruthy();
+    expect(screen.getByText(/소화 예상 2일/)).toBeTruthy();
+    // ★창·가정을 안 밝힌 커버리지 주장 금지 — 이 문장이 사라지면 「2일」이 단정이 된다.
+    expect(screen.getByText(/신규 후보 유입 0 가정/)).toBeTruthy();
+  });
+
+  it("평시(적체 없음)엔 상한 5·소화 1일이 그대로 보인다 — 0건도 침묵하지 않는다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      judge_backlog: { ...BACKLOG, pending_total: 3, pending_ripe: 3, cap_next_run: 5, days_to_drain: 1 },
+    });
+    renderPage();
+    expect(await screen.findByText(/판사 대기열 · 숙성 3건 \/ 대기 3건/)).toBeTruthy();
+    expect(screen.getByText(/다음 회차 상한 5건/)).toBeTruthy();
+  });
+
+  it("judge_backlog가 없는 응답(배포 순서상 구버전)에서도 화면이 안 깨진다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, { ...CANDIDATE_STATUS_EMPTY });
+    renderPage();
+    expect(await screen.findByText(/후보 현황\(승격 전\)/)).toBeTruthy();
+    expect(screen.queryByText(/판사 대기열/)).toBeNull();
+  });
+
+  const REJECTED_ROW = {
+    candidate_id: 24,
+    signature: "g|SHOPPING|bid_up|weekday|summer|normal|",
+    status: "rejected",
+    grain: "global",
+    bucket: "global_pool",
+    bucket_label: "전역 풀(캠페인 통합)",
+    campaign_type: "SHOPPING",
+    experiment_batch: null,
+    action: "bid_up",
+    occurrences: 91,
+    good_count: 60,
+    bad_count: 31,
+    campaign_count: 1,
+    by_campaign: { cmp1: { good: 60, bad: 31 } },
+    observation: "obs",
+    first_seen_at: "2026-07-20 08:45:00",
+    last_seen_at: "2026-08-25 08:45:00",
+  };
+
+  it("기각분의 «판정 이후» 증거 축적과 재심 여력이 후보 행에 보인다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      candidates_total: 1,
+      bucket_counts: { ...CANDIDATE_STATUS_EMPTY.bucket_counts, global_pool: 1 },
+      candidates: [{
+        ...REJECTED_ROW,
+        judged_at: "2026-07-28 08:45:00",
+        judged_occurrences: 45,
+        occurrences_since_judgment: 46,
+        rejudge_count: 1,
+        reopen_ready: true,
+        prior_judgment_count: 1,
+      }],
+    });
+    renderPage();
+    // ★이 줄이 곧 「함정이 풀렸다」의 화면 증거다 — 구판은 45에서 얼어 있었다.
+    expect(await screen.findByText(/판정 시점 45회 → 이후 \+46회 · 재심 1회/)).toBeTruthy();
+    expect(screen.getByText(/이전 판정 1건 보존/)).toBeTruthy();
+    expect(screen.getByText("재개방 대기")).toBeTruthy();
+  });
+
+  it("판정된 적 없는 후보엔 그 줄을 아예 안 그린다(0으로 그리면 «판정 후 0건»과 구별 불가)", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      candidates_total: 1,
+      bucket_counts: { ...CANDIDATE_STATUS_EMPTY.bucket_counts, global_pool: 1 },
+      candidates: [{ ...REJECTED_ROW, status: "pending", judged_occurrences: null }],
+    });
+    renderPage();
+    expect(await screen.findByText(/후보 현황\(승격 전\)/)).toBeTruthy();
+    expect(screen.queryByText(/판정 시점/)).toBeNull();
+    expect(screen.queryByText("재개방 대기")).toBeNull();
+  });
+
+  it("재개방 문턱을 아직 못 넘었으면 배지를 안 단다(축적은 보이되 «대기»는 아니다)", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      candidates_total: 1,
+      bucket_counts: { ...CANDIDATE_STATUS_EMPTY.bucket_counts, global_pool: 1 },
+      candidates: [{
+        ...REJECTED_ROW, occurrences: 47, judged_occurrences: 45,
+        occurrences_since_judgment: 2, rejudge_count: 0, reopen_ready: false,
+        prior_judgment_count: 0,
+      }],
+    });
+    renderPage();
+    expect(await screen.findByText(/판정 시점 45회 → 이후 \+2회 · 재심 0회/)).toBeTruthy();
+    expect(screen.queryByText("재개방 대기")).toBeNull();
+    expect(screen.queryByText(/이전 판정 .*건 보존/)).toBeNull();
+  });
+});

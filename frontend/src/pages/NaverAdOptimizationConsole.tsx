@@ -1533,9 +1533,50 @@ export default function NaverAdOptimizationConsole() {
                           </>
                         )}
                       </div>
+                      {/* ★D-NAO-251(증거보전) — 기각분의 «판정 이후» 증거 축적과 재심 여력.
+                          구판은 기각 즉시 tally가 얼어붙어 「표본 부족」 기각이 표본을 영원히
+                          부족하게 만들었다. 이 줄이 그 함정이 풀렸는지를 화면에서 보여 준다.
+                          ★판정된 적 없으면(judged_occurrences == null) 아무것도 안 그린다 —
+                          0으로 그리면 「판정 후 하나도 안 쌓임」과 구별이 안 된다. */}
+                      {c.judged_occurrences != null && (
+                        <div className="mt-0.5 text-[11px] text-gray-500">
+                          판정 시점 {c.judged_occurrences}회 → 이후 +
+                          {c.occurrences_since_judgment ?? 0}회 · 재심 {c.rejudge_count ?? 0}회
+                          {(c.prior_judgment_count ?? 0) > 0 && (
+                            <> · 이전 판정 {c.prior_judgment_count}건 보존</>
+                          )}
+                          {c.reopen_ready && (
+                            <span className="ml-1 text-emerald-700 bg-emerald-50 rounded px-1">
+                              재개방 대기
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
+              )}
+
+              {/* ★D-NAO-251 §4-③ — 판사 대기열 적체. 「pending 17건인데 회당 5건」이 어디에도
+                  안 보이던 것이 이 계약이 고치는 결함 셋 중 하나다. 객체 존재로 분기하고 값은
+                  ?? 0으로 항상 낸다(교훈 #318: 조용한 0과 죽은 카운터를 가른다).
+                  ★days_to_drain의 «가정»을 같이 그린다 — 창을 안 밝힌 커버리지 주장은 이
+                  저장소의 반복 실패다. */}
+              {cs.judge_backlog && (
+                <div className="mt-3 pt-2 border-t border-gray-100">
+                  <h5 className="text-[11px] font-medium text-gray-500">
+                    판사 대기열 · 숙성 {cs.judge_backlog.pending_ripe ?? 0}건 / 대기{" "}
+                    {cs.judge_backlog.pending_total ?? 0}건
+                  </h5>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                    <span>다음 회차 상한 {cs.judge_backlog.cap_next_run ?? 0}건</span>
+                    <span>소화 예상 {cs.judge_backlog.days_to_drain ?? 0}일</span>
+                    <span>{cs.judge_backlog.cron}</span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    {cs.judge_backlog.assumption}
+                  </p>
+                </div>
               )}
 
               {/* B7-6 파라미터 제안 게이트(D-NAO-249 F3) — 0건이어도 렌더한다. 목적은 「조용히

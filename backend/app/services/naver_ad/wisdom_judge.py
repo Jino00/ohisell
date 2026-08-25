@@ -42,7 +42,6 @@ _MAX_PER_RUN = 5         # 평시 회당 판사 상한
 #   못 박았다. 그래서 주기는 그대로 두고 **적체가 있을 때만 같은 회차 안에서 더 소화**한다.
 #   ★15는 근거 없는 초깃값이다(계약 §2-6) — 상시 LLM 비용의 하드캡이자 주기 감사 재심 안건.
 _MAX_PER_RUN_BACKLOG = 15  # 적체 시 회차 상한 = 하루 하드캡(크론이 1일 1회이므로 동치)
-_MAX_REJUDGE = 2         # 재심 상한(wisdom_candidates._MAX_REJUDGE와 같은 값 — 두 층이 같은 문턱)
 _MAX_SIBLINGS = 8        # condition_controls 상한(프롬프트 비대화 방지, occurrences desc)
 _MAX_OTHER_TYPES = 4     # other_campaign_types 상한
 

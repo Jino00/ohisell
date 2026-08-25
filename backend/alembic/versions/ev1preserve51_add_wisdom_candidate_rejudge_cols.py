@@ -70,10 +70,18 @@ def upgrade() -> None:
         "WHERE status IN ('promoted', 'rejected') AND judged_occurrences IS NULL"
     ))
     # 백필 2 — action 미상 후보 hidden 처분 + 사유 흔적(삭제 아님).
+    # ★promoted는 제외한다(적대 리뷰 P2). 승격된 지혜의 근원 후보를 hidden으로 내리면
+    #   `wisdom_writer`가 1:1로 묶어 둔 지혜의 출처가 조용히 «망각분»으로 재분류된다 —
+    #   이 계약은 promoted를 어디서도 건드리지 않기로 했다(§4-① 「promoted는 완전 terminal」).
+    #   2026-08-26 prod 실측으로는 action 미상 6건 중 promoted 0건이라 지금은 무해하지만,
+    #   미래 행 하나가 조용히 강등되는 경로를 열어 둘 이유가 없다.
+    # ★멱등: status <> 'hidden' 조건이 재실행 시 재진입을 막으므로 사유 문구가 중복 append
+    #   되지 않는다(이 마이그가 두 번 도는 경우는 downgrade→upgrade 왕복뿐이고, 그때는
+    #   status가 이미 hidden이라 건너뛴다).
     conn.execute(sa.text(
         "UPDATE ops_wisdom_candidates "
         "SET status = 'hidden', observation = COALESCE(observation, '') || :note "
-        "WHERE (action IS NULL OR action = '') AND status <> 'hidden'"
+        "WHERE (action IS NULL OR action = '') AND status NOT IN ('hidden', 'promoted')"
     ), {"note": _HIDDEN_NOTE})
 
 
