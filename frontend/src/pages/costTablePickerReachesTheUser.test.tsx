@@ -35,7 +35,7 @@ import {
 } from "../lib/api";
 
 const SETTINGS: CostSetting[] = [
-  { key: "valuation_method", value: "fifo", confirmed: false, note: null },
+  { key: "valuation_method", value: "fifo", confirmed: false, note: null, updated_at: null },
 ];
 
 const BOARD: CostBoard = {

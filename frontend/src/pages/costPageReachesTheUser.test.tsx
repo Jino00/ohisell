@@ -295,7 +295,24 @@ const LEDGER_ROW: CostLedgerMaterialLine = {
 
 // ── S2: 원가 정본 실측(2026-08-23) — 「지문방지필름 TPU 3매」 · bar · 부자재 9종 ──
 //    필름 600×3=1800 + 30 + 22 + 60 + 8 + 13 + 98 + 6 + 100 = ex 2,137 ⇒ inc **2,350.70**
+/**
+ * ★개정 4(D-CPP-59)로 `CostRecipe`에 `picked`가 필수가 됐다. 이 파일의 픽스처는 전부
+ * 「아직 아무도 안 본」 상태 — `none`이다. 그 상태가 **배지를 안 붙이는** 상태라는 것이
+ * 계약 합격 19의 요점이므로, 여기서 다른 값을 주면 이 파일의 기존 단언들이 의미를 잃는다.
+ */
+const NOT_LOOKED_AT: CostRecipe["picked"] = {
+  state: "none",
+  item_id: null,
+  item_name: null,
+  section: null,
+  item_total_inc_vat: null,
+  picked_at: null,
+  absent_confirmed_at: null,
+  absent_note: null,
+};
+
 const RECIPE: CostRecipe = {
+  picked: NOT_LOOKED_AT,
   id: 7,
   product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
   form_factor: "bar",
@@ -367,6 +384,7 @@ const RECIPE: CostRecipe = {
 //    제품이 최소 둘 있어야 한다(레시피·보드 둘 다). 폼팩터 값도 원 제품과 겹치게 둬서
 //    「폼팩터만으로는 안 갈리고 제품이 우선 갈라야 한다」는 것까지 함께 잰다.
 const RECIPE_FLIP: CostRecipe = {
+  picked: NOT_LOOKED_AT,
   id: 8,
   product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
   form_factor: "flip",
@@ -392,6 +410,7 @@ const RECIPE_FLIP: CostRecipe = {
 };
 
 const RECIPE_OTHER_PRODUCT: CostRecipe = {
+  picked: NOT_LOOKED_AT,
   id: 9,
   product_name: "오하이 강화유리 풀커버",
   form_factor: "bar",
@@ -420,6 +439,7 @@ const RECIPE_OTHER_PRODUCT: CostRecipe = {
 //    「강화유리 풀커버」 제품에 bar(RECIPE_OTHER_PRODUCT)와 null을 나란히 두어, 폼팩터
 //    필터가 null도 «하나의 선택지」로 다뤄야 한다는 것을 잰다(`?? "__none__"` sentinel).
 const RECIPE_NULL_FORM: CostRecipe = {
+  picked: NOT_LOOKED_AT,
   id: 10,
   product_name: "오하이 강화유리 풀커버",
   form_factor: null,
