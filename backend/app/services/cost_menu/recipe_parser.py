@@ -334,7 +334,14 @@ def parse_cost_table(rows: Iterable[Sequence[Any]]) -> ParseResult:
             )
         )
 
-    result.materials = list(seen_keys.keys())
+    # ★종 목록은 «실제로 만들어진 라인»에서 뽑는다(적대 리뷰 P2-8). `seen_keys`는 접기 «전»
+    #   키라, 거기서 뽑으면 밀대외 6종이 목록에 남고 cleaning kit은 빠진다 — 종 목록의
+    #   «두 번째 진실»이 생긴다. 지금 소비처가 없어 무해하지만, 무해한 거짓말도 거짓말이다.
+    seen_material_keys: dict[MaterialKey, None] = {}
+    for draft in result.recipes:
+        for ln in draft.lines:
+            seen_material_keys.setdefault(ln.key, None)
+    result.materials = list(seen_material_keys)
     return result
 
 
@@ -417,6 +424,16 @@ def _build_recipe(
         #   `recipes._upsert_materials`에서 막는다(그 자리가 종을 만드는 유일한 자리다).
         if not is_film and is_cleaning_kit_label(spec.label):
             key = CLEANING_KIT_KEY
+            # ★★접기는 «두 열이 한 종이 되는» 일이라, 한 행에 접히는 열이 둘 있으면
+            #   같은 종이 두 줄이 된다(적대 리뷰 P2-2 재현: 「부자재 (밀대외)」와
+            #   「부자재(밀대외)」가 나란히 있는 시트). 계약 §0-D가 지목한 **조용한 이중
+            #   계상**이 여기서 «매 업로드마다» 재생산되는 셈이다 — 제약 위반보다 나쁘다,
+            #   에러가 안 나기 때문이다. 그래서 둘째 줄은 버리고 **이상으로 자백한다.**
+            #   (버리는 쪽이 옳다: 접었다는 것은 같은 물건이라는 뜻이고, 같은 물건을 두 번
+            #    세는 것이 결함이다. 수량 합산이 아니다 — kit은 제품당 1개다.)
+            if any(ln.key == CLEANING_KIT_KEY for ln in lines):
+                anomalies.append(f"duplicate_cleaning_kit:{spec.label}")
+                continue
 
         lines.append(
             RecipeLineDraft(

@@ -234,7 +234,12 @@ def test_parser_reproduces_cost_table_total():
 
 
 def test_standard_cost_golden_value():
-    """정본 대조값 2,350.70 — 계약 §7 합격 3."""
+    """★엑셀 정본의 «자기 재현» — 라인의 엑셀 참고값만으로 더하면 시트의 2,350.70이 나온다.
+
+    ★이 2,350.70은 **표준원가가 아니다**(적대 리뷰 P2-5). D-CPP-58 이후 실제 표준원가는
+    `BAR_STD_INC`(2,536.40)이고, 여기서 재는 것은 「파서가 시트를 옳게 읽었는가」다.
+    두 숫자를 같은 이름으로 부르면 다음 사람이 어느 쪽을 정본으로 읽을지 갈린다.
+    """
 
     res = parse_cost_table(cost_sheet_rows())
     tgt = next(r for r in res.recipes if r.item_name == "지문방지필름 TPU 3매")
@@ -869,3 +874,89 @@ def test_squeegee_label_variants_all_fold(client):
     # ★넓히지 않는다 — 폼팩터마다 값이 «실제로» 다른 종들은 접으면 원가가 틀어진다(§0-F).
     for other in ("패키지", "부착 안내문", "알콜솜 2EA", "부착 지그", "밀대", ""):
         assert not is_cleaning_kit_label(other), other
+
+
+def test_folding_happens_after_the_conflict_check(client):
+    """★접기는 «이상 검사 뒤»여야 한다 — 순서가 뒤집히면 폼팩터별로 다른 값이 한 종으로
+    합쳐지며 `price_conflict`가 **없는 충돌**을 보고한다(적대 리뷰 P2-6: 주석만 있고
+    아무것도 안 잠그던 자리).
+
+    시나리오: bar 섹션의 밀대외는 22, flip 섹션은 25. 접기 전 키는 서로 달라 충돌이 아니다.
+    접기를 앞으로 옮기면 둘 다 `cleaning kit` 키가 되어 22≠25 충돌로 뜬다.
+    """
+
+    rows = cost_sheet_rows()
+    # flip 데이터 행(마지막)의 「부자재 (밀대외)」 칸(index 12)을 25로 바꾼다.
+    flip = list(rows[-1])
+    assert flip[12] == 22, flip
+    flip[12] = 25
+    rows[-1] = tuple(flip)
+
+    res = parse_cost_table(rows)
+    conflicts = [a for a in res.anomalies if "price_conflict" in a]
+    assert not conflicts, conflicts
+
+
+def test_two_squeegee_columns_in_one_row_never_double_count(client):
+    """★한 행에 접히는 열이 둘이면 같은 종이 두 줄이 된다 — 계약 §0-D가 지목한 «조용한
+    이중 계상»이다(적대 리뷰 P2-2). 버리고 **이상으로 자백**한다."""
+
+    rows = cost_sheet_rows()
+    header = list(rows[3])
+    data = list(rows[4])
+    # 같은 물건의 «다른 표기»를 한 열 더 붙인다 — 실제 시트에서 일어날 수 있는 모양이다.
+    header.append("부자재(밀대외)")
+    data.append(22)
+    rows[3] = tuple(header)
+    rows[4] = tuple(data)
+
+    res = parse_cost_table(rows)
+    tgt = next(r for r in res.recipes if r.item_name == "지문방지필름 TPU 3매")
+    kit_lines = [l for l in tgt.lines if l.key.label == CLEANING_KIT_NAME]
+    assert len(kit_lines) == 1, [l.source_column for l in tgt.lines]
+    assert any("duplicate_cleaning_kit" in a for a in tgt.anomalies), tgt.anomalies
+
+
+def test_material_payload_actually_ships_the_excel_reference(client):
+    """★부자재 탭의 「엑셀 참고값」 칸이 **응답에 실제로 실린다**(적대 리뷰 P2-4 — 그 필드를
+    통째로 죽여도 6,550개가 전부 통과했다).
+
+    kit의 참고값이 `None`인 것만 단언하면 「필드가 아예 안 나간다」를 원리적으로 못 잡는다 —
+    **참고값을 가진 종**으로 반대편을 잠근다. 이 PR이 지키려는 것이 정확히 «화면에서
+    190.82 옆에 22가 안 서는 것»이므로, 그 칸의 생사가 곧 이 슬라이스의 표면이다.
+    """
+
+    _import(client)
+    mats = client.get("/api/cost/materials").json()["items"]
+    pkg = next(m for m in mats if m["name"].startswith("패키지"))
+    assert pkg["excel_ref_price"] == "98.00", pkg          # 실린다
+    kit = next(m for m in mats if m["name"] == CLEANING_KIT_NAME)
+    assert kit["excel_ref_price"] is None, kit             # 그리고 kit엔 안 실린다
+
+
+def test_calculation_breakdown_shows_the_cleaning_kit_line(client):
+    """★계약 §6 합격 2의 표면 — **레시피 상세의 「계산 내역」에 cleaning kit 줄이 보인다.**
+
+    적대 리뷰 M8·M9가 이 줄을 지웠는데 6,550개가 통과했다(`line_count == 9`는 원본
+    dataclass에서 오고 렌더 배열은 따로 만들어져, 둘은 같은 사실을 안 잰다 — P2-3).
+    그래서 **라벨로** 잠근다: 화면이 그 줄을 잃으면 여기서 죽는다.
+    """
+
+    _import(client)
+    _seed_cleaning_kit_ledger_price(client)
+    rid = _bar_recipe(client)["id"]
+    client.post(f"/api/cost/recipes/{rid}/approve")
+    client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices")
+
+    detail = client.get(f"/api/cost/recipes/{rid}").json()["standard"]
+    labels = [l["label"] for l in detail["lines"]]
+    assert CLEANING_KIT_NAME in labels, labels
+    assert not [n for n in labels if "밀대외" in n], labels
+    kit = next(l for l in detail["lines"] if l["label"] == CLEANING_KIT_NAME)
+    assert kit["unit_price_ex_vat"] == str(KIT_EX)       # 190.82 — 엑셀 22가 아니다
+
+    # ★저장된 근거(`cost_standard.breakdown`)에도 같은 줄이 있어야 한다 — 조회 시점 계산과
+    #   저장 행이 갈라지면 같은 값이 한 화면에선 보이고 다른 화면에선 안 보인다.
+    board = client.get("/api/cost/board").json()
+    row = next(r for r in board["items"] if r["recipe_id"] == rid)
+    assert CLEANING_KIT_NAME in str(row.get("breakdown") or detail), row
