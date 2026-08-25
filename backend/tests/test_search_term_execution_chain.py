@@ -380,12 +380,15 @@ def test_the_entry_is_actually_picked_up_by_outcome_grains(db):
     assert outcome["d1"]["cost"] != st["cost_total"]
 
 
-def test_the_entry_is_no_longer_harvested_into_wisdom(db):
-    """★위 테스트의 짝 — 검색어 제외 행은 wisdom이 **줍지 않아야** 한다(D-NAO-178).
+def test_the_entry_is_harvested_via_d1_st_not_the_campaign_fallback(db):
+    """★위 테스트의 짝 — S8(D-NAO-178 해제, 2026-08-25) 집행 후: 검색어 제외 행은 이제
+    wisdom이 **줍는다**, 단 d1(캠페인 grain, 배경 성과)이 아니라 d1_st.status로만 판정한다.
 
-    종전엔 이 행이 수확돼 캠페인 grain d1로 승률이 쌓였다(라이브 후보 27의 good 1이 그것이다).
-    수확을 막는 것은 판정 규칙 변경이 아니라 **알려진 거짓 입력의 차단**이고, S8에서 이 skip을
-    걷으면 그대로 복원된다.
+    이 픽스처의 캠페인 grain d1은 cost 20,000원/일(good으로 읽힐 값)이지만, 검색어 자체는
+    제외 다음날 비용 0(d1_st.status=='stopped')이다. 수확된 candidate가 good이라는 사실은
+    ①d1_st가 정말 소비됐고 ②그 판정이 d1과 별개 경로임을 함께 보인다 — d1을 먹었다면
+    good/bad 자체는 우연히 같아도 값(43,084원 vs 0원)의 출처가 달라 signature·observation의
+    campaign_type/action 축은 같더라도 이 테스트가 지키는 것은 「수확이 됐다」+「good이다」다.
     """
     from app.services.naver_ad import diary_outcome, wisdom_candidates
 
@@ -407,13 +410,16 @@ def test_the_entry_is_no_longer_harvested_into_wisdom(db):
     entry = db.query(OpsDiaryEntry).one()
     entry.created_at = executed_at - timedelta(hours=9)
     db.commit()
-    diary_outcome.backfill_outcomes(db, now=NOW)
+    filled = diary_outcome.backfill_outcomes(db, now=NOW)
+    outcome = json.loads(db.query(OpsDiaryEntry).one().outcome_json or "{}")
+    assert outcome["d1_st"]["status"] == "stopped"  # 이 테스트의 전제(위 테스트와 동일 픽스처)
 
     harvested = wisdom_candidates.harvest_candidates(db, now=NOW)
 
-    assert harvested["skipped_search_term_grain"] >= 1, f"skip 카운터가 안 올랐다: {harvested}"
-    assert harvested["new"] == 0 and harvested["updated"] == 0
-    assert db.query(OpsWisdomCandidate).count() == 0, "거짓 승률이 다시 쌓이고 있다"
+    assert harvested["search_term_good"] == 1, f"good tally가 안 올랐다: {harvested}"
+    assert harvested["new"] == 1
+    cand = db.query(OpsWisdomCandidate).one()
+    assert cand.good_count == 1 and cand.bad_count == 0
 
 
 # ═══ 성적표층 ═══

@@ -64,6 +64,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -436,6 +437,11 @@ _ALLOWED_STATUS_TRANSITIONS = {
 
 class ProposalStatusIn(BaseModel):
     status: str  # "approved" | "rejected" — 그 외 값은 400
+    # ★D-NAO-248 §4-B(B1) — param_change 승인 시 반영할 값. **사람이 정한다**: 코드가 값을
+    # 발명하면 그게 새 상수 발명이다(금지선). param_change가 아닌 제안·반려에는 쓰이지 않는다.
+    applied_value: Any | None = None
+    decided_by: str | None = None      # 결정 주체(옵션) — 미지정 시 "console"
+    decision_note: str | None = None   # 결정 근거 메모(옵션) — 미지정 시 자동 생성 문구
 
 
 @router.post("/proposals/{proposal_id}/status")
@@ -451,6 +457,15 @@ def proposal_status_transition(
     P1). rowcount!=1이면 그 사이 상태가 바뀐 것 — 409 "새로고침 후 재시도". approved→rejected
     는 WHERE에 executed_change_log_id IS NULL도 포함해 이미 실행된 제안의 반려를 원자적으로
     막는다.
+
+    ★D-NAO-248 §4-B(B1) — 「승인=적용」 사슬: `proposal_type=='param_change'`가 `approved`로
+    가는 전이는 `guardrail_params.apply_params()`를 같은 트랜잭션으로 호출해 봉투 파라미터를
+    실제로 반영한다. **여전히 자동 적용이 아니다** — 트리거는 이 라우터를 호출하는 사람의
+    승인 행위이고, 반영될 값(`applied_value`)도 사람이 정한다(D-NAO-249 확정). 검증(값 존재·
+    SPECS 키 식별)은 상태 전이 «전에» 끝내고, 상태 전이 자체가 실패(409)하거나 `apply_params`가
+    실패(400, 봉투 밖 값 등)하면 **상태 전이도 되돌린다**(승인됐는데 반영 안 된 상태 방지) —
+    이 함수 안에서 커밋을 한 번만 한다. `param_change`가 아닌 제안의 승인·반려 동작은
+    1비트도 바뀌지 않는다(회귀 테스트로 고정).
     """
     if body.status not in _VALID_STATUS_TARGETS:
         raise HTTPException(400, f"status는 {sorted(_VALID_STATUS_TARGETS)} 중 하나여야 합니다")
@@ -464,6 +479,32 @@ def proposal_status_transition(
     if (current, target) not in _ALLOWED_STATUS_TRANSITIONS:
         raise HTTPException(409, f"허용되지 않는 상태 전이: {current} → {target}")
 
+    is_param_change = proposal.proposal_type == proposal_writer.PARAM_CHANGE
+
+    # ★값 검증은 DB에 아무것도 쓰기 «전에» 끝낸다 — 가장 단순한 형태의 "실패 시 아무 전이도
+    # 없다"(되돌릴 게 없으면 되돌릴 필요도 없다).
+    spec_key: str | None = None
+    if is_param_change and target == "approved":
+        if body.applied_value is None:
+            raise HTTPException(
+                400,
+                "param_change 승인은 applied_value가 필요합니다 — 적용할 값은 사람이 정합니다"
+                "(코드가 값을 발명하지 않습니다).",
+            )
+        if proposal.target_type != guardrail_params.TARGET_TYPE:
+            raise HTTPException(
+                400,
+                f"이 제안은 봉투 파라미터를 식별할 수 없습니다(target_type={proposal.target_type!r}"
+                f", 기대값={guardrail_params.TARGET_TYPE!r})",
+            )
+        if proposal.target_id not in guardrail_params.SPECS:
+            raise HTTPException(
+                400,
+                f"이 제안이 지목한 파라미터 키를 모릅니다: target_id={proposal.target_id!r} "
+                f"(허용: {sorted(guardrail_params.SPECS)})",
+            )
+        spec_key = proposal.target_id
+
     q = db.query(NaverProposal).filter(
         NaverProposal.id == proposal_id,
         NaverProposal.status == current,
@@ -473,13 +514,52 @@ def proposal_status_transition(
     # target=='approved'인 전이는 사람이 이 콘솔 라우터를 직접 호출한 것 — approval_source=
     # 'console'로 감사 기록(X1a T5, delegation_gate의 'delegation'과 대칭). rejected 전이는
     # approval_source를 건드리지 않는다(이력 보존 — 반려됐던 승인의 출처도 남겨둔다).
-    values = {"status": target}
+    values: dict[str, Any] = {"status": target}
     if target == "approved":
         values["approval_source"] = "console"
+    if is_param_change:
+        # ★A7 표면(wisdom_scorecard._proposal_decision)이 「기록 없음(컬럼 신설 전)」 폴백 대신
+        # 실제 결정 메타를 보게 한다. **param_change만** 채운다 — 다른 유형의 승인·반려는
+        # 완전히 그대로(회귀 테스트로 고정, 이 필드들은 결과 JSON에 노출되지 않아 그 회귀에
+        # 영향이 없다).
+        now = kst_now()
+        values["decided_at"] = now
+        values["decided_by"] = body.decided_by or "console"
+        if body.decision_note:
+            values["decision_note"] = body.decision_note
+        elif target == "approved":
+            values["decision_note"] = f"승인 — {spec_key}={body.applied_value!r} 반영"
+        else:
+            values["decision_note"] = "반려"
     rowcount = q.update(values, synchronize_session=False)
-    db.commit()
     if rowcount != 1:
+        db.rollback()
         raise HTTPException(409, "상태가 변경됨 — 새로고침 후 재시도")
+
+    if spec_key is not None:  # is_param_change and target=='approved'이고 값 검증도 끝난 경우만
+        try:
+            result = guardrail_params.apply_params(
+                db, {spec_key: body.applied_value},
+                rationale=f"콘솔 승인 — 제안 #{proposal_id} 반영(D-NAO-248 §4-B)",
+                proposal_id=proposal_id,
+                # ★merge=True — 승인은 «제안 한 건»의 맥락이라 그 키만 바꾼다. PUT의 전체
+                # 치환(사람이 화면 전체를 보고 저장하는 맥락)을 여기 쓰면 사람이 따로
+                # 설정해 둔 다른 키가 조용히 코드 기본값으로 되돌아간다.
+                merge=True,
+            )
+        except guardrail_params.InvalidGuardrailParams as e:
+            db.rollback()
+            raise HTTPException(400, str(e))
+        if result["change_log_id"] is not None:
+            # B0이 반환한 change_log 행 id를 심는다 — B4의 「제안→change_log」 조인이
+            # 이 컬럼을 그대로 읽는다(wisdom_scorecard._change_rows_for).
+            db.query(NaverProposal).filter(NaverProposal.id == proposal_id).update(
+                {"executed_change_log_id": result["change_log_id"]}, synchronize_session=False,
+            )
+        # 무변화(이미 같은 값 재승인)면 change_log_id=None — executed_change_log_id도 그대로
+        # 둔다. 「적용 시도는 됐지만 변경은 없었다」를 change_log 부재로 정직하게 나타낸다.
+
+    db.commit()
 
     db.refresh(proposal)
     verdicts = _latest_ok_verdicts_by_proposal(db, [proposal.id])
@@ -1061,6 +1141,15 @@ def guardrail_params_get(db: Session = Depends(get_db)):
     return {
         "params": guardrail_params.describe(db),
         "from_db_enabled": guardrail_params._PARAMS_FROM_DB,
+        # B3 되돌림 절차 — 스위치의 존재·용법을 응답에 실어 화면이 자기 설명을 하게 한다.
+        "from_db_help": (
+            "from_db_enabled=false면 DB를 아예 읽지 않고 전 파라미터가 코드 상수로 돈다"
+            "(사고 시 되돌림 스위치, guardrail_params._PARAMS_FROM_DB). "
+            "되돌리는 절차: ①즉시 원복 — 배포로 _PARAMS_FROM_DB=False로 바꾼다(모든 params가 "
+            "source='code'로 복귀, DB 값은 지우지 않고 보존됨) ②항목별 원복 — "
+            "PUT /settings/guardrail-params에서 그 키를 넘기지 않거나(전체 치환이므로 키를 빼면 "
+            "그 항목은 코드 상수로 복귀) DB의 naver_account_settings.guardrail_params 행을 삭제한다."
+        ),
         "retro_freshness": guardrail_params_retro_freshness(db),
     }
 
@@ -1088,51 +1177,23 @@ def guardrail_params_retro_freshness(db: Session) -> dict:
 def guardrail_params_put(body: dict, db: Session = Depends(get_db)):
     """봉투 파라미터 설정 — **사람 승인 채널**(D-NAO-172 P1).
 
-    ★이 PUT이 설계의 「풀기는 사람이 승인한다」를 물리적으로 구현한다. 시스템은 이 경로를
-    호출하지 않는다(P3의 제안 생성기도 «제안»만 만들고 누르는 것은 사람이다).
-    전체 치환 저장 — 넘긴 키만 남고 나머지는 코드 상수로 돌아간다(부분 병합은 «지금 무슨
-    값인지»를 사람이 못 쫓는다).
+    ★D-NAO-248 §4-B(B1) 이후: 이 PUT은 여전히 「풀기는 사람이 승인한다」의 한 경로이지만,
+    **더 이상 유일한 경로가 아니다** — `POST /proposals/{id}/status`(승인 핸들러)도 param_change
+    제안 승인 시 같은 `guardrail_params.apply_params()`를 호출해 반영한다. ★그렇다고 이게
+    「자동 적용」인 것은 아니다 — 트리거는 두 경로 모두 **사람의 명시적 행위**(이 PUT 호출 자체,
+    또는 콘솔에서 제안을 승인하는 클릭)이고, **적용될 값의 크기도 사람이 확정**한다(승인
+    핸들러는 값을 발명하지 않고 요청 body의 `applied_value`를 그대로 쓴다) — D-NAO-249 확정.
+    전체 치환 저장 — 넘긴 키만 남고 나머지는 코드 상수로 돌아간다(부분 병합은 「지금 무슨
+    값인지」를 사람이 못 쫓는다).
     타입·범위 밖 값은 **400으로 즉시 거부**한다. 저장 후 조용히 폴백시키면 화면엔 코드 상수가
     뜨는데 사람은 자기가 바꾼 줄 안다.
     """
-    if not isinstance(body, dict):
-        raise HTTPException(400, "본문은 객체여야 합니다")
-    unknown = set(body) - set(guardrail_params.SPECS)
-    if unknown:
-        raise HTTPException(400, f"알 수 없는 파라미터: {sorted(unknown)}")
-    cleaned: dict = {}
-    for key, raw in body.items():
-        spec = guardrail_params.SPECS[key]
-        val = guardrail_params._coerce(spec, raw)
-        if val is None:
-            raise HTTPException(
-                400,
-                f"{key}={raw!r}는 허용 범위 [{spec.lo}, {spec.hi}] 밖이거나 타입이 맞지 않습니다",
-            )
-        cleaned[key] = str(val)
-
-    before = {k: str(v) for k, v in guardrail_params.get_params(db).items()}
-    row = db.query(NaverAccountSettings).filter(
-        NaverAccountSettings.key == guardrail_params.SETTINGS_KEY).first()
-    if row is None:
-        row = NaverAccountSettings(key=guardrail_params.SETTINGS_KEY, value_json=json.dumps(cleaned))
-        db.add(row)
-    else:
-        row.value_json = json.dumps(cleaned)
-    db.flush()
-    after = {k: str(v) for k, v in guardrail_params.get_params(db).items()}
-
-    if before != after:
-        now = kst_now()
-        db.add(NaverChangeLog(
-            entity_type="account", entity_id="", campaign_id="",
-            action="update_guardrail_params",
-            before_value=json.dumps(before, ensure_ascii=False),
-            after_value=json.dumps(after, ensure_ascii=False),
-            rationale="콘솔 PUT /settings/guardrail-params (D-NAO-172)",
-            # changed_at·executed_at 둘 다 KST 명시 — B-1 가드(D-NAO-169)가 30분 초과 어긋남을 거부한다.
-            dry_run=False, executed_at=now, changed_at=now,
-        ))
+    try:
+        guardrail_params.apply_params(
+            db, body, rationale="콘솔 PUT /settings/guardrail-params (D-NAO-172)")
+    except guardrail_params.InvalidGuardrailParams as e:
+        db.rollback()
+        raise HTTPException(400, str(e))
     db.commit()
     return guardrail_params_get(db)
 

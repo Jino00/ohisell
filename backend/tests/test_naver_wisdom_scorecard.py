@@ -2,7 +2,7 @@
 # 계약 docs/PLAN_naver-m3-wisdom-scorecard.md §4-A① · §4-B⑥ · §8-Q5(델타 크기)
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -16,9 +16,11 @@ from app.models import (
     NaverChangeLog,
     NaverProductBep,
     NaverProposal,
+    OpsDiaryEntry,
     OpsWisdomCandidate,
     OpsWisdomEntry,
 )
+from app.services.naver_ad import wisdom_apply
 from app.services.naver_ad import wisdom_candidates
 from app.services.naver_ad import wisdom_scorecard as ws
 
@@ -733,3 +735,356 @@ def test_unjudged_count_reaches_the_gap_text_when_no_verdict_row_exists(db):
     row = ws.build(db)["wisdom"][0]
     assert row["has_evidence"] is False
     assert "2건은 표본 미달로 판정 보류" in row["evidence_gap"]
+
+
+# ── ★D-NAO-248 §4-B(B4) — 「지혜id → 제안id → 결정 메타 → change_log before/after」 한 줄 ──
+def test_linked_proposal_shows_applied_change_before_after(db):
+    """B1이 채운 executed_change_log_id를 타고 change_log의 before/after가 linked_proposals에
+    그대로 보인다 — 조인 하나가 없다던 북극성 ref 82 §5-3①의 진단을 이 자리에서 닫는다."""
+    c = NaverChangeLog(
+        id=200, changed_at=datetime(2026, 8, 25, 9, 0), entity_type="account",
+        entity_id="", campaign_id="", action="update_guardrail_params", dry_run=False,
+        proposal_id=100,
+        before_value='{"cooldown_hours": "2"}', after_value='{"cooldown_hours": "5"}',
+    )
+    db.add(c)
+    db.commit()
+    _proposal(db, pid=100, status="approved", change_log_id=200)
+    _wisdom(db, wid=1, proposal_id=100)
+
+    row = ws.build(db)["wisdom"][0]
+    lp = row["linked_proposals"][0]
+    applied = lp["applied_change"]
+    assert applied is not None
+    assert applied["change_log_id"] == 200
+    assert applied["before_value"] == '{"cooldown_hours": "2"}'
+    assert applied["after_value"] == '{"cooldown_hours": "5"}'
+    assert applied["action"] == "update_guardrail_params"
+
+
+def test_linked_proposal_applied_change_is_none_when_not_executed(db):
+    """아직 반영되지 않은(pending/rejected) 제안은 applied_change가 None — 「반영 증거 없음」을
+    정직하게 나타낸다(값을 지어내지 않는다)."""
+    _proposal(db, pid=101, status="pending", change_log_id=None)
+    _wisdom(db, wid=1, proposal_id=101)
+
+    row = ws.build(db)["wisdom"][0]
+    assert row["linked_proposals"][0]["applied_change"] is None
+
+
+# ── ★D-NAO-248 §4-B(B7-6) — param_gate 카운터, 0이어도 침묵하지 않는다 ──
+def _candidate_with_suggestion(db, *, cid, suggestion, signature):
+    import json as _json
+    c = OpsWisdomCandidate(
+        id=cid, signature=signature, campaign_id="cmp1", action="bid_up",
+        env_bucket_json="{}", observation="관찰 요약", occurrences=1,
+        good_count=1, bad_count=0, status="promoted", importance=5, strength=7.0,
+        judge_verdict_json=_json.dumps(
+            {"verdict": "promote", "principle": "p", "rationale": "r",
+             "param_suggestion": suggestion}, ensure_ascii=False),
+    )
+    db.add(c)
+    db.commit()
+    return c
+
+
+def test_param_gate_present_and_zero_when_no_wisdom(db):
+    """지혜가 0건이어도 param_gate 블록 자체는 항상 나온다(교훈 #318, 침묵 방지)."""
+    out = ws.build(db)["candidate_status"]["param_gate"]
+    assert out == {
+        "unconditional_mapped": 0, "conditional_fallback": 0,
+        "unmapped_param": 0, "no_suggestion": 0,
+    }
+
+
+def test_param_gate_counts_reflect_stored_wisdom(db):
+    """B7 코드 클램프 판정이 wisdom_scorecard의 candidate_status에도 그대로 보인다 —
+    wisdom_apply.gate_summary()를 read-time으로 재현한 것과 같은 값이어야 한다."""
+    # _wisdom(wid=N)의 source_candidate_id 기본값이 N이므로 _candidate_with_suggestion을
+    # 같은 id(cid=N)로 먼저 심으면 별도 연결 없이 조인된다(기존 헬퍼 관례 그대로).
+    _candidate_with_suggestion(
+        db, cid=1, signature="s1",
+        suggestion={"param": "cooldown_hours", "scope": "unconditional", "direction": "up"})
+    _wisdom(db, wid=1, proposal_id=None, text="지혜1")
+    _candidate_with_suggestion(
+        db, cid=2, signature="s2",
+        suggestion={"param": "cooldown_hours", "direction": "up"})  # scope 없음 → conditional
+    _wisdom(db, wid=2, proposal_id=None, text="지혜2")
+
+    out = ws.build(db)["candidate_status"]["param_gate"]
+    assert out["unconditional_mapped"] == 1
+    assert out["conditional_fallback"] == 1
+    assert out == wisdom_apply.gate_summary(db)
+
+
+# ── ★계약 §C2 「재료 전건 왕복」 — search_term_material ─────────────────────────
+def _now_utc_naive():
+    """wisdom_candidates._HARVEST_LOOKBACK_DAYS 창 계산과 같은 방식(kst_now() - 9h)으로
+    「지금」의 naive UTC 값을 낸다 — 테스트가 실제 실행 날짜와 무관하게 안/밖 경계를 잡게 한다."""
+    from app.utils.kst import kst_now as _kst_now  # noqa: PLC0415
+    return _kst_now() - timedelta(hours=9)
+
+
+_IN_WINDOW = _now_utc_naive() - timedelta(days=1)  # 창(90일) 안 — 확실히 최근
+_OUT_OF_WINDOW = _now_utc_naive() - timedelta(days=200)  # 창(90일) 밖 — 여유 있게 지난 값
+
+
+def _diary(db, *, did, target_type="search_term", target_id="검색어", created_at=None,
+           outcome=None, event_type="execute", actor="system"):
+    import json as _json
+    e = OpsDiaryEntry(
+        id=did, created_at=created_at if created_at is not None else _IN_WINDOW,
+        event_type=event_type, campaign_id="cmp1", target_type=target_type, target_id=target_id,
+        outcome_json=_json.dumps(outcome, ensure_ascii=False) if outcome is not None else None,
+        actor=actor,
+    )
+    db.add(e)
+    db.commit()
+    return e
+
+
+def test_search_term_material_counts_status_distribution(db):
+    """계약 §C2 재료 전건 왕복 — stopped/leaking/ambiguous/no_data/absent 각 1건씩 심으면
+    by_status가 그 분포를 그대로 반영해야 한다(창 안, prod 실측 예상값과 같은 모양 —
+    total=일기수).
+
+    ★2026-08-25 의미 정정: did=5(outcome_json 자체가 없음, event_type 기본값 "execute")는
+    예전엔 "absent"로 셌다. 그런데 harvest_candidates()의 SQL 필터는 outcome_json IS NOT
+    NULL을 요구하므로 이 행은 harvest가 **원리적으로 절대 보지 않는다** — "absent"(= harvest는
+    보는데 d1_st 키만 없는 행)라고 부르면 「채워지면 처리될 행」처럼 부정직하게 읽힌다.
+    그래서 이제 event_type이 HARVEST_EVENT_TYPES 밖이거나 outcome_json이 비어 있는 행은
+    별도 "not_harvestable" 버킷으로 간다. "absent"는 별도 테스트
+    (test_search_term_material_absent_means_seen_by_harvest_but_missing_d1_st)로 검증한다."""
+    _diary(db, did=1, outcome={"d1_st": {"status": "stopped"}})
+    _diary(db, did=2, outcome={"d1_st": {"status": "leaking"}})
+    _diary(db, did=3, outcome={"d1_st": {"status": "ambiguous"}})
+    _diary(db, did=4, outcome={"d1_st": {"status": "no_data"}})
+    _diary(db, did=5, outcome=None)  # outcome_json 자체가 없음 → not_harvestable(의미 정정)
+    # target_type이 search_term이 아니면 재료가 아니다 — 섞여도 새지 않는지 같이 검사.
+    _diary(db, did=6, target_type="keyword", outcome={"d1_st": {"status": "stopped"}})
+
+    out = ws.build(db)["candidate_status"]["search_term_material"]
+    assert out["total"] == 5
+    assert out["by_status"] == {
+        "stopped": 1, "leaking": 1, "ambiguous": 1, "no_data": 1, "absent": 0, "unknown": 0,
+        "not_harvestable": 1,
+    }
+
+
+def test_search_term_material_absent_means_seen_by_harvest_but_missing_d1_st(db):
+    """absent(좁혀진 의미) — event_type이 HARVEST_EVENT_TYPES 안(execute/blocked)이고
+    outcome_json도 있지만(harvest가 «보는» 행), 그 안에 d1_st 키 자체가 없는 경우."""
+    _diary(db, did=1, event_type="execute", outcome={})  # outcome_json="{}" — d1_st 없음
+
+    out = ws.build(db)["candidate_status"]["search_term_material"]
+    assert out["total"] == 1
+    assert out["by_status"]["absent"] == 1
+    assert out["by_status"]["not_harvestable"] == 0
+
+
+def test_search_term_material_voided_event_is_not_harvestable_not_absent(db):
+    """★C2 정직화 핵심 회귀 — prod 실측(2026-08-25): search_term 일기 3건 = execute 2건
+    (outcome 보유) + voided 1건(outcome 없음). voided 행은 event_type이 HARVEST_EVENT_TYPES
+    밖이라 d1_st가 나중에 채워지든 말든 harvest가 원리적으로 절대 안 본다 — not_harvestable로
+    가야 하고, "채워지면 처리될 행"처럼 읽히는 absent로 가면 안 된다."""
+    _diary(db, did=1, event_type="voided", outcome=None)
+    # event_type은 HARVEST_EVENT_TYPES 안(execute)인데 outcome_json이 없는 경우도 같은 버킷.
+    _diary(db, did=2, event_type="execute", outcome=None)
+
+    out = ws.build(db)["candidate_status"]["search_term_material"]
+    assert out["total"] == 2
+    assert out["by_status"]["not_harvestable"] == 2
+    assert out["by_status"]["absent"] == 0
+
+
+def test_search_term_material_unknown_status_is_fail_closed(db):
+    """status가 알려진 4값 밖이면 good/bad로 잘못 세지 않고 unknown으로 fail-closed 한다
+    (harvest_candidates._D1_ST_UNKNOWN_STATUS_COUNTER와 같은 원칙)."""
+    _diary(db, did=1, outcome={"d1_st": {"status": "weird"}})
+
+    out = ws.build(db)["candidate_status"]["search_term_material"]
+    assert out["total"] == 1
+    assert out["by_status"]["unknown"] == 1
+    assert sum(out["by_status"].values()) == 1
+
+
+def test_search_term_material_present_even_with_zero_rows(db):
+    """0건이어도 7개 status 키(+not_harvestable) + total + label이 침묵하지 않고 전부
+    나온다(교훈 #318)."""
+    out = ws.build(db)["candidate_status"]["search_term_material"]
+    assert out["total"] == 0
+    assert out["by_status"] == {
+        "stopped": 0, "leaking": 0, "ambiguous": 0, "no_data": 0, "absent": 0, "unknown": 0,
+        "not_harvestable": 0,
+    }
+    assert "재료 0건" in out["label"]
+    assert "지혜가 났다" in out["label"]  # 「검색어 지혜가 났다」 주장 금지 취지가 라벨에 있어야 한다
+
+
+def test_search_term_material_excludes_rows_outside_harvest_window(db):
+    """harvest_candidates와 같은 lookback 창 밖 일기는 재료로 안 세어진다."""
+    _diary(db, did=1, created_at=_OUT_OF_WINDOW, outcome={"d1_st": {"status": "stopped"}})
+    _diary(db, did=2, created_at=_IN_WINDOW, outcome={"d1_st": {"status": "stopped"}})
+
+    out = ws.build(db)["candidate_status"]["search_term_material"]
+    assert out["total"] == 1
+    assert out["by_status"]["stopped"] == 1
+
+
+def test_search_term_material_does_not_disturb_other_candidate_status_keys(db):
+    """search_term_material 추가가 candidate_status의 기존 키를 바꾸면 안 된다(회귀)."""
+    _candidate(db, cid=1, signature="cmp1|bid_up|weekday|summer|normal", grain=None,
+               campaign_id="cmp1")
+    _diary(db, did=1, outcome={"d1_st": {"status": "stopped"}})
+
+    out = ws.build(db)["candidate_status"]
+    assert out["candidates_total"] == 1
+    assert out["bucket_counts"] == {
+        "legacy": 1, "global_pool": 0, "separated_experiment": 0, "separated_unknown": 0,
+    }
+    assert out["retro_harvest_label"] == wisdom_candidates.RETRO_HARVEST_LABEL
+    assert out["param_gate"] == {
+        "unconditional_mapped": 0, "conditional_fallback": 0,
+        "unmapped_param": 0, "no_suggestion": 0,
+    }
+    assert out["search_term_material"]["total"] == 1
+
+
+# ── ★B5 대칭·탐색 관측 (D-NAO-247 점화 계약 「B5. 대칭·탐색 관측」) ──────────────────
+def _guardrail_change(db, *, cid, before, after, changed_at):
+    """guardrail_params.apply_params가 실제로 남기는 change_log 모양(action=
+    "update_guardrail_params", before_value/after_value=JSON{key: "문자열값"})을 흉내낸다."""
+    import json as _json
+    row = NaverChangeLog(
+        id=cid, changed_at=changed_at, entity_type="account", entity_id="", campaign_id="",
+        action="update_guardrail_params",
+        before_value=_json.dumps(before, ensure_ascii=False),
+        after_value=_json.dumps(after, ensure_ascii=False),
+        dry_run=False,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+# ★적대 리뷰 생존 변이 D의 상환(2026-08-25) — 아래 4개는 «단방향 1건»만 넣는다.
+#   구판은 한 테스트에 up 1건 + down 1건을 같이 넣고 합계 {brake:1, accel:1}만 확인했는데,
+#   그러면 **brake/accel 라벨을 통째로 뒤집어도 합계가 그대로라 테스트가 통과한다**(리뷰어가
+#   변이로 실증: 단건 up 변화 시 정상은 {brake:1,accel:0}인데 변이는 {brake:0,accel:1}을 냈고
+#   기존 테스트 59건은 전부 초록이었다). 이 표면은 화면의 「⚠ 브레이크만 조여지고 액셀은 0건
+#   — 표류 경보」로 직결되므로(D-NAO-85 재발 감시), 라벨이 뒤집히면 **경보 판정이 반대로 뜬다.**
+#   교훈 #181의 그 자리 — 「통과하는데 아무것도 안 지키는 테스트」다.
+
+def test_symmetry_tighten_up_increase_is_brake_only(db):
+    """B5① — cooldown_hours(tighten_up: 커질수록 조임)가 «늘기만» 하면 brake 1·accel 0."""
+    assert ws.guardrail_params.SPECS["cooldown_hours"].direction == "tighten_up"
+    _guardrail_change(db, cid=1, before={"cooldown_hours": "2"}, after={"cooldown_hours": "4"},
+                       changed_at=datetime(2026, 8, 1, 9, 0))
+
+    gd = ws.build(db)["symmetry_report"]["guardrail_direction"]
+    assert gd["brake"] == 1, "조이는 방향인데 accel로 셌다 — 표류 경보가 반대로 뜬다"
+    assert gd["accel"] == 0
+    assert gd["by_key"]["cooldown_hours"] == {"brake": 1, "accel": 0}
+    assert gd["total_changes"] == 1
+
+
+def test_symmetry_tighten_up_decrease_is_accel_only(db):
+    """B5① — cooldown_hours가 «줄기만» 하면 accel 1·brake 0(푸는 방향)."""
+    _guardrail_change(db, cid=2, before={"cooldown_hours": "5"}, after={"cooldown_hours": "2"},
+                       changed_at=datetime(2026, 8, 2, 9, 0))
+
+    gd = ws.build(db)["symmetry_report"]["guardrail_direction"]
+    assert gd["accel"] == 1, "푸는 방향인데 brake로 셌다"
+    assert gd["brake"] == 0
+    assert gd["by_key"]["cooldown_hours"] == {"brake": 0, "accel": 1}
+
+
+def test_symmetry_tighten_down_decrease_is_brake_only(db):
+    """B5① — max_auto_up_multiple(tighten_down: 작아질수록 조임)이 «줄기만» 하면 brake 1·accel 0."""
+    assert ws.guardrail_params.SPECS["max_auto_up_multiple"].direction == "tighten_down"
+    _guardrail_change(db, cid=1, before={"max_auto_up_multiple": "2.0"},
+                       after={"max_auto_up_multiple": "1.5"}, changed_at=datetime(2026, 8, 1, 9, 0))
+
+    gd = ws.build(db)["symmetry_report"]["guardrail_direction"]
+    assert gd["brake"] == 1, "tighten_down은 «감소»가 조이는 방향이다 — 방향을 거꾸로 읽었다"
+    assert gd["accel"] == 0
+    assert gd["by_key"]["max_auto_up_multiple"] == {"brake": 1, "accel": 0}
+
+
+def test_symmetry_tighten_down_increase_is_accel_only(db):
+    """B5① — max_auto_up_multiple이 «늘기만» 하면 accel 1·brake 0(상한을 넓히는 방향)."""
+    _guardrail_change(db, cid=2, before={"max_auto_up_multiple": "1.5"},
+                       after={"max_auto_up_multiple": "2.5"}, changed_at=datetime(2026, 8, 2, 9, 0))
+
+    gd = ws.build(db)["symmetry_report"]["guardrail_direction"]
+    assert gd["accel"] == 1, "tighten_down은 «증가»가 푸는 방향이다"
+    assert gd["brake"] == 0
+    assert gd["by_key"]["max_auto_up_multiple"] == {"brake": 0, "accel": 1}
+
+
+def test_symmetry_guardrail_direction_all_keys_present_when_zero_changes(db):
+    """change_log 0건이어도 SPECS 키 전부가 by_key에 0으로 실린다(교훈 #318 — 침묵 방지)."""
+    gd = ws.build(db)["symmetry_report"]["guardrail_direction"]
+    assert gd["brake"] == 0
+    assert gd["accel"] == 0
+    assert gd["unchanged_or_unknown"] == 0
+    assert gd["total_changes"] == 0
+    assert set(gd["by_key"]) == set(ws.guardrail_params.SPECS)
+    for k in ws.guardrail_params.SPECS:
+        assert gd["by_key"][k] == {"brake": 0, "accel": 0}
+
+
+def test_symmetry_exploration_blocked_rate_computed_correctly(db):
+    """B5② — actor=explore 중 event_type=blocked 비율이 맞게 계산된다.
+    파라미터 변경 이력이 없으므로 whole_window에서 관측한다."""
+    _diary(db, did=1, actor="explore", event_type="blocked", target_type="adgroup", outcome=None)
+    _diary(db, did=2, actor="explore", event_type="blocked", target_type="adgroup", outcome=None)
+    _diary(db, did=3, actor="explore", event_type="execute", target_type="adgroup", outcome=None)
+    _diary(db, did=4, actor="daily", event_type="execute", target_type="adgroup", outcome=None)
+
+    ex = ws.build(db)["symmetry_report"]["exploration"]
+    assert ex["boundary_changed_at"] is None
+    assert ex["before"] is None and ex["after"] is None
+    ww = ex["whole_window"]
+    assert ww["total"] == 4
+    assert ww["by_actor"] == {"explore": 3, "daily": 1}
+    assert ww["explore_total"] == 3
+    assert ww["explore_blocked"] == 2
+    assert ww["explore_blocked_rate"] == pytest.approx(round(2 / 3, 4))
+
+
+def test_symmetry_exploration_no_param_change_reports_after_honestly(db):
+    """B5② ★파라미터 변경이 0건일 때 «후» 구간이 정직하게 표시된다 — null을 지어내지 않고
+    boundary·before·after가 전부 None이며, note가 그 사실을 설명한다."""
+    ex = ws.build(db)["symmetry_report"]["exploration"]
+    assert ex["boundary_changed_at"] is None
+    assert ex["before"] is None
+    assert ex["after"] is None
+    assert "경계가 없다" in ex["note"]
+    assert ex["window_days"] == ws._SYMMETRY_WINDOW_DAYS
+    # whole_window는 창이 낭비되지 않도록 대신 낸다(0건이어도 구조는 채워진다).
+    assert ex["whole_window"] == {
+        "total": 0, "by_actor": {}, "explore_share": None,
+        "explore_total": 0, "explore_blocked": 0, "explore_blocked_rate": None,
+    }
+
+
+def test_symmetry_exploration_before_after_split_by_latest_guardrail_change(db):
+    """B5② — 가장 최근 update_guardrail_params 시각을 경계로 창 안 일기가 전/후로 갈린다."""
+    boundary = _now_utc_naive() - timedelta(days=5)
+    _guardrail_change(db, cid=1, before={"cooldown_hours": "2"}, after={"cooldown_hours": "4"},
+                       changed_at=boundary)
+    _diary(db, did=1, actor="explore", event_type="blocked",
+           created_at=boundary - timedelta(days=1), outcome=None)  # 변경 전
+    _diary(db, did=2, actor="explore", event_type="execute",
+           created_at=boundary + timedelta(days=1), outcome=None)  # 변경 후
+    _diary(db, did=3, actor="daily", event_type="execute",
+           created_at=boundary + timedelta(days=2), outcome=None)  # 변경 후
+
+    ex = ws.build(db)["symmetry_report"]["exploration"]
+    assert ex["boundary_changed_at"] is not None
+    assert ex["whole_window"] is None
+    assert ex["before"]["total"] == 1
+    assert ex["before"]["explore_blocked_rate"] == pytest.approx(1.0)
+    assert ex["after"]["total"] == 2
+    assert ex["after"]["by_actor"] == {"explore": 1, "daily": 1}
