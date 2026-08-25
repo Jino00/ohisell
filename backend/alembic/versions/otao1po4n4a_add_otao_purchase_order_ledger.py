@@ -56,7 +56,10 @@ def upgrade() -> None:
         sa.Column("total_amount", sa.Numeric(16, 2), nullable=True),
         sa.Column("currency", sa.String(length=8), nullable=True),
         sa.Column("remarks", sa.String(length=200), nullable=True),
-        sa.Column("parsed_at", sa.DateTime(), server_default=sa.func.now(), nullable=True),
+        # ★nullable=False — 모델(`Mapped[datetime]`, Optional 아님)이 NOT NULL을 뜻한다.
+        # 초판이 True로 적어 **모델(create_all)과 prod(마이그) 스키마가 갈라졌다**(적대 리뷰 1R P1-2).
+        # 저장소 관례도 False다(`b3d5f7a91c48_add_rocket_shipment_tables.py:46`).
+        sa.Column("parsed_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("content_sha256", name="uq_otao_po_sha"),
     )
@@ -97,8 +100,9 @@ def upgrade() -> None:
         sa.Column("match_kind", sa.String(length=16), nullable=False),
         sa.Column("evidence", sa.String(length=300), nullable=True),
         sa.Column("note", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=True),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=True),
+        # ★위 `parsed_at`과 같은 이유로 nullable=False (적대 리뷰 1R P1-2).
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("raw_name", name="uq_otao_item_name_map_raw"),
     )

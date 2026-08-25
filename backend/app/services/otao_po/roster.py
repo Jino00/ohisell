@@ -66,6 +66,7 @@ class RosterRow:
     reserved: int = 0
     out_of_window_ordered: int = 0  # 원장 창보다 이른 발주분 (잔량 계산에서 «뺀» 몫)
     last_order_date: date | None = None
+    # 이 SKU가 실린 **정본 발주서의 건수**(발주일수가 아니다 — 같은 날 복수 발주가 실재한다).
     order_count: int = 0
 
 
@@ -99,12 +100,18 @@ def build_roster(session: Session) -> Roster:
             OtaoPurchaseOrderLine.product_code,
             OtaoPurchaseOrderLine.quantity,
             OtaoPurchaseOrder.order_date,
+            OtaoPurchaseOrder.id,
         )
         .join(OtaoPurchaseOrder, OtaoPurchaseOrderLine.order_id == OtaoPurchaseOrder.id)
         .where(OtaoPurchaseOrder.is_authoritative.is_(True))
     )
-    seen_orders: dict[str, set[date]] = {}
-    for code, qty, order_date in session.execute(q):
+    # ★`order_count`의 그레인은 «발주 건»이지 «발주일»이 아니다 (적대 리뷰 1R P1-1).
+    # 초판은 `set[date]`를 세어 **같은 날 복수 발주가 몇 건이든 1로 뭉개졌다.** 그 입력이
+    # 실재한다는 근거는 `OtaoPurchaseOrder` docstring 안에 이미 있었다 — `serial` 명명 규칙
+    # (`20260107-1`/`-2`)이 같은 날 복수 건을 전제하고, 개정본 4건이 정확히 그 형태다.
+    # 발주서 행 id로 센다: 정본 필터를 이미 통과한 행이라 개정 전 판본은 여기 안 온다.
+    seen_orders: dict[str, set[int]] = {}
+    for code, qty, order_date, order_id in session.execute(q):
         r = row(code)
         in_window = (
             window_start is None or order_date is None or order_date >= window_start
@@ -115,11 +122,10 @@ def build_roster(session: Session) -> Roster:
             r.out_of_window_ordered += int(qty or 0)
         if order_date and (r.last_order_date is None or order_date > r.last_order_date):
             r.last_order_date = order_date
-        if order_date:
-            seen_orders.setdefault(code, set()).add(order_date)
+        seen_orders.setdefault(code, set()).add(int(order_id))
 
-    for code, dates in seen_orders.items():
-        row(code).order_count = len(dates)
+    for code, order_ids in seen_orders.items():
+        row(code).order_count = len(order_ids)
 
     # ── ② 픽업 누계 — 통관 원장(읽기 전용) × 사전 ─────────────────────────
     # `import_invoice_line`은 계약 A′/B 소관이라 **읽기만** 한다(§3-8).
