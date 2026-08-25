@@ -434,15 +434,22 @@ def _parse_payload_from_files(
                 else "Packing List: 이 파일엔 PL 시트가 없다 — PL을 별도 파일로 올리거나 수기로 입력하면 된다."
             )
 
+    # ★PDF는 «양식을 가리는 단일 입구»로 보낸다(`parse_expense_document`) — 폴더에 쌓이는
+    #   「자금정산서」와 메일로 오는 「통관예상경비 청구서」는 서로 다른 서류이고, 옛 경로는
+    #   전자를 후자 파서에 태워 **예외 없이 틀린 값**을 냈다(2026-08-25 실측: 헤더 5칸 전부
+    #   None에 비용 라인 자리엔 주소 문자열). 사람이 텍스트를 «붙여넣은» 경우는 양식을 가릴
+    #   원본이 없으므로 종전대로 통관경비서 파서를 쓴다.
     text = expense_text
+    ex = None
     if text is None and expense_pdf is not None:
         try:
-            text = P.extract_pdf_text(expense_pdf)
+            ex = P.parse_expense_document(expense_pdf)
         except Exception as exc:
-            out["errors"].append(f"통관경비서 PDF: {exc}")
-    if text:
+            out["errors"].append(f"경비 서류 PDF: {exc}")
+    if ex is not None or text:
         try:
-            ex = P.parse_customs_expense(text)
+            if ex is None:
+                ex = P.parse_customs_expense(text)
             out["cost_lines"] = [
                 {
                     "seq": i + 1,
