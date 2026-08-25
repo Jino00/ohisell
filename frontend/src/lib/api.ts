@@ -5653,6 +5653,48 @@ export interface CostRecipeMatch {
   option_count: number | null;
 }
 
+/** 원가표 항목 1건 — 사람이 고를 «목록»의 한 줄 (계약 §0-E-3, D-CPP-59). */
+export interface CostTableItemRow {
+  id: number;
+  section: string;
+  item_name: string;
+  form_factor: string | null;
+  recipe_kind: string;
+  total_inc_vat: string | null;
+  row_number: number | null;
+  anomalies: string | null;
+  line_count: number;
+  /** ★가격 매칭이 걸린 항목 — **제안이지 확정이 아니다**(계약 §0-E-10-4). */
+  suggested: boolean;
+  picked: boolean;
+}
+
+export interface CostTableItemList {
+  recipe_id: number;
+  form_factor: string | null;
+  /** 제안의 근거 — 화면이 「왜 이게 위에 있나」를 말할 수 있어야 제안을 확정으로 안 읽는다. */
+  cost_price_mode: string | null;
+  suggested_count: number;
+  items: CostTableItemRow[];
+}
+
+/**
+ * 픽 상태 — **네 상태를 갈라서** 받는다 (계약 합격 19).
+ *
+ * ★`none`(아직 아무도 안 봄)과 `absent`(사람이 없다고 확인함)를 가르는 것이 이 필드의
+ * 존재 이유다. 둘을 한 모양으로 그리면 화면이 침묵을 판정으로 읽는다.
+ */
+export interface CostRecipePick {
+  state: "picked" | "absent" | "pin_lost" | "pin_ambiguous" | "none";
+  item_id: number | null;
+  item_name: string | null;
+  section: string | null;
+  item_total_inc_vat: string | null;
+  picked_at: string | null;
+  absent_confirmed_at: string | null;
+  absent_note: string | null;
+}
+
 export interface CostRecipe {
   id: number;
   product_name: string;
@@ -5666,6 +5708,7 @@ export interface CostRecipe {
   line_count: number;
   link_count: number;
   standard: CostStandard;
+  picked: CostRecipePick;
   links?: { internal_sku: string; status: string; source: string }[];
 }
 
@@ -5720,6 +5763,12 @@ export interface CostImportResult {
   updated_halves?: string[];
   /** 이번 업로드가 «손대지 않은» 것 — 조용한 반쪽 갱신을 막는 자백 필드. */
   untouched?: string[];
+  /** 사람이 고른 픽이 붙어 있어 가격 매칭이 «건드리지 않은» 레시피 수 (D-CPP-59 · 합격 20). */
+  skipped_pinned?: number;
+  /** 저장된 원가표 항목 수 — 픽 목록의 모수다. 0이면 고를 것이 없다는 뜻이다. */
+  cost_table_items?: number;
+  /** 핀 재해석 결과. `lost`·`ambiguous`가 0이 아니면 **화면이 말해야 한다**(조용한 소실 금지). */
+  pins?: { relinked: number; lost: number; ambiguous: number };
 }
 
 export function fetchCostRecipes(formFactor?: string): Promise<{ items: CostRecipe[] }> {
@@ -5774,6 +5823,45 @@ export function adoptCostExcelPrices(
   recipe: CostRecipe;
 }> {
   return fetchApi(`/api/cost/recipes/${recipeId}/adopt-excel-prices`, {
+    method: "POST",
+    body: JSON.stringify({ note: note ?? null }),
+  });
+}
+
+/**
+ * 이 레시피에 붙일 수 있는 **원가표 항목 전건 목록** (계약 합격 18 · D-CPP-59).
+ *
+ * ★개정 4 전까지 화면은 「후보 N건 — 사람이 고른다」고 말하면서 고를 길을 안 줬다.
+ * 이 호출이 그 길이고, 지워지면 화면의 그 문장이 다시 거짓이 된다.
+ */
+export function fetchCostTableItems(recipeId: number): Promise<CostTableItemList> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/cost-table-items`);
+}
+
+/** 사람이 고른 원가표 항목을 구성으로 확정한다 — **재업로드 없이 즉시**(합격 18). */
+export function pickCostTableItem(
+  recipeId: number,
+  itemId: number,
+): Promise<{ recipe: CostRecipe }> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/pick-cost-table-item`, {
+    method: "POST",
+    body: JSON.stringify({ item_id: itemId }),
+  });
+}
+
+/** 픽을 되돌린다 — 되돌릴 길이 없으면 사람이 고르기를 주저한다. */
+export function unpickCostTableItem(recipeId: number): Promise<{ recipe: CostRecipe }> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/unpick-cost-table-item`, {
+    method: "POST",
+  });
+}
+
+/** 「원가표에 없음」을 사람이 **명시적으로** 확인한다 (합격 19 — 침묵과 구별되는 상태). */
+export function confirmCostTableAbsent(
+  recipeId: number,
+  note?: string,
+): Promise<{ recipe: CostRecipe }> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/confirm-cost-table-absent`, {
     method: "POST",
     body: JSON.stringify({ note: note ?? null }),
   });
