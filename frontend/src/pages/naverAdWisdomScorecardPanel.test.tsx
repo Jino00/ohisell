@@ -839,6 +839,27 @@ describe("지혜 성적표 — 판사 대기열·재개방 상태(D-NAO-251)", (
     expect(screen.queryByText("재개방 대기")).toBeNull();
   });
 
+  it("기준선이 0이어도 줄을 그린다 — truthy 검사로 퇴화하면 여기서 죽는다", async () => {
+    // ★적대 리뷰 2R SUR-4가 드러낸 커버리지 갭. 출하 코드는 `judged_occurrences != null`로
+    //   맞지만, 픽스처에 0인 행이 하나도 없어 이걸 `judged_occurrences &&`(truthy)로 바꿔도
+    //   전건 초록이었다. 0은 «유효한 기준선»이다(판정 시점에 관찰이 0이었던 후보) —
+    //   truthy 검사면 그 행의 재개방 상태가 화면에서 조용히 사라진다.
+    //   n=52 P1과 같은 병이다: 재료가 흐를 때의 «모습»이 픽스처에 있어야 변이가 죽는다.
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      candidates_total: 1,
+      bucket_counts: { ...CANDIDATE_STATUS_EMPTY.bucket_counts, global_pool: 1 },
+      candidates: [{
+        ...REJECTED_ROW, occurrences: 6, judged_occurrences: 0,
+        occurrences_since_judgment: 6, rejudge_count: 0, reopen_ready: true,
+        prior_judgment_count: 0,
+      }],
+    });
+    renderPage();
+    expect(await screen.findByText(/판정 시점 0회 → 이후 \+6회 · 재심 0회/)).toBeTruthy();
+    expect(screen.getByText("재개방 대기")).toBeTruthy();
+  });
+
   it("재개방 문턱을 아직 못 넘었으면 배지를 안 단다(축적은 보이되 «대기»는 아니다)", async () => {
     h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
       ...CANDIDATE_STATUS_EMPTY,

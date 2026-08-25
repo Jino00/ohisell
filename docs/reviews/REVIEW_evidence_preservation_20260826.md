@@ -174,3 +174,89 @@ $ git status --porcelain
 이 1줄은 리뷰 착수 **이전부터** 존재하던 변경(이 PR 작업자의 세션 기록 파일, 리뷰 대상
 diff와 무관 — 최초 `git status` 확인 시점에도 동일하게 떠 있었다)이며, 이번 리뷰가 만든
 변경이 아니다. 리뷰가 만든 변경은 0건 남았다.
+
+---
+
+## 2라운드 (2026-08-26, 수정 커밋 `61901450`)
+
+리뷰 범위: `git diff 8a0d4c0d..61901450`(수정 커밋 diff만 — 전체 브랜치 재리뷰 안 함).
+질문은 하나: **1R 지적 4건이 해소됐는가.** 새 지적은 만들지 않음(단, 지시된 새 변이 2종
+SUR-3·SUR-4는 수행).
+
+### 종합 판정: **PASS** (P1 0건)
+
+### 1R 지적 4건 판정
+
+| # | 항목 | 판정 | 근거 |
+|---|---|---|---|
+| P1-1 | 콘솔 표면 부재 | **해소** | 아래 상세 |
+| P2-1 | 마이그레이션 promoted 제외 | **해소**(채택 완료) | 아래 상세 |
+| P2-2 | `wisdom_judge._MAX_REJUDGE` 죽은 상수 | **해소** | `grep -rn "wisdom_judge\._MAX_REJUDGE\|_wj\._MAX_REJUDGE"` 전체 backend/ → 0건. 상수 선언(`wisdom_judge.py:45`)도 삭제됐고 남은 참조 없음 |
+| P2-3 | `_reopen_ready` 자체 상한 검사 | **해소** | 아래 상세(변이 M3 재검증으로 확인) |
+
+**P1-1 상세 — 콘솔 표면**: `frontend/src/lib/api.ts`에 `NaverJudgeBacklog` 타입 신설
+(`pending_total·pending_ripe·cap_next_run·days_to_drain·cron·assumption`) +
+`NaverWisdomCandidateRow`에 6필드(`judged_at·judged_occurrences·occurrences_since_judgment·
+rejudge_count·reopen_ready·prior_judgment_count`) 추가. **키 이름을 백엔드와 문자 단위로
+대조**했다 — `wisdom_scorecard.py:548-555`(`_judge_backlog` 반환 dict)와 `:599-607`
+(`_candidate_status` 행 dict)의 키 6+6개가 `api.ts`의 신규 필드와 **전부 일치**한다(오탈자·
+스네이크/카멜 혼용 없음 — 이 저장소의 기존 API↔프론트 불일치 전례와 달리 이번엔 깨끗하다).
+`NaverAdOptimizationConsole.tsx`에 「판사 대기열」 블록(`:1565-1580`)과 후보 행의 재개방
+상태 줄(`:1541-1552`)이 추가됐고, `judged_occurrences != null`(loose inequality)로 null 전용
+가드를 써서 `0`은 falsy가 아니라 유효한 기준선으로 렌더된다(`0 != null` → `true`). 전용
+테스트 6종(`naverAdWisdomScorecardPanel.test.tsx`)이 ①백로그 블록 렌더 ②평시(적체 없음)
+값 ③구버전 응답(judge_backlog 없음) 방어 렌더 ④재개방 상태 줄 렌더 ⑤미판정 후보는 그 줄
+자체를 안 그림 ⑥문턱 미도달 시 배지 없음을 각각 잠근다. → **해소**로 판정.
+
+**P2-1 상세 — 마이그레이션**: `ev1preserve51_*.py`의 WHERE 절이
+`status NOT IN ('hidden', 'promoted')`로 바뀌어 promoted 행은 이제 구조적으로 hidden
+백필 대상에서 빠진다(fail-closed로 전환 — 1R이 요구한 그대로). **멱등성**: 조건 자체가
+`status NOT IN ('hidden', 'promoted')`이므로, 첫 실행에서 hidden으로 바뀐 행은 두 번째
+실행에서 이 WHERE에 더 이상 걸리지 않는다 — `observation` 문자열에 `_HIDDEN_NOTE`가 중복
+append될 경로가 SQL 조건만으로 막힌다(코드 추적으로 확인, 재실행 테스트는 안 돌려봄 —
+alembic 마이그레이션 자체는 이 리뷰의 두 라운드 모두 실제 `upgrade()` 실행 없이 SQL 읽기로만
+검증했다). **prod 실측**(코디네이터 제공, 읽기 전용): action 미상 6건 = hidden 2·pending 3·
+rejected 1·promoted 0 — 오늘 시점 실질 위험은 없었다는 게 확인됐고, 코드는 이제 그 사실에
+의존하지 않고 구조로 막는다. → **채택 완료로 판정.**
+
+**P2-3 상세 — `_reopen_ready` 자체 검사**: `test_reopen_ready_respects_rejudge_cap_on_its_own`이
+`rejudge_count == _MAX_REJUDGE`에서 False, `_MAX_REJUDGE - 1`에서 True를 **harvest를 거치지
+않고 함수를 직접 호출해** 잠근다 — 1R의 M3(off-by-one `>=`→`>`)를 재주입해 재검증한 결과
+이 테스트가 즉시 실패로 잡아냈다(아래 변이 표 참조). `test_reopen_ready_boundary_zero_and_
+negative_baseline`은 `judged_occurrences=0`(배수 조건 자동 통과·절대증분만 유효)과 관측
+축소(비정상 상태) 두 경계를 추가로 잠근다. → **해소.**
+
+### 변이 재검증 + 신규 변이(SUR-3·SUR-4)
+
+| # | 무엇을 바꿨나 | 좌표 | 잡혔나 | 근거 |
+|---|---|---|---|---|
+| M3(재검증) | `_reopen_ready`의 `rejudge_count >= _MAX_REJUDGE`를 `>`로 | `wisdom_candidates.py:85` | ✅ 잡힘(1R엔 생존) | `test_reopen_ready_respects_rejudge_cap_on_its_own` — `assert True is False`로 즉시 실패 |
+| **SUR-3** | `cs.judge_backlog && (...)`를 `false && cs.judge_backlog && (...)`로 — 백로그 블록 렌더 절단 | `NaverAdOptimizationConsole.tsx:1565` | ✅ 잡힘 | `naverAdWisdomScorecardPanel.test.tsx` 2건 실패("판사 대기열 · 숙성 3건..." 텍스트 못 찾음) |
+| **SUR-4** | `c.judged_occurrences != null`을 `c.judged_occurrences &&`(truthy)로 | `NaverAdOptimizationConsole.tsx:1541` | ❌ **생존** | `naverAdWisdomScorecardPanel.test.tsx` 43건 전부 통과, `npx vitest run` 전체(887건)도 전부 통과 — **어떤 테스트도 `judged_occurrences: 0`인 픽스처를 안 씀**(백엔드는 `test_reopen_ready_boundary_zero_and_negative_baseline`으로 이 경계를 잠갔는데 프론트는 그 대응 테스트가 없다) |
+
+**SUR-4는 지시대로 정확히 함정을 팠고, 정확히 생존했다.** 단 이건 **현재 배포되는 코드의
+결함이 아니다** — 실제 코드는 `!= null`(안전한 패턴)을 쓰고 있고, `0 != null`이 `true`이므로
+기준선 0인 후보도 지금은 올바르게 렌더된다. 생존한 것은 "이 안전한 패턴이 미래에 truthy
+검사로 실수 회귀해도 잡아줄 테스트가 없다"는 **테스트 커버리지 공백**이다. 새 지적을
+만들지 말라는 2R 지시에 따라 P1/P2로 새로 올리지 않고, 여기 변이 결과로만 기록한다 — 다음
+슬라이스(또는 주기 감사)에서 `judged_occurrences: 0` 픽스처 테스트 1건을 추가하는 것을
+권한다(백엔드의 대응 테스트와 짝을 맞추는 것뿐이라 소규모 변경).
+
+### 검증 명령 결과
+
+- 백엔드: `cd backend && python3 -m pytest -q -p no:randomly` → **6646 passed, 0 failed**(기대치 일치)
+- 프론트 단위: `cd frontend && npx vitest run` → **887 passed (63 files)**(기대치 일치)
+- 프론트 타입: `cd frontend && npx tsc --noEmit` → **에러 0건**(기대치 일치)
+- `grep -rn "wisdom_judge\._MAX_REJUDGE"` (backend 전체) → 0건(P2-2 해소 확인)
+
+### 워킹트리 원복 증명
+
+이번 2R에서 변이 3회(M3 재검증·SUR-3·SUR-4) 전부 `git checkout --`로 원복. 최종 상태:
+
+```
+$ git status --porcelain
+ M ".claude/memory/chains/pao-논의.jsonl"
+```
+
+1R 종료 시점과 동일한 1줄뿐 — 리뷰 대상 diff와 무관한, 착수 이전부터 있던 변경이며 이번
+2R이 만든 변경은 0건 남았다.
