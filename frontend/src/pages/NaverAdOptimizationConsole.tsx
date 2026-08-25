@@ -759,10 +759,14 @@ export default function NaverAdOptimizationConsole() {
       // ★사람이 「눌렀는데 실제로 바뀌었나」를 그 자리에서 확인해야 한다 — 봉투 현황판을
       // 다시 불러 반영된 값을 보인다(요청 사양 F1).
       await loadGuardrail();
-    } catch (e: any) {
+    } catch (e) {
       // ★서버 400 한국어 메시지를 그대로 노출한다(자체 문구로 갈아치우지 않는다) —
       // guardrailSaveError와 같은 관례(저장 실패 사유는 서버가 말해야 한다).
-      setActionResult(p.id, e.message, true);
+      // ★`e: any`를 쓰지 않는다 — 이 파일의 기존 관례이긴 하나 CI 래칫이
+      // `--max-warnings 96`으로 잠겨 있어 **한 건만 더해도 빨간불**이다(2026-08-25 실측:
+      // no-explicit-any 36→37로 CI 실패). 기존 36건은 그 파일을 맡은 트랙이 갚을 부채이고,
+      // 새 코드가 그 숫자를 늘리지는 않는다(래칫의 취지).
+      setActionResult(p.id, e instanceof Error ? e.message : String(e), true);
     } finally {
       await loadProposals(); // codex P2 관례: 목록 갱신 후 busy 해제
       setActionBusy((prev) => ({ ...prev, [p.id]: false }));
