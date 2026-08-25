@@ -1309,6 +1309,60 @@ export default function NaverAdOptimizationConsole() {
           );
         })()}
 
+        {/* A2 후보 현황(승격 전, D-NAO-248 §4-A) — harvest_candidates가 매일 쌓는 후보
+            (OpsWisdomCandidate)는 아직 승격되지 않아 아래 「지혜 성적표」에는 안 뜬다.
+            그 공백을 메운다. ★소급 재수확 산출이므로 「기존 재료 재집계」 라벨을 항상 병기 —
+            없으면 새 배움처럼 읽힌다(계약 판단기준). */}
+        {wisdomCard?.candidate_status && (() => {
+          const cs = wisdomCard.candidate_status;
+          return (
+            <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h4 className="text-xs font-medium text-gray-600">
+                  후보 현황(승격 전) · {cs.candidates_total}건
+                </h4>
+                <span className="text-[11px] text-amber-700 bg-amber-50 rounded px-1.5 py-0.5">
+                  {cs.retro_harvest_label}
+                </span>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                {(Object.keys(cs.bucket_labels) as (keyof typeof cs.bucket_labels)[]).map((k) => (
+                  <span key={k}>
+                    {cs.bucket_labels[k]} {cs.bucket_counts[k] ?? 0}건
+                  </span>
+                ))}
+              </div>
+              {cs.candidates_total === 0 ? (
+                <p className="mt-2 text-xs text-gray-400">아직 수확된 후보가 없습니다.</p>
+              ) : (
+                <ul className="mt-2 space-y-1">
+                  {cs.candidates.map((c) => (
+                    <li key={c.candidate_id} className="text-xs text-gray-600 bg-white rounded border border-gray-100 px-2 py-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="font-mono text-[11px] text-gray-500">{c.signature}</span>
+                        <span className="text-gray-400">{c.bucket_label}</span>
+                        <span className="text-gray-400">{c.status}</span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">
+                        관찰 {c.occurrences}회(good {c.good_count}/bad {c.bad_count}) · 캠페인{" "}
+                        {c.campaign_count}개
+                        {Object.keys(c.by_campaign).length > 0 && (
+                          <>
+                            {" "}—{" "}
+                            {Object.entries(c.by_campaign)
+                              .map(([cid, v]) => `${cid}(${v.good}/${v.bad})`)
+                              .join(", ")}
+                          </>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        })()}
+
         <div className="p-4 space-y-3">
           {avaLoading && !wisdomCard ? (
             <div className="text-center text-gray-400 text-sm py-4">불러오는 중...</div>
@@ -1391,6 +1445,37 @@ export default function NaverAdOptimizationConsole() {
                       : ""}
                   </p>
                 )}
+
+                {/* A7 소비 현황(D-NAO-248 §4-A) — 「이 지혜가 실제로 쓰였는가」. ★썼는지는
+                    관측하되 «쓰게 만들기»는 사람 몫이라 여기는 라벨만 낸다(실행 버튼 없음). */}
+                <div className="mt-2 pt-2 border-t border-gray-50 text-xs">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={
+                        w.briefing_injected
+                          ? "text-blue-700 bg-blue-50 rounded px-1.5 py-0.5"
+                          : "text-gray-400 bg-gray-50 rounded px-1.5 py-0.5"
+                      }
+                    >
+                      브리핑 주입 {w.briefing_injected ? "됨" : "안 됨"}
+                    </span>
+                    <span className="text-gray-400">{w.briefing_injection_note}</span>
+                  </div>
+                  {w.linked_proposals.length === 0 ? (
+                    <p className="mt-1 text-gray-400">이 지혜가 낳은 제안 없음</p>
+                  ) : (
+                    <ul className="mt-1 space-y-0.5">
+                      {w.linked_proposals.map((p) => (
+                        <li key={p.proposal_id} className="text-gray-600">
+                          제안 #{p.proposal_id}({p.proposal_type}) · {p.status}
+                          {p.decided_at
+                            ? ` · 결정 ${p.decided_at.slice(0, 10)}${p.decided_by ? ` (${p.decided_by})` : ""}${p.decision_note ? `: ${p.decision_note}` : ""}`
+                            : ` · 결정: ${p.decision_note ?? "기록 없음"}`}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
             ))
           )}

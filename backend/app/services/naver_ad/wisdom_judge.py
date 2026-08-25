@@ -6,6 +6,12 @@
 #   P2-2)를 기준으로 verdict를 낸다. 후보는 조건 시그니처라 good_count/bad_count/win_rate를 함께
 #   프롬프트에 넘긴다. 회당 상한 5건(LLM 비용·시간). LLM 실패는 해당 후보 skip(fail-open —
 #   pending 유지, 내일 재시도). 읽기/쓰기 모두 wisdom_candidates 테이블만.
+#
+# ★D-NAO-248(2026-08-25, §1) — 판사 재료에 두 가지를 추가했다(재료만, 판정 강제 아님):
+#   ①sibling_buckets: 같은 action의 다른 후보(다른 환경/유형/캠페인_type)들의 n·good/bad·
+#     win_rate. 「이 패턴이 다른 조건에서도 재현되나, 아니면 이 조건에서만 특이하게 좋나」를
+#     판사가 직접 대조하게 한다. ②by_campaign: grain='global' 후보면 캠페인별 분해(전역 시그니처가
+#     합친 표본 안의 이질성을 판사에게 병기 — 부록 Q2 "항상 표본은 합치되 이질성은 판사에게 보인다").
 from __future__ import annotations
 
 import json
@@ -27,6 +33,7 @@ _JUDGE_TIMEOUT_S = 120
 _TTL_DAYS = 14           # first_seen_at부터 이만큼 지나면 숙성(단발이 아니라 유지된 패턴)
 _OCCURRENCE_GATE = 3     # 또는 유사 패턴 3회 재등장
 _MAX_PER_RUN = 5         # 회당 판사 상한(나머지는 익일)
+_MAX_SIBLINGS = 8        # 같은 액션의 형제 버킷 재료 상한(프롬프트 비대화 방지, occurrences desc)
 
 _SYSTEM = (
     "당신은 오하이 네이버 SA 광고 운영의 '지혜 승격 판사'입니다. 아래 후보는 우리가 특정 환경"
@@ -38,6 +45,10 @@ _SYSTEM = (
     "③기존 가드레일/예산·입찰 정책과 단순 중복이 아닌가, "
     "④승률·표본이 원칙을 뒷받침하는가 — good/bad 관찰 수(분모)가 없으면 승격하지 말고, "
     "good과 bad가 모순되게 팽팽하면 어느 방향으로도 승격하지 마세요. "
+    "참고 자료로 sibling_buckets(같은 액션의 다른 환경/유형 후보들의 승률)와 by_campaign"
+    "(이 후보가 합친 캠페인들의 개별 분해, 전역 후보에만 존재)가 주어지면, 이 조건에서만 "
+    "특이하게 나온 값인지 여러 조건에서 재현되는지, 그리고 합쳐진 캠페인들이 실제로 같은 "
+    "방향을 가리키는지 참고하되 — 이 재료가 promote/reject를 자동으로 정하지는 않습니다. "
     "반드시 아래 JSON만 응답하세요(다른 텍스트 없이): "
     '{"verdict": "promote" 또는 "reject", "principle": 승격 시 재사용 판단원칙 한 문장(reject면 빈 문자열), '
     '"rationale": 판정 근거(필수, 한국어), '
@@ -67,22 +78,60 @@ def _is_ripe(cand: OpsWisdomCandidate, now: datetime) -> bool:
     return cand.first_seen_at is not None and cand.first_seen_at <= now - timedelta(days=_TTL_DAYS)
 
 
-def _prompt(cand: OpsWisdomCandidate, now: datetime) -> str:
+def _sibling_buckets(db: Session, cand: OpsWisdomCandidate) -> list[dict]:
+    """같은 action의 다른 후보(버킷)들 — n/good/bad/win_rate. D-NAO-248 §1: 판사가 「이 조건
+    에서만 특이한 값인지, 다른 환경/유형에서도 재현되는지」를 대조할 재료(occurrences 상위
+    _MAX_SIBLINGS건, 프롬프트 비대화 방지). 자기 자신은 제외한다."""
+    if db is None or not cand.action:
+        return []
+    rows = (
+        db.query(OpsWisdomCandidate)
+        .filter(OpsWisdomCandidate.action == cand.action, OpsWisdomCandidate.id != cand.id)
+        .order_by(OpsWisdomCandidate.occurrences.desc())
+        .limit(_MAX_SIBLINGS)
+        .all()
+    )
+    siblings = []
+    for r in rows:
+        good = r.good_count or 0
+        bad = r.bad_count or 0
+        total = good + bad
+        siblings.append({
+            "signature": r.signature, "grain": r.grain,
+            "campaign_type": r.campaign_type, "experiment_batch": r.experiment_batch,
+            "env_bucket": json.loads(r.env_bucket_json) if r.env_bucket_json else {},
+            "n": total, "good": good, "bad": bad,
+            "win_rate": round(good / total, 3) if total else None,
+        })
+    return siblings
+
+
+def _prompt(cand: OpsWisdomCandidate, now: datetime, db: Session | None = None) -> str:
     env = json.loads(cand.env_bucket_json) if cand.env_bucket_json else {}
     days_since = (now - cand.first_seen_at).days if cand.first_seen_at else None
     good = cand.good_count or 0
     bad = cand.bad_count or 0
     total = good + bad
     win_rate = round(good / total, 3) if total else None
+    # D-NAO-248 §1: grain='global' 후보만 by_campaign 병기(이질성 가시화, 부록 Q2) — 레거시
+    # 캠페인 grain 후보(grain=NULL)는 campaign_id 1개뿐이라 이미 by_campaign과 동치.
+    by_campaign = None
+    if cand.grain == "global" and cand.by_campaign_json:
+        by_campaign = json.loads(cand.by_campaign_json)
     view = {
         "campaign_id": cand.campaign_id, "action": cand.action, "env_bucket": env,
         "observation": cand.observation, "occurrences": cand.occurrences,
         "good_count": good, "bad_count": bad, "win_rate": win_rate,
         "days_since_first_seen": days_since,
+        "grain": cand.grain, "campaign_type": cand.campaign_type,
+        "experiment_batch": cand.experiment_batch, "by_campaign": by_campaign,
+        "sibling_buckets": _sibling_buckets(db, cand),
     }
     return (
         "아래는 지혜 승격 후보 1건입니다(JSON). good_count/bad_count는 이 조건에서 결과가 "
         "target 이상(good)/미만(bad)이었던 관찰 수, win_rate=good/(good+bad)입니다. "
+        "by_campaign은 이 후보(전역 시그니처)가 합친 캠페인별 분해, sibling_buckets는 같은 "
+        "액션의 다른 환경/유형 후보들입니다(참고 재료 — 자동 강제 아님). "
         "이 안의 정보만 근거로 판정하세요.\n\n"
         f"{json.dumps(view, ensure_ascii=False, default=str)}"
     )
@@ -106,7 +155,7 @@ def judge_ripe_candidates(db: Session, *, now: datetime | None = None, invoke=_i
     totals = {"ripe": len(ripe), "promoted": 0, "rejected": 0, "skipped_llm": 0, "errors": 0}
     for cand in ripe:
         try:
-            res = invoke(_prompt(cand, now), system=_SYSTEM, schema=_SCHEMA,
+            res = invoke(_prompt(cand, now, db), system=_SYSTEM, schema=_SCHEMA,
                          model=_JUDGE_MODEL, timeout=_JUDGE_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 — fail-open: 내일 재시도(pending 유지)
             log.warning("wisdom_judge: LLM 호출 실패(skip, pending 유지): sig=%s: %s", cand.signature, e)

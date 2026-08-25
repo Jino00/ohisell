@@ -3732,8 +3732,18 @@ export interface NaverWisdomScorecardRow {
     status: string;
     campaign_id: string;
     executed_change_log_id: number | null;
+    // A7① 결정 메타(D-NAO-248 §4-A) — decided_at이 NULL이면 «아직 결정 안 됨»이 아니라
+    // 컬럼 신설 «전»에 결정났을 수 있다(예: 2314는 07-26 rejected). 그때 decision_note는
+    // 실제 사유가 아니라 "기록 없음(컬럼 신설 전)" 표지 문자열이다 — 지어낸 사유가 아니다.
+    decided_at: string | null;
+    decided_by: string | null;
+    decision_note: string | null;
   }[];
   linked_proposal_count: number;
+  // A7② — 이 지혜가 «지금» 전문가 브리핑 자유 텍스트에 실리는가. 「실린다」≠「효과가 났다」
+  // (briefing_injection_note가 그 한계를 실어 나른다 — attribution.limitation과 같은 결).
+  briefing_injected: boolean;
+  briefing_injection_note: string;
   has_evidence: boolean;
   evidence_gap: string | null;
   changes_total: number;
@@ -3754,11 +3764,50 @@ export interface NaverWisdomScorecardRow {
   details: NaverWisdomScorecardChange[];
 }
 
+// ── 후보 현황(A2, D-NAO-248 §4-A) — 승격 «전» 지혜 후보(OpsWisdomCandidate) 파이프라인.
+//   wisdom[] 은 이미 승격된 지혜만 보므로, 그 앞단(harvest_candidates가 매일 쌓는 행)은
+//   여기서만 보인다. wisdom_id 필터와 무관하게 항상 전체가 실린다(후보는 특정 지혜 1건에
+//   속하지 않는다 — 승격 전이라 1:1 링크가 없다).
+export type NaverWisdomCandidateBucket =
+  | "legacy"
+  | "global_pool"
+  | "separated_experiment"
+  | "separated_unknown";
+
+export interface NaverWisdomCandidateRow {
+  candidate_id: number;
+  signature: string;
+  status: string;
+  grain: string | null; // null=레거시(D-NAO-248 이전) / 'global'=신형
+  bucket: NaverWisdomCandidateBucket;
+  bucket_label: string;
+  campaign_type: string | null;
+  experiment_batch: string | null;
+  action: string | null;
+  occurrences: number;
+  good_count: number;
+  bad_count: number;
+  campaign_count: number;
+  by_campaign: Record<string, { good: number; bad: number }>;
+  observation: string | null;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface NaverWisdomCandidateStatus {
+  candidates_total: number;
+  bucket_counts: Record<NaverWisdomCandidateBucket, number>;
+  bucket_labels: Record<NaverWisdomCandidateBucket, string>;
+  retro_harvest_label: string; // 「기존 재료 재집계」 라벨 — 새 배움이 아니라 기존 90일 일기의 재집계
+  candidates: NaverWisdomCandidateRow[];
+}
+
 export interface NaverWisdomScorecard {
   generated_at_kst: string;
   wisdom_total: number;
   wisdom_active: number;
   wisdom_with_evidence: number;
+  candidate_status: NaverWisdomCandidateStatus;
   value_definition: {
     metric: string;
     formula: string;

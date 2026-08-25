@@ -9,6 +9,23 @@
 #   재노출 강화). 읽기(diary·campaign_target_resolver) + wisdom_candidates 쓰기만(원칙18-1).
 #   ★target_type=="search_term" 행은 수확 대상에서 제외한다(D-NAO-178) — 그 행의 d1은 검색어가
 #   아니라 캠페인 grain이라 승률이 남의 성적표로 쌓인다. 해제는 S8(d1_st 소비 전환)에서.
+#
+# ★D-NAO-248(2026-08-25, 부록 Q2 처분 (b′)) — 시그니처를 **전역**(campaign_id 미포함)으로
+#   바꿨다. 옛 시그니처는 campaign_id가 선두라 표본이 캠페인 수만큼 쪼개졌다(§1: 4캠페인 합
+#   91회 관찰이 45/38/5/3으로 갈려 전부 rejected — 근거가 더 두꺼운 쪽을 못 배웠다). 새
+#   시그니처는 (campaign_type × action × 환경버킷[× experiment_batch]) 단위로 캠페인을 넘어
+#   합산하고, 캠페인별 분해는 후보 행 «안»의 by_campaign_json에 병기한다(합산은 하되 이질성은
+#   판사에게 보인다 — 부록 Q2). 경계(부록 Q3, 절대 안 섞임): ①campaign_type(SHOPPING/WEB_SITE/
+#   BRAND_SEARCH — 같은 액션 이름이 다른 레버) ②experiment_batch(A/B·MOP열·대조군·홀드아웃).
+#   상품군·BEP 수준은 경계가 «아니다»(이미 BEP 대비로 정규화됨 — 경계로 삼으면 원래 병이
+#   재발한다). 두 «분리 버킷»이 있다: 실험배치 라벨(전역 풀과 절대 안 섞임) / fail-closed
+#   미상(naver_campaign_settings 행이 없거나 campaign_type을 못 읽으면 — 전역 합산에 넣지
+#   않고 캠페인 단위로 고립시킨다). 시그니처 접두사로 세 버킷을 구조적으로 분리한다:
+#     "g|type|action|day|season|iphone|batch"  — 전역 풀(batch="") / 실험분리(batch=라벨)
+#     "g?|campaign_id|action|day|season|iphone" — fail-closed 미상분리
+#   두 접두사 모두 옛 시그니처(campaign_id 선두, 접두사 없음)와 **문자열이 겹칠 수 없다** —
+#   기존 27건은 재수확 대상에 걸리지 않고 그대로 남는다(소급 재계산이 아니라 소급 재수확 —
+#   같은 90일 일기 위에 새 grain의 새 행만 생긴다).
 from __future__ import annotations
 
 import json
@@ -17,11 +34,15 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.models import OpsDiaryEntry, OpsWisdomCandidate
+from app.models import NaverCampaignSettings, NaverEntity, OpsDiaryEntry, OpsWisdomCandidate
 from app.services.naver_ad import campaign_target_resolver
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
+
+# 신형(전역) 시그니처 접두사 — 옛 시그니처(campaign_id 선두, 접두사 없음)와 절대 겹치지 않는다.
+_GLOBAL_PREFIX = "g"    # g|campaign_type|action|day_class|season|iphone_window|experiment_batch
+_UNKNOWN_PREFIX = "g?"  # g?|campaign_id|action|day_class|season|iphone_window (fail-closed 분리)
 
 # 수확 대상 이벤트 — 실집행(execute)과 가드레일/구조 차단(blocked)만. reject(말미 stale 정리)·
 # kill_switch는 제외(P2 리뷰 P3-2: reject는 blocked와 같은 제안의 2행이라 포함하면 이중계상).
@@ -33,6 +54,12 @@ _TERMINAL_STATUSES = frozenset({"promoted", "rejected"})
 
 # 아이폰 출시 전후 ±N일을 launch_window로 본다(그 외 normal, offset None은 unknown).
 _IPHONE_WINDOW_DAYS = 14
+
+# ★D-NAO-248 §4-A(A2 관측 표면) — 소급 재수확 산출엔 이 라벨을 병기한다(계약 판단기준 원문:
+#   "항상 소급 재수확 산출엔 「기존 재료의 재집계」 라벨을 병기한다"). harvest_candidates의
+#   totals["note"]와 wisdom_scorecard의 후보 현황 블록이 **같은 문자열**을 써야 화면과 로그가
+#   다른 말을 하지 않는다 — 그래서 상수로 한 곳에만 둔다.
+RETRO_HARVEST_LABEL = "diary 90일 lookback 재집계 — 새 grain 신설이 곧 새 관찰 생성은 아니다"
 
 # created_at(UTC) 스캔 하한 — diary_outcome가 60일까지만 결과를 채우므로(그 뒤 소급 없음)
 # 여유를 둔 90일. 시그니처 dedup(entry id 중복 제외)이 있어 재스캔은 멱등이지만, 무한히 커지는
@@ -109,13 +136,106 @@ def _outcome_direction(
 
 def _observation(campaign_id: str, action: str | None, env: dict, good_count: int, bad_count: int) -> str:
     """규칙 기반 요약문(LLM 아님) — 시그니처(조건)가 무엇을 묶는지 + 현재 good/bad 성적 한 줄.
-    방향을 고정 서술하지 않고 tally로 서술한다(리뷰 P2-2: 조건 후보가 승률을 담는다)."""
+    방향을 고정 서술하지 않고 tally로 서술한다(리뷰 P2-2: 조건 후보가 승률을 담는다).
+
+    ★레거시(campaign_id 선두 시그니처) 전용 경로 — D-NAO-248 이후로도 이 함수 자체는 안 바뀐다
+    (기존 27행이 재수확되지 않으니 이 함수가 다시 호출될 일은 없지만, 시그니처가 이 형태를
+    다시 안 만들 뿐 함수 자체를 지우면 "레거시 요약문 경로가 깨졌다"는 신호를 잃는다)."""
     total = good_count + bad_count
     return (
         f"[패턴] 캠페인 {campaign_id}의 {action or '(액션미상)'} — "
         f"{env['day_class']}·{env['season'] or '계절미상'}·아이폰 {env['iphone_window']} 조건에서 "
         f"관찰 {total}회(good {good_count}/bad {bad_count})."
     )
+
+
+def _observation_global(
+    campaign_type: str | None, action: str | None, env: dict, good_count: int, bad_count: int,
+    campaign_count: int, experiment_batch: str | None,
+) -> str:
+    """전역/실험분리 후보 요약문 — ★캠페인 ID를 담지 않는다(D-NAO-248). 캠페인별 분해는
+    by_campaign_json이 담당한다. 이 수확은 «새로 배운 관찰»이 아니라 기존 90일 일기의
+    재집계임을 호출부(diagnosis 등)가 옮길 수 있게 말미에 명시한다."""
+    total = good_count + bad_count
+    scope = f"실험배치 '{experiment_batch}'" if experiment_batch else "전역"
+    return (
+        f"[패턴·{scope}] {campaign_type or '(유형미상)'} 유형의 {action or '(액션미상)'} — "
+        f"{env['day_class']}·{env['season'] or '계절미상'}·아이폰 {env['iphone_window']} 조건에서 "
+        f"관찰 {total}회(good {good_count}/bad {bad_count}), 캠페인 {campaign_count}개에 걸침 "
+        f"(기존 일기 재집계 — 새 관찰 아님)."
+    )
+
+
+def _observation_unknown(campaign_id: str, action: str | None, env: dict, good_count: int, bad_count: int) -> str:
+    """fail-closed 미상분리 후보 요약문 — campaign_type/experiment_batch를 못 읽어 전역 풀에
+    합류시키지 않고 캠페인 단위로 고립시킨 관찰이다."""
+    total = good_count + bad_count
+    return (
+        f"[패턴·라벨미상] 캠페인 {campaign_id}의 {action or '(액션미상)'} — "
+        f"{env['day_class']}·{env['season'] or '계절미상'}·아이폰 {env['iphone_window']} 조건에서 "
+        f"관찰 {total}회(good {good_count}/bad {bad_count}) — campaign_type/실험배치 미상, "
+        f"fail-closed 분리(전역 풀 미참여, 기존 일기 재집계)."
+    )
+
+
+def _campaign_boundary(
+    db: Session, campaign_id: str, cache: dict,
+) -> tuple[str | None, str | None, bool]:
+    """캠페인의 전역 풀링 경계 축 (campaign_type, experiment_batch, known) — 회차 내 캐시
+    (bep_cache와 동일 관례: 행마다 재조회하지 않는다).
+
+    known=False(fail-closed)면 이 캠페인의 관찰은 전역 풀에 절대 넣지 않는다. 두 실패 모드
+    (부록 Q3 집행 규칙 원문 그대로):
+      ① naver_campaign_settings에 그 캠페인 행 자체가 없다 → 라벨 미상
+      ② naver_entity(entity_type='campaign')에서 campaign_type을 못 읽는다 → 유형 미상
+    행이 있고 experiment_batch가 NULL이면 그건 "실험 배치가 아니다"라는 확정값이라 전역
+    풀에 참여한다(행 부재=미상 vs NULL=미상 아님 — 이 둘을 섞으면 안 된다).
+    """
+    if campaign_id in cache:
+        return cache[campaign_id]
+    settings = (
+        db.query(NaverCampaignSettings)
+        .filter(NaverCampaignSettings.campaign_id == campaign_id)
+        .first()
+    )
+    if settings is None:
+        result = (None, None, False)
+        cache[campaign_id] = result
+        return result
+    entity = (
+        db.query(NaverEntity)
+        .filter(NaverEntity.entity_type == "campaign", NaverEntity.entity_id == campaign_id)
+        .first()
+    )
+    campaign_type = (entity.campaign_type or None) if entity is not None else None
+    known = campaign_type is not None
+    result = (campaign_type, settings.experiment_batch, known)
+    cache[campaign_id] = result
+    return result
+
+
+def _build_signature(
+    entry: OpsDiaryEntry, env: dict, campaign_type: str | None, experiment_batch: str | None, known: bool,
+) -> str:
+    """신형(전역) 시그니처 조립. known=False면 fail-closed 미상분리 시그니처(캠페인 단위 고립)."""
+    if known:
+        batch = experiment_batch or ""
+        return (
+            f"{_GLOBAL_PREFIX}|{campaign_type}|{entry.action}"
+            f"|{env['day_class']}|{env['season']}|{env['iphone_window']}|{batch}"
+        )
+    return (
+        f"{_UNKNOWN_PREFIX}|{entry.campaign_id}|{entry.action}"
+        f"|{env['day_class']}|{env['season']}|{env['iphone_window']}"
+    )
+
+
+def _bump_by_campaign(by_campaign_json: str | None, campaign_id: str, direction: str) -> dict:
+    """캠페인별 good/bad 분해 dict를 1건 증분(호출부가 json.dumps한다). direction은 'good'/'bad'만."""
+    by_campaign = json.loads(by_campaign_json) if by_campaign_json else {}
+    bucket = by_campaign.setdefault(campaign_id, {"good": 0, "bad": 0})
+    bucket[direction] = bucket.get(direction, 0) + 1
+    return by_campaign
 
 
 def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
@@ -137,9 +257,15 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
         .all()
     )
     bep_cache: dict[str, object] = {}  # 회차 내 캠페인별 BEP 캐시(행마다 재해석하지 않는다)
+    boundary_cache: dict[str, tuple] = {}  # 회차 내 캠페인별 (campaign_type, experiment_batch, known) 캐시
     totals = {"scanned": 0, "new": 0, "updated": 0, "revived": 0,
               "skipped_no_outcome": 0, "skipped_no_target": 0, "skipped_neutral": 0,
-              "skipped_terminal": 0, "skipped_search_term_grain": 0, "errors": 0}
+              "skipped_terminal": 0, "skipped_search_term_grain": 0, "errors": 0,
+              # D-NAO-248: 전역 풀에 못 들어간(=분리된) 관찰 수. 카운터일 뿐 실패가 아니다.
+              "separated_experiment": 0, "separated_unknown": 0,
+              # 이 수확이 새 학습이 아니라 기존 90일 일기의 «재집계»임을 호출부가 화면에
+              # 옮길 수 있게 하는 표지(부록 Q2: "소급 재계산이 아니라 소급 재수확").
+              "note": RETRO_HARVEST_LABEL}
     for entry in rows:
         try:
             # ★검색어 제외 행은 수확하지 않는다(D-NAO-178). 이 행들의 outcome["d1"]은
@@ -170,11 +296,16 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
                 "season": entry.season,
                 "iphone_window": _iphone_window(entry.iphone_launch_offset_days),
             }
-            # 시그니처 = 조건만(방향 제외). 결과는 good_count/bad_count로 센다(리뷰 P2-2).
-            signature = (
-                f"{entry.campaign_id}|{entry.action}"
-                f"|{env['day_class']}|{env['season']}|{env['iphone_window']}"
+            # D-NAO-248: 전역 시그니처 — campaign_type × action × 환경버킷[× experiment_batch].
+            # known=False(fail-closed)면 "g?|캠페인 단위" 분리 시그니처로 고립시킨다.
+            campaign_type, experiment_batch, known = _campaign_boundary(
+                db, entry.campaign_id, boundary_cache
             )
+            signature = _build_signature(entry, env, campaign_type, experiment_batch, known)
+            if not known:
+                totals["separated_unknown"] += 1
+            elif experiment_batch:
+                totals["separated_experiment"] += 1
 
             cand = (
                 db.query(OpsWisdomCandidate)
@@ -198,23 +329,54 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
                 else:
                     cand.bad_count = (cand.bad_count or 0) + 1
                 cand.occurrences = (cand.good_count or 0) + (cand.bad_count or 0)  # good+bad 합
-                cand.observation = _observation(
-                    entry.campaign_id, entry.action, env, cand.good_count or 0, cand.bad_count or 0
-                )
+                by_campaign = _bump_by_campaign(cand.by_campaign_json, entry.campaign_id, direction)
+                cand.by_campaign_json = json.dumps(by_campaign, ensure_ascii=False)
+                if known:
+                    cand.observation = _observation_global(
+                        campaign_type, entry.action, env, cand.good_count or 0, cand.bad_count or 0,
+                        len(by_campaign), experiment_batch,
+                    )
+                else:
+                    cand.observation = _observation_unknown(
+                        entry.campaign_id, entry.action, env, cand.good_count or 0, cand.bad_count or 0
+                    )
                 cand.last_seen_at = now
                 db.commit()
                 totals["updated"] += 1
             else:
                 good_count = 1 if direction == "good" else 0
                 bad_count = 1 if direction == "bad" else 0
+                by_campaign = {entry.campaign_id: {"good": good_count, "bad": bad_count}}
+                if known:
+                    observation = _observation_global(
+                        campaign_type, entry.action, env, good_count, bad_count,
+                        len(by_campaign), experiment_batch,
+                    )
+                else:
+                    observation = _observation_unknown(
+                        entry.campaign_id, entry.action, env, good_count, bad_count
+                    )
                 cand = OpsWisdomCandidate(
-                    signature=signature, campaign_id=entry.campaign_id, action=entry.action,
+                    # ★전역/실험분리 후보의 campaign_id는 빈 문자열(캠페인 ID를 시그니처·요약문에
+                    # 안 박는다는 원칙과 일관) — 미상분리 후보만 캠페인 단위라 실제 id를 남긴다.
+                    signature=signature, campaign_id=(entry.campaign_id if not known else ""),
+                    action=entry.action,
                     env_bucket_json=json.dumps(env, ensure_ascii=False),
-                    observation=_observation(entry.campaign_id, entry.action, env, good_count, bad_count),
+                    observation=observation,
                     occurrences=1, good_count=good_count, bad_count=bad_count,
                     first_seen_at=now, last_seen_at=now,
                     source_entry_ids_json=json.dumps([entry.id]), status="pending",
                     importance=5, strength=7.0,
+                    # ★grain은 «이 후보가 실제로 무엇을 묶었나»를 적는다 — known=False 후보는
+                    #   시그니처가 `g?|{campaign_id}|…`라 캠페인 1개짜리다. 여기에 "global"을
+                    #   적으면 컬럼이 시그니처와 «모순»되고(라벨은 전역, 실체는 캠페인 단위),
+                    #   소비층이 grain으로 필터할 때 미상분리분이 전역 통계에 섞인다.
+                    #   («왜» 분리됐는지는 `g?|` 접두사와 separated_unknown 카운터가 말한다.
+                    #   값은 컬럼이 String(12)라 짧게 — 'campaign_unknown'(16자)은 SQLite에선
+                    #   조용히 통과해도 PostgreSQL 이관 시 깨진다.)
+                    grain=("global" if known else "campaign"),
+                    campaign_type=campaign_type, experiment_batch=experiment_batch,
+                    by_campaign_json=json.dumps(by_campaign, ensure_ascii=False),
                 )
                 db.add(cand)
                 db.commit()
