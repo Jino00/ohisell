@@ -79,16 +79,22 @@ def rdb(client_and_session):
 
 
 def _candidate(db, *, param_suggestion=None, campaign_id="cmp1", action="bid_up",
-               good=3, bad=1, signature="sig1"):
+               good=3, bad=1, signature="sig1", grain=None, campaign_type=None,
+               experiment_batch=None, env=None):
+    """★P1-1 교정(리뷰 20260825): grain/campaign_type/experiment_batch/env 인자를 추가했다 —
+    기존 호출부는 전부 키워드 인자를 안 넘기므로(기본값 None → 옛 동작과 동일) 시그니처가
+    안 깨진다. 새 인자는 wisdom_judge._sibling_buckets가 실제로 재료를 흘리는지(조건 대조군
+    배선)를 검사하는 테스트가 「진짜 조건 대조군 형제」를 만들 수 있게 하기 위함이다."""
     verdict = {"verdict": "promote", "principle": "휴일엔 bid_up이 좋았다", "rationale": "3회 관찰"}
     if param_suggestion is not None:
         verdict["param_suggestion"] = param_suggestion
     c = OpsWisdomCandidate(
         signature=signature, campaign_id=campaign_id, action=action,
-        env_bucket_json=json.dumps({"day_class": "weekday", "season": "summer", "iphone_window": "normal"}),
+        env_bucket_json=json.dumps(env or {"day_class": "weekday", "season": "summer", "iphone_window": "normal"}),
         observation="obs", occurrences=good + bad, good_count=good, bad_count=bad,
         first_seen_at=NOW, last_seen_at=NOW, source_entry_ids_json="[1]",
         status="promoted", judge_verdict_json=json.dumps(verdict),
+        grain=grain, campaign_type=campaign_type, experiment_batch=experiment_batch,
     )
     db.add(c)
     db.flush()
@@ -155,6 +161,147 @@ def test_empty_param_suggestion_is_ignored(db):
     db.commit()
     res = wisdom_apply.propose_param_changes(db, now=NOW)
     assert res["proposals_created"] == 0 and res["skipped_no_suggestion"] == 1
+
+
+# ══════════════════════ D-NAO-248 §3 — _param_rationale 조건 대조군 요약 ══════════════════════
+
+
+def test_param_rationale_includes_condition_control_summary(db):
+    """조건 대조군이 있으면 카드 근거에 요약이 실린다(판사가 본 재료 — 판정 없이 병기)."""
+    cand = _candidate(db, param_suggestion=_SUGGESTION)
+    entry = _entry(db, cand)
+    db.commit()
+    sibling_view = {
+        "condition_controls": [
+            {"signature": "sib1", "differs_in": ["day_class"], "n": 8, "good": 6, "bad": 2, "win_rate": 0.75},
+        ],
+        "other_campaign_types": [{"signature": "ot1"}],
+        "excluded_from_controls": {"experiment_batch": 1, "legacy_grain": 2, "unknown_boundary": 0},
+        "truncated": {"condition_controls": 0, "other_campaign_types": 0},
+    }
+    suggestion = wisdom_apply._param_suggestion_of(cand)
+    rationale = wisdom_apply._param_rationale(entry, cand, suggestion, sibling_view)
+    assert "조건 대조군(판사가 본 재료 — 판정 아님): 1건" in rationale
+    assert "differs_in=day_class" in rationale
+    assert "비교 불가 유형 1건" in rationale
+    assert "대조군 제외 3건(실험배치 1·레거시 2·경계미상 0·후보 자체가 대조군 자격 없음 0)" in rationale
+
+
+def test_sibling_control_summary_shows_candidate_not_eligible_phrase(db):
+    """★P2-1 — excluded_from_controls["candidate_not_eligible"]가 0이 아니면 「후보 자체가
+    대조군 자격 없음」 문구가 실제 건수와 함께 노출된다(값이 0이어도 표기를 지우지 않는다 —
+    침묵 금지는 이 항목에도 똑같이 적용된다)."""
+    sibling_view = {
+        "condition_controls": [], "other_campaign_types": [],
+        "excluded_from_controls": {
+            "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0,
+            "candidate_not_eligible": 4,
+        },
+        "truncated": {"condition_controls": 0, "other_campaign_types": 0},
+    }
+    summary = wisdom_apply._sibling_control_summary(sibling_view)
+    assert "후보 자체가 대조군 자격 없음 4" in summary
+    assert "대조군 제외 4건" in summary  # 총합에도 반영된다
+
+
+def test_param_rationale_condition_controls_empty_says_none(db):
+    """조건 대조군 0건이면 침묵하지 않고 「없음(0건)」으로 명시한다(값이 없으면 그 줄을
+    「없음」으로 — 침묵 금지). sibling_view=None(호출부 방어)도 같은 결과여야 한다."""
+    cand = _candidate(db, param_suggestion=_SUGGESTION)
+    entry = _entry(db, cand)
+    db.commit()
+    empty_sibling_view = {
+        "condition_controls": [], "other_campaign_types": [],
+        "excluded_from_controls": {"experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0},
+        "truncated": {"condition_controls": 0, "other_campaign_types": 0},
+    }
+    suggestion = wisdom_apply._param_suggestion_of(cand)
+    rationale = wisdom_apply._param_rationale(entry, cand, suggestion, empty_sibling_view)
+    assert "조건 대조군: 없음(0건)" in rationale
+
+    rationale_none = wisdom_apply._param_rationale(entry, cand, suggestion, None)
+    assert "조건 대조군: 없음(0건)" in rationale_none
+
+
+def test_param_rationale_never_contains_a_judgement_verb(db):
+    """★판정 어휘 금지 — 문턱·합격 판단은 사람 몫이다(스펙 3: "충분"·"합격"·"권장" 류가
+    산출 문자열에 없어야 한다)."""
+    cand = _candidate(db, param_suggestion=_SUGGESTION)
+    entry = _entry(db, cand)
+    db.commit()
+    sibling_view = {
+        "condition_controls": [
+            {"signature": "sib1", "differs_in": [], "n": 8, "good": 8, "bad": 0, "win_rate": 1.0},
+        ],
+        "other_campaign_types": [],
+        "excluded_from_controls": {"experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0},
+        "truncated": {"condition_controls": 0, "other_campaign_types": 0},
+    }
+    suggestion = wisdom_apply._param_suggestion_of(cand)
+    rationale = wisdom_apply._param_rationale(entry, cand, suggestion, sibling_view)
+    for verb in ("충분", "합격", "권장"):
+        assert verb not in rationale
+
+
+def test_propose_param_changes_wires_sibling_summary_into_rationale(db):
+    """propose_param_changes가 실제로 wisdom_judge._sibling_buckets를 호출해 카드 근거에
+    조건 대조군 요약을 병기한다(배선 확인 — 재료가 실제로 흐르는지).
+
+    ★P1-1 교정(적대 리뷰 20260825, SUR-1 변이 생존): 옛 버전은 "조건 대조군"·"대조군 제외"
+    부분 문자열만 검사했는데, 그 접두어는 배선이 끊긴 경우(_sibling_control_summary(None))의
+    산출("조건 대조군: 없음(0건) / … / 대조군 제외 0건(…)")에도 그대로 나온다 — 즉 배선을
+    끊어도 이 테스트는 통과했다. 이번엔 진짜 형제 후보를 심어 **배선 없이는 나올 수 없는 값**
+    (건수>0·differs_in·0이 아닌 제외 카운터)을 검사한다."""
+    cand = _candidate(
+        db, param_suggestion=_SUGGESTION, grain="global", campaign_type="WEB_SITE",
+        experiment_batch=None,
+    )
+    _entry(db, cand)
+    # 진짜 조건 대조군 형제 1건 — 같은 action("bid_up")·같은 campaign_type·grain="global"·
+    # 실험배치 없음·환경 차원(day_class)만 다름.
+    _candidate(
+        db, signature="sib_control", grain="global", campaign_type="WEB_SITE",
+        env={"day_class": "holiday", "season": "summer", "iphone_window": "normal"},
+    )
+    # 대조군 제외 형제 1건 — 실험배치가 있어 excluded_from_controls["experiment_batch"]로 잡힌다.
+    _candidate(
+        db, signature="sib_batch", grain="global", campaign_type="WEB_SITE",
+        experiment_batch="iphone-philosophy-ab:mop",
+    )
+    db.commit()
+
+    res = wisdom_apply.propose_param_changes(db, now=NOW)
+    assert res["proposals_created"] == 1
+    prop = db.query(NaverProposal).filter_by(proposal_type="param_change").one()
+    # 배선이 끊기면(_param_rationale의 마지막 인자가 None) 절대 나올 수 없는 값들.
+    assert "조건 대조군(판사가 본 재료 — 판정 아님): 1건" in prop.rationale
+    assert "differs_in=day_class" in prop.rationale
+    assert "대조군 제외 1건(실험배치 1·레거시 0·경계미상 0·후보 자체가 대조군 자격 없음 0)" in prop.rationale
+
+
+def test_propose_param_changes_rationale_differs_with_and_without_sibling_view(db):
+    """★변이 저항성 직접 검사(P1-1 처방 3) — _param_rationale을 sibling_view=None으로 부른
+    산출과 실제 sibling_view로 부른 산출이 달라야 한다. 같으면 배선이 끊겨도 카드 문구가
+    똑같다는 뜻이고, 그게 바로 SUR-1(카드 배선 제거)이 생존했던 이유다. 이 assert는 그 축이
+    다시 무너지면 assert 자체가 즉시 실패한다(문자열 접두어 우연 일치에 의존하지 않는다)."""
+    cand = _candidate(db, param_suggestion=_SUGGESTION)
+    entry = _entry(db, cand)
+    db.commit()
+    suggestion = wisdom_apply._param_suggestion_of(cand)
+    sibling_view = {
+        "condition_controls": [
+            {"signature": "sib1", "differs_in": ["day_class"], "n": 8, "good": 6, "bad": 2, "win_rate": 0.75},
+        ],
+        "other_campaign_types": [],
+        "excluded_from_controls": {
+            "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0,
+            "candidate_not_eligible": 0,
+        },
+        "truncated": {"condition_controls": 0, "other_campaign_types": 0},
+    }
+    with_view = wisdom_apply._param_rationale(entry, cand, suggestion, sibling_view)
+    without_view = wisdom_apply._param_rationale(entry, cand, suggestion, None)
+    assert with_view != without_view
 
 
 # ══════════════════════ B7 코드 클램프(fail-closed) ══════════════════════

@@ -577,24 +577,204 @@ def test_judge_prompt_exposes_win_rate_and_tally(db):
 
 
 def test_judge_prompt_exposes_sibling_buckets_and_by_campaign(db):
-    """★D-NAO-248 §1 — 판사 재료에 형제 버킷(같은 액션의 다른 후보)과 by_campaign 분해가
-    실린다(이질성 가시화, 부록 Q2). db가 없으면(레거시 호출부 호환) sibling_buckets=[]."""
+    """★D-NAO-248 §1·§2 — 판사 재료에 형제 버킷(조건 대조군 dict 구조)과 by_campaign 분해가
+    실린다(이질성 가시화, 부록 Q2). db가 없으면(레거시 호출부 호환) sibling_buckets의 4키가
+    전부 빈 값(리스트 []·카운터 0)으로 실린다(스펙 1 — 침묵이 아니라 명시적 빈 구조)."""
     target = _cand(
         db, signature="g|WEB_SITE|bid_up|weekday|summer|normal|", occurrences=3,
         good_count=2, bad_count=1, grain="global", campaign_type="WEB_SITE",
         by_campaign_json=json.dumps({"cA": {"good": 2, "bad": 0}, "cB": {"good": 0, "bad": 1}}),
     )
+    # 진짜 조건 대조군이 되려면 형제도 grain='global' ∧ 같은 campaign_type ∧ experiment_batch 없음이어야 한다.
     _cand(db, signature="sib1", occurrences=5, good_count=1, bad_count=4,
+          grain="global", campaign_type="WEB_SITE",
           env={"day_class": "holiday", "season": "summer", "iphone_window": "normal"})
     db.commit()
 
     prompt_with_db = wisdom_judge._prompt(target, NOW, db)
     assert '"signature": "sib1"' in prompt_with_db
     assert '"n": 5' in prompt_with_db
+    assert '"condition_controls"' in prompt_with_db
     assert '"cA": {"good": 2, "bad": 0}' in prompt_with_db  # by_campaign 병기
 
     prompt_without_db = wisdom_judge._prompt(target, NOW)  # db 생략 — 레거시 호출부 호환
-    assert '"sibling_buckets": []' in prompt_without_db
+    assert (
+        '"sibling_buckets": {"condition_controls": [], "other_campaign_types": [], '
+        '"excluded_from_controls": {"experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0, '
+        '"candidate_not_eligible": 0}, '
+        '"truncated": {"condition_controls": 0, "other_campaign_types": 0}}'
+    ) in prompt_without_db
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-NAO-248(2026-08-25) §2 — _sibling_buckets 재구조화(조건 대조군 분류)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_sibling_buckets_differs_in_picks_only_the_differing_env_dims(db):
+    """형제가 day_class만 다르면 differs_in == ["day_class"] (다른 축은 안 실린다)."""
+    target = _cand(
+        db, signature="target", grain="global", campaign_type="WEB_SITE",
+        env={"day_class": "weekday", "season": "summer", "iphone_window": "normal"},
+    )
+    _cand(
+        db, signature="sib_day", grain="global", campaign_type="WEB_SITE",
+        env={"day_class": "holiday", "season": "summer", "iphone_window": "normal"},
+    )
+    db.commit()
+    out = wisdom_judge._sibling_buckets(db, target)
+    assert len(out["condition_controls"]) == 1
+    assert out["condition_controls"][0]["differs_in"] == ["day_class"]
+    # ★P2-1 — 후보가 적격(grain='global' ∧ experiment_batch 없음)이면 candidate_not_eligible은 0.
+    assert out["excluded_from_controls"]["candidate_not_eligible"] == 0
+
+
+def test_sibling_buckets_experiment_batch_excluded_from_controls(db):
+    """experiment_batch 있는 형제는 condition_controls에 안 들어가고
+    excluded_from_controls["experiment_batch"]가 오른다(풀링 경계, 계약 §2)."""
+    target = _cand(db, signature="target", grain="global", campaign_type="WEB_SITE")
+    _cand(
+        db, signature="sib_batch", grain="global", campaign_type="WEB_SITE",
+        experiment_batch="iphone-philosophy-ab:mop",
+    )
+    db.commit()
+    out = wisdom_judge._sibling_buckets(db, target)
+    assert out["condition_controls"] == []
+    assert out["excluded_from_controls"]["experiment_batch"] == 1
+
+
+def test_sibling_buckets_legacy_grain_vs_unknown_boundary(db):
+    """grain != 'global' 형제는 legacy_grain으로 가되, signature가 "g?"로 시작하면
+    unknown_boundary로 별도로 센다(경계 미상 분리, 부록 규칙 1)."""
+    target = _cand(db, signature="target", grain="global", campaign_type="WEB_SITE")
+    _cand(db, signature="legacy1", grain=None)                 # 레거시(경계 안 미상)
+    _cand(db, signature="g?|cX|bid_up|weekend|summer|normal", grain=None)  # 경계 미상
+    db.commit()
+    out = wisdom_judge._sibling_buckets(db, target)
+    assert out["excluded_from_controls"]["legacy_grain"] == 1
+    assert out["excluded_from_controls"]["unknown_boundary"] == 1
+    assert out["condition_controls"] == []
+
+
+def test_sibling_buckets_different_campaign_type_is_not_a_control(db):
+    """campaign_type이 다른 형제는 other_campaign_types로 가고 condition_controls·
+    excluded_from_controls 어디에도 안 잡힌다(대조군 아님, 규칙 3)."""
+    target = _cand(db, signature="target", grain="global", campaign_type="WEB_SITE")
+    _cand(db, signature="sib_type", grain="global", campaign_type="SHOPPING")
+    db.commit()
+    out = wisdom_judge._sibling_buckets(db, target)
+    assert out["condition_controls"] == []
+    assert len(out["other_campaign_types"]) == 1
+    assert out["other_campaign_types"][0]["signature"] == "sib_type"
+    assert out["excluded_from_controls"] == {
+        "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0, "candidate_not_eligible": 0,
+    }
+
+
+def test_sibling_buckets_candidate_without_controls_stays_empty(db):
+    """후보 자신이 grain != 'global'이거나 experiment_batch를 가지면 condition_controls는
+    항상 빈 리스트(규칙 0, fail-closed) — 진짜 조건 대조군이 될 형제가 있어도 마찬가지다.
+
+    ★P2-1(리뷰 20260825) — 그 형제는 어느 버킷에도 안 잡힌 채 사라지지 않는다:
+    excluded_from_controls["candidate_not_eligible"]가 그 건수를 센다(「대조군 없음」과
+    「대조를 하지 않았다」를 구분하는 카운터 — 값이 0이면 침묵이 아니라 진짜 0이다)."""
+    # 케이스 A — 레거시 후보(grain=None)
+    legacy_target = _cand(db, signature="legacy_target", grain=None, campaign_type="WEB_SITE")
+    _cand(db, signature="would_be_control_a", grain="global", campaign_type="WEB_SITE")
+    db.commit()
+    out_a = wisdom_judge._sibling_buckets(db, legacy_target)
+    assert out_a["condition_controls"] == []
+    assert out_a["excluded_from_controls"]["candidate_not_eligible"] == 1
+
+    # 케이스 B — 실험 배치가 붙은 후보
+    exp_target = _cand(
+        db, signature="exp_target", action="bid_down", grain="global", campaign_type="WEB_SITE",
+        experiment_batch="iphone-philosophy-ab:mop",
+    )
+    _cand(db, signature="would_be_control_b", action="bid_down", grain="global", campaign_type="WEB_SITE")
+    db.commit()
+    out_b = wisdom_judge._sibling_buckets(db, exp_target)
+    assert out_b["condition_controls"] == []
+    assert out_b["excluded_from_controls"]["candidate_not_eligible"] == 1
+
+
+def test_sibling_buckets_excluded_counter_is_census_not_windowed(db):
+    """excluded_from_controls는 전수 기준 — condition_controls가 상한(8)에 안 걸려도
+    experiment_batch 제외 형제가 8건보다 많으면 그 전수가 그대로 잡힌다(창에 갇힌 숫자 금지)."""
+    target = _cand(db, signature="target", grain="global", campaign_type="WEB_SITE")
+    for i in range(12):
+        _cand(
+            db, signature=f"sib_batch_{i}", grain="global", campaign_type="WEB_SITE",
+            experiment_batch=f"batch{i}",
+        )
+    db.commit()
+    out = wisdom_judge._sibling_buckets(db, target)
+    assert out["excluded_from_controls"]["experiment_batch"] == 12
+    assert out["condition_controls"] == []
+
+
+def test_sibling_buckets_truncated_reports_clipped_counts(db):
+    """condition_controls·other_campaign_types가 상한(8·4)보다 많으면 truncated가 잘린
+    건수를 정확히 보고한다."""
+    target = _cand(
+        db, signature="target", grain="global", campaign_type="WEB_SITE",
+        env={"day_class": "weekday", "season": "summer", "iphone_window": "normal"},
+    )
+    for i in range(10):  # 상한 8 초과 → 2건 잘림
+        _cand(
+            db, signature=f"cc_{i}", grain="global", campaign_type="WEB_SITE",
+            env={"day_class": "holiday", "season": "summer", "iphone_window": "normal"},
+            occurrences=10 - i, good_count=10 - i, bad_count=0,
+        )
+    for i in range(6):  # 상한 4 초과 → 2건 잘림
+        _cand(db, signature=f"ot_{i}", grain="global", campaign_type="SHOPPING")
+    db.commit()
+    out = wisdom_judge._sibling_buckets(db, target)
+    assert len(out["condition_controls"]) == 8
+    assert len(out["other_campaign_types"]) == 4
+    assert out["truncated"] == {"condition_controls": 2, "other_campaign_types": 2}
+
+
+def test_sibling_buckets_none_db_or_no_action_returns_full_key_set(db):
+    """db=None이거나 cand.action이 없으면 4키 전부(빈 리스트·카운터 0)인 dict를 돌려준다
+    (None이나 빈 dict가 아니다 — 키 부재와 0건은 다르다)."""
+    target = _cand(db, signature="target", grain="global", campaign_type="WEB_SITE")
+    db.commit()
+    out_no_db = wisdom_judge._sibling_buckets(None, target)
+    assert set(out_no_db.keys()) == {
+        "condition_controls", "other_campaign_types", "excluded_from_controls", "truncated",
+    }
+    assert out_no_db["condition_controls"] == [] and out_no_db["other_campaign_types"] == []
+    assert out_no_db["excluded_from_controls"] == {
+        "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0, "candidate_not_eligible": 0,
+    }
+    assert out_no_db["truncated"] == {"condition_controls": 0, "other_campaign_types": 0}
+
+    target.action = None
+    out_no_action = wisdom_judge._sibling_buckets(db, target)
+    assert out_no_action == out_no_db
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-NAO-248(2026-08-25) §3 — _SYSTEM scope 문단 교체(회귀 잠금 포함)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_system_scope_paragraph_asks_about_harm_to_other_conditions():
+    """새 scope 문안의 핵심 문구가 실재한다 — 「이 지혜가 항상 참인가」가 아니라 「전역 반영이
+    다른 조건들에 손해를 끼치는가」를 묻는 질문 재구성(계약 §2)."""
+    assert "다른 조건들이 손해를 보는가" in wisdom_judge._SYSTEM
+    assert "condition_controls" in wisdom_judge._SYSTEM
+    # ★fail-closed 기본값 문장은 여전히 존재해야 한다(우기지 말라는 지침이 사라지면 안 된다).
+    assert "판단이 서지 않으면" in wisdom_judge._SYSTEM
+    assert '"conditional"' in wisdom_judge._SYSTEM
+
+
+def test_system_promote_reject_criteria_survive_the_scope_rewrite():
+    """★회귀 잠금 — promote/reject 4기준 문장은 scope 문단 교체와 무관하게 그대로 존재해야
+    한다(스펙 4: 이 문장들은 1비트도 바꾸지 않는다)."""
+    assert "단발 사건이 아니라" in wisdom_judge._SYSTEM
+    assert "good과 bad가 모순되게 팽팽하면" in wisdom_judge._SYSTEM
 
 
 # ══════════════════════════ writer_sa ══════════════════════════
