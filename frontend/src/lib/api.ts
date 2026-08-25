@@ -3802,6 +3802,28 @@ export interface NaverWisdomCandidateRow {
   observation: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  // ★D-NAO-251(증거보전) — 기각 후 증거가 얼마나 더 쌓였는지·재심 여력이 남았는지.
+  // judged_occurrences가 null이면 「아직 판정된 적 없음」이고 occurrences_since_judgment도
+  // null이다(0이 아니다 — 0으로 내면 「판정 후 하나도 안 쌓임」과 구별이 안 된다).
+  // 옵셔널 — 배포 순서상 이 필드가 아직 없는 응답이 올 수 있다.
+  judged_at?: string | null;
+  judged_occurrences?: number | null;
+  occurrences_since_judgment?: number | null;
+  rejudge_count?: number;
+  reopen_ready?: boolean;
+  prior_judgment_count?: number;
+}
+
+// ★D-NAO-251 §4-③ — 판사 대기열 적체. 「pending 17건인데 회당 5건이라 소화에 4일」이
+// 어디에도 안 보이던 것이 이 계약이 고치는 결함 셋 중 하나다(교훈 #318).
+// days_to_drain은 신규 후보 유입 0 가정 위의 값이라 응답이 그 가정을 스스로 밝힌다.
+export interface NaverJudgeBacklog {
+  pending_total: number;
+  pending_ripe: number; // 판사에게 갈 자격이 있는 건수(TTL 14일 or occurrences≥3 ∧ action 있음)
+  cap_next_run: number; // 다음 회차 상한(평시 5 / 적체 시 15)
+  days_to_drain: number;
+  cron: string;
+  assumption: string;
 }
 
 // B7-6(D-NAO-248 §4-B) — 판사의 param_suggestion이 코드 클램프에서 어떻게 갈렸는지 세는
@@ -3881,6 +3903,7 @@ export interface NaverWisdomCandidateStatus {
   // 없는 응답이 올 수 있다. 렌더는 존재 여부로 분기(0건도 존재는 한다 — 별개 개념).
   param_gate?: NaverParamGateCounts;
   search_term_material?: NaverSearchTermMaterialStatus;
+  judge_backlog?: NaverJudgeBacklog; // ★D-NAO-251 §4-③
 }
 
 export interface NaverWisdomScorecard {

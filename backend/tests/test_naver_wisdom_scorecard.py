@@ -1088,3 +1088,87 @@ def test_symmetry_exploration_before_after_split_by_latest_guardrail_change(db):
     assert ex["before"]["explore_blocked_rate"] == pytest.approx(1.0)
     assert ex["after"]["total"] == 2
     assert ex["after"]["by_actor"] == {"explore": 1, "daily": 1}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-NAO-251(2026-08-26) §4-③ — 판사 적체 지표 + 재개방 상태의 관측 표면
+# 계약: docs/contracts/CONTRACT_evidence_preservation.md §5 ①-b/①-c·③-b
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _c251(db, **kw):
+    """D-NAO-251 표면 테스트용 후보 — 숙성(occurrences≥3) 기본."""
+    from app.models import OpsWisdomCandidate as _C
+    import json as _j
+    from datetime import datetime as _dt
+    d = dict(
+        signature=kw.pop("signature", "g|SHOPPING|bid_up|weekday|summer|normal|"),
+        campaign_id="cmp1", action=kw.pop("action", "bid_up"),
+        env_bucket_json=_j.dumps({"day_class": "weekday", "season": "summer",
+                                  "iphone_window": "normal"}),
+        observation="obs", occurrences=kw.pop("occurrences", 5),
+        good_count=kw.pop("good_count", 3), bad_count=kw.pop("bad_count", 2),
+        first_seen_at=_dt(2026, 7, 20, 8, 45), last_seen_at=_dt(2026, 7, 20, 8, 45),
+        source_entry_ids_json="[1]", status=kw.pop("status", "pending"),
+        grain="global", campaign_type="SHOPPING",
+    )
+    d.update(kw)
+    c = _C(**d)
+    db.add(c)
+    db.flush()
+    return c
+
+
+def test_scorecard_exposes_judge_backlog(db):
+    """★D-NAO-251 §5 ③-b — 「pending 17건인데 회당 5건」이 어디에도 안 보이던 것을 값으로 낸다.
+
+    적체가 없으면 상한 5, 있으면 15로 올라가고 소화 일수가 함께 나온다. days_to_drain은 신규
+    유입 0 가정 위의 값이라 그 가정을 응답이 스스로 밝힌다(창을 안 밝힌 커버리지 주장 금지).
+    """
+    from app.services.naver_ad.wisdom_scorecard import _judge_backlog
+    for i in range(3):
+        _c251(db, signature=f"s{i}")
+    db.commit()
+    out = _judge_backlog(db)
+    assert out["pending_total"] == 3 and out["pending_ripe"] == 3
+    assert out["cap_next_run"] == 5 and out["days_to_drain"] == 1
+    assert "신규 후보 유입 0 가정" in out["assumption"]
+
+    for i in range(3, 20):  # 적체 유발
+        _c251(db, signature=f"s{i}")
+    db.commit()
+    out2 = _judge_backlog(db)
+    assert out2["pending_ripe"] == 20
+    assert out2["cap_next_run"] == 15          # 캐치업 상한
+    assert out2["days_to_drain"] == 2          # ceil(20/15)
+
+
+def test_judge_backlog_excludes_action_less_candidates(db):
+    """action 미상 후보는 판사 대기열에서 빠지므로 적체 지표에도 안 들어간다 — 두 층이 같은
+    모집단을 봐야 「소화 일수」가 거짓말이 안 된다(판사가 안 볼 것을 세면 안 된다)."""
+    from app.services.naver_ad.wisdom_scorecard import _judge_backlog
+    _c251(db, signature="ok")
+    _c251(db, signature="noact", action=None)
+    db.commit()
+    out = _judge_backlog(db)
+    assert out["pending_total"] == 2   # pending 자체는 2건
+    assert out["pending_ripe"] == 1    # 판사가 실제로 볼 건 1건
+
+
+def test_scorecard_candidate_rows_expose_reopen_state(db):
+    """★D-NAO-251 §5 ①-b/①-c — 기각 후 증거가 얼마나 더 쌓였는지·재심 여력이 남았는지가
+    후보 행에 보인다. 판정된 적 없으면 occurrences_since_judgment는 0이 아니라 None이다
+    (0으로 내면 「판정 후 하나도 안 쌓임」과 구별이 안 된다)."""
+    from app.services.naver_ad.wisdom_scorecard import _candidate_status
+    fresh = _c251(db, signature="fresh")
+    judged = _c251(db, signature="judged", status="rejected", occurrences=12,
+                   judged_occurrences=5, rejudge_count=0)
+    db.commit()
+
+    rows = {r["signature"]: r for r in _candidate_status(db)["candidates"]}
+    assert rows["fresh"]["judged_occurrences"] is None
+    assert rows["fresh"]["occurrences_since_judgment"] is None
+    assert rows["fresh"]["reopen_ready"] is False          # pending이라 대상 아님
+    assert rows["judged"]["occurrences_since_judgment"] == 7
+    assert rows["judged"]["reopen_ready"] is True          # 12 ≥ 5×2 ∧ 12 ≥ 5+5
+    assert rows["judged"]["prior_judgment_count"] == 0

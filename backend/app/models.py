@@ -4091,8 +4091,9 @@ class OpsWisdomCandidate(Base):
     안 된다([[sqlite-server-default-now-is-utc]]).
 
     status: pending|promoted|rejected|hidden. 시그니처는 signature(unique)로 멱등 재수확한다 —
-    promoted/rejected는 재수확 대상이 아니지만(판사가 이미 판정), hidden은 시그니처가 재등장하면
+    promoted는 재수확 대상이 아니지만(판사가 이미 판정), hidden은 시그니처가 재등장하면
     pending으로 부활한다(Ebbinghaus 재노출 강화 — 연 1회 iphone_window 패턴이 해를 넘겨 누적됨).
+    ★rejected도 2026-08-26(D-NAO-251)부터 재수확 «대상»이다 — 아래 재개방 4컬럼 주석 참조.
 
     ★D-NAO-248(2026-08-25, 부록 Q2 처분 (b′)) — 옛 시그니처(campaign_id 선두)는 표본을
     캠페인 수만큼 쪼갰다(§1: 4캠페인 합 91회가 45/38/5/3으로 갈려 전부 rejected). 이후
@@ -4134,6 +4135,21 @@ class OpsWisdomCandidate(Base):
     campaign_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 경계 축 ⓐ(부록 Q3)
     experiment_batch: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)  # 경계 축 ⓑ — 있으면 전역 풀과 분리
     by_campaign_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 캠페인별 good/bad 분해(판사에게 이질성 병기)
+    # ★D-NAO-251 §4-①(증거보전 — 재개방) — «판정이 증거 수집을 영구히 끝내던» 함정의 수리.
+    #   구판은 promoted/rejected를 똑같이 terminal로 보고 tally 갱신까지 막았다. 그래서 판사가
+    #   "45회 관찰이 단 이틀 안에 집중되어… 승격을 보류합니다"로 기각하면 그 시그니처는 **영원히
+    #   표본이 부족한 채로** 남았다(실측: 그 뒤 일주일에 818건이 더 쌓였는데 다시 안 봤다).
+    #   ⇒ rejected는 tally가 계속 흐르고, occurrences가 판정 시점의 2배(∧ +5 이상)에 닿으면
+    #   pending으로 복귀해 **같은 판사**가 재심한다(판정기를 늘리지 않는다 — 북극성 §6-b M5).
+    #   promoted는 여전히 완전 terminal — 승격↔기각 플립플롭이 브리핑 주입을 흔들기 때문이다.
+    #   전부 nullable/default — 기존 48행은 마이그레이션이 judged_occurrences만 현재값으로 백필한다.
+    judged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시(마지막 판정 시각)
+    judged_occurrences: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 판정 시점 occurrences(재개방 기준선)
+    rejudge_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 재심 횟수(상한 _MAX_REJUDGE)
+    # 이전 판정문 이력(append-only JSON 배열). judge_verdict_json을 덮어쓰지 않고 여기 쌓는다 —
+    # 그 컬럼의 «형태»에 wisdom_writer.py:51·wisdom_apply.py:72가 의존하므로 모양을 바꾸면
+    # 소비층이 깨진다(계약 §3 「기존 판정문 삭제·덮어쓰기 금지」의 구현형).
+    prior_judgments_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("ux_ops_wisdom_candidates_signature", "signature", unique=True),
