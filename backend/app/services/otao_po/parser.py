@@ -203,8 +203,8 @@ def parse_po_text(text: str, *, source_path: str | None = None) -> dict[str, Any
             "blank_qty": blank_qty,
         })
 
-    line_qty_sum = sum(l["qty"] for l in lines if l["qty"] is not None)
-    line_amount_sum = sum(l["amount"] for l in lines if l["amount"] is not None)
+    line_qty_sum = sum(row["qty"] for row in lines if row["qty"] is not None)
+    line_amount_sum = sum(row["amount"] for row in lines if row["amount"] is not None)
     return {
         "serial": serial,
         "header_qty": header_qty,
