@@ -3629,13 +3629,23 @@ export function fetchNaverAdProposals(params?: {
 }
 
 // X1a T4 — 콘솔 승인/반려 상태 전이.
+// D-NAO-249 §4-B(B1) — param_change 제안을 승인(approved)할 때는 applied_value가 **필수**다
+// (없으면 서버 400). 반영될 값은 사람이 정한다 — 코드가 값을 발명하지 않는다. decidedBy·
+// decisionNote는 옵션(미지정 시 서버가 "console"·자동 문구로 채운다). ★extra를 안 넘기면
+// body는 예전과 완전히 같은 {status} 그대로다(param_change가 아닌 제안의 승인·반려 흐름은
+// 1비트도 안 바뀐다 — 회귀 대상).
 export function updateNaverProposalStatus(
   id: number,
   status: "approved" | "rejected",
+  extra?: { appliedValue?: number; decidedBy?: string; decisionNote?: string },
 ): Promise<NaverAdProposal> {
+  const body: Record<string, unknown> = { status };
+  if (extra?.appliedValue !== undefined) body.applied_value = extra.appliedValue;
+  if (extra?.decidedBy !== undefined) body.decided_by = extra.decidedBy;
+  if (extra?.decisionNote !== undefined) body.decision_note = extra.decisionNote;
   return fetchApi<NaverAdProposal>(`/api/naver/ad/proposals/${id}/status`, {
     method: "POST",
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -3794,12 +3804,83 @@ export interface NaverWisdomCandidateRow {
   last_seen_at: string | null;
 }
 
+// B7-6(D-NAO-248 §4-B) — 판사의 param_suggestion이 코드 클램프에서 어떻게 갈렸는지 세는
+// 카운터. 4키 전부 **0이어도 실린다**(교훈 #318: 카운터가 있어야 침묵을 본다 — 「조용히
+// 0건」과 「세는 코드가 죽어서 0건」을 값만 보고는 못 가른다).
+export interface NaverParamGateCounts {
+  unconditional_mapped: number; // scope=unconditional ∧ param∈SPECS → 제안 생성됨
+  conditional_fallback: number; // 조건부(또는 scope 부재) → 제안 안 만듦
+  unmapped_param: number;       // 파라미터 키가 화이트리스트 밖 → 제안 안 만듦
+  no_suggestion: number;        // 판사가 파라미터 제안을 아예 안 냄(대부분 정상)
+}
+
+// C2 — 검색어 재료 현황(다른 세션 배선 중, D-NAO-249). ★백엔드에 아직 없을 수 있어 옵셔널로
+// 둔다 — 없으면 그 섹션을 안 그린다(방어적 렌더).
+export interface NaverSearchTermMaterialStatus {
+  total: number;
+  by_status: {
+    stopped: number;
+    leaking: number;
+    ambiguous: number;
+    no_data: number;
+    absent: number;      // harvest가 «보는»(event_type·outcome_json 조건 통과) 행 중 d1_st 키만 없음
+    unknown: number;
+    // ★2026-08-25 신설 — harvest_candidates()의 자체 필터(event_type IN(execute,blocked) ∧
+    // outcome_json IS NOT NULL) 밖에 있는 행(예: voided). d1_st가 채워지든 말든 harvest가
+    // 원리적으로 안 본다 — absent(「채워지면 처리될 행」으로 읽힘)와 섞으면 부정직하다.
+    not_harvestable: number;
+  };
+  label: string;
+}
+
+// ── B5 대칭·탐색 관측(D-NAO-247 점화 계약) ──────────────────────────────────────
+// ★[판정불능 예약] — 이 표면은 성과 판정을 하지 않는다. 실집행 0건이라 파라미터 변경의
+//   행동·총이익 효과를 관측할 사건 자체가 없다. 「배선·관측의 증거」이지 「효과의 증거」가
+//   아니다 — verdict_pending 문구를 화면에서 지우지 말 것.
+export interface NaverGuardrailDirectionClassification {
+  brake: number;   // 조이는 방향으로 바뀐 키 인스턴스 수
+  accel: number;   // 푸는 방향으로 바뀐 키 인스턴스 수
+  unchanged_or_unknown: number; // 값 불변 또는 방향 판정 불가(파싱 실패·키 누락)
+  by_key: Record<string, { brake: number; accel: number }>;
+  total_changes: number; // update_guardrail_params change_log «행 수»(키 인스턴스 합과는 다른 분모)
+}
+
+export interface NaverExplorationActorSnapshot {
+  total: number;
+  by_actor: Record<string, number>;
+  explore_share: number | null;
+  explore_total: number;
+  explore_blocked: number;
+  explore_blocked_rate: number | null;
+}
+
+export interface NaverExplorationSymmetry {
+  window_days: number;
+  boundary_changed_at: string | null;
+  // 파라미터 변경이 한 번도 없으면 before/after가 둘 다 null이고 whole_window가 대신 채워진다
+  // (창을 낭비하지 않되 «전/후»를 지어내지 않는다).
+  before: NaverExplorationActorSnapshot | null;
+  after: NaverExplorationActorSnapshot | null;
+  whole_window: NaverExplorationActorSnapshot | null;
+  note: string;
+}
+
+export interface NaverSymmetryReport {
+  verdict_pending: string; // "[판정불능 예약] ..." — 성과 판정 없음을 명시하는 문구
+  guardrail_direction: NaverGuardrailDirectionClassification;
+  exploration: NaverExplorationSymmetry;
+}
+
 export interface NaverWisdomCandidateStatus {
   candidates_total: number;
   bucket_counts: Record<NaverWisdomCandidateBucket, number>;
   bucket_labels: Record<NaverWisdomCandidateBucket, string>;
   retro_harvest_label: string; // 「기존 재료 재집계」 라벨 — 새 배움이 아니라 기존 90일 일기의 재집계
   candidates: NaverWisdomCandidateRow[];
+  // ★옵셔널로 둔다 — 다른 세션이 백엔드를 동시에 고치고 있어 배포 순서상 이 필드가 아직
+  // 없는 응답이 올 수 있다. 렌더는 존재 여부로 분기(0건도 존재는 한다 — 별개 개념).
+  param_gate?: NaverParamGateCounts;
+  search_term_material?: NaverSearchTermMaterialStatus;
 }
 
 export interface NaverWisdomScorecard {
@@ -3825,6 +3906,9 @@ export interface NaverWisdomScorecard {
   attribution: { path: string; limitation: string };
   reflection_health: NaverReflectionHealth;
   wisdom: NaverWisdomScorecardRow[];
+  // ★옵셔널 — 백엔드 배포 순서상 이 필드가 아직 없는 응답이 올 수 있다(다른 필드와 같은
+  // 방어적 관례). B5(D-NAO-247 점화 계약) — 대칭·탐색 관측, 성과 판정 없음.
+  symmetry_report?: NaverSymmetryReport;
 }
 
 // ── 반성 루프 상태(D-NAO-228, 계약 PLAN_naver-m5-reflection-visibility.md §5 ⓐ) ──
@@ -3961,6 +4045,9 @@ export interface NaverGuardrailRetroFreshness {
 export interface NaverGuardrailParamsResponse {
   params: NaverGuardrailParam[];
   from_db_enabled: boolean;
+  // B3 되돌림 절차(D-NAO-249) — 스위치(_PARAMS_FROM_DB)의 존재·용법·되돌리는 절차를 서버가
+  // 문장으로 실어 화면이 자기 설명을 하게 한다. ★프론트에서 문구를 새로 짓지 않는다.
+  from_db_help: string;
   retro_freshness: NaverGuardrailRetroFreshness;
 }
 

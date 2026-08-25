@@ -32,12 +32,22 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverAccountSettings
+from app.models import NaverAccountSettings, NaverChangeLog
 from app.services.naver_ad import guardrail_gate
+from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
 
 SETTINGS_KEY = "guardrail_params"
+
+# ★D-NAO-248 §4-B(B7-5) — param_change NaverProposal이 SPECS 키를 **구조적으로** 실어 나르는
+# target_type 값. rationale 자유텍스트 파싱을 승인 핸들러에 강제하지 않기 위해 기존 컬럼
+# (target_type/target_id)에 담는다 — target_id에 SPECS 키 문자열을 그대로 쓴다.
+# ★grep 확인(2026-08-25): 기존 target_type 값(campaign/adgroup/keyword/ad/search_term/account)
+# 어디에도 "guardrail_param"은 없다 — 새 값이 기존 분기와 충돌하지 않는다.
+# ★길이: "guardrail_param"=15자(NaverProposal.target_type String(20) 안), SPECS 키 중 최장
+# "max_daily_auto_bid_downs"=25자(target_id String(50) 안).
+TARGET_TYPE = "guardrail_param"
 
 # ★되돌림 스위치 — False면 DB를 아예 읽지 않고 전부 코드 상수로 돈다(D-NAO-172).
 #   `AD_BID_ROUTING_ENABLED`·`_GROUP_STEP_ALL_ADS`와 같은 관례: 사고 났을 때 한 줄로
@@ -195,3 +205,106 @@ def describe(db: Session) -> list[dict]:
             "updated_at": updated_at.isoformat() if (from_db and updated_at) else None,
         })
     return rows
+
+
+class InvalidGuardrailParams(ValueError):
+    """apply_params 검증 실패(본문 비-객체·미지원 키·범위 밖 값). 호출부(라우터)가 이걸
+    HTTPException(400, str(e))로 변환한다 — 이 서비스 층은 FastAPI를 모른다(레이어 분리)."""
+
+
+def apply_params(
+    db: Session, body: Any, *, rationale: str,
+    proposal_id: int | None = None, wisdom_id: int | None = None,
+    merge: bool = False,
+) -> dict:
+    """봉투 파라미터 **검증 + KV 저장 + change_log 기록**의 단일 진실(B0, D-NAO-248 §4-B).
+
+    ★`merge`가 저장 «범위»를 정한다 — 두 호출부의 맥락이 다르기 때문이다:
+      · `merge=False`(기본, **PUT 경로**) — 전체 치환. 넘긴 키만 남고 나머지는 코드 상수로
+        복귀한다. 사람이 **화면 전체를 보고 저장**하는 맥락이라 정당하다(기존 계약 불변).
+      · `merge=True`(**승인 경로**) — 저장된 행에 그 키만 덮어쓴다. 승인은 «제안 한 건»의
+        맥락이라 전체 치환을 쓰면 **사람이 따로 설정해 둔 다른 키가 조용히 코드 기본값으로
+        되돌아간다.** 되돌아간 흔적은 화면 source가 'db'→'code'로 바뀌는 것뿐이라, 사람은
+        자기가 안 만진 값이 바뀐 걸 못 쫓는다(회귀 테스트
+        `test_param_change_approve_does_not_wipe_the_other_params`가 고정).
+      ★병합 기준은 «저장된 행의 원문»이지 `get_params()`의 실효값이 아니다 — 실효값으로
+        병합하면 사람이 한 번도 설정한 적 없는 키가 코드 기본값 그대로 DB에 박혀 `source`가
+        'code'에서 'db'로 바뀐다(안 만졌는데 만진 것으로 보인다).
+
+    ★기존 PUT /settings/guardrail-params 핸들러 본문을 그대로 옮긴 것이다 — 동작·400 조건·
+    change_log 내용은 **완전히 동일**해야 한다(회귀 테스트 test_guardrail_params_p1.py가 고정).
+    이제 콘솔 승인 핸들러(B1)도 같은 함수를 호출해 검증·기록을 복제하지 않는다 — 복제하면
+    두 경로(PUT·승인)가 갈라진다(이 저장소가 반복해 데인 «표방↔실구현 괴리»의 새 버전이 된다).
+
+    ★`db.commit()`을 하지 않는다 — `db.flush()`까지만 한다. 승인 경로(B1)가 「제안 상태 전이
+    + 파라미터 적용」을 **한 트랜잭션**으로 묶어야 하므로(실패 시 상태 전이도 롤백), 커밋 시점은
+    호출부 책임이다. PUT 핸들러는 이 함수 호출 직후 자신이 커밋한다(기존과 동일한 최종 결과).
+
+    proposal_id/wisdom_id가 주어지면 change_log의 `rationale`에 그 좌표를 병기하고
+    `proposal_id` 컬럼에도 심는다(B4가 요구하는 「제안→change_log」 조인 — wisdom_scorecard의
+    `_change_rows_for`가 이미 `NaverChangeLog.proposal_id`를 그 방향으로 조회한다).
+
+    반환: {"changed": bool, "change_log_id": int|None, "before": dict, "after": dict}.
+    무변화(before==after)면 change_log를 만들지 않고 change_log_id=None(PUT의 기존 계약과 동일).
+    """
+    if not isinstance(body, dict):
+        raise InvalidGuardrailParams("본문은 객체여야 합니다")
+    unknown = set(body) - set(SPECS)
+    if unknown:
+        raise InvalidGuardrailParams(f"알 수 없는 파라미터: {sorted(unknown)}")
+    cleaned: dict = {}
+    for key, raw in body.items():
+        spec = SPECS[key]
+        val = _coerce(spec, raw)
+        if val is None:
+            raise InvalidGuardrailParams(
+                f"{key}={raw!r}는 허용 범위 [{spec.lo}, {spec.hi}] 밖이거나 타입이 맞지 않습니다",
+            )
+        cleaned[key] = str(val)
+
+    before = {k: str(v) for k, v in get_params(db).items()}
+    row = db.query(NaverAccountSettings).filter(
+        NaverAccountSettings.key == SETTINGS_KEY).first()
+    to_store = cleaned
+    if merge and row is not None:
+        # 저장된 «원문»에 이번 키만 덮어쓴다. 원문이 깨졌으면(파싱 실패) 병합할 근거가 없으니
+        # 이번 키만 남긴다 — 읽기 경로(`get_params`)가 깨진 행을 이미 코드 상수로 폴백시키므로
+        # 사람이 잃는 값이 없다. SPECS 밖 키는 여기서 떨군다(옛 키가 영원히 따라다니지 않게).
+        try:
+            existing = json.loads(row.value_json) or {}
+        except (TypeError, ValueError):
+            existing = {}
+        if isinstance(existing, dict):
+            to_store = {k: v for k, v in existing.items() if k in SPECS}
+            to_store.update(cleaned)
+    if row is None:
+        row = NaverAccountSettings(key=SETTINGS_KEY, value_json=json.dumps(to_store))
+        db.add(row)
+    else:
+        row.value_json = json.dumps(to_store)
+    db.flush()
+    after = {k: str(v) for k, v in get_params(db).items()}
+
+    change_log_id = None
+    if before != after:
+        now = kst_now()
+        coords = []
+        if proposal_id is not None:
+            coords.append(f"proposal_id={proposal_id}")
+        if wisdom_id is not None:
+            coords.append(f"wisdom_id={wisdom_id}")
+        full_rationale = f"{rationale} ({', '.join(coords)})" if coords else rationale
+        log_row = NaverChangeLog(
+            entity_type="account", entity_id="", campaign_id="",
+            action="update_guardrail_params",
+            before_value=json.dumps(before, ensure_ascii=False),
+            after_value=json.dumps(after, ensure_ascii=False),
+            rationale=full_rationale,
+            proposal_id=proposal_id,
+            # changed_at·executed_at 둘 다 KST 명시 — B-1 가드(D-NAO-169)가 30분 초과 어긋남을 거부한다.
+            dry_run=False, executed_at=now, changed_at=now,
+        )
+        db.add(log_row)
+        db.flush()
+        change_log_id = log_row.id
+    return {"changed": before != after, "change_log_id": change_log_id, "before": before, "after": after}

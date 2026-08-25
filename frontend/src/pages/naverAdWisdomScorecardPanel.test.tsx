@@ -11,7 +11,7 @@
 //   그 문구를 지워도 아무도 몰랐다면 패널은 있으나 마나다. 그래서 이 파일은 «값»이 아니라
 //   «사람 눈에 닿는가»를 잰다.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const h = vi.hoisted(() => {
@@ -21,12 +21,17 @@ const h = vi.hoisted(() => {
     wisdom: null as unknown,
     wisdomFails: false,
     avaFails: false,
+    // D-NAO-249 F1 — param_change 승인 카드 테스트용. null이면 pending(영구 로딩).
+    proposals: null as unknown,
+    guardrail: null as unknown,
+    updateStatusCalls: [] as unknown[],
+    updateStatusImpl: null as null | ((id: number, status: string, extra?: unknown) => Promise<unknown>),
   };
 });
 
 vi.mock("../lib/api", () => ({
   fetchNaverAdReport: () => h.pending(),
-  fetchNaverAdProposals: () => h.pending(),
+  fetchNaverAdProposals: () => (h.proposals ? Promise.resolve(h.proposals) : h.pending()),
   fetchNaverCampaignSettings: () => h.pending(),
   putNaverCampaignSettings: () => h.pending(),
   fetchNaverAdDiagnosis: () => h.pending(),
@@ -38,12 +43,15 @@ vi.mock("../lib/api", () => ({
       : Promise.resolve({ sample_n: 0, accuracy: null, label: "표본 없음" }),
   fetchNaverWisdomScorecard: () =>
     h.wisdomFails ? Promise.reject(new Error("지혜 조회 실패")) : Promise.resolve(h.wisdom),
-  updateNaverProposalStatus: () => h.pending(),
+  updateNaverProposalStatus: (id: number, status: string, extra?: unknown) => {
+    h.updateStatusCalls.push([id, status, extra]);
+    return h.updateStatusImpl ? h.updateStatusImpl(id, status, extra) : h.pending();
+  },
   executeNaverProposal: () => h.pending(),
   getNaverExpertDelegation: () => h.pending(),
   putNaverExpertDelegation: () => h.pending(),
   getNaverDashboardOverview: () => h.pending(),
-  getNaverGuardrailParams: () => h.pending(),
+  getNaverGuardrailParams: () => (h.guardrail ? Promise.resolve(h.guardrail) : h.pending()),
   putNaverGuardrailParams: () => h.pending(),
 }));
 
@@ -133,6 +141,9 @@ const card = (
   row: Record<string, unknown>,
   reflectionHealth: unknown = REFLECTION_HEALTH,
   candidateStatus: unknown = CANDIDATE_STATUS_EMPTY,
+  // ★B5(D-NAO-247 점화 계약) — symmetry_report. undefined(기본값)면 그 필드 자체가 응답에
+  //   없는 상태를 그대로 재현한다(옵셔널 방어 렌더 검증 — 기존 호출부는 전부 이 상태 그대로).
+  symmetryReport: unknown = undefined,
 ) => ({
   generated_at_kst: "2026-08-22 18:00:00",
   wisdom_total: 1,
@@ -143,13 +154,99 @@ const card = (
   attribution: ATTRIBUTION,
   reflection_health: reflectionHealth,
   wisdom: [row],
+  ...(symmetryReport !== undefined ? { symmetry_report: symmetryReport } : {}),
 });
+
+// B5 대칭·탐색 관측 픽스처(D-NAO-247 점화 계약) — 기본은 「봉투 변경 0건 · 탐색 일기 0건」.
+const SYMMETRY_REPORT_EMPTY = {
+  verdict_pending: "[판정불능 예약] 실집행 0건이라 파라미터 변경의 행동·총이익 효과를 관측할 사건이 없다.",
+  guardrail_direction: {
+    brake: 0, accel: 0, unchanged_or_unknown: 0,
+    by_key: {
+      cooldown_hours: { brake: 0, accel: 0 },
+      max_daily_auto_bid_downs: { brake: 0, accel: 0 },
+      max_auto_up_multiple: { brake: 0, accel: 0 },
+    },
+    total_changes: 0,
+  },
+  exploration: {
+    window_days: 28,
+    boundary_changed_at: null,
+    before: null,
+    after: null,
+    whole_window: {
+      total: 0, by_actor: {}, explore_share: null,
+      explore_total: 0, explore_blocked: 0, explore_blocked_rate: null,
+    },
+    note: "파라미터 변경 이력이 없다 — «전/후»를 가를 경계가 없다.",
+  },
+};
+
+// D-NAO-249 F1 — param_change 승인 카드 픽스처.
+const PARAM_PROPOSAL_BASE = {
+  id: 501,
+  created_at: "2026-08-25 10:00:00",
+  proposal_type: "param_change",
+  target_type: "guardrail_param",
+  target_id: "cooldown_hours",
+  campaign_id: "cmp1",
+  adgroup_id: null,
+  target_name: null,
+  campaign_name: null,
+  rationale: "지혜 근거 — bid_up 진동이 관측됨",
+  expected_effect: null,
+  status: "pending",
+  slack_ts: null,
+  executed_change_log_id: null,
+  target_bid: null,
+  target_lock: null,
+  target_budget: null,
+  budget_auto_eligible: null,
+  informational: false,
+  decision_only: true,
+  action: null,
+  expert_verdict: null,
+  executable: false,
+  not_executable_reason: null,
+  approval_source: null,
+} as const;
+
+const BID_UP_PROPOSAL = {
+  ...PARAM_PROPOSAL_BASE,
+  id: 601,
+  proposal_type: "bid_up",
+  target_type: "keyword",
+  target_id: "kw1",
+  decision_only: false,
+  action: "update_bid",
+  target_bid: 500,
+  executable: true,
+} as const;
+
+const proposalsList = (rows: unknown[]) => ({ total: rows.length, open_actions: [], rows });
+
+const GUARDRAIL_FIXTURE = {
+  params: [
+    {
+      key: "cooldown_hours", label: "쿨다운", value: 4, source: "db" as const, code_default: 2,
+      min: 1, max: 24, why: "근거 문구", direction: "tighten_up" as const, rejected: false,
+      updated_at: null,
+    },
+  ],
+  from_db_enabled: true,
+  from_db_help: "되돌림 절차 설명 XYZ",
+  retro_freshness: { latest_asof: "2026-08-24", expected_asof: "2026-08-25", stale: false, lag_days: 0 },
+};
 
 afterEach(() => {
   cleanup();
   h.wisdom = null;
   h.wisdomFails = false;
   h.avaFails = false;
+  h.proposals = null;
+  h.guardrail = null;
+  h.updateStatusCalls = [];
+  h.updateStatusImpl = null;
   vi.clearAllMocks();
 });
 
@@ -432,5 +529,214 @@ describe("지혜 성적표 패널 — 사람 눈에 닿는가", () => {
       renderPage();
       expect(await screen.findByText(/이 지혜가 낳은 제안 없음/)).toBeTruthy();
     });
+  });
+});
+
+// ── ★D-NAO-249 F1: param_change 승인 카드 값 입력 ─────────────────────────
+describe("param_change 승인 카드 — 값 입력(D-NAO-249 F1)", () => {
+  it("★프리필은 «현재값»이다 — 제안이 권하는 값이 아니다(판사는 키·방향만 정한다)", async () => {
+    h.wisdom = card(ROW_BASE);
+    h.guardrail = GUARDRAIL_FIXTURE;
+    h.proposals = proposalsList([PARAM_PROPOSAL_BASE]);
+    renderPage();
+    const input = (await screen.findByLabelText("cooldown_hours 적용 값")) as HTMLInputElement;
+    expect(input.value).toBe("4"); // GUARDRAIL_FIXTURE의 cooldown_hours 현재값
+  });
+
+  it("승인 시 applied_value가 body에 그대로 실려 나간다", async () => {
+    window.confirm = vi.fn(() => true);
+    h.wisdom = card(ROW_BASE);
+    h.guardrail = GUARDRAIL_FIXTURE;
+    h.proposals = proposalsList([PARAM_PROPOSAL_BASE]);
+    h.updateStatusImpl = async () => ({ ...PARAM_PROPOSAL_BASE, status: "approved" });
+    renderPage();
+    const input = await screen.findByLabelText("cooldown_hours 적용 값");
+    fireEvent.change(input, { target: { value: "6" } });
+    const approveBtn = within(input.parentElement as HTMLElement).getByRole("button", { name: "승인" });
+    fireEvent.click(approveBtn);
+    await waitFor(() => expect(h.updateStatusCalls.length).toBeGreaterThan(0));
+    expect(h.updateStatusCalls[0]).toEqual([501, "approved", { appliedValue: 6 }]);
+  });
+
+  it("★허용 범위 밖 값은 서버로 보내지 못하게 막는다(제출 차단, 화면에서 먼저 알린다)", async () => {
+    window.confirm = vi.fn(() => true);
+    h.wisdom = card(ROW_BASE);
+    h.guardrail = GUARDRAIL_FIXTURE; // min 1 ~ max 24
+    h.proposals = proposalsList([PARAM_PROPOSAL_BASE]);
+    renderPage();
+    const input = await screen.findByLabelText("cooldown_hours 적용 값");
+    fireEvent.change(input, { target: { value: "99" } });
+    const approveBtn = within(input.parentElement as HTMLElement).getByRole("button", { name: "승인" });
+    fireEvent.click(approveBtn);
+    expect(await screen.findByText(/허용 범위 1 ~ 24 밖입니다/)).toBeTruthy();
+    expect(h.updateStatusCalls.length).toBe(0); // 서버에 안 나감
+  });
+
+  it("param_change가 아닌 제안의 승인 흐름은 회귀 없이 그대로다(body가 예전과 같다)", async () => {
+    window.confirm = vi.fn(() => true);
+    h.wisdom = card(ROW_BASE);
+    h.guardrail = GUARDRAIL_FIXTURE;
+    h.proposals = proposalsList([BID_UP_PROPOSAL]);
+    h.updateStatusImpl = async () => ({ ...BID_UP_PROPOSAL, status: "approved" });
+    renderPage();
+    // ★"승인"이라는 accessible name은 상태 필터 탭 버튼과도 겹친다 — 제안 카드 행으로
+    // 스코프를 좁혀 탭이 아니라 카드의 승인 버튼을 누른다.
+    const rationale = await screen.findByText(BID_UP_PROPOSAL.rationale);
+    const row = rationale.closest(".p-4") as HTMLElement;
+    const approveBtn = within(row).getByRole("button", { name: "승인" });
+    fireEvent.click(approveBtn);
+    await waitFor(() => expect(h.updateStatusCalls.length).toBeGreaterThan(0));
+    // extra 인자를 아예 안 넘긴다 — 예전 시그니처 그대로(회귀 대상).
+    expect(h.updateStatusCalls[0]).toEqual([601, "approved", undefined]);
+  });
+
+  it("★400 응답의 서버 메시지를 그대로 보여준다(삼키지 않는다)", async () => {
+    window.confirm = vi.fn(() => true);
+    h.wisdom = card(ROW_BASE);
+    h.guardrail = GUARDRAIL_FIXTURE;
+    h.proposals = proposalsList([PARAM_PROPOSAL_BASE]);
+    h.updateStatusImpl = async () => {
+      throw new Error(
+        'API error 400: {"detail":"param_change 승인은 applied_value가 필요합니다 — 적용할 값은 사람이 정합니다"}',
+      );
+    };
+    renderPage();
+    const input = await screen.findByLabelText("cooldown_hours 적용 값");
+    const approveBtn = within(input.parentElement as HTMLElement).getByRole("button", { name: "승인" });
+    fireEvent.click(approveBtn);
+    expect(await screen.findByText(/param_change 승인은 applied_value가 필요합니다/)).toBeTruthy();
+  });
+});
+
+// ── ★D-NAO-249 F2: 되돌림 도움말(B3) ──────────────────────────────────────
+describe("봉투 현황판 — 되돌림 도움말(D-NAO-249 F2)", () => {
+  it("from_db_help가 화면에 뜬다(서버 문구를 그대로 낸다)", async () => {
+    h.wisdom = card(ROW_BASE);
+    h.guardrail = { ...GUARDRAIL_FIXTURE, from_db_enabled: false };
+    renderPage();
+    expect(await screen.findByText(/되돌림 절차 설명 XYZ/)).toBeTruthy();
+  });
+});
+
+// ── ★D-NAO-249 F3/F4: 지혜 성적표 섹션 4 — param_gate · search_term_material ──
+describe("지혜 성적표 — param_gate · search_term_material(D-NAO-249 F3/F4)", () => {
+  it("param_gate 4종은 0이어도 화면에 뜬다(조용한 0과 죽은 카운터를 구분)", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      param_gate: {
+        unconditional_mapped: 0, conditional_fallback: 0, unmapped_param: 0, no_suggestion: 0,
+      },
+    });
+    renderPage();
+    expect(await screen.findByText(/제안 생성 0건/)).toBeTruthy();
+    expect(screen.getByText(/제안 안 냄\(조건부\) 0건/)).toBeTruthy();
+    expect(screen.getByText(/제안 안 냄\(미매핑\) 0건/)).toBeTruthy();
+    expect(screen.getByText(/제안 없음 0건/)).toBeTruthy();
+  });
+
+  it("param_gate 카운트가 있으면 그 값을 낸다(0이 아닌 값도 정확히)", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      param_gate: {
+        unconditional_mapped: 3, conditional_fallback: 5, unmapped_param: 1, no_suggestion: 40,
+      },
+    });
+    renderPage();
+    expect(await screen.findByText(/제안 생성 3건/)).toBeTruthy();
+    expect(screen.getByText(/제안 안 냄\(조건부\) 5건/)).toBeTruthy();
+    expect(screen.getByText(/제안 안 냄\(미매핑\) 1건/)).toBeTruthy();
+    expect(screen.getByText(/제안 없음 40건/)).toBeTruthy();
+  });
+
+  it("★search_term_material이 없으면 아무것도 안 그린다(옵셔널 방어, 백엔드가 아직 안 줄 수 있다)", async () => {
+    h.wisdom = card(ROW_BASE); // CANDIDATE_STATUS_EMPTY에는 search_term_material 필드가 없다
+    renderPage();
+    // 렌더 자체가 죽지 않고 기존 표면은 그대로 뜬다.
+    expect(await screen.findByText(/아직 수확된 후보가 없습니다/)).toBeTruthy();
+    expect(screen.queryByText(/검색어 재료/)).toBeNull();
+  });
+
+  it("search_term_material이 있으면 건수·분포·label을 낸다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      search_term_material: {
+        total: 12,
+        by_status: { stopped: 3, leaking: 2, ambiguous: 1, no_data: 4, absent: 1, unknown: 1 },
+        label: "재료 라벨 문구",
+      },
+    });
+    renderPage();
+    expect(await screen.findByText(/검색어 재료 · 12건/)).toBeTruthy();
+    expect(screen.getByText(/stopped 3건/)).toBeTruthy();
+    expect(screen.getByText(/재료 라벨 문구/)).toBeTruthy();
+  });
+});
+
+// ── ★B5 대칭·탐색 관측(D-NAO-247 점화 계약) ─────────────────────────────────────
+describe("지혜 성적표 — 대칭·탐색 관측(B5)", () => {
+  it("symmetry_report가 없으면(백엔드 배포 순서상 아직 없을 수 있다) 아무것도 안 그리고 렌더가 죽지 않는다", async () => {
+    h.wisdom = card(ROW_BASE); // symmetryReport 기본값 undefined — 필드 자체가 응답에 없음
+    renderPage();
+    expect(await screen.findByText(/아직 수확된 후보가 없습니다/)).toBeTruthy();
+    expect(screen.queryByText(/대칭·탐색 관측/)).toBeNull();
+  });
+
+  it("0건이어도 [판정불능 예약] 문구·브레이크/액셀 0·by_key 3종이 침묵하지 않고 뜬다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, CANDIDATE_STATUS_EMPTY, SYMMETRY_REPORT_EMPTY);
+    renderPage();
+    expect(await screen.findByText(/대칭·탐색 관측\(B5\)/)).toBeTruthy();
+    expect(screen.getByText(/판정불능 예약/)).toBeTruthy();
+    expect(screen.getByText(/브레이크 0건 · 액셀 0건/)).toBeTruthy();
+    expect(screen.getByText(/cooldown_hours: 브레이크 0·액셀 0/)).toBeTruthy();
+    expect(screen.getByText(/max_daily_auto_bid_downs: 브레이크 0·액셀 0/)).toBeTruthy();
+    expect(screen.getByText(/max_auto_up_multiple: 브레이크 0·액셀 0/)).toBeTruthy();
+    // 파라미터 변경 이력이 없다 — before/after가 아니라 whole_window로 정직하게 표시된다.
+    expect(screen.getByText(/창 전체\(경계 없음\)/)).toBeTruthy();
+    expect(screen.getByText(/파라미터 변경 이력이 없다/)).toBeTruthy();
+  });
+
+  it("브레이크만 있고 액셀이 0건이면 표류 경보를 낸다(성과 판정은 아니다)", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, CANDIDATE_STATUS_EMPTY, {
+      ...SYMMETRY_REPORT_EMPTY,
+      guardrail_direction: {
+        ...SYMMETRY_REPORT_EMPTY.guardrail_direction,
+        brake: 4, accel: 0, total_changes: 4,
+        by_key: {
+          cooldown_hours: { brake: 4, accel: 0 },
+          max_daily_auto_bid_downs: { brake: 0, accel: 0 },
+          max_auto_up_multiple: { brake: 0, accel: 0 },
+        },
+      },
+    });
+    renderPage();
+    expect(await screen.findByText(/브레이크 4건 · 액셀 0건/)).toBeTruthy();
+    expect(screen.getByText(/표류 경보/)).toBeTruthy();
+  });
+
+  it("파라미터 변경 경계가 있으면 «변경 전/후»를 나눠 각각의 탐색 몫·차단률을 낸다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, CANDIDATE_STATUS_EMPTY, {
+      ...SYMMETRY_REPORT_EMPTY,
+      exploration: {
+        window_days: 28,
+        boundary_changed_at: "2026-08-20 09:00:00",
+        note: "가장 최근 파라미터 변경(change_log_id=5) 시각을 경계로 나눴다.",
+        whole_window: null,
+        before: {
+          total: 10, by_actor: { explore: 6, daily: 4 }, explore_share: 0.6,
+          explore_total: 6, explore_blocked: 3, explore_blocked_rate: 0.5,
+        },
+        after: {
+          total: 8, by_actor: { explore: 2, daily: 6 }, explore_share: 0.25,
+          explore_total: 2, explore_blocked: 0, explore_blocked_rate: 0,
+        },
+      },
+    });
+    renderPage();
+    expect(await screen.findByText(/변경 전 · 10건/)).toBeTruthy();
+    expect(screen.getByText(/변경 후 · 8건/)).toBeTruthy();
+    // 0(측정했더니 0)과 표본없음(null)이 다른 문자열로 렌더된다.
+    expect(screen.getByText(/탐색\(explore\) 몫 60\.0% · 탐색 차단률 50\.0% \(3\/6건\)/)).toBeTruthy();
+    expect(screen.getByText(/탐색\(explore\) 몫 25\.0% · 탐색 차단률 0\.0% \(0\/2건\)/)).toBeTruthy();
+    expect(screen.getByText(/경계 2026-08-20 09:00:00/)).toBeTruthy();
   });
 });

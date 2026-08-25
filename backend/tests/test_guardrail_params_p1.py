@@ -401,6 +401,124 @@ def test_put_records_change_log_for_visibility(db):
         _cleanup(db)
 
 
+# ══ ★D-NAO-248 §4-B(B0) — apply_params: PUT과 승인 핸들러가 공유하는 단일 진실 ══
+def test_apply_params_matches_put_behavior_directly(db):
+    """apply_params()를 직접 호출해도 PUT과 완전히 같은 결과가 나온다(값 저장·before/after·
+    change_log_id 반환) — 이게 회귀의 핵심: 두 경로가 검증·기록을 복제하지 않고 공유한다."""
+    result = guardrail_params.apply_params(
+        db, {"cooldown_hours": 4}, rationale="테스트 직접 호출")
+    db.commit()
+    assert result["changed"] is True
+    assert result["before"]["cooldown_hours"] == str(guardrail_gate._COOLDOWN_HOURS)
+    assert result["after"]["cooldown_hours"] == "4"
+    assert result["change_log_id"] is not None
+    assert guardrail_params.get_params(db)["cooldown_hours"] == 4
+
+    from app.models import NaverChangeLog
+    row = db.get(NaverChangeLog, result["change_log_id"])
+    assert row.action == "update_guardrail_params"
+    assert "테스트 직접 호출" in row.rationale
+
+
+def test_apply_params_no_change_returns_none_change_log_id(db):
+    """이미 같은 값이면(무변화) change_log를 만들지 않는다 — change_log_id=None(PUT의 기존
+    계약과 동일, test_put_records_change_log_for_visibility가 PUT 쪽을 고정한다)."""
+    _kv(db, '{"cooldown_hours": 4}')
+    result = guardrail_params.apply_params(
+        db, {"cooldown_hours": 4}, rationale="재시도")
+    db.commit()
+    assert result["changed"] is False
+    assert result["change_log_id"] is None
+
+
+def test_apply_params_invalid_raises_and_does_not_flush_kv(db):
+    """검증 실패는 InvalidGuardrailParams — 호출부(라우터)가 400으로 변환한다. 실패 시 KV도
+    바뀌지 않는다(값 저장 전에 검증이 끝난다)."""
+    with pytest.raises(guardrail_params.InvalidGuardrailParams):
+        guardrail_params.apply_params(db, {"cooldown_hours": 999}, rationale="범위 밖")
+    db.rollback()
+    assert guardrail_params.get_params(db)["cooldown_hours"] == guardrail_gate._COOLDOWN_HOURS
+
+
+def test_apply_params_records_proposal_and_wisdom_coordinates_in_rationale(db):
+    """proposal_id/wisdom_id가 주어지면 change_log rationale에 좌표가 병기되고 proposal_id
+    컬럼에도 심긴다(B4 조인이 이 컬럼을 그대로 읽는다)."""
+    from app.models import NaverChangeLog
+    result = guardrail_params.apply_params(
+        db, {"cooldown_hours": 6}, rationale="콘솔 승인", proposal_id=42, wisdom_id=7)
+    db.commit()
+    row = db.get(NaverChangeLog, result["change_log_id"])
+    assert row.proposal_id == 42
+    assert "proposal_id=42" in row.rationale and "wisdom_id=7" in row.rationale
+
+
+def test_put_uses_apply_params_and_behavior_is_unchanged(db):
+    """★회귀의 핵심 — PUT 핸들러가 apply_params()로 바뀐 뒤에도 성공 경로가 완전히 그대로다:
+    200·저장된 값·change_log 1행·같은 rationale 문구."""
+    from app.models import NaverChangeLog
+    try:
+        r = _client(db).put("/api/naver/ad/settings/guardrail-params",
+                            json={"cooldown_hours": 4})
+        assert r.status_code == 200
+        assert guardrail_params.get_params(db)["cooldown_hours"] == 4
+        rows = db.query(NaverChangeLog).filter(
+            NaverChangeLog.action == "update_guardrail_params").all()
+        assert len(rows) == 1
+        assert "콘솔 PUT /settings/guardrail-params (D-NAO-172)" in rows[0].rationale
+        assert rows[0].proposal_id is None  # PUT 경로는 제안과 무관 — B1의 승인 경로만 채운다
+    finally:
+        _cleanup(db)
+
+
+# ══ ★B3 — from_db_help(되돌림 절차) 응답 표면화 ══
+def test_get_response_includes_from_db_help(db):
+    """되돌림 스위치의 존재·용법이 응답에 문장으로 실린다(_PARAMS_FROM_DB 언급 포함)."""
+    try:
+        body = _client(db).get("/api/naver/ad/settings/guardrail-params").json()
+        assert "from_db_help" in body
+        assert "_PARAMS_FROM_DB" in body["from_db_help"]
+        assert body["from_db_help"].strip()
+    finally:
+        _cleanup(db)
+
+
+def test_from_db_disabled_reverts_all_to_code_source(db):
+    """B3 되돌림 절차의 ① — _PARAMS_FROM_DB=False로 배포하면 DB 값이 있어도 전부 code로
+    돌아간다(describe()의 source가 실제로 바뀌는지까지 — 응답 문구만이 아니라 동작으로 고정)."""
+    _kv(db, '{"cooldown_hours": 5, "max_daily_auto_bid_downs": 6}')
+    assert guardrail_params.describe(db)[0]["source"] in ("db", "code")  # 사전조건 확인용
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(guardrail_params, "_PARAMS_FROM_DB", False)
+        rows = {r["key"]: r for r in guardrail_params.describe(db)}
+        assert all(r["source"] == "code" for r in rows.values())
+        assert rows["cooldown_hours"]["value"] == float(guardrail_gate._COOLDOWN_HOURS)
+
+
+# ══ ★B6 — 게이트 소비 확인(auto_operator.py:2493 cooldown_hours) ══
+def test_auto_operator_explore_cooldown_reads_get_params_and_changes_behavior(db):
+    """B6: auto_operator의 탐색 쿨다운 실효값이 guardrail_params.get_params(db)에서 오는지
+    ①구조 못 — 소스가 실제로 그 호출을 쓰는지(리팩터가 조용히 상수로 되돌리면 여기서 걸린다)
+    ②행위 못 — 그 값이 실제로 exploration_trigger의 발동 여부를 바꾸는지. 전체 hourly 레인을
+    돌리지 않고도 이 둘을 pin하면 「기록됐다(DB에 값이 있다) ≠ 코드가 읽는다」 재발을 막는다."""
+    src = Path(__file__).resolve().parents[1] / "app" / "services" / "naver_ad" / "auto_operator.py"
+    text = src.read_text(encoding="utf-8")
+    assert 'guardrail_params.get_params(db).get("cooldown_hours")' in text, (
+        "auto_operator가 더 이상 get_params로 탐색 쿨다운을 읽지 않는다 — 배선이 끊겼다")
+
+    _kv(db, '{"cooldown_hours": 1}')
+    eff = guardrail_params.get_params(db)["cooldown_hours"]
+    assert eff == 1
+
+    from app.services.naver_ad import exploration
+    now = NOW
+    last_step_at = now - timedelta(hours=1, minutes=30)  # 1.5h 경과
+    fire_db, _ = exploration.exploration_trigger({"clk": 0}, last_step_at, now, cooldown_hours=eff)
+    fire_code_default, _ = exploration.exploration_trigger(
+        {"clk": 0}, last_step_at, now, cooldown_hours=None)
+    assert fire_db is True            # DB 쿨다운 1h → 1.5h 경과는 발동
+    assert fire_code_default is False  # 코드 상수 쿨다운 2h(기본) → 1.5h 경과는 미발동
+
+
 def test_get_reports_retro_freshness(db):
     """★M-F: 소급채점 신선도가 응답 **body**에 실제로 실리는가.
 

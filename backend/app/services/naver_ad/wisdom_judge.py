@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.models import OpsWisdomCandidate
+from app.services.naver_ad import guardrail_params
 from app.services.naver_ad.expert_llm import _invoke_claude
 from app.utils.kst import kst_now
 
@@ -34,6 +35,15 @@ _TTL_DAYS = 14           # first_seen_at부터 이만큼 지나면 숙성(단발
 _OCCURRENCE_GATE = 3     # 또는 유사 패턴 3회 재등장
 _MAX_PER_RUN = 5         # 회당 판사 상한(나머지는 익일)
 _MAX_SIBLINGS = 8        # 같은 액션의 형제 버킷 재료 상한(프롬프트 비대화 방지, occurrences desc)
+
+# ★D-NAO-248 §4-B(B7-2) — param을 자유 텍스트가 아니라 SPECS 화이트리스트 enum으로 좁힌다.
+#   판사가 무엇을 고를 수 있는지(키·이름·근거·범위)를 프롬프트에 그대로 실어 보낸다 — 코드
+#   쪽 클램프(wisdom_apply._classify_param_suggestion)가 최종 판정이지만, 애초에 판사가
+#   화이트리스트 밖을 고를 이유를 없앤다.
+_PARAM_KEYS_DESC = "\n".join(
+    f"  - {key}: {spec.label} — 허용범위 {spec.lo}~{spec.hi}, direction={spec.direction}. {spec.why}"
+    for key, spec in guardrail_params.SPECS.items()
+)
 
 _SYSTEM = (
     "당신은 오하이 네이버 SA 광고 운영의 '지혜 승격 판사'입니다. 아래 후보는 우리가 특정 환경"
@@ -53,11 +63,21 @@ _SYSTEM = (
     '{"verdict": "promote" 또는 "reject", "principle": 승격 시 재사용 판단원칙 한 문장(reject면 빈 문자열), '
     '"rationale": 판정 근거(필수, 한국어), '
     '"param_suggestion": 선택 필드}. '
-    "★param_suggestion은 **이 지혜가 생성기 파라미터(다이얼·클램프·스텝 등) 변경을 구체적으로 "
+    "★param_suggestion은 **이 지혜가 아래 화이트리스트 파라미터 중 하나의 변경을 구체적으로 "
     "함의할 때만** 채우고, 아니면 아예 생략하세요(대부분 생략이 정상 — 억지로 만들지 마세요). "
-    'param_suggestion을 채울 때 형식: {"param": 대상 다이얼 자유 텍스트(예 "17E 스텝 클램프 상한"), '
+    f"화이트리스트({len(guardrail_params.SPECS)}종, 이 안에서만 고를 수 있습니다):\n{_PARAM_KEYS_DESC}\n"
+    'param_suggestion을 채울 때 형식: {"param": 위 화이트리스트 키 중 정확히 하나(자유 텍스트 '
+    '금지 — 목록에 없는 값은 코드가 자동으로 미매핑 처리해 반영되지 않습니다), '
+    '"scope": "unconditional" 또는 "conditional" 중 하나 — 이 지혜가 **항상**(요일·계절 등 '
+    '조건과 무관하게) 적용돼야 한다고 판단하면 "unconditional", 특정 조건(주말·계절·출시창 '
+    '등)에서만 유효하다고 판단하면 "conditional"입니다. 판단이 서지 않으면 "conditional"을 '
+    '쓰세요(우기지 마세요 — scope가 unconditional이 아니면 코드가 이 제안을 자동으로 반영하지 '
+    '않을 뿐, 지혜 자체가 버려지는 것은 아닙니다), '
     '"direction": "up"|"down"|"review" 중 하나, "note": 왜 그렇게 조정해야 하는지 한 문장}. '
-    "이 제안은 자동 적용되지 않고 Jino가 콘솔에서 결정할 참고 신호일 뿐입니다. "
+    "★scope='conditional'이거나 param이 화이트리스트 밖이면 이 제안은 파라미터에 자동 반영되지 "
+    "않습니다 — 전역 상수(화이트리스트 3종)에 조건부 지혜를 반영하면 「주말에만 맞는 지혜가 "
+    "평일까지 막는」 문제가 생기기 때문입니다. 이 제안은 자동 적용되지 않고 Jino가 콘솔에서 "
+    "승인할 때(그리고 승인 시 입력하는 값으로)만 반영되는 참고 신호일 뿐입니다. "
     "근거 없는 승격을 하지 말고, 표본이 얇거나 인과가 불명하면 reject하세요."
 )
 
@@ -66,8 +86,14 @@ _SCHEMA = {
     "principle": "string",
     "rationale": "string",
     # 선택 필드(지혜가 파라미터 변경을 함의할 때만) — 없으면 생략. promote 시 judge_verdict_json에
-    # 그대로 보존돼(파싱 dict 전체를 dump) P4 wisdom_apply가 param_change 제안으로 소비한다.
-    "param_suggestion?": {"param": "string", "direction": "up|down|review", "note": "string"},
+    # 그대로 보존돼(파싱 dict 전체를 dump) P4 wisdom_apply가 param_change 제안 생성 여부를
+    # 판정하는 재료로 쓴다(scope=='unconditional' ∧ param∈SPECS일 때만 제안 생성, B7).
+    "param_suggestion?": {
+        "param": "|".join(sorted(guardrail_params.SPECS)),
+        "scope": "unconditional|conditional",
+        "direction": "up|down|review",
+        "note": "string",
+    },
 }
 
 
