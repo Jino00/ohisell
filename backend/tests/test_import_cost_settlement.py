@@ -13,10 +13,12 @@ from decimal import Decimal as D
 
 import pytest
 
+import app.services.import_cost.parser as P
 from app.services.import_cost.parser import (
     CustomsDocParseError,
     detect_expense_form,
     parse_customs_expense,
+    parse_expense_document,
     parse_settlement_statement,
 )
 
@@ -149,3 +151,97 @@ def test_old_parser_on_this_document_is_wrong_which_is_why_dispatch_exists():
     """
     with pytest.raises(CustomsDocParseError):
         parse_customs_expense(REAL_SETTLEMENT_TEXT)
+
+
+# ──────────────────────────────────────────────
+# 디스패치 — «사람에게 닿는 마지막 배선» (적대 리뷰 1R 변이 1·2가 SURVIVED한 자리)
+# ──────────────────────────────────────────────
+# ★1R에서 `parse_expense_document`의 양식 분기를 통째로 지워도 **94개 테스트가 전부 초록**이었다.
+#   `parse_settlement_statement`도 `detect_expense_form`도 각각 잠겨 있었는데, **둘을 잇는 배선을
+#   아무도 안 밟았다.** 순수 함수는 잠갔는데 그 출력이 사람에게 닿는 경로는 안 잠근 것 —
+#   이 저장소가 반복해 밟은 모양이다. 그래서 라우터가 실제로 부르는 입구를 여기서 잠근다.
+
+
+class _FakePdf:
+    """`extract_pdf_text`를 대신한다 — layout 여부에 따라 다른 텍스트를 준다.
+
+    진짜 PDF 바이트를 만들지 않는 이유: 잠그려는 것은 **PDF 해독**이 아니라 **어느 파서로
+    보내는가**다. 해독은 위 단위 테스트가 이미 실파일 출력으로 잠갔다.
+    """
+
+    def __init__(self, layout_text: str, plain_text: str = ""):
+        self.layout_text, self.plain_text = layout_text, plain_text
+        self.calls: list[bool] = []
+
+    def __call__(self, data, *, layout=False):
+        self.calls.append(layout)
+        text = self.layout_text if layout else self.plain_text
+        if not text.strip():
+            raise CustomsDocParseError("PDF에서 글자를 찾지 못했다 — 스캔 이미지 PDF로 보인다.")
+        return text
+
+
+def test_dispatch_sends_settlement_to_the_settlement_parser(monkeypatch):
+    """★자금정산서를 넣으면 **자금정산서 파서의 결과**가 나온다 — 옛 파서로 새면 값이 틀린다."""
+    monkeypatch.setattr(P, "extract_pdf_text", _FakePdf(REAL_SETTLEMENT_TEXT))
+    ex = parse_expense_document(b"%PDF-fake")
+    # 옛 파서로 샜다면 이 셋은 전부 None이고 비용명은 주소 문자열이 된다(1R 실측).
+    assert ex.hbl_no == "SETR2607220324"
+    assert ex.fx_rate == D("221.1600")
+    assert {c.item_name for c in ex.cost_lines} == {"관세", "부가세", "통관수수료"}
+
+
+def test_dispatch_sends_customs_expense_to_the_old_parser(monkeypatch):
+    """통관예상경비는 **기본 추출 결과**로 옛 파서에 간다 — 그 경로의 입력을 흔들지 않는다.
+
+    잠그는 것은 «어떤 텍스트를 누구에게 주는가»다: layout으로 한 번 훑어 양식을 가른 뒤,
+    옛 파서에는 **기본 추출**을 준다(그 경로가 검증된 입력이 그것이기 때문이다).
+    파싱 성공 여부는 여기서 묻지 않는다 — 그건 `test_import_cost_parse.py`가 실픽스처로 잠갔다.
+    """
+    fake = _FakePdf(layout_text="HBL NO  SETR9999999999", plain_text="HBL NO / SETR9999999999")
+    monkeypatch.setattr(P, "extract_pdf_text", fake)
+    with pytest.raises(CustomsDocParseError):
+        parse_expense_document(b"%PDF-fake")  # 이 가짜 텍스트엔 비용 표가 없다
+    # layout=True로 양식을 가른 뒤 **기본 추출**(False)로 옛 파서를 부른다.
+    assert fake.calls == [True, False], fake.calls
+
+
+def test_dispatch_refuses_documents_that_are_neither(monkeypatch):
+    """송금증·PI는 「경비 서류가 아니다」로 거부된다 — 「비용 라인을 못 찾음」이 아니라."""
+    monkeypatch.setattr(P, "extract_pdf_text", _FakePdf("해외송금 확인서\nREF-NO 060654OR2601102"))
+    with pytest.raises(CustomsDocParseError, match="경비 서류가 아니다"):
+        parse_expense_document(b"%PDF-fake")
+
+
+def test_dispatch_says_scan_when_there_is_no_text(monkeypatch):
+    """스캔본은 「글자를 찾지 못했다」로 나간다 — OCR로 지어내지 않는다(금지선)."""
+    monkeypatch.setattr(P, "extract_pdf_text", _FakePdf(""))
+    with pytest.raises(CustomsDocParseError, match="글자를 찾지 못했다"):
+        parse_expense_document(b"%PDF-fake")
+
+
+def test_router_pdf_upload_path_is_actually_exercised(monkeypatch):
+    """★라우터의 **PDF 업로드 경로**를 밟는다.
+
+    1R 실측: `grep -rl "expense_pdf" backend/tests/` → **0건**. `/parse`의 PDF 경로는 이 PR의
+    신규 테스트를 포함해 **어떤 테스트에서도 실행되지 않았고**, 그래서 라우터에서 그 분기를
+    통째로 지워도 94개가 초록이었다. 폼에 채워지는 값이 «사람이 보는 표면»이므로 여기서 잠근다.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    # ★라우터는 함수 «안»에서 `from app.services.import_cost import parser as P`를 한다 —
+    #   그래서 라우터 모듈이 아니라 **파서 모듈 자체**를 갈아야 그 호출부에 닿는다.
+    monkeypatch.setattr(P, "extract_pdf_text", _FakePdf(REAL_SETTLEMENT_TEXT))
+    client = TestClient(app)
+    res = client.post(
+        "/api/import-cost/parse",
+        files={"expense_file": ("정산서.pdf", b"%PDF-fake", "application/pdf")},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["errors"] == [], body["errors"]
+    assert body["header"].get("hbl_no") == "SETR2607220324"
+    assert body["header"].get("fx_rate") == "221.1600"
+    names = [c["item_name"] for c in body["cost_lines"]]
+    assert names == ["관세", "부가세", "통관수수료"], names

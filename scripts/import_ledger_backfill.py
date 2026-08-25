@@ -147,10 +147,18 @@ def match(expenses: list[Doc], invoices: list[Doc], packings: list[Doc]) -> tupl
     왜 그 열인가: 정산서에는 invoice_no 칸이 없고 CI에는 HBL 칸이 없다. 두 서류가 공유하는
     유일한 강한 값이 결제금액이다. 실측 7건에서 소수점까지 정확히 일치했고 애매한 짝이 0건이었다.
     ★그래도 «정확히 1건»일 때만 잇는다 — 여럿이면 사람 몫이다(matcher.py와 같은 규율).
+
+    ★★**한 서류는 한 수입건에만 붙는다** (적대 리뷰 1R P1-1, 2026-08-25). 초판은 `used_inv`를
+    **채우기만 하고 매칭에서 빼지 않아**, 두 정산서의 결제금액이 우연히 같으면 **같은 CI가 둘 다에**
+    붙었다(재현됨). 그러면 다른 화물의 물품 라인이 통째로 원장에 실리고, 관세 검산까지 그 틀린 CI로
+    계산돼 `duty_rate`가 **잘못된 근거로 채워진다.** 실제 폴더에서는 값이 전부 유일해 안 터졌지만,
+    이 스크립트는 **매일 자동으로 돌 예정**이라 「지금까지 안 터졌다」는 근거가 못 된다.
+    PL도 같다 — 두 CI의 수량합이 우연히 같으면 하나의 PL이 둘 다에 붙었다.
     """
     cands: list[Candidate] = []
     seen_hbl: set[str] = set()
     used_inv: set[int] = set()
+    used_pack: set[int] = set()
 
     for ex_doc in expenses:
         ex = ex_doc.parsed
@@ -165,7 +173,9 @@ def match(expenses: list[Doc], invoices: list[Doc], packings: list[Doc]) -> tupl
         hits = [
             (i, d)
             for i, d in enumerate(invoices)
-            if value is not None
+            # ★이미 다른 수입건에 붙은 CI는 후보에서 뺀다(P1-1).
+            if i not in used_inv
+            and value is not None
             and getattr(d.parsed, "declared_total", None) is not None
             and Decimal(str(d.parsed.declared_total)) == Decimal(str(value))
         ]
@@ -175,9 +185,12 @@ def match(expenses: list[Doc], invoices: list[Doc], packings: list[Doc]) -> tupl
             used_inv.add(idx)
             # PL은 수량합으로 고른다(`_pick_packing` 참조). 못 찾아도 적재는 되지만,
             # 원장의 3중 검산 첫 항목이 「CI 수량합 = PL 수량합」이라 **확정이 거부된다**.
-            cand.packing = _pick_packing(packings, doc)
-            if cand.packing is None:
+            pack_idx = _pick_packing(packings, doc, used_pack)
+            if pack_idx is None:
                 cand.notes.append("PL 미첨부 — 중량·부피 기준 배부는 할 수 없다(금액 기준은 가능).")
+            else:
+                cand.packing = packings[pack_idx]
+                used_pack.add(pack_idx)
         elif len(hits) > 1:
             cand.notes.append(f"CI 후보 {len(hits)}건 — 자동으로 고르지 않는다. 사람이 확정해야 한다.")
         else:
@@ -192,8 +205,8 @@ def _qty_total(doc: Doc) -> Decimal:
     return sum((Decimal(str(l.quantity)) for l in (getattr(doc.parsed, "lines", []) or [])), _ZERO)
 
 
-def _pick_packing(packings: list[Doc], invoice: Doc) -> Doc | None:
-    """CI ↔ PL은 **수량합**으로 잇는다.
+def _pick_packing(packings: list[Doc], invoice: Doc, used: set[int]) -> int | None:
+    """CI ↔ PL은 **수량합**으로 잇는다. 이미 쓰인 PL은 `used`로 제외한다(P1-1).
 
     ★왜 그 값인가: 원장의 3중 검산 첫 항목이 「CI 수량합 = PL 수량합」이다. 그 등식으로
     짝을 고르면 «짝짓기»와 «검산»이 같은 사실을 보므로, 잘못 붙인 PL이 검산을 통과하는
@@ -207,9 +220,9 @@ def _pick_packing(packings: list[Doc], invoice: Doc) -> Doc | None:
     want = _qty_total(invoice)
     if want <= _ZERO:
         return None
-    hits = [p for p in packings if _qty_total(p) == want]
+    hits = [i for i, p in enumerate(packings) if i not in used and _qty_total(p) == want]
     # 여럿이면 고르지 않는다 — 같은 수량의 다른 선적을 붙이면 중량·부피가 통째로 틀린다.
-    return hits[0] if len(hits) == 1 else None
+    return hits[0] if len(hits) == 1 else None  # 인덱스다(호출부가 used에 넣는다)
 
 
 # ──────────────────────────────────────────────
