@@ -54,6 +54,8 @@ from app.models import (
     CostRecipeLine,
     CostRecipeLink,
     CostStandard,
+    CostTableItem,
+    CostTableItemLine,
     ProductChannelMapping,
     ProductMaster,
 )
@@ -76,6 +78,27 @@ DEFAULT_PRICE_RULE = "latest"
 #: 엑셀 참고값을 단가로 채택할 때 남기는 출처 문구의 접두사. 이 문구가 있으면 그 단가가
 #: 「사람이 엑셀을 보고 승인한 값」임을 화면·감사가 안다.
 ADOPT_NOTE_PREFIX = "엑셀 참고값 채택"
+
+# ──────────────────────────────────────────────
+# 개정 4 (D-CPP-59) — pin: 사람이 고른 원가표 항목
+# ──────────────────────────────────────────────
+#: 핀이 가리키던 항목이 재업로드 후 **사라졌을 때** 세우는 깃발. 조용히 지우지 않는다 —
+#: 조용한 소실은 계약 합격 20의 미달 조건이다.
+PIN_LOST = "pin_lost"
+#: 핀 자연 키에 해당하는 항목이 **2건 이상**이 됐을 때(§9-9① 폴드 동명 중복이 실례다).
+#: 둘 중 하나를 시스템이 고르지 않는다(§0-E-7 금지선) — 사람에게 되묻는다.
+PIN_AMBIGUOUS = "pin_ambiguous"
+
+
+def pin_key(section: str, item_name: str, form_factor: Optional[str]) -> str:
+    """`section\\x1Fitem_name\\x1Fform_factor` — `CostTableItem.natural_key`와 같은 규칙.
+
+    구분자가 `\\x1F`인 이유는 품목명·섹션명에 공백·쉼표·슬래시가 흔하기 때문이다 — 흔한
+    구분자를 쓰면 키가 조용히 어긋나고, 그 증상은 「재업로드 후 핀이 남의 항목을 가리킨다」로
+    나타난다.
+    """
+
+    return "\x1f".join([section, item_name, form_factor or ""])
 
 
 def _d(v: Optional[Decimal]) -> Optional[str]:
@@ -276,7 +299,17 @@ def import_drafts(
     materials = _upsert_materials(db, cost) if cost is not None else {}
     db.flush()
 
-    created = updated = skipped_approved = unmatched = 0
+    # ── 개정 4 (D-CPP-59) — 원가표 항목을 «남긴다» ────────────────────────────
+    #   여기까지 파싱해 놓고 버리던 것이 「고를 목록이 없다」의 원인이었다(계약 §0-E-1 ②).
+    #   순서가 설계다: 항목을 갈아끼운 «뒤» 핀을 자연 키로 다시 잇고, 그 다음에 매칭 루프가
+    #   돈다 — 루프는 핀이 붙은 레시피를 건너뛰므로(합격 20) 핀 복구가 먼저여야 한다.
+    pin_report = {"relinked": 0, "lost": 0, "ambiguous": 0}
+    cost_table_items = 0
+    if cost is not None:
+        cost_table_items = _replace_cost_table_items(db, cost)
+        pin_report = _resolve_pins(db)
+
+    created = updated = skipped_approved = unmatched = skipped_pinned = 0
     groups = mapping.groups() if mapping is not None else {}
     report: list[dict] = []
 
@@ -289,6 +322,8 @@ def import_drafts(
                 "materials_seen": len(materials),
                 "cost_table_recipes": cost.recipe_count,
                 "cost_table_anomalies": cost.anomalies,
+                "cost_table_items": cost_table_items,
+                "pins": pin_report,
                 "mapping_options": 0,
                 "mapping_anomalies": [],
                 "groups": 0,
@@ -334,6 +369,26 @@ def import_drafts(
                     "sku_count": len(skus),
                 }
             )
+            continue
+
+        # ★핀이 붙은 레시피는 가격 매칭이 건드리지 않는다 (계약 합격 20 · D-CPP-59).
+        #   사람이 고른 구성을 «파일을 다시 올렸다»는 이유로 갈아치우면, 승인분을 덮지 않는
+        #   규율과 같은 것을 픽에서 어기는 것이다. 핀의 재해석은 위 `_resolve_pins`가 이미
+        #   끝냈고 소실·동명은 깃발로 서 있다.
+        if recipe is not None and recipe.picked_item_key:
+            skipped_pinned += 1
+            report.append(
+                {
+                    "product_name": product_name,
+                    "form_factor": form_factor,
+                    "action": "skipped_pinned",
+                    "reason": _pin_skip_reason(recipe),
+                    "sku_count": len(skus),
+                    "line_count": len(recipe.lines),
+                    "anomaly_flag": recipe.anomaly_flag,
+                }
+            )
+            _sync_links(db, recipe, skus)
             continue
 
         anomaly = None if match.draft else "no_recipe_match"
@@ -440,10 +495,13 @@ def import_drafts(
         "recipes_created": created,
         "recipes_updated": updated,
         "skipped_approved": skipped_approved,
+        "skipped_pinned": skipped_pinned,
         "unmatched": unmatched,
         "materials_seen": len(materials),
         "cost_table_recipes": cost.recipe_count if cost is not None else 0,
         "cost_table_anomalies": cost.anomalies if cost is not None else [],
+        "cost_table_items": cost_table_items,
+        "pins": pin_report,
         "mapping_options": len(mapping.options),
         "mapping_anomalies": mapping.anomalies,
         "groups": len(groups),
@@ -470,12 +528,31 @@ def _reimport_composition_only(
     쓴다(`_match_draft`가 그 둘을 입력으로 받는다). 링크는 아예 손대지 않는다.
     """
 
-    updated = skipped_approved = unmatched = 0
+    updated = skipped_approved = unmatched = skipped_pinned = 0
     report: list[dict] = []
 
     for recipe in db.query(CostRecipe).order_by(CostRecipe.product_name).all():
         if recipe.status == "approved":
             skipped_approved += 1
+            continue
+
+        # ★핀은 가격 매칭보다 우선한다 (계약 §0-E-3 · 합격 20). 위 `_resolve_pins`가 이미
+        #   자연 키로 다시 이어 놨고, 소실·동명이면 깃발이 서 있다 — 어느 경우든 구성을
+        #   지우지 않는다. 여기서 `recipe.lines.clear()`로 흘러가면 사람이 고른 구성이
+        #   파일 한 번 올렸다고 사라진다.
+        if recipe.picked_item_key:
+            skipped_pinned += 1
+            report.append(
+                {
+                    "product_name": recipe.product_name,
+                    "form_factor": recipe.form_factor,
+                    "action": "skipped_pinned",
+                    "reason": _pin_skip_reason(recipe),
+                    "sku_count": _note_dict(recipe).get("sku_count") or 0,
+                    "line_count": len(recipe.lines),
+                    "anomaly_flag": recipe.anomaly_flag,
+                }
+            )
             continue
 
         saved = _note_dict(recipe)
@@ -561,6 +638,7 @@ def _reimport_composition_only(
         "recipes_created": 0,
         "recipes_updated": updated,
         "skipped_approved": skipped_approved,
+        "skipped_pinned": skipped_pinned,
         "unmatched": unmatched,
         "report": report,
     }
@@ -618,6 +696,323 @@ def _upsert_materials(db: Session, cost: ParseResult) -> dict[str, CostMaterial]
         elif m.excel_ref_price is None and ref_price is not None:
             m.excel_ref_price = ref_price
     return out
+
+
+def _pin_skip_reason(recipe: CostRecipe) -> str:
+    """재수입이 핀을 건너뛴 이유 — 깃발이 서 있으면 **그 사실을 그대로 말한다**.
+
+    조용히 「건너뜀」으로만 적으면 소실·동명이 보고서에서 사라지고, 사람은 자기 픽이
+    멀쩡한 줄 안다(계약 합격 20의 「조용한 소실은 미달」).
+    """
+
+    if recipe.anomaly_flag == PIN_LOST:
+        return "사람이 고른 원가표 항목이 이번 파일에 없다 — 구성은 그대로 두고 재확인을 요청한다"
+    if recipe.anomaly_flag == PIN_AMBIGUOUS:
+        return "같은 이름의 원가표 항목이 2건 이상이다 — 시스템이 고르지 않는다, 다시 고른다"
+    return "사람이 고른 원가표 항목이 붙어 있다 — 재수입이 픽을 덮지 않는다"
+
+
+def _replace_cost_table_items(db: Session, cost: ParseResult) -> int:
+    """파싱된 원가표 항목을 **통째로 갈아끼운다** (계약 §0-E-3).
+
+    ★왜 증분이 아니라 교체인가: 이 테이블은 «업로드된 원가표의 현재 단면»이지 이력이 아니다.
+    증분으로 두면 원가표에서 **지워진 품목이 목록에 영원히 남아** 사람이 없는 것을 고르게 된다.
+    이력이 필요한 자리는 단가(`cost_material_price.effective_date`)이지 여기가 아니다.
+
+    ★교체가 핀을 끊지 않는가 — 끊는다(FK가 `SET NULL`이다). 그래서 핀의 정본은 FK가 아니라
+    **자연 키 스냅샷**(`picked_item_key`)이고, 교체 직후 `_resolve_pins`가 다시 잇는다.
+    FK만 믿었다면 S1 적대 리뷰 1R P1(**rowid 재사용**)이 그대로 재발한다.
+
+    ★`form_factor=None`인 수입 완제품 항목도 **빼지 않고 싣는다** — 합격 6은 이번 범위 밖이지만
+    (계약 §0-E-11) 목록에서 지워 두면 다음 슬라이스가 「없다」고 오판한다. 구성 줄이 0인 것은
+    파서가 그 섹션에서 라인을 안 뽑기 때문이고, 그 사실 자체가 화면에 보여야 한다.
+    """
+
+    db.query(CostTableItemLine).delete(synchronize_session=False)
+    db.query(CostTableItem).delete(synchronize_session=False)
+    db.flush()
+
+    for draft in cost.recipes:
+        item = CostTableItem(
+            section=draft.section,
+            item_name=draft.item_name,
+            form_factor=draft.form_factor,
+            recipe_kind=draft.recipe_kind,
+            total_inc_vat=draft.excel_total_inc_vat,
+            row_number=draft.row_number,
+            anomalies=",".join(draft.anomalies)[:200] if draft.anomalies else None,
+        )
+        for line in draft.lines:
+            item.lines.append(
+                CostTableItemLine(
+                    material_name=line.key.display_name,
+                    quantity=line.quantity,
+                    ref_price=line.excel_ref_price,
+                    source_column=line.source_column or None,
+                )
+            )
+        db.add(item)
+    db.flush()
+    return len(cost.recipes)
+
+
+def _resolve_pins(db: Session) -> dict[str, int]:
+    """항목 교체 후 핀을 자연 키로 다시 잇는다 — **조용히 잡지 않는다** (계약 합격 20).
+
+    셋 중 하나로 끝난다: ①정확히 1건이면 다시 잇는다 ②0건이면 `pin_lost` ③2건 이상이면
+    `pin_ambiguous`. ②③은 구성을 **지우지 않는다** — 사람이 붙여 둔 구성을 파일 한 번
+    올렸다고 없애면 그게 「재수입이 승인분을 덮는다」와 같은 병이다. 깃발만 세워 되묻는다.
+    """
+
+    pinned = (
+        db.query(CostRecipe)
+        .filter(CostRecipe.picked_item_key.isnot(None))
+        .all()
+    )
+    if not pinned:
+        return {"relinked": 0, "lost": 0, "ambiguous": 0}
+
+    by_key: dict[str, list[CostTableItem]] = {}
+    for item in db.query(CostTableItem).all():
+        by_key.setdefault(item.natural_key, []).append(item)
+
+    out = {"relinked": 0, "lost": 0, "ambiguous": 0}
+    for recipe in pinned:
+        hits = by_key.get(recipe.picked_item_key or "", [])
+        if len(hits) == 1:
+            recipe.picked_item_id = hits[0].id
+            if recipe.anomaly_flag in (PIN_LOST, PIN_AMBIGUOUS):
+                recipe.anomaly_flag = None
+            out["relinked"] += 1
+        elif not hits:
+            recipe.picked_item_id = None
+            recipe.anomaly_flag = PIN_LOST
+            out["lost"] += 1
+        else:
+            recipe.picked_item_id = None
+            recipe.anomaly_flag = PIN_AMBIGUOUS
+            out["ambiguous"] += 1
+    db.flush()
+    return out
+
+
+def _material_for_name(db: Session, name: str) -> CostMaterial:
+    """픽이 만든 라인이 걸릴 부자재 종 — 없으면 `unconfirmed`로 만든다.
+
+    ★단가 행은 만들지 않는다(계약 §0-E-7 금지선). 새 종은 「빈 칸」이지 0이 아니다.
+    보통은 같은 업로드의 `_upsert_materials`가 이미 만들어 뒀고, 이 갈래는 항목이
+    먼저 저장된 뒤 종이 지워진 경우(D-CPP-58 병합 같은 정리)에만 탄다.
+    """
+
+    m = db.query(CostMaterial).filter(CostMaterial.name == name).first()
+    if m is not None:
+        return m
+    m = CostMaterial(
+        name=name,
+        status="unconfirmed",
+        category="부자재",
+        excel_label=name,
+        note="원가표 항목 픽(D-CPP-59)으로 생성 — 단가는 아직 없다",
+    )
+    db.add(m)
+    db.flush()
+    return m
+
+
+def _apply_item_lines(db: Session, recipe: CostRecipe, item: CostTableItem) -> int:
+    """저장된 원가표 항목의 구성 줄을 레시피 구성으로 실체화한다.
+
+    ★`ref_price`는 **옮기지 않는다** — 라인은 「무엇이 몇 개」이고 단가는 종이 가진다.
+    참고값이 라인을 타고 계산에 스미면 §3 금지선(엑셀에서 단가 자동 유입)이 뚫린다.
+    """
+
+    recipe.lines.clear()
+    db.flush()
+    for line in item.lines:
+        material = _material_for_name(db, line.material_name)
+        recipe.lines.append(
+            CostRecipeLine(
+                material_id=material.id,
+                quantity=line.quantity,
+                note=f"원가표 열 「{line.source_column}」" if line.source_column else None,
+            )
+        )
+    db.flush()
+    return len(item.lines)
+
+
+def list_cost_table_items(db: Session, recipe_id: int) -> dict:
+    """레시피 하나에 붙일 수 있는 **원가표 항목 전건 목록** (계약 합격 18).
+
+    ★목록의 범위는 «그 레시피의 폼팩터»다 — 그리고 **폼팩터가 없는 항목(수입 완제품·매입품)도
+    함께 싣는다.** 폼팩터 버킷만 보여 주면 계약 §0-E-11이 진단한 그 차단(수입 완제품 초안이
+    어떤 레시피와도 못 만난다)을 화면이 그대로 물려받는다.
+
+    ★`suggested`는 **제안일 뿐이다** — 가격 매칭(`_match_draft`와 같은 기준)이 걸린 항목에만
+    참을 실어 목록 상단으로 올린다. 제안이 0건이어도 픽은 막히지 않는다(§0-E-7).
+    """
+
+    recipe = get_recipe(db, recipe_id)
+    saved = _note_dict(recipe)
+    mode = saved.get("cost_price_mode")
+    mode_dec: Optional[Decimal] = None
+    if mode is not None:
+        try:
+            mode_dec = Decimal(str(mode))
+        except (ArithmeticError, ValueError):
+            mode_dec = None
+
+    items = (
+        db.query(CostTableItem)
+        .filter(
+            (CostTableItem.form_factor == recipe.form_factor)
+            | (CostTableItem.form_factor.is_(None))
+        )
+        .order_by(CostTableItem.section, CostTableItem.item_name)
+        .all()
+    )
+
+    rows: list[dict] = []
+    for item in items:
+        suggested = (
+            mode_dec is not None
+            and item.form_factor == recipe.form_factor
+            and item.total_inc_vat is not None
+            and abs(item.total_inc_vat - mode_dec) <= MATCH_TOLERANCE
+        )
+        rows.append(
+            {
+                "id": item.id,
+                "section": item.section,
+                "item_name": item.item_name,
+                "form_factor": item.form_factor,
+                "recipe_kind": item.recipe_kind,
+                "total_inc_vat": _d(item.total_inc_vat),
+                "row_number": item.row_number,
+                "anomalies": item.anomalies,
+                "line_count": len(item.lines),
+                "suggested": suggested,
+                "picked": item.id == recipe.picked_item_id,
+            }
+        )
+    rows.sort(key=lambda r: (not r["suggested"], r["section"], r["item_name"]))
+    return {
+        "recipe_id": recipe.id,
+        "form_factor": recipe.form_factor,
+        # ★제안의 «근거»를 같이 준다 — 화면이 「왜 이게 위에 있나」를 말할 수 있어야
+        #   사람이 제안을 «확정»으로 오해하지 않는다(계약 §0-E-10-4).
+        "cost_price_mode": _d(mode_dec),
+        "suggested_count": sum(1 for r in rows if r["suggested"]),
+        "items": rows,
+    }
+
+
+def pick_cost_table_item(db: Session, recipe_id: int, item_id: int) -> CostRecipe:
+    """사람이 고른 원가표 항목을 레시피 구성으로 확정한다 (계약 합격 18).
+
+    ★**픽은 승인이 아니다** — status는 `draft` 그대로다. 픽이 승인을 겸하면 §2-2가 사람 몫으로
+    못 박은 확정 지점이 한 클릭에 접힌다.
+    ★**승인된 레시피는 거부한다** — 재수입이 승인분을 덮지 않는 것과 같은 규율이다. 바꾸려면
+    먼저 승인을 푼다(`unapprove`).
+    """
+
+    recipe = get_recipe(db, recipe_id)
+    if recipe.status == "approved":
+        raise CostMenuConflict(
+            "승인된 레시피의 구성은 픽으로 바꾸지 않는다 — 먼저 승인을 해제한다."
+        )
+    item = db.query(CostTableItem).filter(CostTableItem.id == item_id).first()
+    if item is None:
+        raise CostMenuError("원가표 항목을 찾을 수 없다 — 원가 정본을 다시 올려야 할 수 있다.")
+
+    line_count = _apply_item_lines(db, recipe, item)
+
+    recipe.picked_item_id = item.id
+    recipe.picked_item_key = item.natural_key
+    recipe.picked_at = datetime.now()
+    # 픽은 「없음 확인」과 상호배타다 — 고른 순간 부재 판정은 사실이 아니게 된다.
+    recipe.absent_confirmed_at = None
+    recipe.absent_note = None
+    recipe.anomaly_flag = item.anomalies[:40] if item.anomalies else None
+
+    note = _note_dict(recipe)
+    note.update(
+        {
+            "match_reason": f"사람이 고름 — 원가표 「{item.section}/{item.item_name}」",
+            "cost_table_item": item.item_name,
+            "cost_table_section": item.section,
+            "excel_total_inc_vat": _d(item.total_inc_vat),
+            "picked_by_human": True,
+        }
+    )
+    recipe.note = json.dumps(note, ensure_ascii=False)
+    db.flush()
+    db.commit()
+    db.refresh(recipe)
+    return recipe
+
+
+def unpick_cost_table_item(db: Session, recipe_id: int) -> CostRecipe:
+    """픽을 되돌린다 — 구성 줄도 함께 지운다(픽이 만든 것이므로).
+
+    ★되돌림 경로가 없으면 사람이 «잘못 고른 것»을 못 고치고, 그러면 픽 자체를 주저하게 된다.
+    """
+
+    recipe = get_recipe(db, recipe_id)
+    if recipe.status == "approved":
+        raise CostMenuConflict("승인된 레시피는 픽을 되돌리지 않는다 — 먼저 승인을 해제한다.")
+
+    recipe.lines.clear()
+    recipe.picked_item_id = None
+    recipe.picked_item_key = None
+    recipe.picked_at = None
+    recipe.anomaly_flag = "no_recipe_match"
+
+    note = _note_dict(recipe)
+    note.update(
+        {
+            "match_reason": "픽을 되돌렸다 — 다시 고르거나 「원가표에 없음」을 확인한다",
+            "cost_table_item": None,
+            "cost_table_section": None,
+            "excel_total_inc_vat": None,
+            "picked_by_human": False,
+        }
+    )
+    recipe.note = json.dumps(note, ensure_ascii=False)
+    db.flush()
+    db.commit()
+    db.refresh(recipe)
+    return recipe
+
+
+def confirm_cost_table_absent(
+    db: Session, recipe_id: int, note_text: Optional[str] = None
+) -> CostRecipe:
+    """「원가표에 없음」을 **사람이 명시적으로** 확인한다 (계약 합격 19).
+
+    ★이 칸이 없으면 「사람이 목록을 다 보고 없다고 판정했다」와 「아직 아무도 안 봤다」가
+    화면에서 **같은 모습**이 된다. 침묵을 판정으로 읽는 것이 이 저장소가 반복해 밟은 자리다.
+    ★사유를 받는 이유: 비필름 48건이 같은 목록에 뜨므로(계약 §0-E-4) 「이 종은 애초에 필름이
+    아니다」와 「필름인데 원가표에 없다」가 갈려 기록돼야 다음 사람이 다시 안 판단한다.
+    """
+
+    recipe = get_recipe(db, recipe_id)
+    if recipe.picked_item_id is not None or recipe.picked_item_key is not None:
+        raise CostMenuConflict(
+            "이미 원가표 항목이 픽돼 있다 — 「없음」과 동시에 참일 수 없다. 먼저 픽을 되돌린다."
+        )
+    recipe.absent_confirmed_at = datetime.now()
+    recipe.absent_note = (note_text or "").strip() or None
+
+    note = _note_dict(recipe)
+    note["match_reason"] = "원가표에 없음 — 사람이 확인함" + (
+        f" ({recipe.absent_note})" if recipe.absent_note else ""
+    )
+    recipe.note = json.dumps(note, ensure_ascii=False)
+    db.flush()
+    db.commit()
+    db.refresh(recipe)
+    return recipe
 
 
 def _sync_links(db: Session, recipe: CostRecipe, skus: dict[str, Optional[Decimal]]) -> None:
@@ -981,6 +1376,40 @@ def standard_payload(result: SC.StandardCostResult) -> dict:
     }
 
 
+def _pick_payload(recipe: CostRecipe) -> dict:
+    """픽 상태 — **세 상태를 갈라서** 화면에 준다 (계약 합격 19 · D-CPP-59).
+
+    `state`는 넷 중 하나다:
+      `picked`      사람이 원가표 항목을 골랐다
+      `absent`      사람이 「원가표에 없음」을 확인했다 (시각·사유 동반)
+      `pin_lost` / `pin_ambiguous`  핀이 재업로드에서 끊겼다 — 되묻는 상태
+      `none`        **아직 아무도 안 봤다** ← 이것이 `absent`와 구별되는 것이 이 칸의 존재 이유다
+    """
+
+    if recipe.anomaly_flag in (PIN_LOST, PIN_AMBIGUOUS):
+        state = recipe.anomaly_flag
+    elif recipe.picked_item_key:
+        state = "picked"
+    elif recipe.absent_confirmed_at is not None:
+        state = "absent"
+    else:
+        state = "none"
+
+    item = recipe.picked_item
+    return {
+        "state": state,
+        "item_id": recipe.picked_item_id,
+        "item_name": item.item_name if item else None,
+        "section": item.section if item else None,
+        "item_total_inc_vat": _d(item.total_inc_vat) if item else None,
+        "picked_at": recipe.picked_at.isoformat() if recipe.picked_at else None,
+        "absent_confirmed_at": (
+            recipe.absent_confirmed_at.isoformat() if recipe.absent_confirmed_at else None
+        ),
+        "absent_note": recipe.absent_note,
+    }
+
+
 def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False) -> dict:
     result = SC.compute_standard_cost(_line_inputs(recipe))
     try:
@@ -999,6 +1428,10 @@ def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False)
         "approved_at": recipe.approved_at.isoformat() if recipe.approved_at else None,
         "match": note,
         "line_count": len(recipe.lines),
+        # ── 개정 4 (D-CPP-59) — 픽·부재확인 상태 ────────────────────────────
+        #   ★셋은 서로 다른 상태다: 픽됨 / 「없음」을 사람이 확인함 / **아직 아무도 안 봄**.
+        #   셋째가 NULL로 표현되므로 화면이 그 셋을 갈라 그릴 수 있다(계약 합격 19).
+        "picked": _pick_payload(recipe),
         "standard": standard_payload(result),
         "link_count": db.query(CostRecipeLink)
         .filter(CostRecipeLink.recipe_id == recipe.id)

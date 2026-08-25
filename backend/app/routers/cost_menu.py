@@ -83,6 +83,26 @@ class AdoptIn(BaseModel):
     note: Optional[str] = None
 
 
+class PickIn(BaseModel):
+    """사람이 고른 **원가표 항목** (계약 §0-E-2, D-CPP-59).
+
+    ★이 스키마가 존재한다는 것 자체가 개정 4의 요점이다 — 화면은 개정 전에도 「사람이
+    고른다」고 말했는데 고른 것을 받아 줄 자리가 없었다.
+    """
+
+    item_id: int
+
+
+class AbsentIn(BaseModel):
+    """「원가표에 없음」 확인에 남기는 사유 (계약 합격 19).
+
+    ★사유를 받는 이유: 비필름 48건이 같은 목록에 뜨므로(계약 §0-E-4) 「애초에 필름이 아니다」와
+    「필름인데 원가표에 없다」가 갈려 기록돼야 다음 사람이 같은 판단을 다시 안 한다.
+    """
+
+    note: Optional[str] = None
+
+
 class ManualPriceIn(BaseModel):
     """국내 구매 부자재 등 원장 파생이 불가한 종의 단가 (계약 §4 하이브리드 ②)."""
 
@@ -313,6 +333,48 @@ def adopt_excel_prices(recipe_id: int, body: AdoptIn | None = None, db: Session 
     db.commit()
     r = R.get_recipe(db, recipe_id)
     return {**out, "recipe": R.recipe_payload(db, r, with_links=True)}
+
+
+@router.get("/recipes/{recipe_id}/cost-table-items")
+def cost_table_items(recipe_id: int, db: Session = Depends(get_db)):
+    """이 레시피에 붙일 수 있는 **원가표 항목 전건 목록** (계약 합격 18 · D-CPP-59).
+
+    ★개정 4 전까지 화면은 「후보 N건 — 사람이 고른다」고 말하면서 **고를 길을 안 줬다**
+    (엔드포인트 17개 전수에 0건, 계약 §0-E-1 ③). 이 엔드포인트가 그 길이다.
+    ★`suggested`는 제안 라벨이지 확정이 아니다 — 제안 0건이어도 목록은 나온다.
+    """
+    return _guard(R.list_cost_table_items, db, recipe_id)
+
+
+@router.post("/recipes/{recipe_id}/pick-cost-table-item")
+def pick_cost_table_item(recipe_id: int, body: PickIn, db: Session = Depends(get_db)):
+    """사람이 고른 원가표 항목을 구성으로 확정한다 — **재업로드 없이 즉시**(계약 합격 18).
+
+    ★픽은 승인이 아니다(status는 draft 유지) — §2-2의 사람 확정 지점을 한 클릭에 접지 않는다.
+    """
+    recipe = _guard(R.pick_cost_table_item, db, recipe_id, body.item_id)
+    return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
+
+
+@router.post("/recipes/{recipe_id}/unpick-cost-table-item")
+def unpick_cost_table_item(recipe_id: int, db: Session = Depends(get_db)):
+    """픽을 되돌린다 — 되돌릴 길이 없으면 사람이 고르기를 주저한다."""
+    recipe = _guard(R.unpick_cost_table_item, db, recipe_id)
+    return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
+
+
+@router.post("/recipes/{recipe_id}/confirm-cost-table-absent")
+def confirm_cost_table_absent(
+    recipe_id: int, body: AbsentIn | None = None, db: Session = Depends(get_db)
+):
+    """「원가표에 없음」을 사람이 **명시적으로** 확인한다 (계약 합격 19).
+
+    ★이 칸이 없으면 「다 보고 없다고 판정했다」와 「아직 아무도 안 봤다」가 화면에서 같아진다.
+    """
+    recipe = _guard(
+        R.confirm_cost_table_absent, db, recipe_id, body.note if body else None
+    )
+    return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
 
 
 @router.get("/board")

@@ -11,11 +11,13 @@
 // ★「없음」은 「0」이 아니다(계약 §2-7). 단가 표시는 전부 `formatCostWon`을 지난다 —
 //   `null`은 「—」이고, 그 자리에 0원을 그리면 미입력이 확정값으로 둔갑한다.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import {
   addCostManualPrice,
   adoptCostExcelPrices,
   approveCostRecipe,
+  confirmCostTableAbsent,
   createCostMaterial,
   deleteCostMaterialPrice,
   fetchCostBoard,
@@ -23,11 +25,14 @@ import {
   fetchCostMaterials,
   fetchCostRecipes,
   fetchCostSettings,
+  fetchCostTableItems,
   importCostRecipes,
   linkCostLedgerPrice,
   patchCostMaterial,
+  pickCostTableItem,
   refreshCostLedgerPrice,
   unapproveCostRecipe,
+  unpickCostTableItem,
   type CostBoard,
   type CostBoardRow,
   type CostImportResult,
@@ -37,8 +42,10 @@ import {
   type CostMaterialPrice,
   type CostRecipe,
   type CostRecipeMatch,
+  type CostRecipePick,
   type CostSetting,
   type CostStandard,
+  type CostTableItemList,
 } from "../lib/api";
 
 export type CostTab = "materials" | "recipes" | "board";
@@ -1545,18 +1552,247 @@ export function StandardBreakdown({ standard }: { standard: CostStandard }) {
   );
 }
 
+/**
+ * 픽 상태 배지 — **네 상태를 갈라 그린다** (계약 합격 19, D-CPP-59).
+ *
+ * ★`none`(아직 아무도 안 봄)에는 배지를 **안 붙인다**. 「미확인」 같은 배지를 붙이면 그것이
+ * 곧 판정처럼 읽혀, 「사람이 다 보고 없다고 확인함」과 다시 뭉개진다.
+ */
+export function PickStateBadge({ pick }: { pick: CostRecipePick | undefined }) {
+  if (!pick || pick.state === "none") return null;
+  const style: Record<string, string> = {
+    picked: "bg-blue-50 text-blue-700 border-blue-200",
+    absent: "bg-gray-100 text-gray-700 border-gray-300",
+    pin_lost: "bg-amber-50 text-amber-800 border-amber-300",
+    pin_ambiguous: "bg-amber-50 text-amber-800 border-amber-300",
+  };
+  const label: Record<string, string> = {
+    picked: "원가표 항목 고름",
+    absent: "원가표에 없음 — 확인함",
+    pin_lost: "고른 항목이 사라졌다 — 재확인",
+    pin_ambiguous: "같은 이름 2건 — 다시 고른다",
+  };
+  return (
+    <span
+      className={`text-[11px] px-1.5 py-0.5 rounded border ${style[pick.state]}`}
+      data-testid={`pick-state-${pick.state}`}
+    >
+      {label[pick.state]}
+    </span>
+  );
+}
+
+/**
+ * 원가표 항목 픽 — **화면이 시키던 그 동작이 실제로 있는 자리**(계약 합격 18, D-CPP-59).
+ *
+ * ★개정 4 전까지 이 패널 위쪽은 「후보 N건 — 사람이 고른다」라고 말했는데 고를 길이
+ * 백엔드에도 화면에도 **0건**이었다. 없는 조작을 지시하지 않는다는 규율의 다른 절반이
+ * 이것이다 — 지시를 지우는 대신 **길을 만든다.**
+ *
+ * ★목록은 «그 폼팩터 전건»이다. 제안(가격 일치)은 라벨과 정렬로만 나타나고, 제안이 0건이어도
+ * 목록은 그대로 나온다 — 제안이 픽의 전제였다면 열쇠를 바꾼 의미가 없다.
+ */
+export function CostTablePicker({
+  recipe,
+  items,
+  loading,
+  busy,
+  onLoad,
+  onPick,
+  onUnpick,
+  onAbsent,
+}: {
+  recipe: CostRecipe;
+  items: CostTableItemList | null;
+  loading: boolean;
+  busy: boolean;
+  onLoad: () => void;
+  onPick: (itemId: number) => void;
+  onUnpick: () => void;
+  onAbsent: (note: string) => void;
+}) {
+  const [absentNote, setAbsentNote] = useState("");
+  const pick = recipe.picked;
+  const approved = recipe.status === "approved";
+
+  return (
+    <section className="mt-3 border rounded-md p-3 bg-white" data-testid="cost-table-picker">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h3 className="text-xs font-semibold text-gray-700">
+          원가표 항목 고르기
+          <span className="ml-1 font-normal text-gray-500">
+            — 가격이 안 맞아도 고를 수 있다
+          </span>
+        </h3>
+        <div className="flex items-center gap-1.5">
+          <PickStateBadge pick={pick} />
+          <button
+            className="text-[11px] px-2 py-1 rounded border disabled:opacity-40"
+            disabled={loading || busy}
+            onClick={onLoad}
+            data-testid="picker-load"
+          >
+            {items ? "목록 새로고침" : "원가표 목록 보기"}
+          </button>
+        </div>
+      </div>
+
+      {pick?.state === "picked" ? (
+        <div className="mt-2 text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded p-2">
+          <div data-testid="picker-picked-item">
+            고른 항목 「{pick.section}/{pick.item_name}」 · 제품원가(+VAT){" "}
+            {formatCostWon(pick.item_total_inc_vat)}
+          </div>
+          {/* ★재수입이 이 픽을 덮지 않는다는 사실을 화면이 말한다 — 안 말하면 사람이
+              엑셀을 다시 올릴 때마다 자기 픽이 살아 있는지 확신하지 못한다(합격 20). */}
+          <div className="mt-0.5 text-blue-700">
+            원가표를 다시 올려도 이 구성은 유지된다. 바꾸려면 픽을 되돌린다.
+          </div>
+          <button
+            className="mt-1 text-[11px] px-2 py-1 rounded border bg-white disabled:opacity-40"
+            disabled={busy || approved}
+            onClick={onUnpick}
+            data-testid="picker-unpick"
+            title={approved ? "승인된 레시피는 먼저 승인을 해제한다" : undefined}
+          >
+            픽 되돌리기
+          </button>
+        </div>
+      ) : null}
+
+      {pick?.state === "absent" ? (
+        <div
+          className="mt-2 text-xs text-gray-700 bg-gray-50 border rounded p-2"
+          data-testid="picker-absent-confirmed"
+        >
+          「원가표에 없음」을 사람이 확인했다 ({pick.absent_confirmed_at?.slice(0, 16)})
+          {pick.absent_note ? ` — ${pick.absent_note}` : null}
+        </div>
+      ) : null}
+
+      {pick?.state === "pin_lost" || pick?.state === "pin_ambiguous" ? (
+        <div
+          className="mt-2 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded p-2"
+          data-testid="picker-pin-broken"
+        >
+          {pick.state === "pin_lost"
+            ? "고른 원가표 항목이 이번 파일에 없다 — 구성은 그대로 두었다. 다시 고르거나 「원가표에 없음」을 확인한다."
+            : "같은 이름의 원가표 항목이 2건 이상이다 — 시스템이 고르지 않는다. 아래에서 다시 고른다."}
+        </div>
+      ) : null}
+
+      {items ? (
+        <>
+          <div className="mt-2 text-[11px] text-gray-500" data-testid="picker-summary">
+            폼팩터 {formFactorLabel(recipe.form_factor)} 기준 {items.items.length}건 · 제안{" "}
+            {items.suggested_count}건
+            {items.cost_price_mode
+              ? ` (제안 근거: 링크된 SKU의 cost_price 최빈값 ${formatCostWon(items.cost_price_mode)} — 제안이지 확정이 아니다)`
+              : " (제안 근거 없음 — SKU에 도달 못 해 가격을 못 쓴다. 그래도 고를 수 있다)"}
+          </div>
+          <div className="mt-1 max-h-72 overflow-y-auto border rounded">
+            <table className="w-full text-[11px]">
+              <thead className="bg-gray-50 text-gray-600 sticky top-0">
+                <tr>
+                  <th className="text-left px-2 py-1">품목</th>
+                  <th className="text-right px-2 py-1">제품원가(+VAT)</th>
+                  <th className="text-right px-2 py-1">구성</th>
+                  <th className="px-2 py-1"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.items.map((it) => (
+                  <tr key={it.id} className="border-t" data-testid={`picker-item-${it.id}`}>
+                    <td className="px-2 py-1">
+                      <div className="text-gray-800">
+                        {it.item_name}
+                        {it.suggested ? (
+                          <span
+                            className="ml-1 text-[10px] px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200"
+                            data-testid={`picker-suggested-${it.id}`}
+                          >
+                            제안
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="text-gray-500">
+                        {it.section}
+                        {it.row_number ? ` · 엑셀 ${it.row_number}행` : ""}
+                        {it.form_factor === null ? " · 폼팩터 없음(수입 완제품·매입품)" : ""}
+                        {it.anomalies ? ` · ⚠️ ${it.anomalies}` : ""}
+                      </div>
+                    </td>
+                    <td className="px-2 py-1 text-right tabular-nums">
+                      {formatCostWon(it.total_inc_vat)}
+                    </td>
+                    <td className="px-2 py-1 text-right tabular-nums">{it.line_count}줄</td>
+                    <td className="px-2 py-1 text-right">
+                      <button
+                        className="text-[11px] px-2 py-0.5 rounded border bg-white disabled:opacity-40"
+                        disabled={busy || approved || it.picked}
+                        onClick={() => onPick(it.id)}
+                        data-testid={`picker-pick-${it.id}`}
+                        title={
+                          approved
+                            ? "승인된 레시피는 먼저 승인을 해제한다"
+                            : "이 항목의 구성을 이 레시피에 붙인다 (승인은 별도다)"
+                        }
+                      >
+                        {it.picked ? "고른 항목" : "고른다"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {items.items.length === 0 ? (
+            <div className="mt-1 text-[11px] text-gray-500" data-testid="picker-empty">
+              이 폼팩터의 원가표 항목이 0건이다 — 원가 정본을 아직 안 올렸거나 그 섹션이 없다.
+            </div>
+          ) : null}
+
+          {pick?.state !== "picked" && pick?.state !== "absent" ? (
+            <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+              <input
+                className="text-[11px] border rounded px-2 py-1 flex-1 min-w-[200px]"
+                placeholder="없음으로 확인하는 사유 (예: 필름이 아니라 사입 상품)"
+                value={absentNote}
+                onChange={(e) => setAbsentNote(e.target.value)}
+                data-testid="picker-absent-note"
+              />
+              <button
+                className="text-[11px] px-2 py-1 rounded border disabled:opacity-40"
+                disabled={busy}
+                onClick={() => onAbsent(absentNote)}
+                data-testid="picker-absent"
+                title="목록을 다 보고 붙일 항목이 없다고 판정한다 — 「아직 안 봄」과 구별해 기록된다"
+              >
+                원가표에 없음 — 확인
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
 export function RecipeDetail({
   recipe,
   busy,
   onApprove,
   onUnapprove,
   onAdopt,
+  picker,
 }: {
   recipe: CostRecipe;
   busy: boolean;
   onApprove: () => void;
   onUnapprove: () => void;
   onAdopt: () => void;
+  /** 원가표 픽 패널 — 계약 합격 18·19가 사는 자리다(주입이라 테스트가 «호출부»까지 잰다). */
+  picker?: ReactNode;
 }) {
   const m = recipe.match;
   return (
@@ -1582,9 +1818,15 @@ export function RecipeDetail({
           </div>
         ) : null}
         {m?.candidates && m.candidates.length > 1 ? (
-          <div className="mt-0.5 text-amber-700">후보 {m.candidates.length}건 — 사람이 고른다</div>
+          // ★개정 4(D-CPP-59)로 이 문장이 «사실»이 됐다 — 고를 자리가 아래에 실재한다.
+          //   그 전까지는 화면이 없는 조작을 지시하고 있었다(계약 §0-E-1 ③).
+          <div className="mt-0.5 text-amber-700">
+            후보 {m.candidates.length}건 — 아래 「원가표 항목 고르기」에서 사람이 고른다
+          </div>
         ) : null}
       </div>
+
+      {picker}
 
       <div className="mt-3 flex gap-2 flex-wrap">
         {recipe.status === "approved" ? (
@@ -1988,6 +2230,30 @@ export default function CostPage() {
   useLayoutEffect(() => {
     setSelectedRecipeId((prev) => reconcileSelectedId(filteredRecipes, prev));
   }, [filteredRecipes]);
+
+  // ── 개정 4 (D-CPP-59) — 원가표 픽 목록 ────────────────────────────────────
+  //   ★목록은 «요청했을 때만» 읽는다(레시피를 고를 때마다 자동으로 읽지 않는다) —
+  //   100건 레시피를 훑는 동안 매번 전건 목록을 끌어오면 화면이 느려지고, 그 느림이
+  //   결국 「목록을 안 보게 만드는」 이유가 된다.
+  const [pickerItems, setPickerItems] = useState<CostTableItemList | null>(null);
+  const [pickerLoading, setPickerLoading] = useState(false);
+
+  const loadPickerItems = useCallback(async (recipeId: number) => {
+    setPickerLoading(true);
+    try {
+      setPickerItems(await fetchCostTableItems(recipeId));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPickerLoading(false);
+    }
+  }, []);
+
+  // ★레시피를 바꾸면 목록을 «비운다» — 안 비우면 앞 레시피의 목록이 남아 다음 레시피의
+  //   것처럼 보이고, 그 상태에서 「고른다」를 누르면 엉뚱한 레시피에 붙는다.
+  useEffect(() => {
+    setPickerItems(null);
+  }, [selectedRecipeId]);
 
   async function run(fn: () => Promise<unknown>, ok: string) {
     setBusy(true);
@@ -2405,6 +2671,35 @@ export default function CostPage() {
                       );
                     }
                   }, "엑셀 참고값을 수동 단가로 채택했다")
+                }
+                picker={
+                  <CostTablePicker
+                    recipe={selectedRecipe}
+                    items={pickerItems}
+                    loading={pickerLoading}
+                    busy={busy}
+                    onLoad={() => loadPickerItems(selectedRecipe.id)}
+                    onPick={(itemId) =>
+                      run(async () => {
+                        await pickCostTableItem(selectedRecipe.id, itemId);
+                        // ★픽 직후 목록을 다시 읽는다 — 「고른 항목」 표시가 서버 사실과
+                        //   어긋나면 사람이 두 번 고른다.
+                        await loadPickerItems(selectedRecipe.id);
+                      }, "원가표 항목을 골랐다 — 구성이 붙었다 (승인은 별도다)")
+                    }
+                    onUnpick={() =>
+                      run(async () => {
+                        await unpickCostTableItem(selectedRecipe.id);
+                        await loadPickerItems(selectedRecipe.id);
+                      }, "픽을 되돌렸다 — 구성도 함께 지웠다")
+                    }
+                    onAbsent={(note) =>
+                      run(
+                        () => confirmCostTableAbsent(selectedRecipe.id, note),
+                        "「원가표에 없음」을 기록했다 — 「아직 안 봄」과 구별된다",
+                      )
+                    }
+                  />
                 }
               />
             ) : (
