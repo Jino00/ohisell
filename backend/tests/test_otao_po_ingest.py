@@ -345,3 +345,31 @@ def test_sync_name_map_does_not_overwrite_manual_decisions(session, folder):
     (row,) = session.scalars(select(OtaoItemNameMap)).all()
     assert (row.match_kind, row.product_code) == ("manual", "GAPIP15PR")
     assert (rep.map_manual_kept, rep.map_resolved) == (1, 1)
+
+
+def test_manual_row_without_code_still_counts_as_mapping_needed(session, folder):
+    """★적대 리뷰 P2-7 — 사람이 「아직 모르겠다」로 남긴 행도 「매핑 필요」에 실린다.
+
+    사람이 손댔다는 이유만으로 미해결 항목이 리포트에서 사라지면, 그게 계약 §2-9가 말하는
+    «조용한 발주 누락»이다. 사람의 확정은 존중하되 **미확정은 여전히 미확정으로 센다.**
+    """
+    root, put = folder
+    put("2026년/a.pdf", _doc("20260812-1", [
+        {"code": "GAPIP15PR", "qty": 100, "name_en": "Glass_iP15 pro"},
+    ]))
+    I.ingest_orders(session, root)
+    _customs(session, ["For iPhone 15/16/14Pro Privacy Tempered Glass"])
+    session.add(
+        OtaoItemNameMap(
+            raw_name="For iPhone 15/16/14Pro Privacy Tempered Glass",
+            product_code=None,  # 사람이 봤지만 아직 못 정했다
+            match_kind="manual",
+            note="Jino 검토 대기",
+        )
+    )
+    session.flush()
+
+    rep = I.sync_name_map(session)
+    assert rep.map_manual_kept == 1
+    assert rep.map_resolved == 0
+    assert rep.map_unresolved == ["For iPhone 15/16/14Pro Privacy Tempered Glass"]

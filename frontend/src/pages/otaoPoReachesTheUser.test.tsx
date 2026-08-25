@@ -175,6 +175,22 @@ describe("★「📦 발주 (OTAO)」가 사람에게 닿는 경로 — 라우�
     expect(row.textContent).toContain("80");
   });
 
+  it("SUR-6: 정본/대체됨 건수가 화면에 있다 — D-INV-3의 근거 보존 표면", async () => {
+    // ★적대 리뷰 P2-5 — 이 표면을 통째로 지워도 7건이 전부 초록이었다. 「왜 이 숫자인가」를
+    //   되짚는 유일한 자리라(개정 전 판본을 버리지 않고 보관하는 이유가 그것이다) 잠근다.
+    await renderApp();
+    await screen.findByText("GAPIP15PR");
+    expect(screen.getByText(/정본 발주서 2건/)).toBeTruthy();
+    expect(screen.getByText(/대체됨 1건/)).toBeTruthy();
+  });
+
+  it("SUR-7: 사전 커버리지 배지(붙음 N/M)가 화면에 있다", async () => {
+    // ★적대 리뷰 P2-5 — 「87.2%를 100%인 척하지 않는다」의 표면. 지워지면 매핑 결손의
+    //   «크기»가 화면에서 사라지고 목록만 남는다.
+    await renderApp();
+    expect(await screen.findByText(/1\/2 붙음/)).toBeTruthy();
+  });
+
   it("SUR-5: ★원장이 비면 0을 그리지 않고 «아직 안 심었다»라고 말한다", async () => {
     payload = EMPTY;
     await renderApp();

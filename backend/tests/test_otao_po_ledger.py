@@ -179,6 +179,10 @@ def test_normalize_keeps_2_5d_prefix():
     """
     assert NM.normalize("2.5D Clear Glass") != NM.normalize(".5D Clear Glass")
     assert "2.5d" in NM.normalize("2.5D Clear Glass")
+    # ★적대 리뷰 P2-4 — 위 두 줄은 `\b`만으로도 통과한다(`2` 뒤에 `ea`가 없다). 즉 lookbehind
+    #   `(?<![\d.])`가 «지키는 입력»이 하나도 없었다. 소수점 뒤 `2ea`가 그 입력이다:
+    #   lookbehind를 지우면 `glass3.2ea` → `glass3.`으로 꼬리가 통째로 잘린다.
+    assert NM.normalize("Glass 3.2ea") == "glass3.2ea"
 
 
 def test_resolve_marks_ambiguous_instead_of_guessing():
@@ -381,6 +385,28 @@ def test_out_of_window_orders_are_separated_not_dropped(session):
     assert row.out_of_window_ordered == 4000
     assert row.reserved == 400
     assert roster.totals["out_of_window_ordered"] == 4000
+
+
+def test_window_start_is_the_earliest_shipment_not_the_latest(session):
+    """★적대 리뷰 P2-3 — 창 시작일은 원장의 **가장 이른** 통관일이다.
+
+    이 단언이 없으면 `min`↔`max`를 바꿔도 전건 초록이었다. 픽스처가 전부 선적 **1건**이라
+    min ≡ max였기 때문이다 — 로직이 아니라 표본이 만든 사각지대다.
+
+    ★prod 실측(2026-08-26 07:56 KST): 선적 **12건 · 2026-01-27 ~ 2026-08-18**. `max`였다면
+    창이 08-18로 밀려 **거의 모든 발주가 「창 밖」으로 떨어진다** — 잔량 칸이 통째로 무의미해진다.
+    """
+    _customs(session, date(2026, 1, 27), [("Glass_iP15 pro", 100)])
+    _customs(session, date(2026, 8, 18), [("Glass_iP15 pro", 50)])
+    _map(session, "Glass_iP15 pro", "GAPIP15PR")
+    _order(session, "20260601-1", date(2026, 6, 1), [("GAPIP15PR", 500)])
+
+    roster = build_roster(session)
+    assert roster.window_start == date(2026, 1, 27)
+    (row,) = roster.rows
+    # 06-01 발주는 창 «안»이다. `max`(08-18)였다면 out_of_window로 떨어진다.
+    assert (row.ordered, row.out_of_window_ordered) == (500, 0)
+    assert row.picked == 150
 
 
 def test_unmapped_ledger_names_are_surfaced_with_quantity(session):
