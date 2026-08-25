@@ -32,9 +32,14 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models import NaverProposal, OpsWisdomCandidate, OpsWisdomEntry
-from app.services.naver_ad import guardrail_params
+from app.services.naver_ad import guardrail_params, wisdom_judge
 from app.services.naver_ad.proposal_writer import PARAM_CHANGE
 from app.utils.kst import kst_now
+
+# ★D-NAO-248 §3 — wisdom_judge를 top-level import한다. 순환 우려를 미리 확인했다: wisdom_judge
+#   (및 그 의존 guardrail_params·expert_llm)는 wisdom_apply를 어디서도 import하지 않는다
+#   (wisdom_apply를 import하는 쪽은 wisdom_loop·expert_briefing_builder·wisdom_scorecard —
+#   wisdom_judge와는 무관한 소비자다). 순환이 없으므로 지연 import 불필요.
 
 log = logging.getLogger(__name__)
 
@@ -121,8 +126,54 @@ def gate_summary(db: Session) -> dict:
     return counts
 
 
-def _param_rationale(entry: OpsWisdomEntry, cand: OpsWisdomCandidate, suggestion: dict) -> str:
-    """콘솔 카드에 보일 근거 — 지혜 원칙 + param_suggestion 내용 + 후보 승률/표본 근거."""
+def _sibling_control_summary(sibling_view: dict | None) -> str:
+    """★D-NAO-248 §3 — 판사가 본 조건 대조군 재료를 «판정 없이» 사람에게 병기한다.
+
+    판사는 sibling_buckets.condition_controls를 보고 scope를 판정하는데, 최종 승인자(사람)는
+    그것 없이 승인한다 — 최종 판정자가 중간 판정자보다 적은 증거로 결정하는 역전을 막는다.
+    문턱·합격 판정 어휘(예: "충분"·"합격"·"권장")는 절대 쓰지 않는다 — 판단은 사람 몫이다.
+    값이 없으면(0건) 침묵하지 않고 「없음(0건)」으로 명시한다.
+    """
+    view = sibling_view or {}
+    cc = view.get("condition_controls") or []
+    ot = view.get("other_campaign_types") or []
+    excl = view.get("excluded_from_controls") or {}
+
+    if cc:
+        items = []
+        for r in cc[:3]:
+            differs = ",".join(r.get("differs_in") or []) or "(없음)"
+            wr = r.get("win_rate")
+            wr_s = str(wr) if wr is not None else "N/A"
+            items.append(f"differs_in={differs} n={r.get('n')} WR={wr_s}")
+        listing = "; ".join(items)
+        if len(cc) > 3:
+            listing += f"; 외 {len(cc) - 3}건"
+        cc_part = f"조건 대조군(판사가 본 재료 — 판정 아님): {len(cc)}건 [{listing}]"
+    else:
+        cc_part = "조건 대조군: 없음(0건)"
+
+    exp = excl.get("experiment_batch", 0)
+    legacy = excl.get("legacy_grain", 0)
+    unknown = excl.get("unknown_boundary", 0)
+    # ★D-NAO-248 §2(P2-1) — 후보 자신이 규칙 0에 걸려 대조군을 가질 수 없을 때, 대조군
+    #   자격이 있었을 형제(어느 버킷에도 안 잡히고 그냥 버려지던 형제)를 여기서 센다. 값이
+    #   0이어도 표기를 지우지 않는다(침묵 금지 — 「없음」과 「0건」은 다르다).
+    not_eligible = excl.get("candidate_not_eligible", 0)
+    excluded_total = exp + legacy + unknown + not_eligible
+
+    return (
+        f"{cc_part} / 비교 불가 유형 {len(ot)}건 / "
+        f"대조군 제외 {excluded_total}건(실험배치 {exp}·레거시 {legacy}·경계미상 {unknown}·"
+        f"후보 자체가 대조군 자격 없음 {not_eligible})"
+    )
+
+
+def _param_rationale(
+    entry: OpsWisdomEntry, cand: OpsWisdomCandidate, suggestion: dict, sibling_view: dict | None
+) -> str:
+    """콘솔 카드에 보일 근거 — 지혜 원칙 + param_suggestion 내용 + 후보 승률/표본 근거 +
+    조건 대조군 요약(D-NAO-248 §3, 판정 없이 재료만)."""
     good = cand.good_count or 0
     bad = cand.bad_count or 0
     total = good + bad
@@ -138,7 +189,8 @@ def _param_rationale(entry: OpsWisdomEntry, cand: OpsWisdomCandidate, suggestion
         f"제안: {param} → {direction}" + (f" ({note})" if note else "") + "\n"
         f"승률 근거: good={good}/bad={bad}"
         + (f", win_rate={win_rate}" if win_rate is not None else " (분모 없음)")
-        + f", 캠페인={cand.campaign_id or '(계정)'}, 액션={cand.action or '(미지정)'}."
+        + f", 캠페인={cand.campaign_id or '(계정)'}, 액션={cand.action or '(미지정)'}.\n"
+        + _sibling_control_summary(sibling_view)
     )
 
 
@@ -183,6 +235,8 @@ def propose_param_changes(db: Session, *, now: datetime | None = None) -> dict:
             totals["skipped_unmapped_param"] += 1
             continue
         param_key = (suggestion.get("param") or "").strip()
+        # ★D-NAO-248 §3 — 판사가 본 조건 대조군 재료를 카드 근거에도 병기한다(판정 없이).
+        sibling_view = wisdom_judge._sibling_buckets(db, cand)
         try:
             proposal = NaverProposal(
                 proposal_type=PARAM_CHANGE,
@@ -190,7 +244,7 @@ def propose_param_changes(db: Session, *, now: datetime | None = None) -> dict:
                 #   구조적으로 싣는다 — 승인 핸들러가 텍스트 파싱을 하지 않게 한다.
                 target_type=guardrail_params.TARGET_TYPE, target_id=param_key,
                 campaign_id=cand.campaign_id or "",
-                rationale=_param_rationale(entry, cand, suggestion),
+                rationale=_param_rationale(entry, cand, suggestion, sibling_view),
                 expected_effect=_PARAM_EXPECTED_EFFECT,
                 status="pending",
                 # ★실행 payload 전부 미설정(None) — 실행 불가 형태 유지(D-NAO-54 금지선).
