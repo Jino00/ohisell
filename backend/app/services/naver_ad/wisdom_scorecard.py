@@ -39,6 +39,7 @@ from app.services.naver_ad import reflection_health
 from app.services.naver_ad import wisdom_apply
 from app.services.naver_ad.wisdom_candidates import (
     _HARVEST_LOOKBACK_DAYS,
+    _reopen_ready,
     HARVEST_EVENT_TYPES,
     RETRO_HARVEST_LABEL,
 )
@@ -529,6 +530,31 @@ def _search_term_material(db: Session) -> dict:
     return {"total": total, "by_status": by_status, "label": label}
 
 
+def _judge_backlog(db: Session) -> dict:
+    """★D-NAO-251 §4-③ — 판사 대기열 적체 지표(읽기 전용 스냅샷).
+
+    `pending_ripe`는 «지금 판사에게 갈 자격이 있는» 후보 수다(TTL 14일 경과 or occurrences≥3,
+    `wisdom_judge._is_ripe`와 같은 판정을 재사용한다 — 문턱을 두 곳에 복사하지 않는다).
+    `days_to_drain`은 크론이 1일 1회라 «회차 수 = 일수»인 데서 나온 산술이며, 신규 후보 유입이
+    0이라는 가정 위의 값이다(그 가정을 라벨에 적어 둔다 — 창을 안 밝힌 커버리지 주장은 이
+    저장소의 반복 실패다).
+    """
+    from app.services.naver_ad import wisdom_judge as _wj
+
+    now = kst_now()
+    pending = db.query(OpsWisdomCandidate).filter(OpsWisdomCandidate.status == "pending").all()
+    ripe = [c for c in pending if _wj._is_ripe(c, now) and c.action]
+    cap = _wj._MAX_PER_RUN_BACKLOG if len(ripe) > _wj._MAX_PER_RUN else _wj._MAX_PER_RUN
+    return {
+        "pending_total": len(pending),
+        "pending_ripe": len(ripe),
+        "cap_next_run": cap,
+        "days_to_drain": (len(ripe) + cap - 1) // cap if ripe else 0,
+        "cron": "08:45 KST 1일 1회 (캐치업 크론 없음 — 적체는 회차 상한으로 흡수)",
+        "assumption": "days_to_drain은 신규 후보 유입 0 가정. 실제로는 매일 새 후보가 생긴다.",
+    }
+
+
 def _candidate_status(db: Session) -> dict:
     """A2 관측 표면 — 지혜 승격 «후보»(OpsWisdomCandidate) 현황. wisdom_scorecard의 나머지는
     이미 승격된 지혜(OpsWisdomEntry)만 보므로, 승격 전 파이프라인(harvest_candidates가 매일
@@ -566,11 +592,27 @@ def _candidate_status(db: Session) -> dict:
             "observation": c.observation,
             "first_seen_at": _iso(c.first_seen_at),
             "last_seen_at": _iso(c.last_seen_at),
+            # ★D-NAO-251 §5 ①-b/①-c 관측 표면 — 기각분의 증거가 판정 이후 얼마나 더 쌓였는지,
+            #   재심 여력이 남았는지를 화면에서 바로 본다. judged_occurrences가 None이면
+            #   「아직 판정된 적 없음」이고 occurrences_since_judgment도 None이다(0이 아니다 —
+            #   0으로 내면 「판정 후 하나도 안 쌓임」과 구별이 안 된다).
+            "judged_at": _iso(c.judged_at),
+            "judged_occurrences": c.judged_occurrences,
+            "occurrences_since_judgment": (
+                None if c.judged_occurrences is None
+                else (c.occurrences or 0) - c.judged_occurrences
+            ),
+            "rejudge_count": c.rejudge_count or 0,
+            "reopen_ready": _reopen_ready(c) if c.status == "rejected" else False,
+            "prior_judgment_count": len(json.loads(c.prior_judgments_json or "[]")),
         })
     return {
         "candidates_total": len(cands),
         "bucket_counts": bucket_counts,
         "bucket_labels": _BUCKET_LABELS,
+        # ★D-NAO-251 §4-③ — 판사 적체가 침묵하지 않게 한다. 「pending 17건인데 회당 5건」이
+        # 어디에도 안 보이던 것이 이 계약이 고치는 결함 셋 중 하나다(교훈 #318).
+        "judge_backlog": _judge_backlog(db),
         # A2 「기존 재료 재집계」 라벨 — harvest_candidates.RETRO_HARVEST_LABEL과 문자열 동일
         # (한 곳에서만 정의 — wisdom_candidates.py 참조).
         "retro_harvest_label": RETRO_HARVEST_LABEL,
