@@ -36,9 +36,13 @@ import {
   type NaverDashboardOverview,
   type NaverGuardrailParamsResponse,
   type NaverGuardrailParam,
+  type NaverParamGateCounts,
+  type NaverExplorationActorSnapshot,
 } from "../lib/api";
 import { isoKST, won, roasX, NO_DATA } from "../lib/format";
 import { buildGuardrailSaveBody } from "../lib/guardrailParamsSave";
+import { buildApplyValue, prefillApplyValue } from "../lib/naverParamChangeApproval";
+import { formatDirectionCount, formatShare, isBrakeOnlyDrift } from "../lib/naverSymmetryFormat";
 import { LayerNav } from "../components/ui";
 
 function daysAgo(n: number): string {
@@ -291,6 +295,36 @@ const VERDICT_META: Record<NaverExpertVerdict, { icon: string; label: string; cl
   commentary: { icon: "💬", label: "총평", className: "bg-blue-50 text-blue-700" },
 };
 
+// X1a T4 제안 카드 버튼 공통 스타일 — renderProposalActions와 renderParamChangeApprovalRow가
+// 같이 쓴다(모듈 상수로 빼서 두 곳이 갈라지지 않게).
+const PROPOSAL_BTN_BASE =
+  "px-3 py-1.5 text-xs rounded border disabled:opacity-50 disabled:cursor-not-allowed";
+
+// B7-6 파라미터 게이트 카운터 라벨(D-NAO-249 F3) — 값이 0이어도 카운터의 존재 자체가
+// «조용히 0건»과 «세는 코드가 죽어서 0건」을 가르는 신호다(교훈 #318).
+const PARAM_GATE_LABELS: { key: keyof NaverParamGateCounts; label: string; hint: string }[] = [
+  {
+    key: "unconditional_mapped",
+    label: "제안 생성",
+    hint: "무조건부 판단 ∧ 화이트리스트 키 → 파라미터 제안이 실제로 생성됨",
+  },
+  {
+    key: "conditional_fallback",
+    label: "제안 안 냄(조건부)",
+    hint: "조건부 판단(또는 scope 부재) → 격상하지 않음",
+  },
+  {
+    key: "unmapped_param",
+    label: "제안 안 냄(미매핑)",
+    hint: "파라미터 키가 화이트리스트 밖 → 격상하지 않음",
+  },
+  {
+    key: "no_suggestion",
+    label: "제안 없음",
+    hint: "판사가 파라미터 제안을 아예 안 냄(대부분 정상)",
+  },
+];
+
 interface CampaignRow {
   campaign_id: string;
   campaign_type: string;
@@ -369,6 +403,13 @@ export default function NaverAdOptimizationConsole() {
   const [guardrailTouched, setGuardrailTouched] = useState<Record<string, boolean>>({});
   const [guardrailSaving, setGuardrailSaving] = useState(false);
   const [guardrailSaveError, setGuardrailSaveError] = useState<string | null>(null);
+
+  // D-NAO-249 F1 — param_change 승인 카드의 값 입력(제안 id별). 프리필은 봉투 현황판의
+  // «현재값»이지 제안이 권하는 값이 아니다(판사는 키·방향만 정한다 — 순수 함수
+  // naverParamChangeApproval.ts 헤더 참조). 사람이 손대지 않았으면 undefined로 두고
+  // 렌더 시점에 prefillApplyValue가 spec.value로 채운다.
+  const [paramChangeValueEdits, setParamChangeValueEdits] = useState<Record<number, string>>({});
+  const [paramChangeValueError, setParamChangeValueError] = useState<Record<number, string | null>>({});
 
   async function loadGuardrail() {
     setGuardrailLoading(true);
@@ -690,6 +731,110 @@ export default function NaverAdOptimizationConsole() {
     }
   }
 
+  // ── D-NAO-249 F1: param_change 승인 카드의 값 입력 ──
+  // 「승인=적용」 사슬(백엔드 POST /proposals/{id}/status)에서 param_change 승인은
+  // applied_value를 요구한다. 반영될 값은 **사람이 정한다** — 판사(지혜)는 파라미터 키와
+  // 방향(direction)만 정하고 크기는 코드가 발명하지 않는다(D-NAO-249 확정). 이 함수들은
+  // 최초 승인(pending)과 재승인(failed)이 공유한다 — 둘 다 같은 백엔드 검증을 탄다.
+
+  // 제안이 지목한 파라미터의 «지금» 스펙(현재값·범위·근거) — 봉투 현황판 API 응답에서 찾는다.
+  // target_type이 guardrail_param이 아니거나 guardrail이 아직 안 실렸으면 undefined
+  // (화면은 이 경우를 「확인 불가」로 명시하지, 값을 지어내지 않는다).
+  function paramChangeSpecFor(p: NaverAdProposal): NaverGuardrailParam | undefined {
+    return guardrail?.params.find((g) => g.key === p.target_id);
+  }
+
+  function updateParamChangeValueEdit(id: number, value: string) {
+    setParamChangeValueEdits((prev) => ({ ...prev, [id]: value }));
+    setParamChangeValueError((prev) => ({ ...prev, [id]: null }));
+  }
+
+  async function approveParamChange(p: NaverAdProposal, confirmText: string, value: number) {
+    if (!window.confirm(confirmText)) return;
+    setActionBusy((prev) => ({ ...prev, [p.id]: true }));
+    clearActionResult(p.id);
+    try {
+      await updateNaverProposalStatus(p.id, "approved", { appliedValue: value });
+      setActionResult(p.id, `✓ 승인 및 반영 완료 (${p.target_id}=${value})`, false);
+      // ★사람이 「눌렀는데 실제로 바뀌었나」를 그 자리에서 확인해야 한다 — 봉투 현황판을
+      // 다시 불러 반영된 값을 보인다(요청 사양 F1).
+      await loadGuardrail();
+    } catch (e) {
+      // ★서버 400 한국어 메시지를 그대로 노출한다(자체 문구로 갈아치우지 않는다) —
+      // guardrailSaveError와 같은 관례(저장 실패 사유는 서버가 말해야 한다).
+      // ★`e: any`를 쓰지 않는다 — 이 파일의 기존 관례이긴 하나 CI 래칫이
+      // `--max-warnings 96`으로 잠겨 있어 **한 건만 더해도 빨간불**이다(2026-08-25 실측:
+      // no-explicit-any 36→37로 CI 실패). 기존 36건은 그 파일을 맡은 트랙이 갚을 부채이고,
+      // 새 코드가 그 숫자를 늘리지는 않는다(래칫의 취지).
+      setActionResult(p.id, e instanceof Error ? e.message : String(e), true);
+    } finally {
+      await loadProposals(); // codex P2 관례: 목록 갱신 후 busy 해제
+      setActionBusy((prev) => ({ ...prev, [p.id]: false }));
+    }
+  }
+
+  function handleApproveParamChangeClick(p: NaverAdProposal, confirmText: string) {
+    const spec = paramChangeSpecFor(p);
+    const raw = prefillApplyValue(spec, paramChangeValueEdits[p.id]);
+    const result = buildApplyValue(raw, spec);
+    if (!result.ok) {
+      setParamChangeValueError((prev) => ({ ...prev, [p.id]: result.error }));
+      return;
+    }
+    setParamChangeValueError((prev) => ({ ...prev, [p.id]: null }));
+    return approveParamChange(p, confirmText, result.value);
+  }
+
+  // param_change 전용 승인 UI(값 입력 + 범위·근거 표시) — pending 최초 승인과 failed 재승인이
+  // 공유한다(confirmText·approveLabel만 다르다).
+  function renderParamChangeApprovalRow(
+    p: NaverAdProposal,
+    busy: boolean,
+    confirmText: string,
+    approveLabel: string,
+  ) {
+    const spec = paramChangeSpecFor(p);
+    const raw = prefillApplyValue(spec, paramChangeValueEdits[p.id]);
+    const err = paramChangeValueError[p.id];
+    return (
+      <div className="flex flex-col items-end gap-1.5">
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            step="any"
+            min={spec?.min}
+            max={spec?.max}
+            value={raw}
+            disabled={busy}
+            onChange={(ev) => updateParamChangeValueEdit(p.id, ev.target.value)}
+            aria-label={`${p.target_id} 적용 값`}
+            className="w-24 border border-gray-200 rounded px-1.5 py-1 text-xs disabled:opacity-50"
+          />
+          <button disabled={busy} onClick={() => handleApproveParamChangeClick(p, confirmText)}
+            className={`${PROPOSAL_BTN_BASE} border-blue-200 text-blue-600 hover:bg-blue-50`}>
+            {approveLabel}
+          </button>
+          <button disabled={busy} onClick={() => handleReject(p)}
+            className={`${PROPOSAL_BTN_BASE} border-gray-200 text-gray-500 hover:bg-gray-50`}>
+            반려
+          </button>
+        </div>
+        {spec ? (
+          <span className="text-[11px] text-gray-400 max-w-[220px] text-right">
+            현재값 {spec.value} · 허용 범위 {spec.min} ~ {spec.max} · 코드 기본값 {spec.code_default}
+            {spec.direction ? ` · 방향(참고만, 크기는 사람이 정함): ${spec.direction}` : ""}
+          </span>
+        ) : (
+          <span className="text-[11px] text-amber-700 max-w-[220px] text-right">
+            봉투 현황판에서 파라미터 「{p.target_id}」를 찾을 수 없습니다 — 값을 직접 확인 후
+            입력하세요(범위 클램프 없이 서버가 최종 검증합니다)
+          </span>
+        )}
+        {err && <span className="text-[11px] text-red-600">{err}</span>}
+      </div>
+    );
+  }
+
   // ── X1a T5: E2 위임 스위치 토글 ──
   // ON 전환은 Confirm 필수(자동 실행 개시 — D-NAO-5 취지 연장), OFF는 즉시(자율성 축소는
   // 마찰 불필요). 전체 배열 치환 PUT이므로 다른 이미 위임된 유형은 그대로 유지한다.
@@ -726,8 +871,14 @@ export default function NaverAdOptimizationConsole() {
     if (!showsActionButtons(p)) {
       return <span className="text-xs text-gray-300">자동 만료</span>;
     }
-    const btnBase = "px-3 py-1.5 text-xs rounded border disabled:opacity-50 disabled:cursor-not-allowed";
+    const btnBase = PROPOSAL_BTN_BASE;
     if (p.status === "pending") {
+      // D-NAO-249 F1: param_change 승인은 applied_value가 필수다(백엔드 400) — 값을
+      // 입력받는 전용 UI로 분기한다. ★백엔드 파생값(decision_only)만으로 분기한다
+      // (proposal_type 문자열 재분류 금지 — 이 파일의 기존 관례, approvePreConfirmText 참조).
+      if (p.decision_only) {
+        return renderParamChangeApprovalRow(p, busy, approvePreConfirmText(p), "승인");
+      }
       return (
         <div className="flex gap-1.5">
           <button disabled={busy} onClick={() => handleApprove(p)}
@@ -767,6 +918,11 @@ export default function NaverAdOptimizationConsole() {
       );
     }
     if (p.status === "failed") {
+      // param_change 재승인도 같은 검증을 탄다(백엔드 (failed,approved) 전이 허용 —
+      // is_param_change 판정은 현재 status와 무관하다).
+      if (p.decision_only) {
+        return renderParamChangeApprovalRow(p, busy, "실패한 제안을 재승인해 재시도할까요?", "재승인");
+      }
       return (
         <div className="flex gap-1.5">
           <button disabled={busy} onClick={() => handleReapprove(p)}
@@ -877,6 +1033,20 @@ export default function NaverAdOptimizationConsole() {
           <div className="bg-gray-50 border border-gray-200 text-gray-600 text-xs rounded-lg p-3 mb-3">
             되돌림 스위치가 내려가 있어 모든 값이 코드 기본값으로 돕니다.
           </div>
+        )}
+
+        {/* B3 되돌림 절차(D-NAO-249) — from_db_help는 서버 문구를 그대로 낸다(프론트가
+            새로 짓지 않는다). 되돌림 스위치가 이미 켜져 있는 평상시엔 접어서 소음을 줄이되,
+            내려가 있으면(위 경고 블록이 뜬 상태) 펼쳐서 바로 절차가 보이게 한다. */}
+        {guardrail && (
+          <details className="mb-3" open={!guardrail.from_db_enabled}>
+            <summary className="text-xs text-blue-600 cursor-pointer select-none">
+              되돌림 스위치란(B3) — 절차 보기
+            </summary>
+            <p className="text-[11px] text-gray-500 mt-1 leading-relaxed whitespace-pre-line">
+              {guardrail.from_db_help}
+            </p>
+          </details>
         )}
 
         {guardrail && guardrail.retro_freshness.stale && (
@@ -1359,6 +1529,128 @@ export default function NaverAdOptimizationConsole() {
                   ))}
                 </ul>
               )}
+
+              {/* B7-6 파라미터 제안 게이트(D-NAO-249 F3) — 0건이어도 렌더한다. 목적은 「조용히
+                  0건인가, 세는 코드가 죽어서 0건인가」를 가르는 것(교훈 #318) — 객체 존재
+                  여부로 분기하고, 값 자체는 ?? 0으로 항상 낸다. */}
+              {cs.param_gate && (
+                <div className="mt-3 pt-2 border-t border-gray-100">
+                  <h5 className="text-[11px] font-medium text-gray-500">
+                    파라미터 제안 게이트(B7-6)
+                  </h5>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                    {PARAM_GATE_LABELS.map(({ key, label, hint }) => (
+                      <span key={key} title={hint}>
+                        {label} {cs.param_gate?.[key] ?? 0}건
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* C2 검색어 재료 현황(다른 세션이 배선 중) — 백엔드에 아직 없으면 아무것도
+                  그리지 않는다(옵셔널 방어 렌더, D-NAO-249 F4). */}
+              {cs.search_term_material && (() => {
+                const stm = cs.search_term_material!;
+                const statusOrder: (keyof typeof stm.by_status)[] = [
+                  "stopped", "leaking", "ambiguous", "no_data", "absent", "unknown",
+                  "not_harvestable",
+                ];
+                return (
+                  <div className="mt-3 pt-2 border-t border-gray-100">
+                    <h5 className="text-[11px] font-medium text-gray-500">
+                      검색어 재료 · {stm.total}건
+                    </h5>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                      {statusOrder.map((k) => (
+                        <span key={k}>
+                          {k} {stm.by_status[k] ?? 0}건
+                        </span>
+                      ))}
+                    </div>
+                    <p className="mt-1 text-[11px] text-gray-400">{stm.label}</p>
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        })()}
+
+        {/* B5 대칭·탐색 관측(D-NAO-247 점화 계약) — ①봉투 파라미터 조인 이력의 액셀/브레이크
+            분류 ②탐색(explore) 몫과 탐색 차단률(파라미터 변경 전/후 병기).
+            ★[판정불능 예약] — 이 블록은 성과를 판정하지 않는다. 실집행이 0건이라 파라미터
+            변경의 효과를 관측할 사건 자체가 없다 — 배선·관측의 증거이지 효과의 증거가 아니다.
+            symmetry_report가 없어도(배포 순서상 백엔드가 아직 안 줄 수 있다) 화면은 안 깨진다. */}
+        {wisdomCard?.symmetry_report && (() => {
+          const sr = wisdomCard.symmetry_report!;
+          const gd = sr.guardrail_direction;
+          const ex = sr.exploration;
+          const renderSnapshot = (label: string, snap: NaverExplorationActorSnapshot) => (
+            <div className="text-[11px] text-gray-500">
+              <div className="font-medium text-gray-600">{label} · {snap.total}건</div>
+              <div>
+                actor 구성:{" "}
+                {Object.keys(snap.by_actor).length === 0
+                  ? "표본 없음"
+                  : Object.entries(snap.by_actor).map(([a, n]) => `${a} ${n}건`).join(" · ")}
+              </div>
+              <div>
+                탐색(explore) 몫 {formatShare(snap.explore_share)} · 탐색 차단률{" "}
+                {formatShare(snap.explore_blocked_rate)}
+                {snap.explore_total > 0 && ` (${snap.explore_blocked}/${snap.explore_total}건)`}
+              </div>
+            </div>
+          );
+          return (
+            <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h4 className="text-xs font-medium text-gray-600">대칭·탐색 관측(B5)</h4>
+                <span className="text-[11px] text-amber-700 bg-amber-50 rounded px-1.5 py-0.5">
+                  {sr.verdict_pending}
+                </span>
+              </div>
+
+              <div className="mt-2">
+                <h5 className="text-[11px] font-medium text-gray-500">
+                  액셀/브레이크 분류(봉투 파라미터 조치 {gd.total_changes}건)
+                </h5>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                  <span>{formatDirectionCount(gd.brake, gd.accel)}</span>
+                  <span>무변화/판정불가 {gd.unchanged_or_unknown}건</span>
+                  {isBrakeOnlyDrift(gd.brake, gd.accel) && (
+                    <span className="text-amber-700">
+                      ⚠ 브레이크만 조여지고 액셀은 0건 — 표류 경보(D-NAO-85 재발 주의, 성과 판정 아님)
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-400">
+                  {Object.entries(gd.by_key).map(([key, v]) => (
+                    <span key={key}>
+                      {key}: 브레이크 {v.brake}·액셀 {v.accel}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-3 pt-2 border-t border-gray-100">
+                <h5 className="text-[11px] font-medium text-gray-500">
+                  탐색 몫·탐색 차단률(최근 {ex.window_days}일)
+                </h5>
+                <p className="mt-1 text-[11px] text-gray-400">
+                  {ex.note}
+                  {ex.boundary_changed_at && ` — 경계 ${ex.boundary_changed_at}`}
+                </p>
+                {ex.before && ex.after ? (
+                  <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {renderSnapshot("변경 전", ex.before)}
+                    {renderSnapshot("변경 후", ex.after)}
+                  </div>
+                ) : ex.whole_window ? (
+                  <div className="mt-1">{renderSnapshot("창 전체(경계 없음)", ex.whole_window)}</div>
+                ) : (
+                  <p className="mt-1 text-[11px] text-gray-400">표본이 없습니다.</p>
+                )}
+              </div>
             </div>
           );
         })()}

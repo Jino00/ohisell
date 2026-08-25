@@ -37,10 +37,22 @@ NAME_B = "오하이 지문방지 PET 저반사 필름 2매"
 
 # 엑셀 정본 산술 (부자재 8종 공용분 = 30+22+60+8+13+98+6+100 = 337)
 SHARED = 337
-A_EX = 600 * 3 + SHARED          # 2137  → inc 2350.70
-B_EX = 600 * 2 + SHARED          # 1537  → inc 1690.70
+A_EX = 600 * 3 + SHARED          # 2137  → inc 2350.70 (D-CPP-58 이전)
+B_EX = 600 * 2 + SHARED          # 1537  → inc 1690.70 (D-CPP-58 이전)
+
+# ★D-CPP-58 — 「부자재 (밀대외)」 22원이 원장 파생 `cleaning kit` 190.82원으로 대체됐다.
+#   그래서 표준원가는 엑셀 「제품원가」와 **더는 같지 않다**(엑셀이 실제보다 과소 — GOAL 카드).
+#   값은 prod 2026-08-18 로트의 실측값이다.
+KIT_EX = D("190.82")
+KIT_INC = D("209.90")
+A_STD_EX = D(A_EX) - D("22") + KIT_EX     # 2305.82
+B_STD_EX = D(B_EX) - D("22") + KIT_EX     # 1705.82
+A_STD_INC = "2536.40"            # (2137 − 22 + 190.82) × 1.1
+B_STD_INC = "1876.40"            # (1537 − 22 + 190.82) × 1.1
 SHARED_NAMES = (
-    "부착 안내문", "부자재 (밀대외)", "알콜솜 2EA", "비닐 (9*18)",
+    # ★「부자재 (밀대외)」는 D-CPP-58 층2가 `cleaning kit`으로 접는다 — 폼팩터가 안 붙는
+    #   유일한 종이라 이름에 `(bar)`가 없다.
+    "부착 안내문", "cleaning kit", "알콜솜 2EA", "비닐 (9*18)",
     "비닐 (12*22+4)", "패키지", "폼텍 스티커", "부착 지그",
 )
 
@@ -115,6 +127,7 @@ def client():
 
     app.dependency_overrides[get_db] = _override_get_db
     tc = TestClient(app)
+    tc.testing_session = TestingSession
 
     with TestingSession() as s:
         s.add(Channel(id=1, name="자사몰", code="CAFE24", platform="cafe24"))
@@ -185,13 +198,43 @@ def _ready(client) -> tuple[int, int]:
     """A·B 둘 다 승인 + 단가 채택까지 — 「이미 계산되고 있는 상태」를 만든다."""
 
     _import(client)
+    _seed_cleaning_kit_price(client)
     ra, rb = _recipe(client, NAME_A)["id"], _recipe(client, NAME_B)["id"]
     for rid in (ra, rb):
         assert client.post(f"/api/cost/recipes/{rid}/approve").status_code == 200
         assert client.post(f"/api/cost/recipes/{rid}/adopt-excel-prices").status_code == 200
-    assert _board_std(client, ra) == {"2350.70"}
-    assert _board_std(client, rb) == {"1690.70"}
+    assert _board_std(client, ra) == {A_STD_INC}
+    assert _board_std(client, rb) == {B_STD_INC}
     return ra, rb
+
+
+def _seed_cleaning_kit_price(client) -> None:
+    """★D-CPP-58: cleaning kit은 «원장이 단가의 정본»이라 엑셀 채택 경로를 안 탄다.
+    prod에는 수입 로트 7건이 붙어 있다. 픽스처가 그 모양을 재현하지 않으면 표준원가가
+    영영 «계산 불가»로 남아, 이 파일이 «병합 후의 prod»가 아닌 상태를 검사하게 된다.
+
+    `source="manual"`인 이유는 `test_cost_menu_recipes.py`와 같다 — `ledger` 행은 조회 시점에
+    원장과 다시 맞춰 보므로 수입건 라인 없이 심으면 계산에서 빠진다. **원장 파생 단가가 실제로
+    보드에 닿는지**는 이 파일 아래쪽 `test_linking_a_ledger_line_reaches_the_board`가
+    진짜 수입건을 만들어 따로 잰다.
+    """
+
+    from app.models import CostMaterial, CostMaterialPrice
+    from app.services.cost_menu.recipe_parser import CLEANING_KIT_NAME
+
+    with client.testing_session() as s:
+        m = s.query(CostMaterial).filter(CostMaterial.name == CLEANING_KIT_NAME).one()
+        assert m.excel_ref_price is None, "엑셀 22원이 cleaning kit의 참고값으로 샜다(층2 실패)"
+        m.prices.append(
+            CostMaterialPrice(
+                source="manual",
+                unit_price_ex_vat=KIT_EX,
+                unit_price_inc_vat=KIT_INC,
+                effective_date=date(2026, 8, 18),
+            )
+        )
+        m.status = "approved"
+        s.commit()
 
 
 # ──────────────────────────────────────────────
@@ -215,8 +258,8 @@ def test_shared_material_price_change_reaches_every_approved_recipe(client):
     assert r.status_code == 201, r.text
 
     # ⇒ **두 레시피 모두** 보드에서 +100(ex) 만큼 오른다. 한쪽만 오르면 그게 이 계약이 고친 병이다.
-    assert _board_std(client, ra) == {f"{(A_EX + 100) * 1.1:.2f}"}   # 2460.70
-    assert _board_std(client, rb) == {f"{(B_EX + 100) * 1.1:.2f}"}   # 1800.70
+    assert _board_std(client, ra) == {f"{(A_STD_EX + 100) * D('1.1'):.2f}"}   # 2646.40
+    assert _board_std(client, rb) == {f"{(B_STD_EX + 100) * D('1.1'):.2f}"}   # 1986.40
 
     # 같은 레시피의 SKU들은 여전히 «같은 값»이다(전파가 SKU 단위로 갈라지지 않는다).
     assert len(_board_rows(client, ra)) == 2
@@ -235,8 +278,8 @@ def test_only_the_shared_material_moves_both_recipes(client):
                           "effective_date": date.today().isoformat()})
     assert r.status_code == 201, r.text
 
-    assert _board_std(client, ra) == {f"{(A_EX + 100 * 3) * 1.1:.2f}"}   # 2680.70
-    assert _board_std(client, rb) == {"1690.70"}                          # 불변
+    assert _board_std(client, ra) == {f"{(A_STD_EX + 100 * 3) * D('1.1'):.2f}"}   # 2866.40
+    assert _board_std(client, rb) == {B_STD_INC}                          # 불변
 
 
 # ──────────────────────────────────────────────
@@ -279,8 +322,8 @@ def test_unapproving_a_material_returns_board_to_dash(client):
     # 되돌리면 다시 돌아온다 — 한 방향으로만 도는 전파는 전파가 아니다.
     assert client.patch(f"/api/cost/materials/{pkg['id']}",
                         json={"status": "approved"}).status_code == 200
-    assert _board_std(client, ra) == {"2350.70"}
-    assert _board_std(client, rb) == {"1690.70"}
+    assert _board_std(client, ra) == {A_STD_INC}
+    assert _board_std(client, rb) == {B_STD_INC}
 
 
 def test_rename_does_not_trigger_useless_recompute(client):
@@ -296,7 +339,7 @@ def test_rename_does_not_trigger_useless_recompute(client):
 
     after = client.get("/api/cost/board").json()
     assert {r["internal_sku"]: r["std_cost_inc_vat"] for r in after["items"]} == stamp
-    assert _board_std(client, ra) == {"2350.70"}
+    assert _board_std(client, ra) == {A_STD_INC}
 
 
 # ──────────────────────────────────────────────
@@ -311,6 +354,7 @@ def test_adopting_one_recipe_completes_another_that_shares_materials(client):
     """
 
     _import(client)
+    _seed_cleaning_kit_price(client)
     ra, rb = _recipe(client, NAME_A)["id"], _recipe(client, NAME_B)["id"]
     client.post(f"/api/cost/recipes/{ra}/approve")
     client.post(f"/api/cost/recipes/{rb}/approve")
@@ -324,13 +368,15 @@ def test_adopting_one_recipe_completes_another_that_shares_materials(client):
     assert _board_std(client, rb) == {None}
 
     out = client.post(f"/api/cost/recipes/{ra}/adopt-excel-prices").json()
-    # A는 자기 필름 + 공유 8종 = 9종을 채택한다.
-    assert len(out["adopted"]) == 9
+    # ★A는 자기 필름 + 공유 7종 = **8종**을 채택한다 — cleaning kit은 엑셀 참고값이 없어
+    #   채택 대상이 아니다(D-CPP-58 층2). 9였다가 8이 되는 이 숫자가 「단가의 정본이 엑셀에서
+    #   원장으로 옮겨졌다」의 가장 짧은 증거다.
+    assert len(out["adopted"]) == 8
     # ★그 채택이 **B까지** 재계산했다는 자백이 응답에 실린다(조용한 전파는 전파가 아니다).
     assert out["also_recomputed_recipe_ids"] == [rb]
 
-    assert _board_std(client, ra) == {"2350.70"}
-    assert _board_std(client, rb) == {"1690.70"}
+    assert _board_std(client, ra) == {A_STD_INC}
+    assert _board_std(client, rb) == {B_STD_INC}
 
 
 # ──────────────────────────────────────────────
@@ -341,6 +387,7 @@ def test_propagation_never_computes_an_unapproved_recipe(client):
     전파가 그 문을 여는 뒷길이 되면 안 된다."""
 
     _import(client)
+    _seed_cleaning_kit_price(client)
     ra, rb = _recipe(client, NAME_A)["id"], _recipe(client, NAME_B)["id"]
     client.post(f"/api/cost/recipes/{ra}/approve")
     client.post(f"/api/cost/recipes/{ra}/adopt-excel-prices")
@@ -354,7 +401,7 @@ def test_propagation_never_computes_an_unapproved_recipe(client):
     rows = _board_rows(client, rb)
     assert {x["std_cost_inc_vat"] for x in rows} == {None}
     assert all("미승인" in (x["reason"] or "") for x in rows), [x["reason"] for x in rows]
-    assert _board_std(client, ra) == {"2350.70"}
+    assert _board_std(client, ra) == {A_STD_INC}
 
 
 def test_price_change_never_touches_cost_price(client):
@@ -372,6 +419,8 @@ def test_price_change_never_touches_cost_price(client):
                 json={"unit_price_ex_vat": "198", "effective_date": date.today().isoformat()})
     client.patch(f"/api/cost/materials/{pkg['id']}", json={"status": "unconfirmed"})
     assert _cost_prices() == before
+    # ★이 값은 표준원가가 아니라 `product_master.cost_price`(등록가)다 — D-CPP-58로 표준원가는
+    #   2,536.40으로 올랐지만 **등록가 2,350.70은 그대로여야 한다.** 그게 이 금지선의 전부다.
     assert before["OHI-A1"] == "2350.70"
     assert _board_std(client, ra) == {None}  # 표준원가는 움직였다 — 대조값만 안 움직였다
 
@@ -423,7 +472,7 @@ def test_price_without_effective_date_never_becomes_latest(client):
     # 이력엔 2건이 남는다 — 값을 버리지 않는다.
     assert len(client.get(f"/api/cost/materials/{pkg['id']}").json()["prices"]) == 2
     # 그러나 계산은 «날짜 있는» 채택분(98원)을 계속 쓴다.
-    assert _board_std(client, ra) == {"2350.70"}
+    assert _board_std(client, ra) == {A_STD_INC}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -496,8 +545,8 @@ def test_linking_a_ledger_line_reaches_the_board(client):
     mat = client.get(f"/api/cost/materials/{pkg['id']}").json()
     assert mat["latest_price_ex_vat"] == line["unit_cost_ex_vat"], mat["prices"]
 
-    assert _board_std(client, ra) != {"2350.70"}, "원장 단가가 보드에 안 닿았다"
-    assert _board_std(client, rb) != {"1690.70"}, "공유 종인데 한쪽만 움직였다"
+    assert _board_std(client, ra) != {A_STD_INC}, "원장 단가가 보드에 안 닿았다"
+    assert _board_std(client, rb) != {B_STD_INC}, "공유 종인데 한쪽만 움직였다"
     _assert_board_matches_detail(client, ra)
     _assert_board_matches_detail(client, rb)
 

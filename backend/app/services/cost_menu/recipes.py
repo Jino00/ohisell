@@ -62,6 +62,7 @@ from app.services.cost_menu import standard_cost as SC
 from app.services.cost_menu.mapping_parser import MappingParseResult, parse_mapping_table
 from app.services.cost_menu.materials import CostMenuConflict, CostMenuError, ledger_check
 from app.services.cost_menu.recipe_parser import (
+    CLEANING_KIT_NAME,
     ParseResult,
     RecipeDraft,
     parse_cost_table,
@@ -577,7 +578,16 @@ def _upsert_materials(db: Session, cost: ParseResult) -> dict[str, CostMaterial]
     for draft in cost.recipes:
         for line in draft.lines:
             name = line.key.display_name
-            wanted.setdefault(name, line.excel_ref_price)
+            ref = line.excel_ref_price
+            # ★cleaning kit은 «원장이 단가의 정본»인 종이라 엑셀 참고값을 심지 않는다
+            #   (D-CPP-58 층2). Jino 2026-08-25 11:36: *"cleaning kit의 단가가 맞는거고,
+            #   부자재(밀대외) (기종) 이 단가가 잘못 들어가있는거야"*. 라인의 22는 엑셀 총계
+            #   검산(`computed_ex_vat`)에 그대로 쓰이지만 **종의 참고값 자리로는 못 간다** —
+            #   가면 화면이 190.82원 옆에 22원을 나란히 세우고, 「엑셀 참고값 채택」 버튼이
+            #   있는 화면에서 그 나란함은 «권유»로 읽힌다.
+            if name == CLEANING_KIT_NAME:
+                ref = None
+            wanted.setdefault(name, ref)
             meta.setdefault(name, (line.key.form_factor, line.key.part, line.is_film))
 
     if not wanted:

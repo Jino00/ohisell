@@ -153,6 +153,39 @@ class MaterialKey:
         return f"{self.label} ({' · '.join(bits)})" if bits else self.label
 
 
+# ──────────────────────────────────────────────
+# cleaning kit 별칭 (D-CPP-58 층2) — 폼팩터를 «가르지 않는» 유일한 예외
+# ──────────────────────────────────────────────
+#: 원장 파생 종의 이름. **prod의 `cost_material.id=1`과 문자열이 완전히 같아야 한다** —
+#: `_upsert_materials`가 이름으로 upsert하므로, 한 글자만 달라도 새 종이 하나 더 생긴다.
+CLEANING_KIT_NAME = "cleaning kit"
+
+#: 폼팩터·부위 **둘 다 None**이다. MaterialKey docstring이 「폼팩터가 다르면 다른 물건」이라
+#: 적어 둔 것의 **명시적 예외**이고, 근거는 규칙이 아니라 사실이다 — Jino 2026-08-25 11:32:
+#: *"기종별 부자재와 cleaning kit가 따로 있는데 이게 모두 같은 cleaning kit야"*.
+#: 같은 물건이므로 규격이 갈리지 않고, 단가는 수입 로트 하나에서 나온다.
+#: ★이 예외를 다른 라벨로 넓히지 마라 — 패키지(98/370/550)·부착 안내문(30/40/55)은 폼팩터마다
+#: 값이 «실제로» 달라 접으면 원가가 틀어진다(계약 §0-F 실측).
+CLEANING_KIT_KEY = MaterialKey(None, None, CLEANING_KIT_NAME)
+
+#: 엑셀 원가표가 이 물건을 부르는 이름들. 실측 라벨은 「부자재 (밀대외)」 하나지만,
+#: 시트마다 줄바꿈·공백이 다르게 들어온다(테스트 픽스처에 `"부자재\n(밀대외)"`가 실재).
+_CLEANING_KIT_ALIASES = frozenset({"부자재(밀대외)"})
+
+
+def is_cleaning_kit_label(label: str) -> bool:
+    """엑셀 열 이름이 cleaning kit을 가리키는가.
+
+    ★공백·줄바꿈을 **전부 지우고** 비교한다 — 「부자재 (밀대외)」·「부자재(밀대외)」·
+    「부자재\\n(밀대외)」가 같은 열이기 때문이다. 이름 매칭이 공백 하나에 지면 층2가 조용히
+    뚫리고, 그때 증상은 «다음 엑셀 업로드에 6종이 되살아난다»로 나타난다(계약 §2-4).
+    """
+
+    if not label:
+        return False
+    return "".join(str(label).split()) in _CLEANING_KIT_ALIASES
+
+
 @dataclass(frozen=True)
 class RecipeLineDraft:
     """구성 한 줄의 초안. `excel_ref_price`는 **참고값**이지 단가가 아니다(§3 금지선)."""
@@ -301,7 +334,14 @@ def parse_cost_table(rows: Iterable[Sequence[Any]]) -> ParseResult:
             )
         )
 
-    result.materials = list(seen_keys.keys())
+    # ★종 목록은 «실제로 만들어진 라인»에서 뽑는다(적대 리뷰 P2-8). `seen_keys`는 접기 «전»
+    #   키라, 거기서 뽑으면 밀대외 6종이 목록에 남고 cleaning kit은 빠진다 — 종 목록의
+    #   «두 번째 진실»이 생긴다. 지금 소비처가 없어 무해하지만, 무해한 거짓말도 거짓말이다.
+    seen_material_keys: dict[MaterialKey, None] = {}
+    for draft in result.recipes:
+        for ln in draft.lines:
+            seen_material_keys.setdefault(ln.key, None)
+    result.materials = list(seen_material_keys)
     return result
 
 
@@ -374,6 +414,26 @@ def _build_recipe(
             anomalies.append(f"price_conflict:{spec.label}:{prior}≠{value}")
         if value is not None:
             seen_keys.setdefault(key, value)
+
+        # ★별칭은 «신원이 정해지고 이상 검사가 끝난 뒤» 적용한다(D-CPP-58 층2).
+        #   순서가 중요하다 — 접기 전에 검사해야 `price_conflict`가 원래 열 이름으로 뜬다.
+        #
+        # ★★`excel_ref_price`는 **그대로 22를 싣는다.** 접었다고 22를 버리면
+        #   `computed_ex_vat`(구성 합 = 엑셀 「제품원가」인가)라는 **검산이 통째로 죽는다** —
+        #   시트를 잘못 읽어도 아무도 모르게 된다. 22가 «종의 단가»로 새는 것은 여기가 아니라
+        #   `recipes._upsert_materials`에서 막는다(그 자리가 종을 만드는 유일한 자리다).
+        if not is_film and is_cleaning_kit_label(spec.label):
+            key = CLEANING_KIT_KEY
+            # ★★접기는 «두 열이 한 종이 되는» 일이라, 한 행에 접히는 열이 둘 있으면
+            #   같은 종이 두 줄이 된다(적대 리뷰 P2-2 재현: 「부자재 (밀대외)」와
+            #   「부자재(밀대외)」가 나란히 있는 시트). 계약 §0-D가 지목한 **조용한 이중
+            #   계상**이 여기서 «매 업로드마다» 재생산되는 셈이다 — 제약 위반보다 나쁘다,
+            #   에러가 안 나기 때문이다. 그래서 둘째 줄은 버리고 **이상으로 자백한다.**
+            #   (버리는 쪽이 옳다: 접었다는 것은 같은 물건이라는 뜻이고, 같은 물건을 두 번
+            #    세는 것이 결함이다. 수량 합산이 아니다 — kit은 제품당 1개다.)
+            if any(ln.key == CLEANING_KIT_KEY for ln in lines):
+                anomalies.append(f"duplicate_cleaning_kit:{spec.label}")
+                continue
 
         lines.append(
             RecipeLineDraft(

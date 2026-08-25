@@ -7,8 +7,10 @@
 #   결측 관찰은 중립이라 tally에 안 넣고 후보 생성/갱신도 skip(리뷰 P2-3). promoted/rejected
 #   시그니처는 재수확하지 않지만, hidden은 재등장 시 pending으로 부활한다(리뷰 P2-1 — Ebbinghaus
 #   재노출 강화). 읽기(diary·campaign_target_resolver) + wisdom_candidates 쓰기만(원칙18-1).
-#   ★target_type=="search_term" 행은 수확 대상에서 제외한다(D-NAO-178) — 그 행의 d1은 검색어가
-#   아니라 캠페인 grain이라 승률이 남의 성적표로 쌓인다. 해제는 S8(d1_st 소비 전환)에서.
+#   ★target_type=="search_term" 행은 outcome["d1"](캠페인 폴백)을 절대 소비하지 않는다
+#   (D-NAO-178 금지선). 대신 outcome["d1_st"].status(stopped/leaking/ambiguous/no_data,
+#   diary_outcome.py 참조)로 good/bad/skip을 판정한다 — S8(d1_st 소비 전환) 집행,
+#   2026-08-25. `_outcome_window`/`_outcome_direction`(d1/d7 기반) 경로는 타지 않는다.
 #
 # ★D-NAO-248(2026-08-25, 부록 Q2 처분 (b′)) — 시그니처를 **전역**(campaign_id 미포함)으로
 #   바꿨다. 옛 시그니처는 campaign_id가 선두라 표본이 캠페인 수만큼 쪼개졌다(§1: 4캠페인 합
@@ -132,6 +134,44 @@ def _outcome_direction(
     roas_c = window.get("roas_c")
     good = roas_c is not None and roas_c >= float(bep)
     return "good" if good else "bad"
+
+
+# d1_st.status → 스킵 사유 totals 키. good('stopped')·bad('leaking')는 여기 없다(direction이
+# 나오는 경우라 스킵 카운터가 필요 없다). status가 이 매핑에도 4값에도 없으면(코드가 미래에
+# 새 값을 추가했는데 이 파일이 못 따라간 경우) fail-closed로 unknown_status에 떨어뜨린다 —
+# 조용히 good/bad로 잘못 세는 것보다 스킵되는 쪽이 안전하다(원칙: 알려진 값만 소비).
+_D1_ST_SKIP_COUNTER = {
+    "ambiguous": "skipped_search_term_ambiguous",
+    "no_data": "skipped_search_term_no_data",
+}
+_D1_ST_UNKNOWN_STATUS_COUNTER = "skipped_search_term_unknown_status"
+
+
+def _search_term_direction(outcome: dict) -> tuple[str | None, str | None]:
+    """검색어 제외 행 전용 방향 판정 — `outcome["d1_st"]["status"]`만 읽는다.
+
+    ★금지선(D-NAO-178 원문 이유 그대로, S8 집행): 이 함수는 `outcome["d1"]`을 **절대** 읽지
+      않는다. `_grain_and_target`의 campaign 폴백 탓에 검색어 행의 d1은 「그 캠페인 전체의
+      하루 성과」이지 조치의 성적이 아니다(2026-08-13 라이브: d1 43,084원 vs 「골프」 30일
+      31,411원). `_outcome_window`/`_outcome_direction`을 재사용하지 않는 것도 같은 이유다
+      — 그 둘은 d1을 먹는다.
+    ★두 번째 이유: 제외 조치의 성공 지표는 **비용 정지**다. 기존 ROAS 규칙
+      (`_outcome_direction`)을 재사용하면 완벽한 성공(cost=0)이 'neutral'로 버려진다
+      (diary_outcome.py d1_st 섹션 헤더가 이미 못 박은 설계 — status 문자열로만 판정한다).
+
+    반환 (direction, skip_reason). direction이 not None이면 good/bad고 skip_reason은 None.
+    direction이 None이면 skip_reason은 "absent"(d1_st 자체가 없음) 또는 totals의 완성된
+    카운터 키(caller가 그대로 인덱싱한다 — 접두사를 다시 붙이지 않는다).
+    """
+    d1_st = outcome.get("d1_st")
+    if not d1_st:
+        return None, "absent"
+    status = d1_st.get("status")
+    if status == "stopped":
+        return "good", None
+    if status == "leaking":
+        return "bad", None
+    return None, _D1_ST_SKIP_COUNTER.get(status, _D1_ST_UNKNOWN_STATUS_COUNTER)
 
 
 def _observation(campaign_id: str, action: str | None, env: dict, good_count: int, bad_count: int) -> str:
@@ -260,7 +300,16 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
     boundary_cache: dict[str, tuple] = {}  # 회차 내 캠페인별 (campaign_type, experiment_batch, known) 캐시
     totals = {"scanned": 0, "new": 0, "updated": 0, "revived": 0,
               "skipped_no_outcome": 0, "skipped_no_target": 0, "skipped_neutral": 0,
-              "skipped_terminal": 0, "skipped_search_term_grain": 0, "errors": 0,
+              "skipped_terminal": 0, "errors": 0,
+              # ★S8(D-NAO-178 해제, 2026-08-25) — search_term 행의 d1_st.status 소비 카운터.
+              #   구 "skipped_search_term_grain"(통째로 skip)은 의미가 사라져 제거했다 — 지금은
+              #   good/bad로 갈리는 행이 존재하므로 "전건 skip"을 뜻하는 이름을 남기면 거짓말이 된다.
+              "skipped_search_term_no_d1_st": 0,   # d1_st 자체가 없음(아직 스윕 전 or unresolved)
+              "skipped_search_term_ambiguous": 0,  # d1_st.status == ambiguous
+              "skipped_search_term_no_data": 0,    # d1_st.status == no_data
+              "skipped_search_term_unknown_status": 0,  # status가 알려진 4값 밖(fail-closed)
+              "search_term_good": 0,  # d1_st.status == stopped (good 판정)
+              "search_term_bad": 0,   # d1_st.status == leaking (bad 판정)
               # D-NAO-248: 전역 풀에 못 들어간(=분리된) 관찰 수. 카운터일 뿐 실패가 아니다.
               "separated_experiment": 0, "separated_unknown": 0,
               # 이 수확이 새 학습이 아니라 기존 90일 일기의 «재집계»임을 호출부가 화면에
@@ -268,28 +317,33 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
               "note": RETRO_HARVEST_LABEL}
     for entry in rows:
         try:
-            # ★검색어 제외 행은 수확하지 않는다(D-NAO-178). 이 행들의 outcome["d1"]은
-            #   `_grain_and_target`의 campaign 폴백 탓에 **그 캠페인 전체의 하루 성과**이지
-            #   조치의 성적이 아니다(2026-08-13 라이브: d1 43,084원 vs 「골프」 30일 31,411원).
-            #   진실을 d1_st에 적으면서 거짓 d1을 계속 먹이면 「측정 정합」이 아니다.
-            #   판정 규칙(_outcome_window/_outcome_direction) 변경이 아니라 **알려진 거짓 입력의
-            #   차단**이고, S8에서 이 skip을 걷으면 그대로 복원된다(가역).
-            if entry.target_type == "search_term":
-                totals["skipped_search_term_grain"] += 1
-                continue
             outcome = json.loads(entry.outcome_json) if entry.outcome_json else {}
-            window = _outcome_window(outcome) if outcome else None
-            if window is None:
-                totals["skipped_no_outcome"] += 1
-                continue
-            totals["scanned"] += 1
-            direction = _outcome_direction(db, entry, window, bep_cache=bep_cache)
-            if direction is None:
-                totals["skipped_no_target"] += 1
-                continue
-            if direction == "neutral":  # cost=0 — tally·후보 미기여(리뷰 P2-3)
-                totals["skipped_neutral"] += 1
-                continue
+
+            if entry.target_type == "search_term":
+                # ★S8(D-NAO-178 해제) — d1(캠페인 폴백)은 절대 안 읽는다. d1_st.status만 소비
+                #   (금지선·이유는 _search_term_direction 문서 참조).
+                direction, skip_reason = _search_term_direction(outcome)
+                if direction is None:
+                    if skip_reason == "absent":
+                        totals["skipped_search_term_no_d1_st"] += 1
+                    else:
+                        totals[skip_reason] += 1  # 이미 완성된 totals 키
+                    continue
+                totals["scanned"] += 1
+                totals["search_term_good" if direction == "good" else "search_term_bad"] += 1
+            else:
+                window = _outcome_window(outcome) if outcome else None
+                if window is None:
+                    totals["skipped_no_outcome"] += 1
+                    continue
+                totals["scanned"] += 1
+                direction = _outcome_direction(db, entry, window, bep_cache=bep_cache)
+                if direction is None:
+                    totals["skipped_no_target"] += 1
+                    continue
+                if direction == "neutral":  # cost=0 — tally·후보 미기여(리뷰 P2-3)
+                    totals["skipped_neutral"] += 1
+                    continue
 
             env = {
                 "day_class": _day_class(entry),
