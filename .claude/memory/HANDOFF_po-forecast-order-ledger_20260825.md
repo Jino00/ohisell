@@ -118,7 +118,41 @@ PDF 파서로 실증되고(95/95 검산) Jino 승인 매핑 규칙 3건이 확�
 ## 2-3. 착지
 
 - **완료 단계**: 커밋 → push → **PR 생성**까지. **머지 안 함.**
-- **멈춘 단계**: **적대 리뷰 — INCONCLUSIVE(미완주)**. 리뷰 서브에이전트가 변이 주입 도중 판정을 내지 못한 채 종료했다. 전역 §4: *"리뷰가 미완주면 그건 «발견 0건»이 아니라 INCONCLUSIVE다. PASS를 주지 말고 재실행하거나 부채로 남긴다"* ⇒ **P1 판정이 없으므로 머지 게이트가 안 열린다.**
+- **멈춘 단계**: **적대 리뷰 — FAIL (P1 2건)**. ⇒ P1 미해소 상태라 §4에 따라 **머지 없이 닫는다**(부채 기록).
+
+  ⚠️**기록 정정**: 이 절은 처음에 「INCONCLUSIVE(미완주)」로 적혔다가 고쳐졌다. 리뷰 에이전트의 **조기 완료 통지**를 최종 판정으로 오독한 것이다(실제 판정은 그 뒤에 도착했다). **미완주가 아니라 FAIL이고, 다음 세션이 할 일이 「리뷰 재실행」에서 「P1 2건 수정 → 2R 재판정」으로 바뀐다** — 후자가 훨씬 싸다.
+
+#### 적대 리뷰 1R 판정 원문 요약 — P1 2건 (둘 다 재현 절차 확인됨)
+
+**P1-1 `backend/app/services/otao_po/roster.py:106-122`** — `order_count`가 「발주 건수」가 아니라 **「고유 발주일수」**를 센다. `seen_orders.setdefault(code, set()).add(order_date)`가 **날짜의 집합**이라, 같은 날 복수 발주가 몇 건이든 1로 뭉개진다.
+→ ★이 입력이 실재한다는 근거가 **`models.py`의 `OtaoPurchaseOrder` docstring 안에 이미 있다**: `serial` 명명 규칙(`20260107-1`/`-2`)이 같은 날 복수건을 전제하고, 개정본 4건 예시가 정확히 그 형태다. **자기 문서가 자기 버그를 반증하고 있었다.**
+→ 고치는 법: 날짜가 아니라 **주문 식별자**(`order_id` 또는 `serial`)의 집합으로 센다.
+
+**P1-2 `models.py` ↔ `alembic/versions/otao1po4n4a_*.py` 파리티** — `parsed_at`·`created_at`·`updated_at`의 nullable이 어긋난다. 모델은 `nullable=False`(`__table__.c.parsed_at.nullable → False`), 마이그레이션은 `nullable=True`.
+→ 왜 P1인가: 테스트가 `Base.metadata.create_all()`로 만들면 **NOT NULL**, prod가 마이그레이션으로 만들면 **NULLABLE** ⇒ **모델과 prod 스키마가 갈라진다.** 이후 `alembic revision --autogenerate`가 이 드리프트를 잡아 불필요한 ALTER를 낸다.
+→ 대조군: 같은 저장소 관례(`alembic/versions/b3d5f7a91c48_add_rocket_shipment_tables.py:46`)는 동일 패턴에 `nullable=False`를 쓴다 — **이 PR만 관례에서 이탈**했다.
+
+**P2-1 (이월)** — 마이그레이션의 인덱스 3개·unique 제약 이름이 모델이 자동 유도하는 이름과 다르다(`ix_otao_po_line_order_id` vs `ix_otao_purchase_order_line_order_id` 등). 기능 영향 0이나 다음 `autogenerate`가 drop+recreate로 오인해 잡음 diff를 낸다. **처분: 이월** — `ingest.py` 붙일 때 함께 정리.
+
+#### ★변이 주입 결과 — 4종 **전건 생존**
+
+원인은 **테스트 0건**이다(`grep -rln "otao_po\|OtaoItemNameMap" backend/tests` 매치 0). 4개 변이를 **동시에 적용한 채 전체 스위트 6,631 passed / 0 failed**.
+
+| 변이 | 내용 | 결과 |
+|---|---|---|
+| A | `parser._int()`의 콤마 스트립 제거 → `_int("1,927")`이 `ValueError` | **생존** |
+| B | `roster` 예약잔량에서 `- r.picked` 제거 | **생존** |
+| C | `name_map.normalize()`의 `2ea` 규칙 제거(D-INV-2 규칙 3 무력화) | **생존** |
+| D | **표면 배선 절단** — `row(code).picked += n` 제거 → `picked` 영구 0 | **생존** |
+
+★**리뷰가 덧붙인 관측이 이 PR의 상태를 가장 정확히 말한다**: *"진짜 «최종 표면 절단»은 실행 불가능했다 — `build_roster()`를 호출하는 라우터·화면·`ingest.py`가 저장소 전체에 **0건**이다. **끊을 마지막 마디 자체가 존재하지 않는다.**"* (`naver_ad.py`의 `build_roster`는 동명이인 `pao_scope_roster`의 것으로 확인됨.)
+
+#### 리뷰가 확인만 하고 결함이 아니라고 판정한 것 (다시 의심하지 말 것)
+- 파서 재검증: 121파일 → 95건 파싱, 수량 검산 불일치 **0/95**, dropped 0 — PR 주장과 일치
+- `_TWO_EA` lookbehind: `"2.5D Clear Glass"` 매치 안 됨(의도대로), `2ea`류만 매치 — 정상
+- `resolve()`의 `exact_en`/`normalized` 구분이 더 이상 「정의상 항상 참」이 아님 — 정상
+- Boolean `server_default=sa.false()` — 교훈 #341 준수 확인
+- `ImportShipment.declaration_date` 타입힌트 불일치는 **이 PR이 안 건드린 기존 모델**의 것이고, 런타임은 Core 컬럼 타입(`Date`)이 지배해 SQLite/PostgreSQL 모두 정상 — **결함 아님**
 - **재개 명령**:
   ```
   gh pr view 460 --json state,mergeable,statusCheckRollup
@@ -197,7 +231,12 @@ PDF 파서로 실증되고(95/95 검산) Jino 승인 매핑 규칙 3건이 확�
 - [ ] **화면** `frontend/src/pages/…` + `App.tsx` 라우트 + `Layout.tsx` 메뉴 + `lib/api.ts`
       (신규 메뉴 최소 세트 4파일 — 최근 선례 커밋 `1079819b` "feat(naver-ad): PAO 스코프 대시보드"가 8파일 패턴을 보여준다)
       ★**화면이 자백해야 하는 것 3가지**: ①데이터 구간이 2026-01-27 이후라는 것 ②「매핑 필요」 12.8% ③예약 잔량 음수의 의미
-- [ ] ★**적대 리뷰 재실행 → PR #460 머지** — 1R이 **INCONCLUSIVE(미완주)**로 끝나 P1 판정이 없다. **이게 다음 세션의 첫 항목이다**(머지 게이트가 안 열린 채 열려 있는 PR). 2R 범위는 **PR 전체 diff**다 — 「수정 diff만」 규칙은 1R이 판정을 냈을 때의 것이다. ★표면 절단 변이 1개 필수 · ★**변이 전 커밋을 먼저 찍을 것**(이번에 리뷰가 변이를 남긴 채 죽었고, 커밋이 있어서 살았다)
+- [ ] ★★**P1 2건 수정 → 2R 재판정 → PR #460 머지** — **이게 다음 세션의 첫 항목이다.** 1R이 **FAIL(P1 2건)**이라 머지 게이트가 닫혀 있다. 둘 다 좁고 재현 절차가 §2-3에 있다:
+      - **P1-1** `roster.py:106-122` — `seen_orders`를 `order_date` 집합이 아니라 **`order_id`(또는 `serial`) 집합**으로 바꾼다
+      - **P1-2** 마이그레이션 `otao1po4n4a`의 `parsed_at`·`created_at`·`updated_at`을 **`nullable=False`**로(모델과 일치, 저장소 관례와도 일치)
+      - ★2R 범위는 **수정 커밋 diff만**이다(§4 — 1R이 판정을 냈으므로). 「해소 여부 판정」만 시키고 새 지적을 만들게 하지 않는다
+      - ★**변이 주입 전에 커밋을 먼저 찍을 것** — 1R이 변이를 남긴 채 한 번 죽었고, 커밋이 있어서 살았다
+- [ ] ★**테스트를 P1 수정과 같이 넣는다** — 변이 4종이 **전건 생존**했고 원인은 테스트 0건이다. 최소한 변이 A~D를 각각 잡는 4개는 있어야 한다(그게 곧 회귀 그물의 최소 크기다)
 - [ ] (화면이 생긴 뒤) 적대 리뷰 — 「로스터가 값을 만드는데 화면에 안 뜨게」 하는 표면 절단 변이 포함
 - [ ] (선택) 파서 `2.5D` 앞자리 유실 수정
 - [ ] (선택) **S0-b** — ECOUNT 발주 축 생산자 저장소 결정. n=1부터 이월된 유일한 S0 잔여
