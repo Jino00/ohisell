@@ -50,9 +50,45 @@ _UNKNOWN_PREFIX = "g?"  # g?|campaign_id|action|day_class|season|iphone_window (
 # kill_switch는 제외(P2 리뷰 P3-2: reject는 blocked와 같은 제안의 2행이라 포함하면 이중계상).
 HARVEST_EVENT_TYPES = ("execute", "blocked")
 
-# 판사가 이미 판정한 시그니처는 재수확 금지(tally조차 갱신 안 함). hidden은 제외 — 재등장하면
-# 부활시킨다(리뷰 P2-1: 망각↔TTL 데드락 해소 + Ebbinghaus 재노출 강화).
-_TERMINAL_STATUSES = frozenset({"promoted", "rejected"})
+# 승격된 시그니처는 재수확 금지(tally조차 갱신 안 함). hidden은 제외 — 재등장하면 부활시킨다
+# (리뷰 P2-1: 망각↔TTL 데드락 해소 + Ebbinghaus 재노출 강화).
+#
+# ★D-NAO-251 §4-① — 여기서 `rejected`가 빠졌다. 구판은 promoted/rejected를 함께 terminal로
+#   묶어 **tally 갱신까지** 막았는데, 그게 「표본 부족」 기각을 자기충족 함정으로 만들었다:
+#   판사가 *"45회 관찰이 단 이틀 안에 집중되어… 승격을 보류합니다"* 로 기각한 뒤 같은 조건으로
+#   일주일에 818건이 더 쌓였으나 그 시그니처는 다시 볼 수 없었다. 「재현성 불명」이라 기각해
+#   놓고 재현을 관측할 길을 코드가 닫아 버린 것이다.
+#   promoted가 남아 있는 이유는 답이 달라야 하기 때문이다 — 승격 지혜의 사후 성적은 지혜
+#   성적표가 «집행 결과»로 재는 것이지 관찰 tally로 뒤집을 것이 아니고, 승격↔기각 플립플롭은
+#   브리핑 주입(`wisdom_apply.active_wisdom_prefix`)을 흔든다.
+_TERMINAL_STATUSES = frozenset({"promoted"})
+
+# ★D-NAO-251 §4-① 재개방 조건 — rejected 후보가 pending으로 «복귀»하는 문턱.
+#   판정 시점 대비 배수(_REOPEN_MULTIPLE)와 절대 증분(_REOPEN_MIN_DELTA)을 **둘 다** 넘어야
+#   한다: 배수만 두면 3회→6회 같은 잔챙이가 재심을 부르고, 절대값만 두면 표본이 큰 후보가
+#   너무 자주 돌아온다.
+#   ★이 세 숫자(2.0 · 5 · 2)는 근거 없는 초깃값이다(계약 §2-6·§8-3) — 「재심에서 판정이 바뀐
+#   비율」을 잴 표면이 아직 없으므로 주기 감사의 재심 안건으로 남긴다.
+_REOPEN_MULTIPLE = 2.0   # occurrences ≥ 판정시점 × 2.0
+_REOPEN_MIN_DELTA = 5    # ∧ occurrences ≥ 판정시점 + 5
+_MAX_REJUDGE = 2         # 재심 상한. 소진하면 다시 완전 terminal(tally도 멈춘다 — 행 비대 방지)
+
+
+def _reopen_ready(cand, *, now=None) -> bool:
+    """rejected 후보가 재개방 문턱을 넘었는가(순수 함수 — 테스트·리뷰가 여기만 보면 된다).
+
+    기준선 `judged_occurrences`가 없으면 **재개방하지 않는다**(fail-closed) — 「어디서부터
+    2배인지」를 모르는 채 여는 것은 문턱이 없는 것과 같다. 마이그레이션이 기존 판정분에
+    현재 occurrences를 기준선으로 백필하므로, 기존 rejected는 «지금부터» 2배가 쌓여야 열린다
+    (소급 재개방이 아니다 — 과거 판정 시점의 occurrences는 기록이 없어 복원 불가).
+    """
+    if (cand.rejudge_count or 0) >= _MAX_REJUDGE:
+        return False
+    base = cand.judged_occurrences
+    if base is None:
+        return False
+    n = cand.occurrences or 0
+    return n >= base * _REOPEN_MULTIPLE and n >= base + _REOPEN_MIN_DELTA
 
 # 아이폰 출시 전후 ±N일을 launch_window로 본다(그 외 normal, offset None은 unknown).
 _IPHONE_WINDOW_DAYS = 14
@@ -301,6 +337,12 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
     totals = {"scanned": 0, "new": 0, "updated": 0, "revived": 0,
               "skipped_no_outcome": 0, "skipped_no_target": 0, "skipped_neutral": 0,
               "skipped_terminal": 0, "errors": 0,
+              # ★D-NAO-251(증거보전) — 0이어도 키를 낸다(교훈 #318: 0건과 침묵은 다르다).
+              #   skipped_terminal은 이제 promoted «만» 센다 — 아래 셋이 rejected의 행방이다.
+              "rejected_tally_resumed": 0,      # 기각분에 증거가 다시 쌓임(문턱 미도달 포함)
+              "reopened": 0,                    # 2배∧+5 도달 → pending 복귀(재심 대기)
+              "skipped_rejudge_exhausted": 0,   # 재심 상한 소진 → 다시 완전 terminal
+              "skipped_no_action": 0,           # action 미상 일기 행 → 후보 생성 안 함(§4-② ⓑ)
               # ★S8(D-NAO-178 해제, 2026-08-25) — search_term 행의 d1_st.status 소비 카운터.
               #   구 "skipped_search_term_grain"(통째로 skip)은 의미가 사라져 제거했다 — 지금은
               #   good/bad로 갈리는 행이 존재하므로 "전건 skip"을 뜻하는 이름을 남기면 거짓말이 된다.
@@ -345,6 +387,16 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
                     totals["skipped_neutral"] += 1
                     continue
 
+            # ★D-NAO-251 §4-② ⓑ — action이 없는 일기 행으로는 후보를 만들지 않는다.
+            #   action은 패턴의 «의미 축» 그 자체라, 미상인 채 후보가 되면 판사가 형제를
+            #   찾을 수 없고(`wisdom_judge._sibling_buckets`가 action으로 매칭한다) 그 후보는
+            #   대조군 없이 영원히 판정만 기다린다. prod 실재 사례: 후보 45번
+            #   `g|SHOPPING|None|weekday|summer|normal|`.
+            #   ★그리고 «만들지 않았다»가 침묵하지 않게 카운터로 센다(교훈 #318).
+            if not entry.action:
+                totals["skipped_no_action"] += 1
+                continue
+
             env = {
                 "day_class": _day_class(entry),
                 "season": entry.season,
@@ -367,8 +419,13 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
                 .first()
             )
             if cand is not None:
-                if cand.status in _TERMINAL_STATUSES:  # promoted/rejected — 판사 판정 완료
+                if cand.status in _TERMINAL_STATUSES:  # promoted — 판사 판정 완료(완전 terminal)
                     totals["skipped_terminal"] += 1
+                    continue
+                # ★D-NAO-251 §4-① — rejected는 재심 상한을 소진했을 때만 terminal이다.
+                #   소진 전이면 아래로 흘러 tally가 계속 쌓인다(증거보전의 본체).
+                if cand.status == "rejected" and (cand.rejudge_count or 0) >= _MAX_REJUDGE:
+                    totals["skipped_rejudge_exhausted"] += 1
                     continue
                 ids = json.loads(cand.source_entry_ids_json or "[]")
                 if entry.id in ids:  # 같은 행 재스캔 — 부풀림·부활 금지
@@ -376,6 +433,11 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
                 if cand.status == "hidden":  # 망각분 재등장 → 부활(Ebbinghaus 재노출, 리뷰 P2-1)
                     cand.status = "pending"
                     totals["revived"] += 1
+                elif cand.status == "rejected":
+                    # 기각분에 증거가 «다시 흐르기 시작»한 것 자체를 센다 — 재개방 문턱을
+                    # 아직 못 넘었어도 이 카운터가 0이 아니면 배선은 살아 있다는 뜻이다
+                    # (계약 §5 ①-b: 재료가 없어 문턱을 못 넘어도 배선 합격을 관측할 표면).
+                    totals["rejected_tally_resumed"] += 1
                 ids.append(entry.id)
                 cand.source_entry_ids_json = json.dumps(ids)
                 if direction == "good":
@@ -395,6 +457,14 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
                         entry.campaign_id, entry.action, env, cand.good_count or 0, cand.bad_count or 0
                     )
                 cand.last_seen_at = now
+                # ★D-NAO-251 §4-① — 증거가 판정 시점의 2배(∧+5)에 닿으면 pending 복귀.
+                #   판정을 코드가 뒤집는 게 아니다 — **같은 판사에게 다시 묻는 것**까지다
+                #   (판정기 증식 금지, 북극성 §6-b M5). 재심 횟수는 여기서 올리지 않는다:
+                #   판사가 실제로 다시 판정했을 때 `wisdom_judge`가 올린다(문을 연 것과
+                #   실제로 재심한 것은 다르다 — 판사 호출이 실패하면 pending으로 남는다).
+                if cand.status == "rejected" and _reopen_ready(cand):
+                    cand.status = "pending"
+                    totals["reopened"] += 1
                 db.commit()
                 totals["updated"] += 1
             else:

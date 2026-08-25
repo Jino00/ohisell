@@ -274,10 +274,16 @@ def test_harvest_same_entry_rescan_does_not_inflate(db):
 
 
 def test_harvest_terminal_signature_ignored(db):
+    """promoted는 완전 terminal — 재등장해도 tally조차 갱신하지 않는다.
+
+    ★D-NAO-251: 구판은 rejected도 여기 함께 묶여 있었으나 분리됐다(아래 재개방 테스트군).
+    promoted가 남은 이유는 답이 달라야 하기 때문이다 — 승격 지혜의 사후 성적은 지혜 성적표가
+    «집행 결과»로 재는 것이고, 승격↔기각 플립플롭은 브리핑 주입을 흔든다.
+    """
     _diary(db, outcome=_good())
     wisdom_candidates.harvest_candidates(db, now=NOW)
     cand = db.query(OpsWisdomCandidate).one()
-    cand.status = "rejected"  # 판사가 이미 기각
+    cand.status = "promoted"  # 판사가 이미 승격
     db.commit()
     _diary(db, action_date=date(2026, 7, 14), outcome=_good())  # 같은 시그니처 재등장
     res = wisdom_candidates.harvest_candidates(db, now=NOW)
@@ -518,12 +524,37 @@ def test_judge_ripe_gate_ttl_or_occurrences(db):
 
 
 def test_judge_caps_at_five_per_run(db):
-    for i in range(6):
+    """평시(숙성 ≤5)엔 회차 상한 5가 그대로 적용된다 — 적응형이 평시를 안 건드린다.
+
+    ★D-NAO-251 §4-③: 상한은 이제 «적체가 있을 때만» 15로 올라간다. 그 경계를 두 방향으로
+    잠근다 — 이 테스트가 «평시 불변», 아래가 «적체 시 캐치업»과 «하드캡».
+    """
+    for i in range(5):
         _cand(db, signature=f"c{i}", occurrences=5)
     db.commit()
     res = wisdom_judge.judge_ripe_candidates(db, now=NOW, invoke=_promote_invoke)
     assert res["ripe"] == 5 and res["promoted"] == 5
-    assert db.query(OpsWisdomCandidate).filter_by(status="pending").count() == 1
+    assert res["cap_applied"] == wisdom_judge._MAX_PER_RUN == 5
+    assert res["backlog_remaining"] == 0
+    assert db.query(OpsWisdomCandidate).filter_by(status="pending").count() == 0
+
+
+def test_judge_catches_up_when_backlog_and_still_hard_caps(db):
+    """★D-NAO-251 §4-③ — 적체(숙성 >5)면 같은 회차에서 더 소화하되 하루 하드캡 15를 넘지 않는다.
+
+    구판은 pending 17건이면 회당 5건 × 1일 1회라 소화에 4일이 걸렸고, 크론이 하루 못 뜨면
+    (08-24 prod 1h48m 다운 실전례) 그날 슬롯이 그냥 사라졌다. 주기를 늘리는 건 답이 아니다
+    (재료 grain이 D-1 — 북극성 §5-2 「주기를 부풀리는 것은 5,403배 오류와 같은 부류」).
+    """
+    for i in range(20):
+        _cand(db, signature=f"c{i}", occurrences=5)
+    db.commit()
+    res = wisdom_judge.judge_ripe_candidates(db, now=NOW, invoke=_promote_invoke)
+    assert res["cap_applied"] == wisdom_judge._MAX_PER_RUN_BACKLOG == 15
+    assert res["ripe"] == 15 and res["promoted"] == 15
+    assert res["ripe_available"] == 20
+    assert res["backlog_remaining"] == 5  # 익일로 넘긴 건수가 «값»으로 보인다(침묵 금지)
+    assert db.query(OpsWisdomCandidate).filter_by(status="pending").count() == 5
 
 
 def test_judge_promote_and_reject_recorded(db):
@@ -601,7 +632,7 @@ def test_judge_prompt_exposes_sibling_buckets_and_by_campaign(db):
     assert (
         '"sibling_buckets": {"condition_controls": [], "other_campaign_types": [], '
         '"excluded_from_controls": {"experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0, '
-        '"candidate_not_eligible": 0}, '
+        '"candidate_not_eligible": 0, "no_action": 0}, '
         '"truncated": {"condition_controls": 0, "other_campaign_types": 0}}'
     ) in prompt_without_db
 
@@ -747,12 +778,37 @@ def test_sibling_buckets_none_db_or_no_action_returns_full_key_set(db):
     assert out_no_db["condition_controls"] == [] and out_no_db["other_campaign_types"] == []
     assert out_no_db["excluded_from_controls"] == {
         "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0, "candidate_not_eligible": 0,
+        "no_action": 0,  # ★D-NAO-251 §4-② ⓐ — 0이어도 키가 있다(교훈 #318)
     }
     assert out_no_db["truncated"] == {"condition_controls": 0, "other_campaign_types": 0}
 
     target.action = None
     out_no_action = wisdom_judge._sibling_buckets(db, target)
-    assert out_no_action == out_no_db
+    assert out_no_action == out_no_db  # 형제가 없으면 no_action도 0
+
+
+def test_sibling_buckets_counts_action_less_siblings_instead_of_silence(db):
+    """★D-NAO-251 §4-② ⓐ — action이 없어 «형제 매칭 자체가 불가능»했던 건수를 값으로 낸다.
+
+    구판은 `not cand.action`에서 전부 0인 dict를 그대로 돌려줬다. 그러면 판정문엔 「대조군
+    없음」으로 보이는데 실제로는 «대조를 시도조차 못 했다»였다 — n=52 P2-1이 규칙 0 경로에
+    대해 고친 것과 **같은 모양의 두 번째 침묵**이다. prod 실재 사례: 후보 45번
+    `g|SHOPPING|None|weekday|summer|normal|`.
+
+    ★action을 매칭 «값»으로 쓰지는 않는다(미상끼리 묶으면 서로 다른 액션이 가짜 대조군이 되어
+    판사 재료가 오염된다) — 세기만 한다.
+    """
+    target = _cand(db, signature="t-none", grain="global", campaign_type="SHOPPING")
+    target.action = None
+    for i in range(3):  # 같은 처지의 형제들 — 구판에선 어느 카운터에도 안 잡혔다
+        sib = _cand(db, signature=f"sib-none-{i}", grain="global", campaign_type="SHOPPING")
+        sib.action = None
+    _cand(db, signature="sib-has-action", grain="global", campaign_type="SHOPPING")  # action 있음
+    db.commit()
+
+    out = wisdom_judge._sibling_buckets(db, target)
+    assert out["excluded_from_controls"]["no_action"] == 3  # 자기 자신 제외, action 있는 형제 제외
+    assert out["condition_controls"] == []  # 매칭은 여전히 안 한다(오염 금지)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1071,3 +1127,190 @@ def test_outcome_direction_zero_cost_stays_neutral(db, monkeypatch):
     assert wisdom_candidates._outcome_direction(
         db, _diary_entry(), {"cost": 0, "clk": 0, "conv": 0, "roas_c": None}
     ) == "neutral"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-NAO-251(2026-08-26) 증거보전 — ①재개방 ②action 미상 ③캐치업
+# 계약: docs/contracts/CONTRACT_evidence_preservation.md
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_harvest_rejected_keeps_tallying_instead_of_freezing(db):
+    """★D-NAO-251 §4-① 본체 — 기각된 시그니처도 증거가 계속 쌓인다.
+
+    구판의 병: 판사가 *"45회 관찰이 단 이틀 안에 집중되어… 승격을 보류합니다"* 로 기각하면
+    그 순간부터 tally 갱신까지 막혀, 그 뒤 일주일에 818건이 더 쌓였어도 판사는 다시 못 봤다.
+    「재현성 불명」이라 기각해 놓고 재현을 관측할 길을 코드가 닫는 자기충족 함정이었다.
+    """
+    _diary(db, outcome=_good())
+    wisdom_candidates.harvest_candidates(db, now=NOW)
+    cand = db.query(OpsWisdomCandidate).one()
+    cand.status = "rejected"
+    cand.judged_occurrences = cand.occurrences  # 판정 시점 기준선(마이그레이션이 하는 일)
+    db.commit()
+
+    _diary(db, action_date=date(2026, 7, 14), outcome=_good())  # 같은 시그니처 재등장
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+
+    db.refresh(cand)
+    assert cand.occurrences == 2 and cand.good_count == 2  # ★얼지 않는다
+    assert res["rejected_tally_resumed"] == 1              # 그리고 그 사실이 값으로 보인다
+    assert res["skipped_terminal"] == 0                    # promoted가 아니므로 여기 안 잡힌다
+    assert cand.status == "rejected"                       # 문턱(2배∧+5) 미도달이라 아직 안 열림
+
+
+def test_harvest_reopens_rejected_when_evidence_doubles(db):
+    """★D-NAO-251 §4-① — 증거가 판정 시점의 2배(∧+5)에 닿으면 pending으로 «복귀»한다.
+
+    코드가 판정을 뒤집는 게 아니라 **같은 판사에게 다시 묻는 것**까지다(판정기 증식 금지,
+    북극성 §6-b M5). 재심 횟수는 여기서 안 올린다 — 판사가 실제로 다시 판정했을 때 올린다
+    (문을 연 것과 실제로 재심한 것은 다르다).
+    """
+    _diary(db, outcome=_good())
+    wisdom_candidates.harvest_candidates(db, now=NOW)
+    cand = db.query(OpsWisdomCandidate).one()
+    cand.status = "rejected"
+    cand.judged_occurrences = 1
+    db.commit()
+
+    # 2배(=2)는 넘지만 +5를 못 넘는 구간에서는 열리지 않는다 — 잔챙이 재심 차단.
+    for i, d in enumerate([date(2026, 7, 13), date(2026, 7, 14), date(2026, 7, 15)]):
+        _diary(db, action_date=d, outcome=_good())
+    wisdom_candidates.harvest_candidates(db, now=NOW)
+    db.refresh(cand)
+    assert cand.occurrences == 4 and cand.status == "rejected"
+    assert wisdom_candidates._reopen_ready(cand) is False
+
+    # +5까지 채우면 열린다.
+    for d in [date(2026, 7, 16), date(2026, 7, 17)]:
+        _diary(db, action_date=d, outcome=_good())
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+    db.refresh(cand)
+    assert cand.occurrences == 6 and cand.status == "pending"  # 6 ≥ 1×2 ∧ 6 ≥ 1+5
+    assert res["reopened"] == 1
+    assert (cand.rejudge_count or 0) == 0  # 문을 연 것뿐 — 재심 카운트는 판사가 올린다
+
+
+def test_harvest_no_reopen_without_baseline(db):
+    """기준선(judged_occurrences)이 없으면 재개방하지 않는다 — fail-closed.
+
+    「어디서부터 2배인지」를 모르는 채 여는 것은 문턱이 없는 것과 같다. 마이그레이션이 기존
+    판정분에 현재 occurrences를 기준선으로 백필하므로 이 경로는 정상 운영에선 안 나온다.
+    """
+    c = _cand(db, signature="nobase", occurrences=99, status="rejected")
+    c.judged_occurrences = None
+    db.commit()
+    assert wisdom_candidates._reopen_ready(c) is False
+
+
+def test_harvest_rejudge_exhausted_returns_to_terminal(db):
+    """재심 상한(_MAX_REJUDGE=2)을 소진하면 다시 완전 terminal — tally도 멈춘다(행 비대 방지)."""
+    _diary(db, outcome=_good())
+    wisdom_candidates.harvest_candidates(db, now=NOW)
+    cand = db.query(OpsWisdomCandidate).one()
+    cand.status = "rejected"
+    cand.judged_occurrences = 1
+    cand.rejudge_count = wisdom_candidates._MAX_REJUDGE
+    db.commit()
+
+    _diary(db, action_date=date(2026, 7, 14), outcome=_good())
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+    db.refresh(cand)
+    assert cand.occurrences == 1  # 얼었다
+    # ★skip 카운터는 «일기 행» 단위라 재스캔된 옛 행도 함께 센다(기존 skipped_terminal과 같은
+    #   관례 — 그 테스트도 >=1로 잠근다). 반대로 tally 카운터는 dedup «뒤»에 있어 중복이
+    #   안 잡힌다. 두 카운터의 분모가 다르다는 것을 여기서 잠근다.
+    assert res["skipped_rejudge_exhausted"] >= 1
+    assert res["rejected_tally_resumed"] == 0
+
+
+def test_harvest_skips_diary_rows_without_action(db):
+    """★D-NAO-251 §4-② ⓑ — action 없는 일기 행으로는 후보를 만들지 않고, 그 사실을 센다.
+
+    action은 패턴의 «의미 축» 그 자체라 미상인 채 후보가 되면 판사가 형제를 못 찾고
+    (`_sibling_buckets`가 action으로 매칭한다) 그 후보는 대조군 없이 판정만 기다린다.
+    prod 실재 사례: 후보 45번 `g|SHOPPING|None|weekday|summer|normal|`.
+    """
+    _diary(db, outcome=_good(), action=None)
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+    assert res["skipped_no_action"] == 1
+    assert db.query(OpsWisdomCandidate).count() == 0  # 후보가 «안 생긴다»
+
+
+def test_judge_excludes_action_less_candidates_from_queue(db):
+    """★D-NAO-251 §4-② ⓓ — action 미상 후보는 판사 대기열에서 빠지고 카운터로 남는다.
+
+    수확층(ⓑ)이 더는 이런 후보를 안 만들고 마이그레이션이 기존분을 hidden 처분하므로,
+    이 필터는 그 둘 사이의 fail-closed 안전망이다.
+    """
+    ok = _cand(db, signature="ok", occurrences=5)
+    bad = _cand(db, signature="noact", occurrences=5)
+    bad.action = None
+    db.commit()
+
+    res = wisdom_judge.judge_ripe_candidates(db, now=NOW, invoke=_promote_invoke)
+    assert res["skipped_no_action"] == 1
+    assert res["ripe"] == 1 and res["promoted"] == 1
+    db.refresh(ok), db.refresh(bad)
+    assert ok.status == "promoted"
+    assert bad.status == "pending"  # 판정되지 않고 그대로 남는다(삭제·강제판정 아님)
+
+
+def test_judge_records_snapshot_and_preserves_prior_verdict(db):
+    """★D-NAO-251 §4-① — 판정 시점 스냅샷을 찍고, 재심 시 이전 판정문을 이력으로 보존한다.
+
+    `judge_verdict_json`은 덮어쓰되 «형태»는 안 바꾼다(wisdom_writer.py:51·wisdom_apply.py:72가
+    그 모양에 의존). 이전 판정문은 `prior_judgments_json`에 append한다(계약 §3).
+    """
+    c = _cand(db, signature="s1", occurrences=3)
+    db.commit()
+
+    wisdom_judge.judge_ripe_candidates(db, now=NOW, invoke=_reject_invoke)
+    db.refresh(c)
+    assert c.status == "rejected"
+    assert c.judged_at == NOW and c.judged_occurrences == 3
+    assert c.rejudge_count == 0                 # 첫 판정은 재심이 아니다
+    assert c.prior_judgments_json in (None, "[]")
+    first_verdict = c.judge_verdict_json
+
+    # 증거가 쌓여 재개방됐다고 가정하고 다시 판정.
+    c.status = "pending"
+    c.occurrences = 9
+    db.commit()
+    later = NOW + timedelta(days=3)
+    wisdom_judge.judge_ripe_candidates(db, now=later, invoke=_promote_invoke)
+    db.refresh(c)
+
+    assert c.status == "promoted"
+    assert c.rejudge_count == 1                 # ★이번엔 재심
+    assert c.judged_occurrences == 9            # 기준선이 다시 찍혔다
+    prior = json.loads(c.prior_judgments_json)
+    assert len(prior) == 1
+    assert prior[0]["verdict_json"] == first_verdict      # ★옛 판정문이 살아 있다
+    assert prior[0]["occurrences_at_judgment"] == 3
+    assert json.loads(c.judge_verdict_json)["verdict"] == "promote"  # 형태 불변
+
+
+def test_judge_prompt_carries_prior_judgments_on_rejudge(db):
+    """★D-NAO-251 §5 ①-c — 재심 프롬프트에 이전 판정 근거와 증거 증가폭이 «재료»로 실린다.
+
+    재료만이고 판정 강제가 아니다 — 같은 이유로 다시 기각하는 것도 유효한 결과이며, 그 지침
+    문장 자체가 프롬프트에 있어야 한다(판사가 「늘었으니 승격」으로 기울지 않게).
+    """
+    c = _cand(db, signature="s1", occurrences=3)
+    db.commit()
+    wisdom_judge.judge_ripe_candidates(db, now=NOW, invoke=_reject_invoke)
+    db.refresh(c)
+    c.status, c.occurrences = "pending", 12
+    db.commit()
+
+    prompt = wisdom_judge._prompt(c, NOW + timedelta(days=3), db)
+    assert '"prior_judgments"' in prompt
+    assert '"verdict": "reject"' in prompt          # 이전 판정
+    assert '"evidence_growth": "3 \\u2192 12 (\\u00d74.0)"' in prompt or "3 → 12 (×4.0)" in prompt
+    assert "같은 이유로 다시 기각하는 것도 유효한 판정입니다" in prompt
+
+    # 처음 판정되는 후보엔 None — 「이력이 비었다([])」와 「처음이다(None)」는 다르다.
+    fresh = _cand(db, signature="fresh", occurrences=3)
+    db.commit()
+    assert wisdom_judge._prior_judgments_view(fresh) is None

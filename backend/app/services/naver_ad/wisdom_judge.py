@@ -18,6 +18,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 
+from sqlalchemy import or_ as sa_or
 from sqlalchemy.orm import Session
 
 from app.models import OpsWisdomCandidate
@@ -33,7 +34,15 @@ _JUDGE_TIMEOUT_S = 120
 
 _TTL_DAYS = 14           # first_seen_at부터 이만큼 지나면 숙성(단발이 아니라 유지된 패턴)
 _OCCURRENCE_GATE = 3     # 또는 유사 패턴 3회 재등장
-_MAX_PER_RUN = 5         # 회당 판사 상한(나머지는 익일)
+_MAX_PER_RUN = 5         # 평시 회당 판사 상한
+# ★D-NAO-251 §4-③ — 캐치업. 구판은 상한 5 × 1일 1회에 «따라잡기»가 없어, pending 17건이면
+#   소화에 4일이 걸리고 크론이 하루 못 뜨면(08-24 prod 1h48m 다운 실전례) 그날 슬롯은 그냥
+#   사라졌다. 그런데 **주기를 늘리는 것은 답이 아니다** — 재료 grain이 D-1이라 하루에 여러 번
+#   판정할 이유가 없고, 북극성 §5-2가 *"주기를 부풀리는 것은 5,403배 오류와 같은 부류"*라고
+#   못 박았다. 그래서 주기는 그대로 두고 **적체가 있을 때만 같은 회차 안에서 더 소화**한다.
+#   ★15는 근거 없는 초깃값이다(계약 §2-6) — 상시 LLM 비용의 하드캡이자 주기 감사 재심 안건.
+_MAX_PER_RUN_BACKLOG = 15  # 적체 시 회차 상한 = 하루 하드캡(크론이 1일 1회이므로 동치)
+_MAX_REJUDGE = 2         # 재심 상한(wisdom_candidates._MAX_REJUDGE와 같은 값 — 두 층이 같은 문턱)
 _MAX_SIBLINGS = 8        # condition_controls 상한(프롬프트 비대화 방지, occurrences desc)
 _MAX_OTHER_TYPES = 4     # other_campaign_types 상한
 
@@ -156,10 +165,29 @@ def _sibling_buckets(db: Session, cand: OpsWisdomCandidate) -> dict:
         "excluded_from_controls": {
             "experiment_batch": 0, "legacy_grain": 0, "unknown_boundary": 0,
             "candidate_not_eligible": 0,
+            # ★D-NAO-251 §4-② ⓐ — action이 없어 «형제 매칭 자체가 불가능»했던 건수.
+            #   0이어도 키를 낸다(교훈 #318).
+            "no_action": 0,
         },
         "truncated": {"condition_controls": 0, "other_campaign_types": 0},
     }
-    if db is None or not cand.action:
+    if db is None:
+        return empty
+    if not cand.action:
+        # ★D-NAO-251 §4-② ⓐ — 구판은 여기서 «전부 0»인 dict를 그대로 돌려줬다. 그러면
+        #   판정문에 「대조군 없음」으로 보이는데, 실제로는 «대조를 시도조차 못 했다»였다
+        #   (n=52 P2-1이 규칙 0 경로에 대해 고친 것과 **같은 모양의 두 번째 침묵**).
+        #   그래서 「액션 미상이라 아무하고도 못 묶은」 형제 수를 세어 침묵을 값으로 바꾼다.
+        #   ★action을 매칭 «값»으로 쓰지는 않는다 — 미상끼리 묶으면 서로 다른 액션이 가짜
+        #   대조군이 되어 판사 재료가 오염된다(북극성 §7 학습 오염과 같은 결).
+        empty["excluded_from_controls"]["no_action"] = (
+            db.query(OpsWisdomCandidate)
+            .filter(
+                OpsWisdomCandidate.id != cand.id,
+                sa_or(OpsWisdomCandidate.action.is_(None), OpsWisdomCandidate.action == ""),
+            )
+            .count()
+        )
         return empty
 
     rows = (
@@ -222,6 +250,45 @@ def _sibling_buckets(db: Session, cand: OpsWisdomCandidate) -> dict:
     }
 
 
+def _prior_judgments_view(cand: OpsWisdomCandidate) -> list[dict] | None:
+    """재심 재료 — 이전 판정들의 (시각·verdict·rationale·당시 표본) 압축. 없으면 None.
+
+    ★None과 []는 다르다: None='이 후보는 처음 판정된다', []='이력 컬럼이 비어 있다'(구판에서
+    판정됐으나 이력화 전이라 판정문만 있는 경우). 그래서 현재 판정문도 «직전 판정»으로 함께
+    싣는다 — 재심 판사가 「무엇을 뒤집으려 하는지」를 보지 못하면 재심의 의미가 없다.
+    """
+    items: list[dict] = []
+    for rec in json.loads(cand.prior_judgments_json or "[]"):
+        try:
+            v = json.loads(rec.get("verdict_json") or "{}")
+        except (ValueError, TypeError):
+            v = {}
+        items.append({
+            "judged_at": rec.get("judged_at"),
+            "occurrences_at_judgment": rec.get("occurrences_at_judgment"),
+            "verdict": v.get("verdict"), "rationale": v.get("rationale"),
+        })
+    if cand.judge_verdict_json:
+        try:
+            v = json.loads(cand.judge_verdict_json)
+        except (ValueError, TypeError):
+            v = {}
+        items.append({
+            "judged_at": cand.judged_at.isoformat() if cand.judged_at else None,
+            "occurrences_at_judgment": cand.judged_occurrences,
+            "verdict": v.get("verdict"), "rationale": v.get("rationale"),
+        })
+    if not items:
+        return None
+    now_n = cand.occurrences or 0
+    base = cand.judged_occurrences
+    for it in items:
+        it["occurrences_now"] = now_n
+    if base:
+        items[-1]["evidence_growth"] = f"{base} → {now_n} (×{round(now_n / base, 2)})"
+    return items
+
+
 def _prompt(cand: OpsWisdomCandidate, now: datetime, db: Session | None = None) -> str:
     env = json.loads(cand.env_bucket_json) if cand.env_bucket_json else {}
     days_since = (now - cand.first_seen_at).days if cand.first_seen_at else None
@@ -242,6 +309,10 @@ def _prompt(cand: OpsWisdomCandidate, now: datetime, db: Session | None = None) 
         "grain": cand.grain, "campaign_type": cand.campaign_type,
         "experiment_batch": cand.experiment_batch, "by_campaign": by_campaign,
         "sibling_buckets": _sibling_buckets(db, cand),
+        # ★D-NAO-251 §4-① — 재심이면 «이전에 무엇을 근거로 기각했고, 그 뒤 표본이 얼마나
+        #   늘었는지»를 재료로 준다. 재료만이고 판정 강제가 아니다(D-NAO-248 전례) — 판사가
+        #   같은 이유로 다시 기각하는 것도 유효한 결과다.
+        "prior_judgments": _prior_judgments_view(cand),
     }
     return (
         "아래는 지혜 승격 후보 1건입니다(JSON). good_count/bad_count는 이 조건에서 결과가 "
@@ -250,8 +321,14 @@ def _prompt(cand: OpsWisdomCandidate, now: datetime, db: Session | None = None) 
         "같은 액션의 형제 후보를 condition_controls(조건 대조군 — 캠페인유형이 같고 실험배치가 "
         "없으며 환경 차원만 다른 형제, differs_in이 어느 차원이 다른지 알려줍니다)와 "
         "other_campaign_types(캠페인유형이 달라 비교 불가한 형제 — 대조군 아님)로 분류하고, "
-        "excluded_from_controls(대조군에서 뺀 건수 — 실험배치·레거시 grain·경계미상)와 "
-        "truncated(상한에 잘린 건수)를 함께 담습니다(참고 재료 — 자동 강제 아님). "
+        "excluded_from_controls(대조군에서 뺀 건수 — 실험배치·레거시 grain·경계미상·"
+        "no_action[액션 미상이라 형제 매칭 자체가 불가])와 truncated(상한에 잘린 건수)를 함께 "
+        "담습니다(참고 재료 — 자동 강제 아님). "
+        "prior_judgments가 있으면 이 후보는 **재심**입니다 — 이전에 같은 후보를 판정한 근거와 "
+        "그 뒤 표본이 얼마나 늘었는지(evidence_growth)를 담았습니다. 표본이 늘었다는 사실 자체가 "
+        "승격 사유는 아닙니다. 이전 기각 사유가 «표본·기간 부족»이었다면 지금 그것이 해소됐는지 "
+        "보고, 사유가 «방향이 틀렸다»였다면 늘어난 표본이 그 판단을 바꾸는지 보십시오. "
+        "같은 이유로 다시 기각하는 것도 유효한 판정입니다. "
         "이 안의 정보만 근거로 판정하세요.\n\n"
         f"{json.dumps(view, ensure_ascii=False, default=str)}"
     )
@@ -270,9 +347,26 @@ def judge_ripe_candidates(db: Session, *, now: datetime | None = None, invoke=_i
         .order_by(OpsWisdomCandidate.occurrences.desc(), OpsWisdomCandidate.first_seen_at.asc())
         .all()
     )
-    ripe = [c for c in pending if _is_ripe(c, now)][:_MAX_PER_RUN]
+    ripe_all = [c for c in pending if _is_ripe(c, now)]
+    # ★D-NAO-251 §4-② ⓓ — action 미상 후보는 대기열에서 뺀다. 형제 매칭이 원리적으로 불가라
+    #   판사에게 «대조군 없음»만 보여 주는 판정을 부르고, 그 판정이 다시 terminal이 된다.
+    #   수확층(§4-② ⓑ)이 이런 후보를 더는 안 만들고, 기존분은 마이그레이션이 hidden 처분한다 —
+    #   이 필터는 그 둘 사이의 fail-closed 안전망이다. 뺐다는 사실은 카운터로 남긴다.
+    skipped_no_action = sum(1 for c in ripe_all if not c.action)
+    ripe_all = [c for c in ripe_all if c.action]
+    # ★D-NAO-251 §4-③ — 적체가 있을 때만 회차 상한을 올린다(주기는 불변).
+    cap = _MAX_PER_RUN_BACKLOG if len(ripe_all) > _MAX_PER_RUN else _MAX_PER_RUN
+    ripe = ripe_all[:cap]
 
-    totals = {"ripe": len(ripe), "promoted": 0, "rejected": 0, "skipped_llm": 0, "errors": 0}
+    totals = {
+        "ripe": len(ripe), "promoted": 0, "rejected": 0, "skipped_llm": 0, "errors": 0,
+        # ★D-NAO-251 — 적체가 침묵하지 않도록 이 회차의 «남긴 것»을 값으로 낸다(교훈 #318).
+        "ripe_available": len(ripe_all),          # 이번 회차에 숙성해 있던 전건
+        "cap_applied": cap,                       # 실제 적용된 회차 상한(5 또는 15)
+        "backlog_remaining": max(0, len(ripe_all) - len(ripe)),  # 익일로 넘긴 건수
+        "skipped_no_action": skipped_no_action,   # 대기열에서 뺀 action 미상 후보
+        "rejudged": 0,                            # 재심(=이전 판정이 있던 후보)으로 판정한 건수
+    }
     for cand in ripe:
         try:
             res = invoke(_prompt(cand, now, db), system=_SYSTEM, schema=_SCHEMA,
@@ -292,8 +386,26 @@ def judge_ripe_candidates(db: Session, *, now: datetime | None = None, invoke=_i
             continue
 
         try:
+            # ★D-NAO-251 §4-① — 판정 «전»의 판정문을 이력으로 밀어 넣고 나서 덮어쓴다.
+            #   judge_verdict_json의 «형태»에 wisdom_writer.py:51·wisdom_apply.py:72가
+            #   의존하므로 그 컬럼의 모양은 바꾸지 않는다(계약 §3).
+            is_rejudge = cand.judged_at is not None or cand.judge_verdict_json is not None
+            if cand.judge_verdict_json:
+                prior = json.loads(cand.prior_judgments_json or "[]")
+                prior.append({
+                    "judged_at": cand.judged_at.isoformat() if cand.judged_at else None,
+                    "occurrences_at_judgment": cand.judged_occurrences,
+                    "verdict_json": cand.judge_verdict_json,
+                })
+                cand.prior_judgments_json = json.dumps(prior, ensure_ascii=False)
             cand.judge_verdict_json = json.dumps(parsed, ensure_ascii=False)
             cand.status = "promoted" if verdict == "promote" else "rejected"
+            # 재개방 기준선을 «이번» 판정 시점으로 다시 찍는다 — 다음 재개방은 여기서부터 2배다.
+            cand.judged_at = now
+            cand.judged_occurrences = cand.occurrences or 0
+            if is_rejudge:
+                cand.rejudge_count = (cand.rejudge_count or 0) + 1
+                totals["rejudged"] += 1
             db.commit()
             totals["promoted" if verdict == "promote" else "rejected"] += 1
         except Exception as e:  # noqa: BLE001 — 한 건 실패가 나머지를 못 죽인다
