@@ -51,6 +51,7 @@ from app.models import (
     ImportInvoiceLine,
     ImportShipment,
 )
+from app.services.cost_menu import price_rule as PR
 
 log = logging.getLogger(__name__)
 
@@ -235,19 +236,49 @@ def run(
             continue
 
         material = db.get(CostMaterial, material_id)
+        # ★연결 «전»의 채택 단가 — 계약 §4-③의 `old→new`가 여기서만 만들어진다
+        #   (적대 리뷰 1R P1-3: 초판은 이 값을 채우는 코드가 **아예 없어서** 필드는 DB·API·
+        #   프론트 타입 어디에나 있는데 항상 `None`이었고, 화면 분기가 `old ? "old → new" : "new"`라
+        #   **「178.78 → 190.82」가 원리적으로 절대 안 떴다.** 「불변이면 old=new 멱등」도
+        #   원리적으로 불가능했다. 변이가 아니라 배포될 코드 자체의 결함이었다).
+        old_ex_vat = None
+        if material is not None:
+            try:
+                old_ex_vat = PR.choose_price(
+                    list(material.prices), PR.read_rule(db)
+                ).price
+                old_ex_vat = old_ex_vat.unit_price_ex_vat if old_ex_vat else None
+            except Exception:  # noqa: BLE001
+                # 옛 값을 못 읽는 것이 «연결 자체»를 막지는 않는다 — 그 사유는 아래 링크
+                # 시도가 같은 예외로 다시 만나 FAILED 행에 담긴다.
+                old_ex_vat = None
+
         try:
-            price = link_ledger_line(
-                db,
-                material_id,
-                line.id,
-                note=f"자동 연결 — {trigger} 회전 #{run_row.id}",
-            )
+            # ★★SAVEPOINT — 적대 리뷰 1R P1-2.
+            #   초판은 `link_ledger_line`이 단가 행을 `flush`한 «뒤» `_propagate`(표준원가
+            #   재계산)를 부르는데, `_propagate`에서 예외가 나면 **이미 flush된 단가 행이
+            #   롤백되지 않았다.** `run()`은 예외를 밖으로 안 던지므로 호출자가 그대로 커밋했고,
+            #   결과는 **「failed」로 기록된 라인의 단가가 실제로는 영구히 커밋되는 것**이었다.
+            #   게다가 `_candidate_lines`가 «이미 링크된» 라인을 후보에서 빼므로 그 라인은
+            #   다음 회전부터 재검사 대상에서도 빠져 — 재시도도 안 되고 큐에도 안 걸린다.
+            #   표준원가는 낡은 채로 남는데 어느 표면도 그걸 말하지 않는다.
+            #   ⇒ 라인 하나를 **원자 단위**로 만든다: 실패하면 그 라인의 쓰기가 통째로 사라져
+            #   라인은 미연결로 남고, 다음 회전이 다시 시도하며, MAX_ATTEMPTS가 실제로 건다.
+            with db.begin_nested():
+                price = link_ledger_line(
+                    db,
+                    material_id,
+                    line.id,
+                    note=f"자동 연결 — {trigger} 회전 #{run_row.id}",
+                )
+                price_id = price.id
             db.add(
                 CostAutoRefreshEntry(
                     outcome=OUTCOME_LINKED,
                     material_id=material_id,
                     material_name=material.name if material else None,
-                    price_id=price.id,
+                    price_id=price_id,
+                    old_price_ex_vat=old_ex_vat,
                     **common,
                 )
             )
@@ -255,11 +286,13 @@ def run(
             touched_materials.add(material_id)
         except Exception as exc:  # noqa: BLE001 — 사유를 «행»으로 남기는 것이 이 except의 일이다
             # ★한 라인의 실패가 회전을 죽이지 않는다. 그러나 조용히 넘기지도 않는다.
+            #   savepoint가 이미 되감겼으므로 세션은 깨끗하고, 아래 기록 쓰기는 안전하다.
             db.add(
                 CostAutoRefreshEntry(
                     outcome=OUTCOME_FAILED,
                     material_id=material_id,
                     material_name=material.name if material else None,
+                    old_price_ex_vat=old_ex_vat,
                     message=f"{type(exc).__name__}: {exc}",
                     **common,
                 )
@@ -361,40 +394,80 @@ def recent_runs(db: Session, limit: int = 20) -> list[dict]:
 
 
 def pending_queue(db: Session) -> list[dict]:
-    """「연결 대기」 큐 — 자동이 **안 건드리고 사람에게 올린** 라인들(합격 ⑤의 표면).
+    """「연결 대기」 큐 — **지금 사람을 기다리는 라인**(합격 ⑤의 표면).
 
-    ★최신 회전의 `queued` 항목만 낸다. 옛 회전의 대기 항목까지 합치면 이미 사람이 연결한
-    라인이 계속 대기로 보인다 — 「할 일 목록」이 거짓말을 하면 아무도 안 본다.
-    ★그리고 지금도 정말 미연결인지 **다시 확인한다** — 회전 이후 사람이 연결했을 수 있다.
+    ★★**«회전 기록»이 아니라 «현재 상태»에서 만든다** (적대 리뷰 1R P1-1).
+
+    초판은 «가장 최근 1회전»의 `queued` 항목만 냈다. 그런데 로트가 확정될 때마다
+    `confirm_shipment`가 **그 로트 하나만 스캔하는 이벤트 회전**을 돌리고(§7-3에서 이벤트를
+    «주» 방아쇠로 채택했으므로 정상 업무 흐름에서 매번 일어난다), 그 좁은 회전이 최신이 되는
+    순간 큐 화면은 **그 로트에서 새로 발견된 것만** 보여줬다 — 여전히 미연결인 다른 로트의
+    항목들이 화면에서 통째로 사라졌다. 「할 일 목록」이 조용히 짧아지는 결함이다.
+
+    초판 docstring은 반대 방향 위험(«옛 대기 항목이 이미 연결됐는데도 계속 뜬다»)만 막고
+    이 방향을 놓쳤다. ⇒ **양쪽을 한 번에 없애는 방법은 로그를 안 보는 것이다**: 큐는
+    「지금 무엇이 미연결인가」라는 **상태 질문**이지 「지난 회전에 무엇을 봤나」가 아니다.
+
+    사유는 회전 기록에서 «가져올 수 있으면» 가져오고(사람이 읽을 맥락), 없으면 지금 상태로
+    다시 만든다 — 사유 없는 대기 항목은 화면에서 침묵과 같다(§2-6).
     """
 
-    latest = (
-        db.query(CostAutoRefreshRun)
-        .order_by(CostAutoRefreshRun.started_at.desc(), CostAutoRefreshRun.id.desc())
-        .first()
-    )
-    if latest is None:
+    pairs = known_pairs(db)
+    lines = _candidate_lines(db)  # 확정·부자재·단가 있음·미연결 = 지금 후보 전건
+    if not lines:
         return []
-    rows = (
+
+    # 회전 기록의 사유를 라인별로 «최근 것»만 집어 온다(있으면 그 문장을 그대로 쓴다).
+    line_ids = [ln.id for ln in lines]
+    notes: dict[int, CostAutoRefreshEntry] = {}
+    for e in (
         db.query(CostAutoRefreshEntry)
         .filter(
-            CostAutoRefreshEntry.run_id == latest.id,
-            CostAutoRefreshEntry.outcome == OUTCOME_QUEUED,
+            CostAutoRefreshEntry.import_invoice_line_id.in_(line_ids),
+            CostAutoRefreshEntry.outcome.in_((OUTCOME_QUEUED, OUTCOME_FAILED)),
         )
         .order_by(CostAutoRefreshEntry.id)
         .all()
-    )
-    if not rows:
-        return []
-    line_ids = [e.import_invoice_line_id for e in rows if e.import_invoice_line_id]
-    still_linked = {
-        row[0]
-        for row in db.query(CostMaterialPrice.import_invoice_line_id)
-        .filter(CostMaterialPrice.import_invoice_line_id.in_(line_ids))
-        .all()
-    }
-    return [
-        entry_payload(e)
-        for e in rows
-        if e.import_invoice_line_id not in still_linked
-    ]
+    ):
+        notes[e.import_invoice_line_id] = e  # 뒤에 오는 것이 최신
+
+    out: list[dict] = []
+    for ln in lines:
+        name = (ln.item_name or "").strip()
+        material_id = pairs.get(name)
+        prev = notes.get(ln.id)
+        ship = ln.shipment
+        if prev is not None:
+            payload = entry_payload(prev)
+        else:
+            # ★아직 어느 회전도 이 라인을 못 본 경우 — 「검사 안 함」이 아니라 「곧 검사될
+            #   것」이다. 그래도 사람에겐 지금 보여야 한다(다음 회전까지 숨기면 그게 침묵이다).
+            payload = {
+                "id": None,
+                "run_id": None,
+                "outcome": OUTCOME_QUEUED,
+                "material_id": material_id,
+                "material_name": None,
+                "price_id": None,
+                "import_invoice_line_id": ln.id,
+                "hbl_no": ship.hbl_no if ship is not None else None,
+                "item_name": ln.item_name,
+                "old_price_ex_vat": None,
+                "new_price_ex_vat": _d(ln.unit_cost_ex_vat),
+                "message": None,
+                "created_at": None,
+            }
+        if not payload.get("message"):
+            payload["message"] = (
+                f"「{name}」은 아직 어느 부자재에도 연결된 적이 없다 — "
+                "첫 연결은 사람이 한다(계약 §7-4)."
+                if material_id is None
+                else "자동 연결을 아직 시도하지 않았다 — 다음 회전이 잇는다."
+            )
+        # 좌표는 «지금»의 것으로 덮는다 — 옛 기록의 HBL이 남아 사람을 딴 데로 보내면 안 된다.
+        payload["import_invoice_line_id"] = ln.id
+        payload["hbl_no"] = ship.hbl_no if ship is not None else None
+        payload["item_name"] = ln.item_name
+        payload["material_id"] = material_id
+        out.append(payload)
+    return out

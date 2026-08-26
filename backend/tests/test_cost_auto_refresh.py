@@ -322,3 +322,181 @@ class TestSurface:
         )
         assert r.status_code == 400, r.text
         assert "구현된 규칙이 아니다" in r.text
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R 회귀 — P1 3건 + SURVIVED 변이 3건
+#
+# ★아래 테스트들이 없던 동안 리뷰어의 변이가 **그대로 살아남았다**:
+#   · `MAX_ATTEMPTS` 락(§3 금지선)을 통째로 지워도 623 passed
+#   · 실패 시 `CostAutoRefreshEntry(FAILED)` 기록을 지워도 623 passed
+#   이 계약의 «금지선»과 «침묵 금지»에 회귀 테스트가 0건이었다는 뜻이다.
+# ══════════════════════════════════════════════════════════════════════
+class TestReviewRound1Regressions:
+    def test_P1_1_queue_survives_a_narrow_event_run(self, client):
+        """★P1-1: 로트 하나만 스캔한 이벤트 회전이 **다른 로트의 할 일을 가리면 안 된다.**
+
+        초판은 큐를 「최신 회전의 queued 항목」으로 만들어서, 로트가 확정될 때마다(=정상
+        업무 흐름에서 매번) 좁은 이벤트 회전이 최신이 되며 이전 대기 항목이 **화면에서
+        통째로 사라졌다.** 지금은 큐를 «현재 상태»에서 만든다.
+        """
+        with client.testing_session() as s:
+            sh1 = _shipment(s, "LOT-A", date(2026, 8, 1))
+            _line(s, sh1, "처음보는품목A", "100", "110", seq=1)
+            _line(s, sh1, "처음보는품목B", "200", "220", seq=2)
+            s.commit()
+            AR.run(s, trigger=AR.TRIGGER_CRON)
+            s.commit()
+            assert {q["item_name"] for q in AR.pending_queue(s)} == {
+                "처음보는품목A", "처음보는품목B",
+            }
+
+            # 무관한 세 번째 로트가 확정 → 그 로트만 보는 이벤트 회전
+            sh2 = _shipment(s, "LOT-C", date(2026, 8, 18))
+            _line(s, sh2, "처음보는품목C", "300", "330", seq=1)
+            s.commit()
+            AR.run(s, trigger=AR.TRIGGER_EVENT, shipment_id=sh2.id)
+            s.commit()
+
+            names = {q["item_name"] for q in AR.pending_queue(s)}
+            assert names == {"처음보는품목A", "처음보는품목B", "처음보는품목C"}, (
+                f"좁은 이벤트 회전이 이전 대기 항목을 가렸다 — 지금 큐: {names}"
+            )
+            # 사유는 여전히 비면 안 된다(§2-6).
+            assert all(q["message"] for q in AR.pending_queue(s))
+
+    def test_P1_1b_queue_drops_the_line_once_a_human_links_it(self, client):
+        """반대 방향도 지킨다 — 사람이 연결하면 그 라인은 큐에서 «즉시» 빠진다."""
+        with client.testing_session() as s:
+            m = CostMaterial(name="종X", status="approved")
+            s.add(m)
+            s.flush()
+            sh = _shipment(s, "LOT-A", date(2026, 8, 1))
+            ln = _line(s, sh, "품목X", "100", "110")
+            s.commit()
+            AR.run(s, trigger=AR.TRIGGER_CRON)
+            s.commit()
+            assert len(AR.pending_queue(s)) == 1
+
+            from app.services.cost_menu.materials import link_ledger_line
+
+            link_ledger_line(s, m.id, ln.id, note="사람이 연결")
+            s.commit()
+            assert AR.pending_queue(s) == []
+
+    def test_P1_2_a_failed_line_leaves_no_committed_price(self, client, monkeypatch):
+        """★P1-2: 「failed」로 기록된 라인의 단가가 **실제로 커밋되면 안 된다.**
+
+        초판은 `link_ledger_line`이 단가를 flush한 «뒤» `_propagate`가 터지면 그 flush가
+        살아남았다. `run()`은 예외를 안 던지므로 호출자가 그대로 커밋했고, 결과는
+        「실패라고 적힌 라인의 단가가 영구히 커밋되는 것」이었다. 게다가 그 라인은
+        `_candidate_lines`가 «이미 링크됨»으로 빼서 **재시도도 큐도 안 걸렸다.**
+        """
+        with client.testing_session() as s:
+            material_id, _ = _seed_human_link(s)
+            new = _shipment(s, "SETR2608170216", date(2026, 8, 18))
+            _line(s, new, KIT, "190.82", "209.90")
+            s.commit()
+
+            before = s.query(CostMaterialPrice).count()
+            # `_propagate`(표준원가 재계산)만 터뜨린다 — 단가 flush «뒤»에 도는 자리다.
+            import app.services.cost_menu.materials as M
+
+            monkeypatch.setattr(
+                M, "_propagate",
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("재계산 폭발")),
+            )
+            result = AR.run(s, trigger=AR.TRIGGER_CRON)
+            s.commit()   # ★라우터·스케줄러가 하는 것과 같은 커밋
+
+            assert result.failed == 1 and result.updated == 0
+            assert s.query(CostMaterialPrice).count() == before, (
+                "실패로 기록됐는데 단가 행이 커밋됐다 — 로그와 실제 상태가 어긋난다"
+            )
+            # 그리고 그 라인은 «여전히 미연결»이라 다음 회전이 다시 본다.
+            monkeypatch.undo()
+            second = AR.run(s, trigger=AR.TRIGGER_CRON)
+            s.commit()
+            assert second.updated == 1, "실패한 라인이 재시도 대상에서 빠졌다"
+
+    def test_P1_3_old_price_is_recorded_so_the_screen_can_say_old_to_new(self, client):
+        """★P1-3: `old_price_ex_vat`를 **채우는 코드가 있어야** 화면이 `old → new`를 말한다.
+
+        초판은 이 필드를 채우는 자리가 아예 없어서 항상 `None`이었고, 화면 분기가
+        `old ? "old → new" : "new"`라 **「178.78 → 190.82」가 원리적으로 절대 안 떴다.**
+        """
+        with client.testing_session() as s:
+            _seed_human_link(s)
+            new = _shipment(s, "SETR2608170216", date(2026, 8, 18))
+            _line(s, new, KIT, "190.82", "209.90")
+            s.commit()
+            AR.run(s, trigger=AR.TRIGGER_EVENT, shipment_id=new.id)
+            s.commit()
+
+            runs = AR.recent_runs(s)
+            entry = next(
+                e for e in runs[0]["entries"] if e["outcome"] == AR.OUTCOME_LINKED
+            )
+            assert entry["old_price_ex_vat"] == "178.78", (
+                "연결 «전» 채택 단가가 안 남았다 — 화면이 old→new를 못 말한다"
+            )
+            assert entry["new_price_ex_vat"] == "190.82"
+
+    def test_SURVIVED_1_max_attempts_lock_is_actually_enforced(self, client):
+        """★리뷰어 변이 생존분: `MAX_ATTEMPTS` 락(§3 무한 재시도 금지)을 지워도 전건 초록이었다.
+
+        이 계약의 **금지선**에 회귀 테스트가 0건이었다는 뜻이다.
+        """
+        with client.testing_session() as s:
+            material_id, _ = _seed_human_link(s)
+            new = _shipment(s, "SETR2608170216", date(2026, 8, 18))
+            ln = _line(s, new, KIT, "190.82", "209.90")
+            s.commit()
+            # 실패 이력을 MAX_ATTEMPTS만큼 심는다(회전 행 없이 직접 — 판정 근거는 개수다).
+            from app.models import CostAutoRefreshEntry as E, CostAutoRefreshRun as R
+
+            r = R(trigger=AR.TRIGGER_CRON)
+            s.add(r)
+            s.flush()
+            for _ in range(AR.MAX_ATTEMPTS):
+                s.add(E(run_id=r.id, outcome=AR.OUTCOME_FAILED,
+                        import_invoice_line_id=ln.id, item_name=KIT))
+            s.commit()
+
+            result = AR.run(s, trigger=AR.TRIGGER_CRON)
+            s.commit()
+            assert result.updated == 0, "3회 실패한 라인을 또 시도했다 — §3 금지선 위반"
+            assert result.queued == 1
+            q = AR.pending_queue(s)
+            assert any(str(AR.MAX_ATTEMPTS) in (x["message"] or "") for x in q), (
+                "큐에 고정됐다는 사유가 사람에게 안 보인다"
+            )
+
+    def test_SURVIVED_2_a_failure_always_leaves_a_row_with_a_reason(
+        self, client, monkeypatch
+    ):
+        """★리뷰어 변이 생존분: 실패 시 `FAILED` 행 기록을 지워도 전건 초록이었다(§2-6 침묵)."""
+        with client.testing_session() as s:
+            _seed_human_link(s)
+            new = _shipment(s, "SETR2608170216", date(2026, 8, 18))
+            _line(s, new, KIT, "190.82", "209.90")
+            s.commit()
+
+            import app.services.cost_menu.materials as M
+
+            monkeypatch.setattr(
+                M, "_propagate",
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("재계산 폭발")),
+            )
+            AR.run(s, trigger=AR.TRIGGER_CRON)
+            s.commit()
+
+            runs = AR.recent_runs(s)
+            failed = [
+                e for e in runs[0]["entries"] if e["outcome"] == AR.OUTCOME_FAILED
+            ]
+            assert len(failed) == 1, "실패가 어느 행에도 안 남았다 — 침묵이다"
+            assert "재계산 폭발" in (failed[0]["message"] or ""), (
+                "실패 사유가 비었다 — 사유 없는 실패는 화면에서 침묵과 같다"
+            )
+            assert runs[0]["failed"] == 1

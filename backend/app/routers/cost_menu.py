@@ -293,8 +293,15 @@ def auto_refresh_run(db: Session = Depends(get_db)):
 
     ★이 경로도 «사람이 만든 짝의 반복»만 한다 — 수동 실행이 게이트를 여는 문이 되면 안 된다.
     """
-    result = AR.run(db, trigger=AR.TRIGGER_MANUAL)
-    db.commit()
+    # ★P2-4(적대 리뷰 1R): 로트 확정 경로와 «같은 방어»를 둔다. `run()`은 라인별 예외를
+    #   이미 savepoint 안에서 잡지만, 회전 «층 자체»가 터지면(설정 오류 등) 여기서 세션이
+    #   오염된 채 남는다. 일관성이 곧 다음 사람의 예측 가능성이다.
+    try:
+        result = AR.run(db, trigger=AR.TRIGGER_MANUAL)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"자동 갱신 회전 실패: {exc}")
     return {
         "run_id": result.run_id,
         "trigger": result.trigger,

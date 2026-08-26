@@ -483,7 +483,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function renderApp() {
+/** `/cost`를 통째로 렌더한다.
+ *
+ *  ★`materials`를 갈아끼울 수 있게 둔 이유: SUR-F6·F7이 재는 배지는 **특정 데이터 모양**
+ *  (어긋남 있음 / 로트 구간 폭 있음)에서만 뜬다. 기본 픽스처는 둘 다 없는 «조용한» 종이라
+ *  그대로 두면 그 렌더 자리를 원리적으로 못 잰다 — 실제로 리뷰어의 변이가 그 틈으로 살아남았다. */
+async function renderApp(over?: { materials?: CostMaterial[] }) {
+  if (over?.materials) {
+    const api = await import("../lib/api");
+    (api.fetchCostMaterials as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: over.materials,
+    });
+  }
   const { default: App } = await import("../App");
   return render(<App />);
 }
@@ -514,6 +525,57 @@ describe("★D-CPP-60 표면이 `/cost`에서 실제로 닿는가 (App 통째 �
     expect(
       await screen.findByText(/첫 연결은 사람이 한다\(계약 §7-4\)/),
     ).toBeTruthy();
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // ★SUR-F6·F7 — 적대 리뷰 1R에서 **살아남은** 변이의 자리
+  //
+  //   리뷰어가 `CostPage.tsx`의 `price_conflict` 배지 렌더 블록을 `{null}`로 치환했는데
+  //   프론트 534개가 **전부 초록이었다**. 순수 함수(`priceConflictText`) 단위 테스트만 있고
+  //   **그 문구가 실제 DOM에 뜨는지 재는 테스트가 없었다** — 이 저장소가 반복해 밟은
+  //   「함수는 값을 만드는데 사람은 못 본다」의 정확히 그 모양이다.
+  //   §4-⑥ 로트 구간 배지도 같은 구멍이었으므로 둘 다 여기서 잠근다.
+  // ══════════════════════════════════════════════════════════════════
+  it("★SUR-F6: 어긋남 배지(§4-⑦)가 실제 DOM에 뜬다 — 순수 함수만 재면 렌더가 안 잠긴다", async () => {
+    await renderApp({
+      materials: [
+        {
+          ...MATERIAL_MIN,
+          latest_price_ex_vat: "190.82",
+          latest_price_source: "ledger",
+          price_conflict: true,
+          price_conflict_price_id: 29,
+        },
+      ],
+    });
+    await screen.findByRole("heading", { name: /원가/ });
+    expect(
+      await screen.findByTestId(`material-${MATERIAL_MIN.id}-price-conflict`),
+    ).toBeTruthy();
+    expect(screen.getByText(/더 늦은 수동 입력이 있다/)).toBeTruthy();
+  });
+
+  it("★SUR-F7: 관측 로트 구간 배지(§4-⑥)가 실제 DOM에 뜬다 — 폭이 없으면 안 뜬다", async () => {
+    await renderApp({
+      materials: [
+        {
+          ...MATERIAL_MIN,
+          lot_count: 2,
+          latest_price_ex_vat: "190.82",
+          latest_price_source: "ledger",
+          lot_price_min: "178.78",
+          lot_price_max: "190.82",
+          lot_price_has_span: true,
+        },
+      ],
+    });
+    await screen.findByRole("heading", { name: /원가/ });
+    expect(
+      await screen.findByTestId(`material-${MATERIAL_MIN.id}-lot-span`),
+    ).toBeTruthy();
+    expect(screen.getByText(/178\.78~190\.82원/)).toBeTruthy();
+    // ★그리고 「FIFO」로 부르지 않는다(§3 금지선) — 방향이 반대다.
+    expect(screen.queryByText(/선입선출 근사|FIFO 근사/)).toBeNull();
   });
 
   it("「지금 검사」를 누르면 자동 갱신을 다시 부르고 목록이 새로고침된다", async () => {
