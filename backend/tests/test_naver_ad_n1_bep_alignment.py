@@ -203,7 +203,7 @@ def test_logistics_nbaesong_share_uses_same_sample_as_price(db):
 
 
 def test_logistics_paid_is_linear_in_nbaesong_share(db):
-    # 최근 창 10건 중 5건 N배송 → 지불 = 1,900 + 1,120 × 0.5 = 2,460
+    # 최근 창 10건 중 5건 N배송 → 지불 = 1,900 + (3,377−1,900) × 0.5 = 2,638.5
     _order(db, "p1", days_ago=3, nbaesong=True, n=5)
     _order(db, "p1", days_ago=4, nbaesong=False, n=5)
     db.commit()
