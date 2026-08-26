@@ -6264,6 +6264,8 @@ export interface OtaoSalesChannel {
   quantity_mapped: number;
   /** 취소·반품으로 «뺀» 몫. 조용히 빼지 않는다 */
   quantity_excluded: number;
+  /** ★한 채널 상품 ID가 서로 다른 상품 여러 개를 가리켜 «안 붙인» 수량. 고르면 발주 오염이다 */
+  quantity_ambiguous: number;
   /** ★수량 기준. null = 분모가 0이라 «잴 수 없음»(0%가 아니다) */
   mapping_rate: number | null;
   days_with_rows: number;
@@ -6278,12 +6280,16 @@ export interface OtaoSalesRow {
   product_name: string | null;
   total: number;
   by_channel: Record<string, number>;
+  /** ★일별 판매수량. `OtaoSales.dates`와 **자리로** 대응한다 — 이게 「시계열」의 본체다 */
+  series: number[];
 }
 
 export interface OtaoSales {
   window_start: string;
   window_end: string;
   days: number;
+  /** 창의 날짜 축. `rows[*].series`가 이 배열과 자리로 대응한다 */
+  dates: string[];
   channels: OtaoSalesChannel[];
   rows: OtaoSalesRow[];
   daily: { date: string; total: number; by_channel: Record<string, number> }[];

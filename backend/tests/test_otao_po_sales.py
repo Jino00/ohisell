@@ -297,3 +297,107 @@ def test_order_axis_bridge_is_confessed_when_absent(session):
     assert ts.order_axis["overlap"] == 0
     assert ts.order_axis["sales_axis_skus"] == 1
     assert any("다리가 아직 없다" in n for n in ts.notes)
+
+
+# ── ⑥ 적대 리뷰 P1-1 — 중복 매핑이 판매를 «곱하면» 안 된다 ──────────────────
+#
+# `product_channel_mapping.channel_product_id`엔 unique 제약이 없고 prod에 중복 55키·121행이
+# 실재한다(한 키가 서로 다른 상품 5개를 가리키는 경우까지). 초판은 outerjoin으로 풀어서
+# 같은 수량을 N번 더했다 — Wing 3P 오픽스가 원장 1,980 → 화면 2,099(+6.0%)로 부풀었고
+# 그 몫이 **팔린 적 없는 SKU에도 배분**됐다. 기존 픽스처는 키당 1행이라 0건이 잡았다.
+
+
+def test_duplicate_mapping_rows_to_the_same_product_do_not_multiply(session):
+    """같은 상품을 가리키는 **중복 행**은 안전하게 접힌다 — 수량이 두 배가 되면 안 된다."""
+    pm = _master(session)
+    for _ in range(3):  # 같은 (키 → 같은 상품) 매핑이 3행
+        session.add(ProductChannelMapping(product_id=pm.id, channel_id=1, channel_product_id="V-1"))
+    session.add(
+        CoupangVendorItemSalesDaily(
+            sale_date=TODAY, account_key="COUPANG_WING1", vendor_item_id="V-1",
+            registration_type="ROCKET_GROWTH", product_id="1", units_sold=10,
+        )
+    )
+    session.flush()
+
+    ts = build_sales_timeseries(session, days=7, today=TODAY)
+    wing = _ch(ts, "wing3p_ofix")
+    assert wing.quantity == 10, "원장 수량 그대로여야 한다"
+    assert wing.quantity_mapped == 10
+    assert ts.rows[0]["total"] == 10, "중복 매핑 행 수만큼 곱해지면 안 된다"
+    assert len(ts.rows) == 1
+
+
+def test_one_channel_id_pointing_at_several_products_is_left_ambiguous(session):
+    """★서로 다른 상품을 가리키면 **고르지 않는다.** 다수결도 안 된다 — 발주 오염이다."""
+    a = _master(session, sku="OHI-0001")
+    b = _master(session, sku="OHI-0002", name="다른 상품")
+    session.add(ProductChannelMapping(product_id=a.id, channel_id=1, channel_product_id="V-9"))
+    session.add(ProductChannelMapping(product_id=b.id, channel_id=1, channel_product_id="V-9"))
+    session.add(
+        CoupangVendorItemSalesDaily(
+            sale_date=TODAY, account_key="COUPANG_WING1", vendor_item_id="V-9",
+            registration_type="ROCKET_GROWTH", product_id="1", units_sold=10,
+        )
+    )
+    session.flush()
+
+    ts = build_sales_timeseries(session, days=7, today=TODAY)
+    wing = _ch(ts, "wing3p_ofix")
+    assert wing.quantity == 10
+    assert wing.quantity_mapped == 0, "모호한 것을 붙이면 안 된다"
+    assert wing.quantity_ambiguous == 10
+    # 팔린 적 없는 SKU에 배분되지 않는다
+    assert ts.rows == []
+    assert ts.unmapped == {"wing3p_ofix": 10}
+    assert any("서로 다른 상품 여러 개" in n for n in ts.notes)
+
+
+def test_rg_uses_the_same_ambiguity_rule(session):
+    a = _master(session, sku="OHI-0001")
+    b = _master(session, sku="OHI-0002", name="다른 상품")
+    session.add(ProductChannelMapping(product_id=a.id, channel_id=3, channel_product_id="R-9"))
+    session.add(ProductChannelMapping(product_id=b.id, channel_id=3, channel_product_id="R-9"))
+    session.add(
+        CoupangRgOrderItem(
+            order_id="R-1", vendor_item_id="R-9", account_key="COUPANG_WING1",
+            vendor_id="A0", sales_quantity=4,
+            paid_at=datetime(TODAY.year, TODAY.month, TODAY.day, 9, 0),
+        )
+    )
+    session.flush()
+    ts = build_sales_timeseries(session, days=7, today=TODAY)
+    assert _ch(ts, "rg2p_ofix").quantity_ambiguous == 4
+    assert ts.rows == []
+
+
+# ── ⑦ 적대 리뷰 P1-2 — 「시계열」이 실제로 시계열인가 ────────────────────────
+
+
+def test_rows_carry_a_per_day_series_aligned_to_the_date_axis(session):
+    """★S3 원문의 첫 요구가 «시계열»이다. SKU×창합계만으로는 그것이 아니다."""
+    pm = _master(session)
+    _order(session, channel_id=6, product_id=pm.id, d=TODAY, qty=3)
+    _order(session, channel_id=6, product_id=pm.id, d=TODAY - timedelta(days=2), qty=5)
+    session.flush()
+
+    ts = build_sales_timeseries(session, days=3, today=TODAY)
+    assert ts.dates == [
+        (TODAY - timedelta(days=2)).isoformat(),
+        (TODAY - timedelta(days=1)).isoformat(),
+        TODAY.isoformat(),
+    ]
+    (row,) = ts.rows
+    # 배열이 날짜 축과 «자리로» 대응한다 — 합계 8이 아니라 [5, 0, 3]이어야 한다
+    assert row["series"] == [5, 0, 3]
+    assert sum(row["series"]) == row["total"] == 8
+
+
+def test_series_sums_channels_per_day(session):
+    pm = _master(session)
+    _order(session, channel_id=6, product_id=pm.id, d=TODAY, qty=2)
+    _order(session, channel_id=7, product_id=pm.id, d=TODAY, qty=3)
+    session.flush()
+    ts = build_sales_timeseries(session, days=2, today=TODAY)
+    (row,) = ts.rows
+    assert row["series"] == [0, 5]

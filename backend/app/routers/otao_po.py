@@ -118,6 +118,8 @@ def get_sales(
         "window_start": ts.window_start.isoformat(),
         "window_end": ts.window_end.isoformat(),
         "days": days,
+        # ★`rows[*].series`가 이 배열과 «자리로» 대응한다. 없으면 시계열이 좌표를 잃는다.
+        "dates": ts.dates,
         "channels": [
             {
                 "key": c.key,
@@ -130,6 +132,8 @@ def get_sales(
                 "quantity": c.quantity,
                 "quantity_mapped": c.quantity_mapped,
                 "quantity_excluded": c.quantity_excluded,
+                # ★한 채널 상품 ID가 여러 상품을 가리켜 «안 붙인» 수량(적대 리뷰 P1-1)
+                "quantity_ambiguous": c.quantity_ambiguous,
                 "mapping_rate": c.mapping_rate,
                 "days_with_rows": c.days_with_rows,
                 # ★false면 「결손일과 판매 0을 구분할 근거가 없다」는 뜻이다.

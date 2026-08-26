@@ -54,6 +54,7 @@ function channel(over: Partial<OtaoSales["channels"][number]>) {
     quantity: 100,
     quantity_mapped: 90,
     quantity_excluded: 4,
+    quantity_ambiguous: 7,
     mapping_rate: 90,
     days_with_rows: 58,
     missing_day_evidence: true,
@@ -67,6 +68,7 @@ const SALES: OtaoSales = {
   window_start: "2026-06-28",
   window_end: "2026-08-26",
   days: 60,
+  dates: ["2026-08-24", "2026-08-25", "2026-08-26"],
   channels: [
     channel({}),
     // ★근거가 «없는» 채널 — 결손을 가르면 안 되고 화면이 그렇게 말해야 한다
@@ -80,6 +82,7 @@ const SALES: OtaoSales = {
       quantity: 50,
       quantity_mapped: 50,
       quantity_excluded: 0,
+      quantity_ambiguous: 0,
       mapping_rate: 100,
       missing_day_evidence: false,
       days_collected_zero: [],
@@ -97,6 +100,7 @@ const SALES: OtaoSales = {
       quantity: 0,
       quantity_mapped: 0,
       quantity_excluded: 0,
+      quantity_ambiguous: 0,
       mapping_rate: null,
       days_with_rows: 0,
       missing_day_evidence: false,
@@ -110,6 +114,7 @@ const SALES: OtaoSales = {
       product_name: "지문방지 PET 필름 2매, 아이폰16",
       total: 140,
       by_channel: { naver: 90, wing3p_ofix: 50 },
+      series: [40, 0, 100],
     },
   ],
   daily: [{ date: "2026-08-26", total: 140, by_channel: { naver: 90, wing3p_ofix: 50 } }],
@@ -221,5 +226,98 @@ describe("S3 판매 축이 화면까지 닿는다", () => {
     expect(await screen.findByText("발주 원장이 비어 있습니다")).toBeTruthy();
     // 그리고 판매 실패를 «말한다» — 조용히 빈 화면이 되지 않는다
     expect(await screen.findByText(/판매 시계열을 불러오지 못했습니다/)).toBeTruthy();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★적대 리뷰 P1-3 — **prod가 타는 경로**를 보는 테스트가 없었다.
+//
+// 기제는 두 파일의 사각지대 «교집합»이었다: 이 파일은 로스터를 비우고(`ledger_empty: true`),
+// `otaoPoReachesTheUser.test.tsx`는 `fetchOtaoSales`를 일부러 throw시킨다. 그래서
+// **「원장이 비어 있지 않다 + 판매 fetch가 정상」** — 즉 prod의 실제 상태 — 를 렌더하는
+// 테스트가 저장소에 한 건도 없었고, 그 상태에서 판매 섹션을 통째로 지워도 18/18이 초록이었다.
+//
+// 아래 describe가 그 교집합을 메운다. prod 실측(발주서 95건 적재됨)과 같은 모양이다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LOADED_ROSTER: OtaoRoster = {
+  ledger_empty: false,
+  window_start: "2026-01-27",
+  rows: [
+    {
+      product_code: "GAPIP15PR",
+      ordered: 3900,
+      picked: 2100,
+      reserved: 1800,
+      out_of_window_ordered: 61400,
+      last_order_date: "2026-08-12",
+      order_count: 37,
+    },
+  ],
+  totals: {
+    ordered: 30090,
+    picked: 18970,
+    reserved: 11120,
+    out_of_window_ordered: 310927,
+    unmapped_qty: 2790,
+    sku_count: 75,
+    unmapped_name_count: 22,
+  },
+  unmapped: [{ item_name: "For iPhone 15 Pro", quantity: 400 }],
+  notes: ["예약 잔량은 통관 원장이 덮는 창(2026-01-27 이후) 안의 발주분만 센다."],
+  source: {
+    orders_total: 95,
+    orders_authoritative: 66,
+    orders_superseded: 29,
+    last_order_date: "2026-08-19",
+    name_map_total: 65,
+    name_map_resolved: 43,
+  },
+};
+
+describe("prod가 타는 경로 — 원장이 차 있고 판매도 정상일 때", () => {
+  beforeEach(async () => {
+    const api = await import("../lib/api");
+    vi.mocked(api.fetchOtaoRoster).mockResolvedValue(LOADED_ROSTER);
+  });
+
+  it("★발주 3칸과 판매 섹션이 **둘 다** 뜬다", async () => {
+    await renderApp();
+    // 발주 축 (S1)
+    expect(await screen.findByText("GAPIP15PR")).toBeTruthy();
+    expect(await screen.findByText(/합계 — 발주 30,090 · 픽업 18,970 · 잔량 11,120/)).toBeTruthy();
+    // 판매 축 (S3) — 이게 없으면 이 커밋이 아무것도 안 한 것과 같다
+    expect(await screen.findByText("판매 (채널 통합)")).toBeTruthy();
+    expect(await screen.findByText("OHI-0001")).toBeTruthy();
+    expect(await screen.findByText("채널별 판매 — 매핑률과 결손일")).toBeTruthy();
+    expect(await screen.findByText("SKU별 채널 통합 판매수량")).toBeTruthy();
+  });
+
+  it("두 축이 **다른 라벨 공간**임을 화면이 말한다", async () => {
+    await renderApp();
+    // 발주 축 라벨(GAPIP…)과 판매 축 라벨(OHI-…)이 같은 화면에 있되 다른 표에 있다
+    expect(await screen.findByText("GAPIP15PR")).toBeTruthy();
+    expect(await screen.findByText("OHI-0001")).toBeTruthy();
+    expect(await screen.findByText(/발주 축 ↔ 판매 축 다리: 겹치는 값 0개/)).toBeTruthy();
+    expect(
+      await screen.findByText(/위 발주 표의 상품코드\(GAPIP…\)와 \*\*다른 축\*\*/),
+    ).toBeTruthy();
+  });
+
+  it("SUR-S7 — SKU별 **일별 시계열**이 화면에 그려진다", async () => {
+    const { container } = await renderApp();
+    await screen.findByText("OHI-0001");
+    // 창 합계만 그리면 「언제 팔렸나」가 사라진다 — 그건 S3 원문의 첫 요구를 안 한 것이다
+    const spark = container.querySelector('svg[role="img"] polyline');
+    expect(spark).toBeTruthy();
+    expect(spark?.getAttribute("points")?.split(" ").length).toBe(3);
+    expect(await screen.findByText(/일별 추이 \(2026-08-24 ~ 2026-08-26\)/)).toBeTruthy();
+  });
+
+  it("SUR-S8 — 「매핑 모호」 수량이 화면에 뜬다", async () => {
+    await renderApp();
+    // 다수결로 고르지 않고 남긴 몫. 안 그리면 P1-1 수정이 사용자에게 안 닿는다.
+    expect(await screen.findByText(/^7 ⚠$/)).toBeTruthy();
+    expect(await screen.findByText("매핑 모호")).toBeTruthy();
   });
 });

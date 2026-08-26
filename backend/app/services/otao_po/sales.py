@@ -86,6 +86,9 @@ class ChannelHealth:
     quantity: int = 0
     quantity_mapped: int = 0
     quantity_excluded: int = 0  # 취소·반품
+    # ★한 채널 상품 ID가 서로 다른 상품 여러 개를 가리키는 경우의 수량(적대 리뷰 P1-1).
+    #   붙이지 않고 「매핑 모호」로 드러낸다 — 고르면 «조용한 발주 오염»이다.
+    quantity_ambiguous: int = 0
     rows: int = 0
     days_with_rows: int = 0
     # ★「그 날짜에 수집이 있었는가」를 되짚을 수 있는 채널인가. False면 화면이 그렇게 말한다.
@@ -106,6 +109,8 @@ class ChannelHealth:
 class SalesTimeseries:
     window_start: date
     window_end: date
+    # 창의 날짜 축 — `rows[*].series`가 이 배열과 **자리로** 대응한다.
+    dates: list[str] = field(default_factory=list)
     channels: list[ChannelHealth] = field(default_factory=list)
     # SKU별 합계 — {internal_sku, product_name, total, by_channel}
     rows: list[dict] = field(default_factory=list)
@@ -178,66 +183,91 @@ def _orders_channel(
     return cells, excluded, rows
 
 
+def _channel_sku_index(session: Session) -> dict[str, set[str]]:
+    """`channel_product_id` → 그 키가 가리키는 `internal_sku` **집합**.
+
+    ★★**조인으로 풀면 안 된다** (적대 리뷰 P1-1). `product_channel_mapping.channel_product_id`엔
+    unique 제약이 없고 prod에 **중복 55키·121행**이 실재한다(한 키가 서로 다른 상품 **5개**를
+    가리키는 경우까지). outerjoin은 그 행마다 판매를 복제해 **같은 수량을 N번 더한다** —
+    실측으로 Wing 3P 오픽스가 원장 1,980 → 화면 2,099(+6.0%)로 부풀어 있었고, 그 몫이
+    **팔린 적 없는 SKU에도 배분**됐다. 조용히 넣으면 발주 오염이다(계약 §2-9).
+
+    그래서 «집합»으로 들고 와서 파이썬에서 가른다:
+      - 집합 크기 1 → 그 상품에 붙인다(단순 중복 행은 여기서 안전하게 접힌다)
+      - 집합 크기 ≥2 → **붙이지 않는다.** 다수결로 고르지 않는다 — 9:1이어도 소수 쪽이 옳을 수
+        있고, 발주 수량이 걸린 자리에서 「아마 이것」은 근거가 아니다(D-INV-5의 `ambiguous`와
+        같은 규율). 화면이 「매핑 모호」로 드러낸다.
+    """
+    idx: dict[str, set[str]] = {}
+    for cpid, sku in session.execute(
+        select(ProductChannelMapping.channel_product_id, ProductMaster.internal_sku).join(
+            ProductMaster, ProductMaster.id == ProductChannelMapping.product_id
+        )
+    ):
+        if cpid is None or sku is None:
+            continue
+        idx.setdefault(str(cpid), set()).add(sku)
+    return idx
+
+
+def _resolve(idx: dict[str, set[str]], key) -> tuple[str | None, bool]:
+    """(internal_sku, 모호한가). 모호하면 `(None, True)` — 「모름」이지 「없음」이 아니다."""
+    if key is None:
+        return None, False
+    skus = idx.get(str(key))
+    if not skus:
+        return None, False
+    if len(skus) > 1:
+        return None, True
+    return next(iter(skus)), False
+
+
 def _wing_3p(
-    session: Session, *, account_key: str, start: date, end: date
-) -> tuple[list[tuple[date, str | None, int]], int, int]:
+    session: Session, *, account_key: str, start: date, end: date, idx: dict[str, set[str]]
+) -> tuple[list[tuple[date, str | None, int]], int, int, int]:
     """쿠팡 Wing 3P 정본. 다리는 `vendor_item_id`이지 `product_id`가 아니다."""
-    q = (
-        select(
-            CoupangVendorItemSalesDaily.sale_date,
-            ProductMaster.internal_sku,
-            CoupangVendorItemSalesDaily.units_sold,
-        )
-        .select_from(CoupangVendorItemSalesDaily)
-        .outerjoin(
-            ProductChannelMapping,
-            cast(ProductChannelMapping.channel_product_id, String)
-            == cast(CoupangVendorItemSalesDaily.vendor_item_id, String),
-        )
-        .outerjoin(ProductMaster, ProductMaster.id == ProductChannelMapping.product_id)
-        .where(
-            CoupangVendorItemSalesDaily.account_key == account_key,
-            CoupangVendorItemSalesDaily.sale_date >= start,
-            CoupangVendorItemSalesDaily.sale_date <= end,
-        )
+    q = select(
+        CoupangVendorItemSalesDaily.sale_date,
+        CoupangVendorItemSalesDaily.vendor_item_id,
+        CoupangVendorItemSalesDaily.units_sold,
+    ).where(
+        CoupangVendorItemSalesDaily.account_key == account_key,
+        CoupangVendorItemSalesDaily.sale_date >= start,
+        CoupangVendorItemSalesDaily.sale_date <= end,
     )
-    cells = []
-    rows = 0
-    for d, sku, qty in session.execute(q):
+    cells, rows, ambiguous = [], 0, 0
+    for d, vid, qty in session.execute(q):
         rows += 1
-        cells.append((d if isinstance(d, date) else date.fromisoformat(str(d)), sku, int(qty or 0)))
-    return cells, 0, rows
+        sku, amb = _resolve(idx, vid)
+        n = int(qty or 0)
+        if amb:
+            ambiguous += n
+        cells.append((d if isinstance(d, date) else date.fromisoformat(str(d)), sku, n))
+    return cells, 0, rows, ambiguous
 
 
 def _rg_2p(
-    session: Session, *, account_key: str, start: date, end: date
-) -> tuple[list[tuple[date, str | None, int]], int, int]:
+    session: Session, *, account_key: str, start: date, end: date, idx: dict[str, set[str]]
+) -> tuple[list[tuple[date, str | None, int]], int, int, int]:
     """쿠팡 로켓그로스(2P). 같은 다리(`vendor_item_id`)를 쓴다."""
-    q = (
-        select(
-            func.date(CoupangRgOrderItem.paid_at),
-            ProductMaster.internal_sku,
-            CoupangRgOrderItem.sales_quantity,
-        )
-        .select_from(CoupangRgOrderItem)
-        .outerjoin(
-            ProductChannelMapping,
-            cast(ProductChannelMapping.channel_product_id, String)
-            == cast(CoupangRgOrderItem.vendor_item_id, String),
-        )
-        .outerjoin(ProductMaster, ProductMaster.id == ProductChannelMapping.product_id)
-        .where(
-            CoupangRgOrderItem.account_key == account_key,
-            func.date(CoupangRgOrderItem.paid_at) >= start.isoformat(),
-            func.date(CoupangRgOrderItem.paid_at) <= end.isoformat(),
-        )
+    q = select(
+        func.date(CoupangRgOrderItem.paid_at),
+        CoupangRgOrderItem.vendor_item_id,
+        CoupangRgOrderItem.sales_quantity,
+    ).where(
+        CoupangRgOrderItem.account_key == account_key,
+        func.date(CoupangRgOrderItem.paid_at) >= start.isoformat(),
+        func.date(CoupangRgOrderItem.paid_at) <= end.isoformat(),
     )
-    cells = []
-    rows = 0
-    for d, sku, qty in session.execute(q):
+    cells, rows, ambiguous = [], 0, 0
+    for d, vid, qty in session.execute(q):
         rows += 1
-        cells.append((date.fromisoformat(str(d)), sku, int(qty or 0)))
-    return cells, 0, rows
+        sku, amb = _resolve(idx, vid)
+        n = int(qty or 0)
+        if amb:
+            ambiguous += n
+        cells.append((date.fromisoformat(str(d)), sku, n))
+    return cells, 0, rows, ambiguous
 
 
 def _rocket_1p(
@@ -288,21 +318,22 @@ _SPECS = [
 ]
 
 
-def _fetch(session: Session, key: str, start: date, end: date):
+def _fetch(session: Session, key: str, start: date, end: date, idx: dict[str, set[str]]):
+    """반환 = (셀, 취소·반품 수량, 행수, 모호 수량)."""
     if key == "naver":
-        return _orders_channel(session, channel_id=6, start=start, end=end)
+        return (*_orders_channel(session, channel_id=6, start=start, end=end), 0)
     if key == "cafe24":
-        return _orders_channel(session, channel_id=7, start=start, end=end)
+        return (*_orders_channel(session, channel_id=7, start=start, end=end), 0)
     if key == "wing3p_ofix":
-        return _wing_3p(session, account_key="COUPANG_WING1", start=start, end=end)
+        return _wing_3p(session, account_key="COUPANG_WING1", start=start, end=end, idx=idx)
     if key == "wing3p_ohitech":
-        return _wing_3p(session, account_key="COUPANG_WING2", start=start, end=end)
+        return _wing_3p(session, account_key="COUPANG_WING2", start=start, end=end, idx=idx)
     if key == "rg2p_ofix":
-        return _rg_2p(session, account_key="COUPANG_WING1", start=start, end=end)
+        return _rg_2p(session, account_key="COUPANG_WING1", start=start, end=end, idx=idx)
     if key == "rg2p_ohitech":
-        return _rg_2p(session, account_key="COUPANG_WING2", start=start, end=end)
+        return _rg_2p(session, account_key="COUPANG_WING2", start=start, end=end, idx=idx)
     if key == "rocket1p":
-        return _rocket_1p(session, start=start, end=end)
+        return (*_rocket_1p(session, start=start, end=end), 0)
     raise ValueError(f"모르는 채널 키: {key}")  # pragma: no cover
 
 
@@ -335,11 +366,14 @@ def build_sales_timeseries(session: Session, *, days: int = 60, today: date | No
     all_days = _daterange(start, end)
 
     out = SalesTimeseries(window_start=start, window_end=end)
+    out.dates = [d.isoformat() for d in all_days]
+    day_pos = {d: i for i, d in enumerate(all_days)}
     per_sku: dict[str, dict] = {}
     per_day: dict[date, dict] = {d: {} for d in all_days}
+    idx = _channel_sku_index(session)
 
     for key, label, company, sell_type, table, bridge, sync_channel_id in _SPECS:
-        cells, excluded, rows = _fetch(session, key, start, end)
+        cells, excluded, rows, ambiguous = _fetch(session, key, start, end, idx)
         health = ChannelHealth(
             key=key,
             label=label,
@@ -348,6 +382,7 @@ def build_sales_timeseries(session: Session, *, days: int = 60, today: date | No
             source_table=table,
             bridge=bridge,
             quantity_excluded=excluded,
+            quantity_ambiguous=ambiguous,
             rows=rows,
         )
         seen_days: set[date] = set()
@@ -357,10 +392,20 @@ def build_sales_timeseries(session: Session, *, days: int = 60, today: date | No
             if sku:
                 health.quantity_mapped += qty
                 row = per_sku.setdefault(
-                    sku, {"internal_sku": sku, "product_name": None, "total": 0, "by_channel": {}}
+                    sku,
+                    {
+                        "internal_sku": sku,
+                        "product_name": None,
+                        "total": 0,
+                        "by_channel": {},
+                        # ★S3 원문의 첫 요구는 «시계열»이다 — SKU×창합계만으로는 그게 아니다
+                        #   (적대 리뷰 P1-2). 창 길이만큼의 일별 배열을 여기서 만든다.
+                        "series": [0] * len(all_days),
+                    },
                 )
                 row["total"] += qty
                 row["by_channel"][key] = row["by_channel"].get(key, 0) + qty
+                row["series"][day_pos[d]] += qty
             else:
                 # 「모름」이지 「0」이 아니다 — 조용히 빼면 수요가 그만큼 사라진다(§2-9).
                 out.unmapped[key] = out.unmapped.get(key, 0) + qty
@@ -415,6 +460,12 @@ def build_sales_timeseries(session: Session, *, days: int = 60, today: date | No
         out.notes.append(
             f"상품코드에 못 붙은 판매 {total_unmapped:,}개가 SKU 시계열에서 빠져 있다 — "
             "채널별 내역은 「매핑 필요」 칸에 있다."
+        )
+    amb = sum(c.quantity_ambiguous for c in out.channels)
+    if amb:
+        out.notes.append(
+            f"채널 상품 ID 하나가 **서로 다른 상품 여러 개**를 가리키는 판매가 {amb:,}개다 — "
+            "다수결로 고르지 않고 「매핑 모호」로 남겼다. 고르면 그만큼이 조용한 발주 오염이 된다."
         )
     if out.order_axis.get("overlap", 0) == 0:
         out.notes.append(

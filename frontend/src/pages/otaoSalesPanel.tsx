@@ -63,6 +63,37 @@ export function MissingDayCell({ channel }: { channel: OtaoSalesChannel }) {
   );
 }
 
+/**
+ * SKU 한 줄의 **일별 시계열**을 그린다 (적대 리뷰 P1-2).
+ *
+ * ★S3 원문의 첫 요구가 「시계열」이다. 창 합계만 그리면 «언제 팔렸나»가 사라지고, 그건
+ * 발주 판단에서 가장 중요한 축이다(같은 60개라도 최근 3일에 몰린 것과 두 달에 퍼진 것은
+ * 다른 결정을 부른다). 외부 차트 라이브러리 없이 인라인 SVG로 그린다.
+ */
+export function Sparkline({ series, dates }: { series: number[]; dates: string[] }) {
+  const max = Math.max(...series, 1);
+  const w = 120;
+  const h = 20;
+  const step = series.length > 1 ? w / (series.length - 1) : w;
+  const pts = series
+    .map((v, i) => `${(i * step).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`)
+    .join(" ");
+  const peak = series.indexOf(max);
+  return (
+    <svg
+      width={w}
+      height={h}
+      viewBox={`0 0 ${w} ${h}`}
+      className="inline-block align-middle"
+      role="img"
+      aria-label={`일별 판매 추이 — 최대 ${max}개 (${dates[peak] ?? "—"})`}
+    >
+      <title>{`${dates[0] ?? ""} ~ ${dates[dates.length - 1] ?? ""} · 최대 ${max}개 (${dates[peak] ?? "—"})`}</title>
+      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.2" className="text-sky-600" />
+    </svg>
+  );
+}
+
 export default function OtaoSalesPanel({ data }: { data: OtaoSales }) {
   const byKey = new Map(data.channels.map((c) => [c.key, c]));
   const active = data.channels.filter((c) => c.quantity > 0);
@@ -101,6 +132,7 @@ export default function OtaoSalesPanel({ data }: { data: OtaoSales }) {
               <Th right>매핑됨</Th>
               <Th>매핑률</Th>
               <Th right>취소·반품</Th>
+              <Th right>매핑 모호</Th>
               <Th right>데이터 있는 날</Th>
               <Th>빈 날의 정체</Th>
             </>
@@ -120,6 +152,20 @@ export default function OtaoSalesPanel({ data }: { data: OtaoSales }) {
                 {c.quantity_excluded > 0 ? (
                   <span className="text-gray-500" title="취소·반품은 수요가 아니라 판매수량에서 뺐습니다. 뺀 몫을 여기 남깁니다.">
                     −{num(c.quantity_excluded)}
+                  </span>
+                ) : (
+                  <span className="text-gray-300">0</span>
+                )}
+              </Td>
+              <Td right>
+                {/* ★한 채널 상품 ID가 서로 다른 상품 여럿을 가리켜 «안 붙인» 몫. 다수결로
+                    고르면 그만큼이 조용한 발주 오염이 된다 — 그래서 숫자로 드러낸다. */}
+                {c.quantity_ambiguous > 0 ? (
+                  <span
+                    className="text-amber-700 font-medium"
+                    title="이 채널의 상품 ID 하나가 서로 다른 상품 여러 개에 매핑돼 있어 어느 상품의 판매인지 정할 수 없는 수량입니다. 다수결로 고르지 않고 남겨 둡니다."
+                  >
+                    {num(c.quantity_ambiguous)} ⚠
                   </span>
                 ) : (
                   <span className="text-gray-300">0</span>
@@ -161,6 +207,8 @@ export default function OtaoSalesPanel({ data }: { data: OtaoSales }) {
               <>
                 <Th>SKU</Th>
                 <Th>상품명</Th>
+                {/* ★S3 원문의 첫 요구 — 일별 추이. 창 합계만 그리면 «언제 팔렸나»가 사라진다. */}
+                <Th>일별 추이 ({data.dates[0]} ~ {data.dates[data.dates.length - 1]})</Th>
                 {active.map((c) => (
                   <Th key={c.key} right>{c.label}</Th>
                 ))}
@@ -172,6 +220,7 @@ export default function OtaoSalesPanel({ data }: { data: OtaoSales }) {
               <tr key={r.internal_sku}>
                 <Td>{r.internal_sku}</Td>
                 <Td><span className="text-xs text-gray-600">{r.product_name ?? "—"}</span></Td>
+                <Td><Sparkline series={r.series} dates={data.dates} /></Td>
                 {active.map((c) => (
                   <Td key={c.key} right>
                     {r.by_channel[c.key] ? (
