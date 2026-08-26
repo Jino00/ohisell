@@ -288,8 +288,13 @@ def _customs(session, item_names: list[str]) -> None:
     session.flush()
 
 
-def test_sync_name_map_uses_only_authoritative_orders(session, folder):
-    """개정 전 판본의 품목명이 사전을 오염시키면 안 된다."""
+def test_sync_name_map_authoritative_label_wins_over_superseded(session, folder):
+    """라벨이 «충돌»하면 정본이 이긴다 — D-INV-3의 우선순위는 라벨 축에서도 유지된다.
+
+    (구판 이름은 `..._uses_only_authoritative_orders`였다. D-INV-5로 사전 모집단이 전체로
+    넓어졌으므로 이 테스트가 지키는 것은 「정본만 읽는다」가 아니라 **「충돌 시 정본이 이긴다」**로
+    바뀌었다. 넓히면서 이 잠금까지 같이 풀면 개정본이 고쳐 쓴 코드를 옛 코드가 조용히 이긴다.)
+    """
     root, put = folder
     put("2026년/OHI_Order Sheet_260107.pdf",
         _doc("20260107-2", [{"code": "WRONGCODE", "qty": 5700, "name_en": "Glass_iP15 pro"}]))
@@ -301,7 +306,74 @@ def test_sync_name_map_uses_only_authoritative_orders(session, folder):
     rep = I.sync_name_map(session)
     (row,) = session.scalars(select(OtaoItemNameMap)).all()
     assert row.product_code == "GAPIP15PR"
+    # ambiguous로 떨어지지도 않는다 — 정본이 그 키를 «말했으므로» 보충층은 아예 안 본다.
+    assert row.match_kind == "exact_en"
     assert (rep.map_total, rep.map_resolved) == (1, 1)
+
+
+def test_sync_name_map_borrows_labels_when_authoritative_is_silent(session, folder):
+    """★D-INV-5의 본체 — 정본이 «침묵»하는 키는 대체된 판본이 채운다.
+
+    prod의 실제 모양이다: ECOUNT 사본(정본)은 B형이라 `영문상품명` 칸이 **아예 없고**(`name_en`
+    NULL), 우리가 만들어 보낸 로컬 원본(대체됨)에만 영문명이 있다. 「정본만」으로 사전을 만들면
+    이 자리가 통째로 비어 원장 품목명이 영원히 `unmatched`로 남는다 — prod 실측으로 그렇게
+    잃고 있던 것이 **8종 5,600개**(커버리지 61.4% ↔ 87.2%).
+    """
+    root, put = folder
+    put("2025/OHI_Order Sheet_251121.pdf",
+        _doc("20251121-1", [{"code": "GAPIP17", "qty": 500, "name_en": "Glass_Ip17"}]))
+    # ECOUNT 사본(15자 해시형 파일명) = 정본. 같은 코드를 들고 있으나 영문명 칸이 없다.
+    put("2025/87267R2FJHK2TOO.PDF",
+        _doc("20251121-1", [{"code": "GAPIP17", "qty": 500, "name_en": None}]))
+    I.ingest_orders(session, root)
+    _customs(session, ["Glass_Ip17"])
+
+    # 전제 확인 — 정본이 실제로 영문명을 안 갖고 있어야 이 테스트가 무언가를 잰다.
+    auth_names = session.scalars(
+        select(OtaoPurchaseOrderLine.name_en)
+        .join(OtaoPurchaseOrder, OtaoPurchaseOrderLine.order_id == OtaoPurchaseOrder.id)
+        .where(OtaoPurchaseOrder.is_authoritative.is_(True))
+    ).all()
+    assert auth_names == [None]
+
+    rep = I.sync_name_map(session)
+    (row,) = session.scalars(select(OtaoItemNameMap)).all()
+    assert row.product_code == "GAPIP17"
+    # ★보충층은 «코드만» 옮기는 게 아니다 — 근거와 원문 표기도 같이 와야 한다.
+    #   `evidence`가 빠지면 「어느 발주서를 근거로 붙였나」가 사라지고, `originals`가 빠지면
+    #   원문이 그대로 같은데도 `normalized`로 떨어진다(적대 리뷰 M3·M4가 여기서 생존했다).
+    assert row.match_kind == "exact_en"
+    assert row.evidence == "20251121-1"
+    assert rep.map_unresolved == []
+    assert (rep.map_total, rep.map_resolved) == (1, 1)
+
+
+def test_widening_the_dictionary_does_not_widen_the_order_totals(session, folder):
+    """★두 축을 가르는 잠금 — 사전은 전체를 읽어도 **발주 누계는 정본만** 센다.
+
+    섞이면 개정 전 판본의 수량이 발주 누계에 얹힌다(실측 `20260107-2` 5,700 vs 1,300).
+    사전 모집단을 넓힌 이번 변경이 수량 축으로 새는지를 여기서 잡는다.
+    """
+    root, put = folder
+    # 발주일은 원장 창(`_customs`의 2026-01-27) «안»으로 둔다 — 창 밖이면 수량이
+    # `out_of_window_ordered`로 빠져 이 테스트가 재려던 자리를 안 밟는다.
+    put("2026년/OHI_Order Sheet_260210.pdf",
+        _doc("20260210-2", [{"code": "GAPIP15PR", "qty": 5700, "name_en": "Glass_iP15 pro"}]))
+    put("2026년/87261BS4UU81W5D.PDF",
+        _doc("20260210-2", [{"code": "GAPIP15PR", "qty": 1300, "name_en": None}]))
+    I.ingest_orders(session, root)
+    _customs(session, ["Glass_iP15 pro"])
+    I.sync_name_map(session)
+
+    from app.services.otao_po.roster import build_roster
+
+    roster = build_roster(session)
+    (row,) = roster.rows
+    assert row.product_code == "GAPIP15PR"
+    # 라벨은 대체된 판본에서 빌려 왔고(그래서 픽업 100개가 붙는다) 수량은 정본 1,300뿐이다.
+    assert row.ordered == 1300
+    assert row.picked == 100
+    assert roster.unmapped == {}
 
 
 def test_sync_name_map_applies_rule_3_and_surfaces_the_rest(session, folder):
