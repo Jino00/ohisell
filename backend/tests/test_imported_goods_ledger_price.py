@@ -616,3 +616,45 @@ def test_a_plain_pick_does_not_touch_an_existing_category(db_session):
 
     assert existing.category == "원단"
     assert existing.note is None
+
+
+# ══════════════════════════════════════════════════════════════════
+# 9. 옵트인과 «이미 붙은 라인»은 서로 배타가 아니다 (적대 리뷰 1R P2-3 · 2R BE-6)
+# ══════════════════════════════════════════════════════════════════
+def test_a_linked_line_of_any_type_survives_the_opt_in(db_session):
+    """★2R에서 이 자리의 변이(`if`→`elif`)가 **살아남았다** — 고쳤는데 지키는 층이 없었다.
+
+    구판은 두 갈래가 `elif`라 **옵트인을 «켰을 때만»** `linked_ids` 갈래가 빠졌다.
+    그래서 원장에서 `material`·`product` 아닌 종류로 재분류된 «이미 연결된» 라인이
+    그때만 목록에서 사라진다 — 1R P1-1이 고친 병(어긋난 연결이 화면에서 사라진다)의
+    반쪽 재발이다. 옵트인 여부와 무관하게 붙어 있는 것은 보여야 한다.
+    """
+
+    species = CostMaterial(
+        name="재분류된 것", status="approved", category=M.IMPORTED_GOODS_CATEGORY
+    )
+    db_session.add(species)
+    sh = _shipment(db_session)
+    # 원장이 나중에 종류를 바꿨다 — `material`도 `product`도 아니다.
+    odd = _line(db_session, sh, line_type="expense", item_name="재분류된 것", seq=9)
+    db_session.flush()
+    db_session.add(
+        CostMaterialPrice(
+            material_id=species.id,
+            source="ledger",
+            unit_price_ex_vat=Decimal("100"),
+            unit_price_inc_vat=Decimal("110"),
+            import_invoice_line_id=odd.id,
+            linked_item_name="재분류된 것",
+            effective_date=date(2026, 8, 18),
+        )
+    )
+    db_session.commit()
+
+    off = {r["line_id"] for r in M.ledger_material_lines(db_session)}
+    on = {
+        r["line_id"]
+        for r in M.ledger_material_lines(db_session, include_products=True)
+    }
+    assert odd.id in off, "옵트인 없이도 붙어 있는 라인은 보여야 한다"
+    assert odd.id in on, "★옵트인을 켰다고 붙어 있는 라인이 사라지면 안 된다(elif 회귀)"

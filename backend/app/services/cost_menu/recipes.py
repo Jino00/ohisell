@@ -69,6 +69,7 @@ from app.services.cost_menu.mapping_parser import (
     form_source_for,
     parse_mapping_table,
 )
+from app.utils.kst import kst_now
 from app.services.cost_menu.materials import (
     IMPORTED_GOODS_CATEGORY,
     IMPORTED_GOODS_KIND,
@@ -844,7 +845,12 @@ def _material_for_name(
             #   나중에 「이 종이 왜 수입 완제품이지?」에 답할 수 있어야 한다.
             before = m.category
             m.category = category
-            stamp = f"[{datetime.now():%Y-%m-%d %H:%M}] 픽으로 분류 변경: {before or '(없음)'} → {category}"
+            # ★`datetime.now()`는 prod(UTC 서버)에서 UTC를 찍는다 — 사람이 읽는 감사
+            #   흔적이라 KST로 못 박고 라벨도 단다(전역 §0 · 적대 리뷰 2R 관찰).
+            stamp = (
+                f"[{kst_now():%Y-%m-%d %H:%M} KST] 픽으로 분류 변경: "
+                f"{before or '(없음)'} → {category}"
+            )
             m.note = f"{m.note}\n{stamp}" if m.note else stamp
             db.flush()
         return m
