@@ -800,7 +800,25 @@ def run_naver_wisdom_job():
         from app.services.naver_ad.wisdom_loop import run_daily_wisdom
 
         result = run_daily_wisdom(db)
-        log.info("[스케줄러] naver wisdom: %s", result["stage_status"])
+        # ★D-NAO-251 §5 ①-b — 구판은 stage_status(ok/failed)만 남겨, harvest·judge가 돌려주는
+        #   totals가 **어디에도 영속화되지 않았다**. 그래서 「기각분에 증거가 다시 흐르기
+        #   시작했는가」·「적체를 얼마나 소화했는가」를 사후에 볼 표면이 로그에도 없었다
+        #   (완료 QA가 ①-b를 부분달성으로 판정한 자리 — 카운터는 있는데 닿는 곳이 없었다).
+        #   회차당 한 줄이면 되므로 같이 남긴다. dict.get으로만 읽어 단계 실패({"error": ...})
+        #   에도 이 로깅이 잡을 안 죽인다.
+        hv = result.get("harvest") or {}
+        jd = result.get("judge") or {}
+        log.info(
+            "[스케줄러] naver wisdom: %s | harvest scanned=%s new=%s updated=%s "
+            "rejected_tally_resumed=%s reopened=%s rejudge_exhausted=%s no_action=%s "
+            "| judge ripe=%s cap=%s backlog_remaining=%s rejudged=%s no_action=%s",
+            result["stage_status"],
+            hv.get("scanned"), hv.get("new"), hv.get("updated"),
+            hv.get("rejected_tally_resumed"), hv.get("reopened"),
+            hv.get("skipped_rejudge_exhausted"), hv.get("skipped_no_action"),
+            jd.get("ripe"), jd.get("cap_applied"), jd.get("backlog_remaining"),
+            jd.get("rejudged"), jd.get("skipped_no_action"),
+        )
     except Exception as e:  # noqa: BLE001 — fail-open: 관찰·보고 전용 잡, 집행 체인 보호(raise 없음)
         log.exception("[스케줄러] run_naver_wisdom_job 에러(fail-open): %s", e)
     finally:

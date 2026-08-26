@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
+from sqlalchemy import or_ as sa_or
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -530,6 +531,44 @@ def _search_term_material(db: Session) -> dict:
     return {"total": total, "by_status": by_status, "label": label}
 
 
+def _no_action_status(db: Session) -> dict:
+    """★D-NAO-251 §5 ②-b — action 미상 후보 현황(읽기 전용 스냅샷).
+
+    action은 패턴의 «의미 축» 그 자체라, 미상인 후보는 `_sibling_buckets`가 형제를 원리적으로
+    못 찾고(액션으로 매칭한다) 판사에게 「대조군 없음」만 보이며 그 판정이 다시 terminal이 된다.
+    2026-08-26 08:45 판사 회차가 그 사슬을 실증했다 — 후보 45는 11건 전승인데 판정문이
+    *"액션이 null(미상)이므로 어떤 행동을 실행/차단했는지 알 수 없어"*로 기각했다.
+    ⇒ 수확층이 이런 후보를 더는 안 만들고(`skipped_no_action`), 기존분은 마이그레이션이 hidden
+    처분했다. 이 블록은 **그 처분이 실제로 됐는지**를 화면에서 보게 한다.
+
+    `candidates`는 0건이어도 키가 있고, 빈 리스트다(키 부재와 0건은 다르다 — 교훈 #318).
+    """
+    rows = (
+        db.query(OpsWisdomCandidate)
+        .filter(sa_or(OpsWisdomCandidate.action.is_(None), OpsWisdomCandidate.action == ""))
+        .order_by(OpsWisdomCandidate.id)
+        .all()
+    )
+    by_status: dict[str, int] = {}
+    for c in rows:
+        by_status[c.status] = by_status.get(c.status, 0) + 1
+    return {
+        "total": len(rows),
+        "by_status": by_status,
+        "unresolved": sum(1 for c in rows if c.status not in ("hidden", "promoted")),
+        "candidates": [
+            {"candidate_id": c.id, "signature": c.signature, "status": c.status,
+             "occurrences": c.occurrences}
+            for c in rows
+        ],
+        "label": (
+            "action 미상 후보 — 형제 매칭이 원리적으로 불가해 대조군을 못 만든다. "
+            "수확층이 더는 만들지 않고(skipped_no_action), 기존분은 hidden 처분됐다. "
+            "unresolved > 0이면 처분이 안 된 행이 남아 있다는 뜻이다."
+        ),
+    }
+
+
 def _judge_backlog(db: Session) -> dict:
     """★D-NAO-251 §4-③ — 판사 대기열 적체 지표(읽기 전용 스냅샷).
 
@@ -613,6 +652,13 @@ def _candidate_status(db: Session) -> dict:
         # ★D-NAO-251 §4-③ — 판사 적체가 침묵하지 않게 한다. 「pending 17건인데 회당 5건」이
         # 어디에도 안 보이던 것이 이 계약이 고치는 결함 셋 중 하나다(교훈 #318).
         "judge_backlog": _judge_backlog(db),
+        # ★D-NAO-251 §5 ②-b — action 미상 후보 현황. 0이어도 키를 낸다.
+        #   ★왜 여기 또 있나: `no_action` 카운터를 처음엔 `_sibling_buckets`(판사 프롬프트
+        #   재료)와 harvest totals(휘발성)에만 뒀는데, 완료 QA가 「합격기준이 «응답에 존재»라
+        #   써 놓고 응답엔 없다」를 라이브로 반증했다. 이 저장소가 반복해 온 「카운터는
+        #   생겼는데 화면까지 안 닿는다」와 같은 모양이라 상환한다 — 만드는 층과 «닿는» 층은
+        #   다른 층이고, 합격기준이 지목한 것은 닿는 층이었다.
+        "no_action": _no_action_status(db),
         # A2 「기존 재료 재집계」 라벨 — harvest_candidates.RETRO_HARVEST_LABEL과 문자열 동일
         # (한 곳에서만 정의 — wisdom_candidates.py 참조).
         "retro_harvest_label": RETRO_HARVEST_LABEL,

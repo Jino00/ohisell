@@ -1349,3 +1349,44 @@ def test_reopen_ready_boundary_zero_and_negative_baseline(db):
     c2.judged_occurrences = 10        # 관측이 줄어든 비정상 상태
     db.commit()
     assert wisdom_candidates._reopen_ready(c2) is False
+
+
+def test_wisdom_cron_logs_harvest_and_judge_totals(db, caplog, monkeypatch):
+    """★D-NAO-251 §5 ①-b 상환 — 크론 로그에 harvest·judge totals가 «키로» 남는다.
+
+    구판은 `stage_status`(ok/failed)만 로깅해, 신규 카운터 4종이 회차마다 계산되고도
+    **어디에도 영속화되지 않았다** — 완료 QA가 「카운터가 코드에 있다」와 「라이브 표면에
+    관측된다」는 다르다고 판정한 자리다. 로그가 그 표면이다.
+    """
+    import logging
+    monkeypatch.setattr(scheduler_service, "_get_own_db_session", lambda: db)
+    monkeypatch.setattr(
+        wisdom_loop, "run_daily_wisdom",
+        lambda _db: {
+            "stage_status": {"harvest": "ok", "judge": "ok"},
+            "harvest": {"scanned": 4113, "new": 0, "updated": 2,
+                        "rejected_tally_resumed": 7, "reopened": 1,
+                        "skipped_rejudge_exhausted": 0, "skipped_no_action": 14},
+            "judge": {"ripe": 15, "cap_applied": 15, "backlog_remaining": 5,
+                      "rejudged": 2, "skipped_no_action": 1},
+        },
+    )
+    with caplog.at_level(logging.INFO):
+        scheduler_service.run_naver_wisdom_job()
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    for token in ("rejected_tally_resumed=7", "reopened=1", "rejudge_exhausted=0",
+                  "no_action=14", "ripe=15", "cap=15", "backlog_remaining=5", "rejudged=2"):
+        assert token in msg, f"크론 로그에 {token} 없음 — 카운터가 로그 표면에 안 닿는다"
+
+
+def test_wisdom_cron_log_survives_stage_failure(db, caplog, monkeypatch):
+    """단계 실패({"error": ...})여도 로깅이 잡을 안 죽인다 — fail-open 유지."""
+    import logging
+    monkeypatch.setattr(scheduler_service, "_get_own_db_session", lambda: db)
+    monkeypatch.setattr(
+        wisdom_loop, "run_daily_wisdom",
+        lambda _db: {"stage_status": {"harvest": "failed"}, "harvest": {"error": "boom"}},
+    )
+    with caplog.at_level(logging.INFO):
+        scheduler_service.run_naver_wisdom_job()  # 예외가 밖으로 안 나와야 한다
+    assert "naver wisdom" in "\n".join(r.getMessage() for r in caplog.records)
