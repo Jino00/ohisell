@@ -215,6 +215,19 @@ def _ad_bid_canary(campaign_id: str) -> bool:
     return campaign_id in AD_BID_CANARY_CAMPAIGNS
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
+# ★D-NAO-258(S1-a): 소급채점(retro) as-of 허용 지연 — _bleeding_hold_reason 조건④의 신선도 계약.
+# 이전엔 이 값이 함수 안에 `today - timedelta(days=1)`로 «묻혀» 있어서, 「무엇이 탐색을 막는가」를
+# 물으면 코드를 읽어야만 답이 나왔다(2026-08-26 실측: 탐색 시도 3,834 중 94.1% 차단, 그 사유의
+# 약 52%(1,890건)가 이 한 줄이었는데 로그엔 held 합계 하나뿐이라 «보이지 않았다»).
+#
+# 값이 1인 근거(발명이 아니라 기존 계약의 명시화 — 계약 §2-3 「새 상수 발명 금지」):
+#   retro_snapshotter._BOARDS가 매일 08:30에 «어제» as-of 스냅샷을 만들고(=항상 today-1이 최신),
+#   일 레인은 08:50에 돈다. 즉 정상 가동 시 latest_asof == today-1이 «기대값»이고, 이보다
+#   오래되면 그날 08:30 retro가 실패했다는 뜻이다. 그 상태에서 「보드에 없음」을 「bleeding
+#   아님」으로 읽으면 stale 데이터로 bid_up이 자동 집행된다(fail-open) — 그래서 fail-closed다.
+# ★이 값을 «키우는» 것은 안전 완화다: 2로 올리면 retro가 하루 죽어도 탐색이 계속 오른다.
+#   조정하려면 그 대가(옛 성적표로 UP 집행)를 계약에 적고 §7 대칭 검사를 거칠 것.
+_RETRO_ASOF_MAX_LAG_DAYS = 1
 # _HOURLY_RANK_DOWN_THRESHOLD: 과열밴드 DOWN(<2.5)은 IU2(D-NAO-66)로 폐지 — 순위는 목표가
 # 아니라 결과이므로 순위만으로 강제 하향하지 않는다(상단 순위의 이상 지출은 CPC 급등 DOWN +
 # RL3 loss 고삐가 담당). 이 상수는 탐침(_probe_trigger·_learned_optimal_skip의 밴드 프라이어)
@@ -500,6 +513,95 @@ def _entity_status_hold_reason(db: Session, target_type: str, target_id: str) ->
     return None
 
 
+# ★D-NAO-258(S1-a) 차단 사유 분류 — 「무엇이 막는가」를 로그 한 줄에서 읽게 만드는 층.
+#
+# 왜 필요한가: hold 사유는 자유 텍스트로 result["held"]에 쌓이고 로그엔 **합계 하나**(held=N)만
+# 찍혔다. 그래서 2026-08-26에 「탐색 차단의 52%가 소급채점 stale」이라는 사실을 알아내는 데
+# prod DB의 rationale 문자열을 사람이 파싱해야 했다 — 매일 도는 크론이 매일 그 답을 갖고
+# 있었는데도. 분류는 «집계»일 뿐 판정이 아니다(원칙 23-A와 같은 결: 세기만 한다).
+#
+# 설계: 순서 있는 (카테고리, 부분문자열들) 목록. **먼저 걸린 것이 이긴다** — 좁은 규칙이
+# 위, 넓은 규칙이 아래다(예: "소급채점 stale"이 "소급채점"보다 위). 못 맞추면 "other"이고,
+# other가 커지는 것 자체가 「분류가 낡았다」는 신호라 그 값을 일부러 남긴다(0으로 감추지 않는다).
+_HOLD_REASON_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ── 조건④ 소급채점(retro) 계열 — 탐색 차단의 최대 지분 ──
+    ("retro_stale", ("소급채점 stale",)),
+    ("retro_missing", ("소급채점 데이터 없음",)),
+    ("bleeding", ("소급채점에서 bleeding",)),
+    ("bleeding_board_missing", ("bleeding 보드 매핑 없음",)),
+    # ── 표본·성과 게이트 ──
+    ("clk_short", ("rationale 창 클릭 부족",)),
+    ("roas_below", ("정착 ROAS", "ROAS 미달", "BEP 미달")),
+    # ── EX(확장) 게이트 ──
+    ("ex_membership", ("EX 멤버십 재검증 실패",)),
+    ("ex_fallback_denied", ("EX 프라이어 폴백 불가",)),
+    # ── 소재 CTR·손실 고삐 ──
+    ("ctr_alert", ("CTR경보",)),
+    ("daily_loss", ("daily 손실상태 제외",)),
+    # ── 안전장치 ──
+    ("kill_switch", ("킬스위치",)),
+    ("external_stop", ("외부/수동 정지 이력",)),
+    ("entity_not_on", ("타깃 엔티티 status",)),
+    # ── 소진 서킷브레이커(§4-6) ──
+    # ★"stale"이 들어가지만 소급채점 stale과 «다른 병»이다(이쪽은 당일 소진 스냅샷).
+    #   위 retro_stale 규칙이 "소급채점 stale"로 좁게 걸리므로 충돌하지 않는다.
+    ("spend_snapshot_stale", ("소진 스냅샷 stale",)),
+    ("spend_snapshot_missing", ("소진 스냅샷 부재",)),
+    ("spend_breaker", ("소진 서킷브레이커",)),
+    # ── 스코프·제안 구조 ──
+    ("scope_out", ("자동운영 스코프 밖",)),
+    ("malformed_proposal", ("target_bid 없음", "구조 결함")),
+    # ── 탐색 레인 고유 종료 사유 ──
+    ("ghost_visibility", ("유령 지면", "증거창 비활성")),
+    ("no_impression", ("당일 imp 없음",)),
+    ("rank_no_basis", ("순위 근거 없음",)),
+    ("band_reached", ("밴드 도달", "밴드 상단", "이미 도달")),
+    ("ceiling_reached", ("경제성 상한", "상한 도달")),
+    ("live_refetch_failed", ("라이브 현재가 재조회 실패", "입찰 라이브 재조회 실패", "재조회 실패")),
+    ("budget_envelope", ("예산봉투",)),
+)
+
+
+def classify_hold_reason(reason: str | None) -> str:
+    """hold/blocked 사유 문자열 → 안정적인 카테고리 키. 판정이 아니라 «분류»다.
+
+    빈 사유는 "unknown"(사유를 안 적은 자리가 있다는 뜻 — 0으로 감추면 그 자리가 안 보인다).
+    어느 규칙에도 안 걸리면 "other" — other가 커지면 _HOLD_REASON_RULES가 낡은 것이다.
+    """
+    if not reason:
+        return "unknown"
+    text = str(reason)
+    for category, needles in _HOLD_REASON_RULES:
+        for needle in needles:
+            if needle in text:
+                return category
+    return "other"
+
+
+def summarize_held_by_reason(held: list) -> dict[str, int]:
+    """result["held"] → {카테고리: 건수}. 큰 것부터, 동수면 키 이름순(로그 출력이 회차마다
+    흔들리지 않게 — 눈으로 회차 간 비교를 하는 표면이기 때문이다).
+
+    held 원소는 {"id"|"target_id", "reason"} dict거나 문자열일 수 있다(레인마다 형태가 다르다).
+    """
+    counts: dict[str, int] = {}
+    for item in held or []:
+        if isinstance(item, dict):
+            reason = item.get("reason")
+        else:
+            reason = item
+        key = classify_hold_reason(reason)
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def format_held_by_reason(counts: dict[str, int]) -> str:
+    """로그 한 줄용 압축 표기 — "retro_stale=12 bleeding=3". 비면 "-"(0건과 미집계를 구분)."""
+    if not counts:
+        return "-"
+    return " ".join(f"{k}={v}" for k, v in counts.items())
+
+
 def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date) -> str | None:
     """D-NAO-48 조건④(최신 소급채점에서 bleeding 아님) 판정 — 미충족 시 hold 사유, 통과 시
     None. retro_snapshotter._BOARDS가 매일 08:30 board별로 스냅샷하는 NaverRetroSignal의
@@ -521,11 +623,12 @@ def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: 
     latest_asof = db.query(sqlfunc.max(NaverRetroSignal.asof_date)).scalar()
     if latest_asof is None:
         return "④소급채점 데이터 없음 — bleeding 검증 불가(fail-closed)"
-    expected_asof = today - timedelta(days=1)
+    expected_asof = today - timedelta(days=_RETRO_ASOF_MAX_LAG_DAYS)
     if latest_asof < expected_asof:
         return (
             f"④소급채점 stale — latest_asof={latest_asof.isoformat()} < 기대 "
-            f"{expected_asof.isoformat()}(당일 retro 미완주, fail-closed, codex 4R[P1])"
+            f"{expected_asof.isoformat()}(당일 retro 미완주, fail-closed, codex 4R[P1], "
+            f"허용지연={_RETRO_ASOF_MAX_LAG_DAYS}일)"
         )
     exists = db.query(NaverRetroSignal.id).filter(
         NaverRetroSignal.asof_date == latest_asof,
@@ -956,6 +1059,9 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     result: dict = {
         "reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0,
         "rejected_stale": 0,
+        # ★D-NAO-258(S1-a): held를 사유별로 가른 집계. 레인 말미에 held에서 파생한다(호출부
+        # 20여 곳을 고치지 않는 이유 — 같은 원천에서 파생해야 로그와 held가 갈라지지 않는다).
+        "held_by_reason": {},
         # D-NAO-87 예산 봉투 자동 심사(별도 스코프 — 비태그 budget_up 불변).
         "budget_reviewed": 0, "budget_approved": 0, "budget_executed": 0, "budget_failed": 0,
         "budget_rejected_stale": 0,
@@ -1159,6 +1265,10 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     # VF(D-NAO-83): 유령∧증거창 비활성 관측(VT3b 최소형·diary만·실쓰기 0) — CTR 브리핑과 독립.
     result["ghost_visibility_observed"] = 0
     _run_ghost_visibility_briefing(db, now, result)
+
+    # ★D-NAO-258(S1-a): 사유별 집계는 **맨 마지막에 한 번** — 위 브리핑 스텝들도 held에
+    # 얹을 수 있으므로 그 뒤라야 누락이 없다.
+    result["held_by_reason"] = summarize_held_by_reason(result["held"])
 
     return result
 
@@ -3146,6 +3256,8 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
 
     result: dict = {
         "reviewed": 0, "approved": 0, "executed": 0, "held": [], "skipped": 0, "failed": 0,
+        # ★D-NAO-258(S1-a): 탐색 차단 사유별 집계(일 레인과 동형). 레인 말미에 held에서 파생.
+        "held_by_reason": {},
         "probed": 0,  # D-NAO-58 CD2: 탐침으로 승격된 up 제안 수(라이브 관측용)
         "ad_confirm_pending": 0,  # B3 GATE P2-2: Confirm 대기로 생성된 ad-레벨 제안 수
         "ad_confirm_pending_dup_skipped": 0,  # B3 GATE 2R P2-B: 동일 pending 존재로 skip된 수
@@ -3845,5 +3957,8 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         _run_budget_pacing_lane(db, now, result)
     except Exception as e:  # noqa: BLE001 — BP 레인 실패는 fail-soft(레인 결과 불변)
         log.warning("auto_operator: 예산 페이싱 레인 실패(fail-soft): %s", e)
+
+    # ★D-NAO-258(S1-a): 사유별 집계는 맨 마지막에 한 번(vitality·BP도 held에 얹으므로 그 뒤).
+    result["held_by_reason"] = summarize_held_by_reason(result["held"])
 
     return result
