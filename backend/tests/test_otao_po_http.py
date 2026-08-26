@@ -281,12 +281,18 @@ def test_sales_body_carries_every_confession_field(env):
     _seed_sales(s)
 
     body = tc.get("/api/otao-po/sales?days=7").json()
-    for key in ("window_start", "window_end", "channels", "rows", "daily",
+    # ★`dates`가 빠지면 화면이 「일별 추이 (undefined ~ undefined)」가 된다 — 값은 있는데
+    #   «좌표»가 사라지는 모양이라 서비스층 테스트가 원리적으로 못 잡는다(적대 리뷰 2R R2-A).
+    for key in ("window_start", "window_end", "dates", "channels", "rows", "daily",
                 "unmapped", "order_axis", "notes"):
         assert key in body, f"body에 {key}가 없다"
+    assert len(body["dates"]) == 7
+    assert len(body["rows"][0]["series"]) == 7, "series가 날짜 축과 길이가 같아야 한다"
     naver = next(c for c in body["channels"] if c["key"] == "naver")
+    # ★`quantity_ambiguous`가 빠지면 「매핑 모호」가 화면에서 **영구히 0**으로 그려진다.
     for key in ("mapping_rate", "missing_day_evidence", "days_collected_zero",
-                "days_no_data", "quantity_excluded", "bridge", "source_table"):
+                "days_no_data", "quantity_excluded", "quantity_ambiguous",
+                "bridge", "source_table"):
         assert key in naver, f"채널 body에 {key}가 없다"
 
 
