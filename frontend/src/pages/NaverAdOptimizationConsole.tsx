@@ -1579,6 +1579,36 @@ export default function NaverAdOptimizationConsole() {
                 </div>
               )}
 
+              {/* ★D-NAO-251 §5 ②-b — action 미상 후보. 0건이어도 렌더한다(교훈 #318).
+                  unresolved > 0이면 처분이 덜 된 행이 남았다는 뜻이라 눈에 띄게 표시한다.
+                  ★이 블록이 «나중에» 붙은 것 자체가 이 계약의 교훈이다 — 카운터를 만든 층
+                  (_sibling_buckets·harvest totals)과 «닿는» 층(API 응답·화면)은 다른 층이고,
+                  합격기준이 지목한 것은 닿는 층이었다. 완료 QA가 그 간극을 라이브로 반증했다. */}
+              {cs.no_action && (
+                <div className="mt-3 pt-2 border-t border-gray-100">
+                  <h5 className="text-[11px] font-medium text-gray-500">
+                    action 미상 후보 · {cs.no_action.total}건
+                    {cs.no_action.unresolved > 0 ? (
+                      <span className="ml-1 text-amber-700 bg-amber-50 rounded px-1">
+                        미처분 {cs.no_action.unresolved}건
+                      </span>
+                    ) : (
+                      <span className="ml-1 text-gray-400">전건 처분됨</span>
+                    )}
+                  </h5>
+                  {Object.keys(cs.no_action.by_status).length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                      {Object.entries(cs.no_action.by_status).map(([st, n]) => (
+                        <span key={st}>
+                          {st} {n}건
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <p className="mt-1 text-[11px] text-gray-400">{cs.no_action.label}</p>
+                </div>
+              )}
+
               {/* B7-6 파라미터 제안 게이트(D-NAO-249 F3) — 0건이어도 렌더한다. 목적은 「조용히
                   0건인가, 세는 코드가 죽어서 0건인가」를 가르는 것(교훈 #318) — 객체 존재
                   여부로 분기하고, 값 자체는 ?? 0으로 항상 낸다. */}

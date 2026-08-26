@@ -3904,6 +3904,20 @@ export interface NaverWisdomCandidateStatus {
   param_gate?: NaverParamGateCounts;
   search_term_material?: NaverSearchTermMaterialStatus;
   judge_backlog?: NaverJudgeBacklog; // ★D-NAO-251 §4-③
+  no_action?: NaverNoActionStatus; // ★D-NAO-251 §5 ②-b
+}
+
+// ★D-NAO-251 §5 ②-b — action 미상 후보 현황. action은 패턴의 «의미 축»이라 미상이면 형제
+// 매칭이 원리적으로 불가하고, 판사에겐 「대조군 없음」만 보여 그 판정이 다시 terminal이 된다.
+// 2026-08-26 08:45 회차가 실증: 후보 45는 11건 전승인데 「액션이 null(미상)이므로」 기각됐다.
+// ★이 타입이 «나중에» 생긴 것 자체가 교훈이다 — 카운터를 만든 층(_sibling_buckets·harvest
+// totals)과 «닿는» 층(API 응답·화면)은 다른 층이고, 합격기준이 지목한 것은 닿는 층이었다.
+export interface NaverNoActionStatus {
+  total: number;
+  by_status: Record<string, number>;
+  unresolved: number; // hidden·promoted가 아닌 채 남은 행 수 — 0이 아니면 처분이 덜 됐다
+  candidates: { candidate_id: number; signature: string; status: string; occurrences: number }[];
+  label: string;
 }
 
 export interface NaverWisdomScorecard {

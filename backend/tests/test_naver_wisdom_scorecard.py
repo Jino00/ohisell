@@ -1172,3 +1172,37 @@ def test_scorecard_candidate_rows_expose_reopen_state(db):
     assert rows["judged"]["occurrences_since_judgment"] == 7
     assert rows["judged"]["reopen_ready"] is True          # 12 ≥ 5×2 ∧ 12 ≥ 5+5
     assert rows["judged"]["prior_judgment_count"] == 0
+
+
+def test_scorecard_exposes_no_action_status(db):
+    """★D-NAO-251 §5 ②-b 상환 — `no_action`이 **scorecard 응답까지** 닿는다.
+
+    초판은 이 카운터를 `_sibling_buckets`(판사 프롬프트 재료)와 harvest totals(휘발성)에만
+    뒀다. 합격기준은 「응답에 존재」였는데 응답엔 없었고, **적대 리뷰 2R도 못 잡았다**
+    (SUR-2가 `_sibling_buckets` 단위만 겨눴지 그 값이 응답까지 가는지는 안 봤다).
+    완료 QA가 라이브로 반증한 자리다 — 「카운터는 생겼는데 화면까지 안 닿는다」의 재발.
+    ⇒ 이 테스트는 «만드는 층»이 아니라 «닿는 층»을 잠근다.
+    """
+    from app.services.naver_ad.wisdom_scorecard import _candidate_status
+    _c251(db, signature="ok")                                   # action 있음
+    _c251(db, signature="na-hidden", action=None, status="hidden")
+    _c251(db, signature="na-pending", action=None)              # 미처분
+    db.commit()
+
+    out = _candidate_status(db)
+    assert "no_action" in out                                    # ★키 자체가 응답에 있다
+    na = out["no_action"]
+    assert na["total"] == 2
+    assert na["by_status"] == {"hidden": 1, "pending": 1}
+    assert na["unresolved"] == 1                                 # pending 1건이 미처분
+    assert {c["signature"] for c in na["candidates"]} == {"na-hidden", "na-pending"}
+
+
+def test_scorecard_no_action_present_even_when_zero(db):
+    """0건이어도 키를 낸다 — 「조용히 0건」과 「세는 코드가 죽어서 0건」은 다르다(교훈 #318)."""
+    from app.services.naver_ad.wisdom_scorecard import _candidate_status
+    _c251(db, signature="ok")
+    db.commit()
+    na = _candidate_status(db)["no_action"]
+    assert na["total"] == 0 and na["unresolved"] == 0
+    assert na["by_status"] == {} and na["candidates"] == []

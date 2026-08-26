@@ -877,3 +877,57 @@ describe("지혜 성적표 — 판사 대기열·재개방 상태(D-NAO-251)", (
     expect(screen.queryByText(/이전 판정 .*건 보존/)).toBeNull();
   });
 });
+
+// ── ★D-NAO-251 §5 ②-b 상환: action 미상 후보가 «화면까지» 닿는다 ──
+// 초판은 이 카운터를 백엔드 안쪽(_sibling_buckets·harvest totals)에만 뒀다. 합격기준은
+// 「응답에 존재」였는데 응답엔 없었고 적대 리뷰 2R도 못 잡았다 — 완료 QA가 라이브로 반증했다.
+// 「카운터는 생겼는데 화면까지 안 닿는다」의 재발이라, 이 describe는 «닿는 층»만 잠근다.
+describe("지혜 성적표 — action 미상 후보(D-NAO-251 §5 ②-b)", () => {
+  const NO_ACTION = {
+    total: 6,
+    by_status: { hidden: 6 },
+    unresolved: 0,
+    candidates: [
+      { candidate_id: 45, signature: "g|SHOPPING|None|weekday|summer|normal|", status: "hidden", occurrences: 11 },
+    ],
+    label:
+      "action 미상 후보 — 형제 매칭이 원리적으로 불가해 대조군을 못 만든다. " +
+      "수확층이 더는 만들지 않고(skipped_no_action), 기존분은 hidden 처분됐다. " +
+      "unresolved > 0이면 처분이 안 된 행이 남아 있다는 뜻이다.",
+  };
+
+  it("전건 처분됐으면 그렇게 표시한다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, { ...CANDIDATE_STATUS_EMPTY, no_action: NO_ACTION });
+    renderPage();
+    expect(await screen.findByText(/action 미상 후보 · 6건/)).toBeTruthy();
+    expect(screen.getByText("전건 처분됨")).toBeTruthy();
+    expect(screen.getByText(/hidden 6건/)).toBeTruthy();
+  });
+
+  it("미처분이 남으면 눈에 띄게 표시한다 — 처분 누락이 침묵하면 안 된다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      no_action: { ...NO_ACTION, by_status: { hidden: 5, pending: 1 }, unresolved: 1 },
+    });
+    renderPage();
+    expect(await screen.findByText("미처분 1건")).toBeTruthy();
+    expect(screen.queryByText("전건 처분됨")).toBeNull();
+  });
+
+  it("0건이어도 블록을 그린다 — 조용한 0과 죽은 카운터를 가른다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      no_action: { total: 0, by_status: {}, unresolved: 0, candidates: [], label: NO_ACTION.label },
+    });
+    renderPage();
+    expect(await screen.findByText(/action 미상 후보 · 0건/)).toBeTruthy();
+    expect(screen.getByText("전건 처분됨")).toBeTruthy();
+  });
+
+  it("no_action이 없는 응답(구버전 백엔드)에서도 화면이 안 깨진다", async () => {
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, { ...CANDIDATE_STATUS_EMPTY });
+    renderPage();
+    expect(await screen.findByText(/후보 현황\(승격 전\)/)).toBeTruthy();
+    expect(screen.queryByText(/action 미상 후보/)).toBeNull();
+  });
+});
