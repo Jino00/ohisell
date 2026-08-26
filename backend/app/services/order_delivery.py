@@ -7,7 +7,7 @@
 # 전부 여기를 통해 같은 답을 얻는다(예전처럼 bep_calculator 안에만 두면 또 갈라진다).
 #
 # ★판별 계약(D-NAO-84 · 원칙22, 변경 금지):
-#   productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송(3,020)
+#   productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송(3,377 — 아래 ★단가 이력)
 #   그 외 값·필드 부재·파싱 실패·raw_data 부재                → 일반배송(1,900) fail-safe
 #   동반 신호(logisticsCompanyId=="PG", logisticsCenterId, arrivalGuaranteeDate,
 #   deliveryTagType=="TOMORROW")는 **참고만**, 판별에 쓰지 않는다(표본이 얇을 때 판별자를

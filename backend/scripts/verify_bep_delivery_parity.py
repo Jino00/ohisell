@@ -2,7 +2,7 @@
 #
 # 이력(중요): 원본(2026-07-28 N0)은 `_avg_qty_and_logistics`가 주문 건별로 부르던
 # `order_delivery.order_shipping_cost`를 몽키패치해 신·구 산출을 대조했다. N1(D-NAO-99)이 지불
-# 배송비를 **건별 합산 → 혼합비 공식**(1,900 + 1,120 × N배송비중)으로 바꾸면서 그 호출이
+# 배송비를 **건별 합산 → 혼합비 공식**(NORMAL + (NBAESONG−NORMAL) × N배송비중)으로 바꾸면서 그 호출이
 # 끊겼고, 스크립트는 무엇을 주입해도 통과하는 껍데기가 됐다(적대적 리뷰 P2-2 재현: 9,999원을
 # 주입해도 출력 불변). **초록불인데 아무것도 안 보는 상태가 아무 검증도 없는 것보다 나쁘다**
 # (원칙 22). 그래서 현재 경로에 맞게 다시 썼다.
@@ -101,11 +101,20 @@ def logistics_recompute(db: Session) -> int:
         recent, _fresh = bep_calculator._recent_sample(rows, n)
         share = (Decimal(sum(1 for r in recent if r["nbaesong"])) / Decimal(len(recent))
                  if recent else Decimal("0"))
-        paid = Decimal("1900") + Decimal("1120") * share
+        # ★단가를 숫자로 적지 않는다 — 정본은 order_delivery.py(2026-08-26, 교훈 #365).
+        #   종전엔 `1900 + 1120 * share`가 하드코딩돼 있었다. N배송 단가가 3,020→3,377로
+        #   갱신되면서 차액이 1,120→1,477이 됐는데 여기만 안 따라가, 이 «검증» 스크립트가
+        #   nb_share>0인 전 상품에서 **거짓 불일치**를 뱉는 상태였다(엔진이 맞고 검증기가 틀림).
+        paid = (bep_calculator.SHIPPING_COST_NORMAL
+                + (bep_calculator.SHIPPING_COST_NBAESONG - bep_calculator.SHIPPING_COST_NORMAL)
+                * share)
         qty = sum(r["quantity"] for r in wide)
         avg_qty = Decimal(qty) / Decimal(len(wide)) if wide and qty > 0 else Decimal("1")
-        collected = (sum((r["collected"] for r in wide), Decimal("0")) / Decimal(len(wide))
-                     if wide else Decimal("0"))
+        # ★수취는 **지불과 같은 표본(최근 N건)**에서 뽑는다 — D-NAO-168(2026-08-10).
+        #   종전엔 여기서 wide(120일)를 썼다. 엔진은 그때 recent로 옮겼는데 이 스크립트만
+        #   남아, 위 하드코딩과 겹쳐 두 번째 거짓 불일치 원인이 됐다.
+        collected = (sum((r["collected"] for r in recent), Decimal("0")) / Decimal(len(recent))
+                     if recent else Decimal("0"))
         expect = (max(Decimal("0"), paid - collected) / avg_qty).quantize(
             Decimal("0.01"), ROUND_HALF_UP)
         got = produced.get(pid, {}).get("logistics")

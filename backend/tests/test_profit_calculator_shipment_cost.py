@@ -51,7 +51,7 @@ def test_today_delivery_is_normal_price():
 
 
 def test_nbaesong_without_snapshot_falls_back_to_raw_parse():
-    # shipping_cost_paid 결측(백필 이전 행)이어도 raw_data 파싱으로 3,020을 얻는다.
+    # shipping_cost_paid 결측(백필 이전 행)이어도 raw_data 파싱으로 3,377을 얻는다.
     assert _shipment_cost(_naver_order("ARRIVAL_GUARANTEE", paid=None)) == NBAESONG
 
 
