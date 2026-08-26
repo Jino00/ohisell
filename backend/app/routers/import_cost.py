@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import date
 from decimal import Decimal
 from typing import Literal, Optional
@@ -31,8 +32,11 @@ from app.models import (
     ImportPackingLine,
     ImportShipment,
 )
+from app.services.cost_menu import auto_refresh as AR
 from app.services.import_cost import ledger
 from app.services.import_cost.allocator import ALLOCATION_BASES
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/import-cost", tags=["import-cost"])
 
@@ -245,6 +249,28 @@ def confirm_shipment(shipment_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc))
     if result["confirmed"]:
         db.commit()
+        # ★단가 자동 갱신 — 로트 확정 «직후»가 주(主) 방아쇠다 (D-CPP-60 §7-3).
+        #   왜 여기인가: 로트 확정은 드물어서(prod confirmed 11건) 크론 단독이면 하루 지연
+        #   대비 실익이 없는데, 여기에 걸면 「확정하면 곧바로 결과가 보이는」 표면이 생긴다.
+        #   일일 sweep은 이 이벤트가 «누락»될 때를 위한 보조다 — 이벤트만 두면 놓쳤을 때
+        #   아무도 모른다(sweep 없는 이벤트는 침묵 실패의 표준형, §7-3 버린 대안).
+        #
+        # ★확정 커밋 «뒤에» 부른다 — 자동 갱신이 실패해도 확정은 이미 살아 있다.
+        #   순서가 반대면 부수 효과가 본 작업을 되돌린다.
+        # ★예외를 삼키되 로그는 남긴다: `auto_refresh.run`은 스스로 실패를 행으로 적으므로
+        #   여기 도달하는 예외는 «자동 갱신 층 자체»의 사고이고, 그것이 로트 확정 API를
+        #   4xx/5xx로 만들면 안 된다(계약 §7-3 「어느 단계도 침묵하지 않는다」의 반대편 —
+        #   침묵이 아니라 «전파 차단»이다. 로그와 run 행이 사실을 보존한다).
+        try:
+            AR.run(db, trigger=AR.TRIGGER_EVENT, shipment_id=shipment_id)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log.warning(
+                "[cost-auto] 로트 %s 확정 후 자동 갱신 실패(확정 자체는 유효): %s",
+                shipment_id,
+                exc,
+            )
     else:
         db.rollback()
     payload = ledger.shipment_payload(_load(db, shipment_id))

@@ -45,6 +45,7 @@ from app.models import (
     ImportShipment,
 )
 from app.services.cost_menu import ledger_check as LC
+from app.services.cost_menu import price_rule as PR
 from app.services.cost_menu.matcher import LedgerItem, MaterialRule, Suggestion, suggest
 
 MATERIAL_STATUSES = ("unconfirmed", "approved")
@@ -162,7 +163,10 @@ def _shipment_ref(p: CostMaterialPrice) -> dict | None:
 
 
 def material_payload(
-    m: CostMaterial, prices: list[CostMaterialPrice], used_by: list[dict]
+    m: CostMaterial,
+    prices: list[CostMaterialPrice],
+    used_by: list[dict],
+    rule: str,
 ) -> dict:
     """부자재 1종 + 단가 이력 + **사용처**.
 
@@ -178,6 +182,13 @@ def material_payload(
     ★`latest_price_*`는 **재검사를 통과한 행에서만** 고른다(적대 리뷰 1R P1-1). 어긋난 행은
       이력에 남되(근거 보존) 최신 자리를 못 차지한다. 전부 어긋나면 최신은 «없음»이고,
       `stale_count`가 **왜 없는지**를 화면에 말한다 — 조용히 비는 것과 다르다.
+
+    ★`rule`은 **필수 인자다**(D-CPP-60 §0-A). 구판은 이 함수 «안»에 정렬 규칙을 복제해 갖고
+      있었고 `cost_setting`을 안 읽었다 — 그래서 화면의 「최신 단가」는 계산과 같은 값을 내면서도
+      **같은 규칙을 쓴다는 보장이 없었다.** 이제 둘 다 `price_rule.choose_price` 한 벌을 쓴다.
+    ★`lot_price_min`/`lot_price_max`를 함께 낸다 — 계약 §4-⑥의 「관측 로트 구간」이고,
+      그 폭이 곧 **재고 원장(C1)이 없어서 우리가 못 고르는 폭**이다. 화면이 그걸 자백한다.
+    ★`price_conflict_*`는 §2-5의 자백: 채택은 `ledger`인데 더 늦은 `manual`이 있다.
     """
     ordered = sorted(
         prices,
@@ -185,9 +196,8 @@ def material_payload(
         reverse=True,
     )
     checks = {p.id: ledger_check(p) for p in ordered}
-    eligible = [p for p in ordered if checks[p.id].counts_as_evidence]
-    stale = [p for p in ordered if not checks[p.id].counts_as_evidence]
-    latest = eligible[0] if eligible else None
+    choice = PR.choose_price(list(prices), rule)
+    latest = choice.price
     return {
         "id": m.id,
         "name": m.name,
@@ -208,15 +218,23 @@ def material_payload(
         "part": m.part,
         "note": m.note,
         # 근거로 세는 로트 = 원장 파생 + 재검사 통과분.
-        "lot_count": sum(
-            1 for p in eligible if p.source == "ledger"
-        ),
+        "lot_count": choice.lot_count,
         "price_count": len(ordered),
         # ★어긋난 연결 수. 0이 아니면 화면이 「최신 단가에서 왜 빠졌나」를 말해야 한다.
-        "stale_count": len(stale),
+        "stale_count": choice.stale_count,
         "latest_price_ex_vat": _d(latest.unit_price_ex_vat) if latest else None,
         "latest_price_inc_vat": _d(latest.unit_price_inc_vat) if latest else None,
         "latest_price_source": latest.source if latest else None,
+        # ★적용된 규칙을 **값과 함께** 낸다 — 「이 숫자가 어느 규칙의 산물인가」를 화면이
+        #   말할 수 있어야 설정 변경이 화면에서 보인다(합격 ⑧).
+        "price_rule": choice.rule,
+        # ★관측 로트 구간(계약 §4-⑥). 로트가 1건이면 min==max이고 폭이 0이다 — 그것도 사실이다.
+        "lot_price_min": _d(choice.lot_min),
+        "lot_price_max": _d(choice.lot_max),
+        "lot_price_has_span": choice.has_span,
+        # ★§2-5 자백 — 채택은 `ledger`인데 더 늦은 `manual`이 있다.
+        "price_conflict": choice.conflict,
+        "price_conflict_price_id": choice.conflict_price_id,
         "prices": [price_payload(p, checks[p.id]) for p in ordered],
         # ★사용처 — 「이 부자재가 어느 제품에 들어가는가」. 없으면 빈 목록이고, 그건
         #   «아직 어느 레시피도 이 종을 안 쓴다»는 사실이지 미상이 아니다.
@@ -291,13 +309,18 @@ def payload_with_usage(db: Session, m: CostMaterial) -> dict:
     ★라우터의 단일 종 응답 7곳이 전부 이 함수를 지나게 한다. 각자 `usage_map`을 부르면
     그중 하나가 빠지고, 그 화면만 사용처가 비어 보인다."""
 
-    return material_payload(m, list(m.prices), usage_map(db, [m.id]).get(m.id, []))
+    return material_payload(
+        m, list(m.prices), usage_map(db, [m.id]).get(m.id, []), PR.read_rule(db)
+    )
 
 
 def list_materials(db: Session) -> list[dict]:
     rows = _materials_query(db).order_by(CostMaterial.name).all()
     usage = usage_map(db, [m.id for m in rows])
-    return [material_payload(m, list(m.prices), usage.get(m.id, [])) for m in rows]
+    rule = PR.read_rule(db)
+    return [
+        material_payload(m, list(m.prices), usage.get(m.id, []), rule) for m in rows
+    ]
 
 
 def ledger_material_lines(db: Session) -> list[dict]:
@@ -392,6 +415,123 @@ def list_settings(db: Session) -> list[dict]:
         }
         for s in db.query(CostSetting).order_by(CostSetting.key).all()
     ]
+
+
+#: 화면에서 바꿀 수 있는 설정. ★목록 밖 키는 API로 못 바꾼다 — 설정 테이블은 앞으로도
+#:  늘어날 텐데, 「바꿀 수 있는 것」과 「그냥 저장돼 있는 것」이 안 갈리면 아무 키나
+#:  화면에서 덮이게 된다.
+EDITABLE_SETTINGS = ("valuation_method", "standard_price_rule")
+
+#: `valuation_method`가 가질 수 있는 값. ★법정 방법 이름이지 **구현된 계산 규칙이 아니다** —
+#:  층3(계약 C) 소관이라 지금은 «선언»만 한다. 층1이 실제로 쓰는 단가 규칙은
+#:  `standard_price_rule`이고 그쪽 구현분은 `price_rule.SUPPORTED_RULES`가 정본이다.
+VALUATION_METHODS = ("fifo",)
+
+
+def list_setting_history(db: Session, limit: int = 50) -> list[dict]:
+    """설정 변경 이력 — **append 전용**(계약 §4-②).
+
+    ★비어 있는 것과 「바꾼 적 없음」은 같다 — 그건 사실이므로 화면이 그대로 말하면 된다.
+    """
+
+    from app.models import CostSettingHistory
+
+    rows = (
+        db.query(CostSettingHistory)
+        .order_by(CostSettingHistory.created_at.desc(), CostSettingHistory.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": h.id,
+            "key": h.key,
+            "old_value": h.old_value,
+            "new_value": h.new_value,
+            "old_confirmed": None if h.old_confirmed is None else bool(h.old_confirmed),
+            "new_confirmed": bool(h.new_confirmed),
+            "actor": h.actor,
+            "note": h.note,
+            "created_at": h.created_at.isoformat() if h.created_at else None,
+        }
+        for h in rows
+    ]
+
+
+def update_setting(
+    db: Session,
+    key: str,
+    *,
+    value: str | None = None,
+    confirmed: bool | None = None,
+    actor: str | None = None,
+    note: str | None = None,
+) -> dict:
+    """설정 1건을 바꾸고 **이력을 남긴다**(계약 §4-②).
+
+    ★**값이 안 바뀌어도 이력을 남긴다.** 「선입선출 재확인」은 값 변경이 아니라 **사람이
+    확인했다는 사건**이고, 그 사건이 곧 §74의 「신고한 방법」 확인 기록이다. 값 비교로
+    걸러 버리면 확인 행위가 통째로 사라진다.
+
+    ★`confirmed`를 True로 올리는 것은 **사람만** 한다 — 모델이 「신고방법 확인됨」을 대신
+    누르는 것은 §3 금지선이다(추정으로 확정 금지). 이 함수는 라우터의 POST에서만 불린다.
+    """
+
+    from app.models import CostSettingHistory
+
+    if key not in EDITABLE_SETTINGS:
+        raise CostMenuError(
+            f"`{key}`는 화면에서 바꿀 수 있는 설정이 아니다"
+            f"(가능: {', '.join(EDITABLE_SETTINGS)})."
+        )
+    row = db.query(CostSetting).filter(CostSetting.key == key).first()
+    if row is None:
+        raise CostMenuError(f"설정 `{key}`가 없다.")
+
+    old_value, old_confirmed = row.value, bool(row.confirmed)
+    new_value = old_value if value is None else str(value).strip()
+    new_confirmed = old_confirmed if confirmed is None else bool(confirmed)
+
+    if not new_value:
+        raise CostMenuError("설정 값이 비었다.")
+    if key == "valuation_method" and new_value not in VALUATION_METHODS:
+        raise CostMenuError(
+            f"`valuation_method`는 {', '.join(VALUATION_METHODS)} 중 하나여야 한다. "
+            "다른 방법으로 신고돼 있다면 그 구현은 새 계약이다(D-CPP-60 §7-1)."
+        )
+    if key == "standard_price_rule" and new_value not in PR.SUPPORTED_RULES:
+        raise CostMenuError(
+            f"`standard_price_rule` = `{new_value}`는 아직 구현된 규칙이 아니다"
+            f"(구현분: {', '.join(sorted(PR.SUPPORTED_RULES))}). "
+            "선언만 바꾸면 계산이 멈춘다 — 구현 없이 선언하지 않는다."
+        )
+
+    row.value = new_value
+    row.confirmed = new_confirmed
+    if note is not None:
+        row.note = note
+    db.add(
+        CostSettingHistory(
+            key=key,
+            old_value=old_value,
+            new_value=new_value,
+            old_confirmed=old_confirmed,
+            new_confirmed=new_confirmed,
+            actor=(actor or "jino").strip() or "jino",
+            note=note,
+        )
+    )
+    db.flush()
+    return {
+        "key": row.key,
+        "value": row.value,
+        "confirmed": bool(row.confirmed),
+        "note": row.note,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        # ★값이 안 바뀌었어도 이력은 남았다 — 화면이 그 사실을 말할 수 있게 알려 준다.
+        "value_changed": old_value != new_value,
+        "confirmed_changed": old_confirmed != new_confirmed,
+    }
 
 
 # ──────────────────────────────────────────────

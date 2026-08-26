@@ -20,10 +20,13 @@ import {
   confirmCostTableAbsent,
   createCostMaterial,
   deleteCostMaterialPrice,
+  fetchCostAutoRefreshQueue,
+  fetchCostAutoRefreshRuns,
   fetchCostBoard,
   fetchCostLedgerMaterialLines,
   fetchCostMaterials,
   fetchCostRecipes,
+  fetchCostSettingHistory,
   fetchCostSettings,
   fetchCostTableItems,
   importCostRecipes,
@@ -31,8 +34,12 @@ import {
   patchCostMaterial,
   pickCostTableItem,
   refreshCostLedgerPrice,
+  runCostAutoRefreshNow,
   unapproveCostRecipe,
   unpickCostTableItem,
+  updateCostSetting,
+  type CostAutoRefreshEntry,
+  type CostAutoRefreshRun,
   type CostBoard,
   type CostBoardRow,
   type CostImportResult,
@@ -44,9 +51,18 @@ import {
   type CostRecipeMatch,
   type CostRecipePick,
   type CostSetting,
+  type CostSettingHistoryRow,
   type CostStandard,
   type CostTableItemList,
 } from "../lib/api";
+import {
+  formatKstDateTime,
+  lotSpanText,
+  priceConflictText,
+  standardPriceRuleText,
+  sweepSummaryText,
+  triggerLabel,
+} from "../lib/costMenuSurface";
 
 export type CostTab = "materials" | "recipes" | "board";
 
@@ -308,10 +324,39 @@ export function latestPriceNote(
 // ══════════════════════════════════════════════════════════════════
 // 표시 컴포넌트 (전부 순수 — props만 본다. 테스트가 직접 렌더한다)
 // ══════════════════════════════════════════════════════════════════
-export function ValuationBadge({ settings }: { settings: CostSetting[] }) {
+/** ★D-CPP-60 §4-① — 두 줄이 «나란히» + 확인·변경 UI + 이력(합격 ②).
+ *
+ * 줄1 = `valuationBadgeText`(법정 신고 방법 자백) · 줄2 = `standardPriceRuleText`(층1이
+ * **지금 계산에 쓰는** 규칙). **둘은 다른 사실이라 하나로 합치지 않는다** — 줄1이 없어도
+ * (설정 자체가 없어도) 줄2는 별개로 존재할 수 있고, 그 반대도 마찬가지다. 둘 다 「최신 로트
+ * 단가」를 「선입선출」이라 부르지 않는다(계약 §3 금지선 — 방향이 반대다).
+ *
+ * `onReconfirm`을 안 넘기면(레시피·보드 탭 등 다른 헤더 자리) 버튼·이력은 안 그린다 — 헤더
+ * compact 배지 용도와 「원가 설정」 카드 용도를 같은 컴포넌트로 감당한다. */
+export function ValuationBadge({
+  settings,
+  history = [],
+  busy,
+  onReconfirm,
+}: {
+  settings: CostSetting[];
+  /** 확인·변경 이력. 0건이면 카드가 「아직 확인·변경 기록 없음」이라고 **명시**한다
+   *  (계약 §2-6 침묵 금지 — 조용한 빈 자리는 「몰라서 안 보여준다」와 구별이 안 된다). */
+  history?: CostSettingHistoryRow[];
+  busy?: boolean;
+  /** 확인 조작. 이 prop이 있을 때만 버튼·이력 목록을 그린다.
+   *
+   *  ★`confirmed`를 **인자로 받는다**(초판은 `false` 하드코딩이었다). 하드코딩이면 Jino가
+   *  홈택스에서 신고방법을 확인하고 와도 **「확인됨」으로 바꿀 길이 화면에 없다** — 계약
+   *  §7-1이 *"확인 결과가 FIFO면 배지만 「확인됨」으로 바뀌고"*라고 정한 경로가 통째로 막히고,
+   *  이 카드는 영원히 「확인 전」만 말하는 장식이 된다.
+   *  ★그래도 «확정»은 사람만 한다 — 버튼이 둘로 갈려 있고 모델은 어느 쪽도 안 누른다(§3 금지선). */
+  onReconfirm?: (note: string | null, confirmed: boolean) => void;
+}) {
   const text = valuationBadgeText(settings);
   if (!text) return null;
   const unconfirmed = text.includes("미확인") || text.includes("확인 안 됨");
+  const ruleText = standardPriceRuleText(settings);
   return (
     <div
       className={`text-xs px-3 py-1.5 rounded-md border ${
@@ -322,6 +367,94 @@ export function ValuationBadge({ settings }: { settings: CostSetting[] }) {
     >
       {unconfirmed ? "⚠ " : ""}
       {text}
+      {/* ★줄2 — 같은 <div>의 별개 자식이라, 위 문구(줄1)만 잡는 기존 getByText(/신고 내역
+          미확인/) 같은 단일 매치 단언을 깨지 않는다(새 텍스트가 다른 문장이라 겹치지 않음). */}
+      {ruleText ? (
+        <div className="mt-0.5 text-gray-600" data-testid="standard-price-rule-line">
+          {ruleText}
+        </div>
+      ) : null}
+      {onReconfirm ? (
+        <div className="mt-1.5 border-t pt-1.5" data-testid="valuation-confirm-panel">
+          <div className="text-[11px] text-gray-500">
+            신고방법 확인 경로: 홈택스 → My홈택스 → 신고내역 → 재고자산 평가조정명세서(별지
+            제39호서식) ③신고방법
+          </div>
+          {/* ★버튼이 둘인 이유: 「기록만 남긴다」와 「신고방법을 확인했다고 «확정»한다」는
+              다른 사건이다. 하나로 합치면 둘 중 하나가 반드시 사라진다 — 초판은 뒤쪽이
+              사라져서 배지가 영원히 「확인 전」에 갇혔다. */}
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              className="text-[11px] px-2 py-1 rounded border border-gray-300 bg-white font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+              disabled={busy}
+              onClick={() => {
+                // ★취소(null)와 «빈 메모로 진행»(빈 문자열)을 가른다 — 메모는 선택이지
+                //   버튼 자체는 사람이 눌러야 사건이 남는다(§4-② 값이 안 바뀌어도 이력은 남음).
+                const note = window.prompt("확인 메모 (선택 — 비워도 됩니다)", "");
+                if (note === null) return;
+                onReconfirm(note.trim() ? note.trim() : null, false);
+              }}
+            >
+              선입선출 재확인 (기록만)
+            </button>
+            {unconfirmed ? (
+              <button
+                type="button"
+                data-testid="valuation-mark-confirmed"
+                className="text-[11px] px-2 py-1 rounded border border-emerald-300 bg-emerald-50 font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-40"
+                disabled={busy}
+                onClick={() => {
+                  // ★이 버튼만이 `confirmed`를 올린다. **모델은 절대 못 누른다** — 추정으로
+                  //   확정하는 것이 §3 금지선이고, 이 확정의 근거는 화면 밖(홈택스)에 있다.
+                  const note = window.prompt(
+                    "홈택스 「재고자산 평가조정명세서」 ③신고방법에서 «선입선출»을 확인하셨습니까?\n확인한 내용을 적어 주세요 (예: 2025 귀속 신고서 ③신고방법 = 선입선출법)",
+                    "",
+                  );
+                  if (note === null) return;
+                  onReconfirm(note.trim() ? note.trim() : null, true);
+                }}
+              >
+                ✓ 홈택스에서 확인했다 — 「확인됨」으로 표시
+              </button>
+            ) : null}
+          </div>
+          <details className="mt-1.5">
+            <summary className="text-[11px] text-gray-500 cursor-pointer">
+              확인·변경 이력{history.length ? ` (${history.length}건)` : ""}
+            </summary>
+            {history.length === 0 ? (
+              <div
+                className="text-[11px] text-gray-400 mt-1"
+                data-testid="valuation-history-empty"
+              >
+                아직 확인·변경 기록 없음
+              </div>
+            ) : (
+              <ul className="mt-1 space-y-0.5" data-testid="valuation-history-list">
+                {history.map((h) => (
+                  <li
+                    key={h.id}
+                    className="text-[11px] text-gray-600"
+                    data-testid={`valuation-history-${h.id}`}
+                  >
+                    {formatKstDateTime(h.created_at)} · {h.actor ?? "—"} ·{" "}
+                    {h.old_value === h.new_value
+                      ? `값은 그대로(${h.new_value})`
+                      : `${h.old_value ?? "—"} → ${h.new_value}`}
+                    {h.old_confirmed !== h.new_confirmed
+                      ? ` · 확인상태 ${h.old_confirmed ? "확인" : "미확인"}→${
+                          h.new_confirmed ? "확인" : "미확인"
+                        }`
+                      : ""}
+                    {h.note ? ` · ${h.note}` : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </details>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -550,6 +683,25 @@ export function MaterialList({
           >
             {lotCountText(m, importedIds.has(m.id))}
           </div>
+          {/* ★D-CPP-60 §4-⑥ — 근사 자백. 폭이 없으면(로트 1건) 함수가 `null`을 돌려
+              배지 자체가 안 뜬다 — 구간을 지어내지 않는다. */}
+          {lotSpanText(m) ? (
+            <div
+              className="text-[11px] text-gray-500 mt-0.5"
+              data-testid={`material-${m.id}-lot-span`}
+            >
+              {lotSpanText(m)}
+            </div>
+          ) : null}
+          {/* ★D-CPP-60 §4-⑦ — 채택은 원장인데 더 늦은 수동 입력이 있다는 어긋남 자백. */}
+          {priceConflictText(m) ? (
+            <div
+              className="text-[11px] text-amber-700 mt-0.5"
+              data-testid={`material-${m.id}-price-conflict`}
+            >
+              ⚠ {priceConflictText(m)}
+            </div>
+          ) : null}
           {onApprove && m.status !== "approved" ? (
             /* ★조작을 «조작처럼» 보이게 — 초판은 `text-[11px] text-blue-600 hover:underline`이라
                본문 각주와 구별되지 않았고, Jino가 *"confirm 할 수 있는 곳이 전혀 없어"*라고
@@ -711,6 +863,134 @@ export function LedgerMaterialLines({
         })}
       </tbody>
     </table>
+  );
+}
+
+/** ★D-CPP-60 §7-3·§7-4 — 단가 자동 갱신의 「사건」 표면. 부자재 탭 안에 둔다.
+ *
+ * ★★맨 위 요약(`sweepSummaryText`)이 「갱신 0건」과 「한 번도 안 돎」을 **반드시 구별**한다
+ *  — 이 저장소가 반복 실측한 fail-open이다. 실패 항목은 `message`를 **반드시** 보여준다
+ *  (사유 없는 실패는 침묵과 같다). 「연결 대기」 큐엔 **자동 연결 버튼을 두지 않는다** —
+ *  첫 연결은 영원히 사람이다(계약 §7-4 불변식). */
+export function AutoRefreshPanel({
+  runs,
+  queue,
+  busy,
+  onRunNow,
+  onGoToMaterial,
+}: {
+  runs: CostAutoRefreshRun[];
+  queue: CostAutoRefreshEntry[];
+  busy?: boolean;
+  onRunNow: () => void;
+  /** 큐 항목에서 「부자재 연결」 화면(원장 부자재 라인 표)으로 이동. 그 항목이 짝을 못 찾은
+   *  (`material_id === null`) 경우는 갈 곳이 없다 — 버튼 자체를 안 그린다. */
+  onGoToMaterial?: (materialId: number) => void;
+}) {
+  return (
+    <section className="border rounded-md p-4" data-testid="auto-refresh-panel">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h2 className="text-sm font-semibold text-gray-700">단가 자동 갱신</h2>
+        <button
+          type="button"
+          className="text-xs px-2 py-1 rounded border border-gray-300 bg-white font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+          disabled={busy}
+          onClick={onRunNow}
+        >
+          지금 검사
+        </button>
+      </div>
+      <div className="text-xs text-gray-600 mt-1" data-testid="auto-refresh-summary">
+        {sweepSummaryText(runs)}
+      </div>
+
+      <div className="mt-3">
+        <h3 className="text-xs font-semibold text-gray-600">회전 이력</h3>
+        {runs.length === 0 ? (
+          <div className="text-xs text-gray-400 py-2" data-testid="auto-refresh-runs-empty">
+            회전 이력 없음
+          </div>
+        ) : (
+          <ul className="mt-1 divide-y text-xs">
+            {runs.map((r) => (
+              <li key={r.id} className="py-1.5" data-testid={`auto-refresh-run-${r.id}`}>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-medium">{formatKstDateTime(r.started_at)}</span>
+                  <span className="text-gray-500">({triggerLabel(r.trigger)})</span>
+                  <span className="text-gray-500">
+                    검사 {r.checked}종 · 갱신 {r.updated}건 · 실패 {r.failed}건 · 대기{" "}
+                    {r.queued}건
+                  </span>
+                </div>
+                {r.entries.length > 0 ? (
+                  <ul className="mt-1 ml-3 space-y-0.5">
+                    {r.entries.map((e) => (
+                      <li key={e.id} data-testid={`auto-refresh-entry-${e.id}`}>
+                        {e.outcome === "linked" ? (
+                          <span className="text-green-700">
+                            연결 · {e.material_name ?? "—"} · {e.hbl_no ?? "—"} ·{" "}
+                            {e.item_name ?? "—"} ·{" "}
+                            {e.old_price_ex_vat
+                              ? `${e.old_price_ex_vat} → ${e.new_price_ex_vat}`
+                              : `${e.new_price_ex_vat ?? "—"}`}
+                          </span>
+                        ) : e.outcome === "failed" ? (
+                          // ★사유 없는 실패는 침묵과 같다 — `message`를 반드시 보여준다.
+                          <span className="text-red-600" data-testid={`auto-refresh-entry-${e.id}-failed`}>
+                            실패 · {e.item_name ?? e.hbl_no ?? "—"} ·{" "}
+                            {e.message ?? "사유 없음"}
+                          </span>
+                        ) : e.outcome === "queued" ? (
+                          <span className="text-amber-700">
+                            대기 · {e.item_name ?? "—"} · {e.message ?? ""}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">
+                            변화 없음 · {e.item_name ?? "—"}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="mt-3">
+        <h3 className="text-xs font-semibold text-gray-600">연결 대기</h3>
+        {queue.length === 0 ? (
+          <div className="text-xs text-gray-400 py-2" data-testid="auto-refresh-queue-empty">
+            연결 대기 없음
+          </div>
+        ) : (
+          <ul className="mt-1 divide-y text-xs">
+            {queue.map((e) => (
+              <li key={e.id} className="py-1.5" data-testid={`auto-refresh-queue-${e.id}`}>
+                <div>
+                  {e.item_name ?? "—"} · {e.hbl_no ?? "—"}
+                </div>
+                {/* ★대기 사유 — 「왜 자동이 손 안 댔나」를 침묵하지 않는다. */}
+                <div className="text-gray-500" data-testid={`auto-refresh-queue-${e.id}-message`}>
+                  {e.message ?? "사유 없음"}
+                </div>
+                {e.material_id !== null && e.material_id !== undefined && onGoToMaterial ? (
+                  <button
+                    type="button"
+                    className="mt-0.5 text-[11px] text-blue-600 hover:underline"
+                    onClick={() => onGoToMaterial(e.material_id as number)}
+                  >
+                    부자재 연결 화면으로 이동
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -2010,6 +2290,10 @@ export default function CostPage() {
   const [materials, setMaterials] = useState<CostMaterial[]>([]);
   const [ledgerLines, setLedgerLines] = useState<CostLedgerMaterialLine[]>([]);
   const [settings, setSettings] = useState<CostSetting[]>([]);
+  // ── D-CPP-60 — 평가방법 확인 이력 + 단가 자동 갱신 ──────────────────────────
+  const [settingHistory, setSettingHistory] = useState<CostSettingHistoryRow[]>([]);
+  const [autoRefreshRuns, setAutoRefreshRuns] = useState<CostAutoRefreshRun[]>([]);
+  const [autoRefreshQueue, setAutoRefreshQueue] = useState<CostAutoRefreshEntry[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [recipes, setRecipes] = useState<CostRecipe[]>([]);
   const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
@@ -2202,18 +2486,24 @@ export default function CostPage() {
 
   const load = useCallback(async () => {
     try {
-      const [m, l, s, r, b] = await Promise.all([
+      const [m, l, s, r, b, sh, ar, aq] = await Promise.all([
         fetchCostMaterials(),
         fetchCostLedgerMaterialLines(),
         fetchCostSettings(),
         fetchCostRecipes(),
         fetchCostBoard(),
+        fetchCostSettingHistory(),
+        fetchCostAutoRefreshRuns(),
+        fetchCostAutoRefreshQueue(),
       ]);
       setMaterials(m.items);
       setLedgerLines(l.items);
       setSettings(s.items);
       setRecipes(r.items);
       setBoard(b);
+      setSettingHistory(sh.items);
+      setAutoRefreshRuns(ar.items);
+      setAutoRefreshQueue(aq.items);
       // ★부자재 선택도 여기서 건드리지 않는다(2026-08-23 N5) — 부자재 탭에도 필터가
       //   생겼으므로, 여기서 `setSelectedId`를 하면 「전체 목록 기준」과 「필터된 목록
       //   기준」 두 곳이 같은 상태를 다투게 된다. 레시피에서 이미 밟은 결함이다.
@@ -2359,13 +2649,85 @@ export default function CostPage() {
     }
   }
 
+  // ★D-CPP-60 §4-② — 값이 안 바뀌어도 이력은 남는다. 응답의 `value_changed`를 보고
+  //   화면이 그 사실을 말한다(§2-6 침묵 금지 — 「변경 없음」이라고만 쓰면 확인 사건 자체가
+  //   사라진 것처럼 보인다).
+  async function handleReconfirmValuation(note: string | null, confirmed: boolean) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const out = await updateCostSetting("valuation_method", {
+        value: "fifo",
+        confirmed,
+        actor: "jino",
+        note,
+      });
+      await load();
+      setMsg(
+        out.confirmed_changed
+          ? "신고방법이 「확인됨」으로 기록됐다 — 배지에서 「신고 내역 미확인」이 내려간다"
+          : out.value_changed
+            ? "평가방법 값이 갱신됐다 — 확인 기록도 함께 추가됐다"
+            : "값은 그대로 · 확인 기록 1건 추가",
+      );
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ★D-CPP-60 §7-3 — 크론(09:40 일일 sweep)을 기다리지 않고 사람이 확인할 길.
+  async function handleAutoRefreshRunNow() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await runCostAutoRefreshNow();
+      await load();
+      setMsg(
+        `지금 검사 완료 — 검사 ${r.checked}종 · 갱신 ${r.updated}건 · 실패 ${r.failed}건 · 대기 ${r.queued}건`,
+      );
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ★「연결 대기」 큐 항목 → 부자재 연결 화면(원장 부자재 라인 표)으로 이동. 필터가 그
+  //   종을 가리고 있을 수 있어 필터도 함께 초기화한다 — 안 그러면 선택은 됐는데 목록
+  //   필터 때문에 상세 패널이 다른 종을 보여주는(reconcileSelectedId) 자리로 샌다.
+  function handleGoToMaterialFromQueue(materialId: number) {
+    setTab("materials");
+    setMaterialForm(null);
+    setMaterialPart(null);
+    setSelectedId(materialId);
+    if (typeof window !== "undefined" && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        const el = document.querySelector('[data-testid="material-ledger-lines"]');
+        if (el && "scrollIntoView" in el) {
+          (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      });
+    }
+  }
+
   return (
     <div className="p-6 max-w-[96rem]">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">💰 원가</h1>
         <div className="flex items-center gap-2 flex-wrap">
           <VatBasisBadge />
-          <ValuationBadge settings={settings} />
+          <ValuationBadge
+            settings={settings}
+            history={settingHistory}
+            busy={busy}
+            onReconfirm={(note, confirmed) =>
+              void handleReconfirmValuation(note, confirmed)
+            }
+          />
         </div>
       </div>
       <p className="text-xs text-gray-500 mt-2">
@@ -2407,11 +2769,23 @@ export default function CostPage() {
       ) : null}
 
       {tab === "materials" ? (
-        // ★B (Jino 2026-08-23: *"오른쪽 빈 곳이 넓어 … 부자재 종 부분의 공간을 좀 더 옆으로"*)
-        //   260px에선 종 이름이 2~3줄로 접히고 「미승인」 배지가 «미/확/인» 세로로 깨졌다.
-        //   ★고정폭을 **박지 않는다** — `minmax()`라 좁은 화면에선 22rem까지 줄고 넓으면
-        //   28rem까지만 자란다. 고정폭을 박았다가 옆 패널을 덮은 것이 이 파일의 여덟 번째
-        //   결함이었고, 그 가드 테스트(「필터 바는 좁은 칸에서 접힌다」)가 아직 살아 있다.
+        <>
+          {/* ★D-CPP-60 §7-3·§7-4 — 부자재 탭 «안»에 둔다(위임문 지정 자리). 필터·선택과
+              무관하게 항상 보여야 하므로 아래 2단 그리드 밖, 그리드 위에 둔다. */}
+          <div className="mt-4">
+            <AutoRefreshPanel
+              runs={autoRefreshRuns}
+              queue={autoRefreshQueue}
+              busy={busy}
+              onRunNow={() => void handleAutoRefreshRunNow()}
+              onGoToMaterial={handleGoToMaterialFromQueue}
+            />
+          </div>
+        {/* ★B (Jino 2026-08-23: *"오른쪽 빈 곳이 넓어 … 부자재 종 부분의 공간을 좀 더 옆으로"*)
+            260px에선 종 이름이 2~3줄로 접히고 「미승인」 배지가 «미/확/인» 세로로 깨졌다.
+            ★고정폭을 **박지 않는다** — `minmax()`라 좁은 화면에선 22rem까지 줄고 넓으면
+            28rem까지만 자란다. 고정폭을 박았다가 옆 패널을 덮은 것이 이 파일의 여덟 번째
+            결함이었고, 그 가드 테스트(「필터 바는 좁은 칸에서 접힌다」)가 아직 살아 있다. */}
         <div className="mt-4 grid grid-cols-1 md:grid-cols-[minmax(22rem,28rem)_1fr] gap-6 items-start">
           <div className="min-w-0">
             <div className="flex items-center justify-between">
@@ -2652,6 +3026,7 @@ export default function CostPage() {
             </details>
           </div>
         </div>
+        </>
       ) : null}
 
       {tab === "recipes" ? (

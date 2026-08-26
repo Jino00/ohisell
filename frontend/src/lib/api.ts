@@ -5501,6 +5501,17 @@ export interface CostMaterial {
   latest_price_ex_vat: string | null;
   latest_price_inc_vat: string | null;
   latest_price_source: "ledger" | "manual" | null;
+  /** 적용된 채택 규칙 — 지금은 항상 `"latest"`(최신 로트). **FIFO가 아니다**(D-CPP-60). */
+  price_rule: string;
+  /** 관측 로트 구간(ex_vat) 하한 — ledger·유효분만. 재고 원장(C1) 가동 전이라 층1은 이
+   *  구간 안에서 «최신 로트»만 고른다는 사실을 화면이 자백한다(계약 §4-⑥). */
+  lot_price_min: string | null;
+  lot_price_max: string | null;
+  /** 구간에 «폭»이 있는가(로트 2건 이상 & 값이 다름). false면 구간을 지어내지 않는다. */
+  lot_price_has_span: boolean;
+  /** 채택은 원장 값인데 더 늦은 수동 입력이 있다(계약 §2-5 자백). */
+  price_conflict: boolean;
+  price_conflict_price_id: number | null;
   prices: CostMaterialPrice[];
   /** ★이 부자재가 «어느 제품에 들어가는가» (Jino 2026-08-24). 빈 배열은 «아직 어느
    *  레시피도 안 쓴다»는 **사실**이지 미상이 아니다. */
@@ -5640,6 +5651,96 @@ export function addCostManualPrice(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 원가 메뉴 — 평가방법 확인·변경 이력 + 자동 갱신 (D-CPP-60)
+// ══════════════════════════════════════════════════════════════════
+
+/** 설정 변경 이력 한 줄 — **값이 안 바뀌어도** 「확인했다」는 사건으로 남는다(계약 §4-②). */
+export interface CostSettingHistoryRow {
+  id: number;
+  key: string;
+  old_value: string | null;
+  new_value: string;
+  old_confirmed: boolean | null;
+  new_confirmed: boolean;
+  actor: string | null;
+  note: string | null;
+  created_at: string | null;
+}
+
+export function fetchCostSettingHistory(): Promise<{ items: CostSettingHistoryRow[] }> {
+  return fetchApi("/api/cost/settings/history");
+}
+
+/** 설정 1건 확인·변경. **값이 그대로여도** `value_changed:false`로 그 사실을 자백한다 —
+ *  화면은 「값은 그대로 · 확인 기록 1건 추가」라고 말해야 한다(§2-6 침묵 금지). */
+export function updateCostSetting(
+  key: string,
+  body: { value?: string; confirmed?: boolean; actor?: string | null; note?: string | null },
+): Promise<CostSetting & { value_changed: boolean; confirmed_changed: boolean }> {
+  return fetchApi(`/api/cost/settings/${key}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 단가 자동 갱신의 «사건»(§7-4) — 사람이 만든 짝(연결)의 반복만 한다. 값 갱신·미갱신·
+ *  실패·대기 넷 다 이 모양이다. */
+export interface CostAutoRefreshEntry {
+  id: number;
+  run_id: number;
+  outcome: "linked" | "unchanged" | "failed" | "queued";
+  material_id: number | null;
+  material_name: string | null;
+  price_id: number | null;
+  import_invoice_line_id: number | null;
+  hbl_no: string | null;
+  item_name: string | null;
+  old_price_ex_vat: string | null;
+  new_price_ex_vat: string | null;
+  message: string | null;
+  created_at: string | null;
+}
+
+/** 자동 갱신 회전 1건. **`updated=0`이어도 행이 남는다** — 그게 「자동이 살아 있다」는
+ *  유일한 증거다(§2-6). 목록이 통째로 비면 「한 번도 안 돌았다」다. */
+export interface CostAutoRefreshRun {
+  id: number;
+  trigger: "event" | "cron" | "manual";
+  started_at: string | null;
+  finished_at: string | null;
+  checked: number;
+  updated: number;
+  failed: number;
+  queued: number;
+  note: string | null;
+  entries: CostAutoRefreshEntry[];
+}
+
+export function fetchCostAutoRefreshRuns(
+  limit = 20,
+): Promise<{ items: CostAutoRefreshRun[] }> {
+  return fetchApi(`/api/cost/auto-refresh/runs?limit=${limit}`);
+}
+
+/** 「연결 대기」 큐 — 자동이 **안 건드리고** 사람에게 올린 라인(계약 §7-4 불변식: 첫 연결은
+ *  영원히 사람이다. 이 큐에 «자동 연결» 버튼을 달지 않는다). */
+export function fetchCostAutoRefreshQueue(): Promise<{ items: CostAutoRefreshEntry[] }> {
+  return fetchApi("/api/cost/auto-refresh/queue");
+}
+
+/** 「지금 검사」 버튼 — 크론(일일 sweep)을 기다리지 않고 1회전을 즉시 돈다. */
+export function runCostAutoRefreshNow(): Promise<{
+  run_id: number;
+  trigger: "manual";
+  checked: number;
+  updated: number;
+  failed: number;
+  queued: number;
+}> {
+  return fetchApi("/api/cost/auto-refresh/run", { method: "POST" });
 }
 
 // ══════════════════════════════════════════════════════════════════

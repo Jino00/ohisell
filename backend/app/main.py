@@ -7,6 +7,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.services.cost_menu.price_rule import UnknownPriceRule
 
 from app.routers import ad_costs, channels, oauth, orders, products, sync
 from app.routers import dashboard, scheduler, settlements, manual_revenue
@@ -64,6 +67,22 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ohisell API", version="0.2.0", lifespan=lifespan)
+
+
+@app.exception_handler(UnknownPriceRule)
+async def _unknown_price_rule_handler(request, exc: UnknownPriceRule):
+    """`cost_setting.standard_price_rule`이 구현 밖 값일 때 — **화면이 사유를 말한다**
+    (D-CPP-60 합격 ⑧).
+
+    ★왜 엔드포인트별 try/except가 아니라 앱 레벨인가: 이 오류는 «설정»에서 오므로 원가 메뉴의
+    **모든** 표면(부자재 목록·레시피 상세·표준원가 보드)에서 동시에 난다. 한 곳씩 감싸면
+    감싸는 걸 빠뜨린 표면만 500으로 죽고, 그 표면은 「왜 죽었나」를 못 말한다.
+
+    ★422가 아니라 409인 이유: 입력이 틀린 게 아니라 **설정과 구현이 어긋난** 상태다.
+    사용자가 요청을 고쳐서 풀 문제가 아니라 설정을 되돌려야 풀린다.
+    """
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
 
 app.add_middleware(
     CORSMiddleware,

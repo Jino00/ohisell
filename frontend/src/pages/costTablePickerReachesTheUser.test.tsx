@@ -166,6 +166,29 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCostSettings: vi.fn(async () => ({ items: SETTINGS })),
     fetchCostRecipes: vi.fn(async () => ({ items: [STUCK] })),
     fetchCostBoard: vi.fn(async () => BOARD),
+    // ★D-CPP-60 — `load()`가 이 넷을 항상 부른다. 오버라이드가 없으면 `actual`이 전역
+    //   `fetchSpy`(항상 `{}`)를 타 `.items`가 `undefined`가 되고 `AutoRefreshPanel`이 던진다
+    //   (costPageReachesTheUser.test.tsx에서 실측 — 같은 원인, 같은 처방).
+    fetchCostSettingHistory: vi.fn(async () => ({ items: [] })),
+    fetchCostAutoRefreshRuns: vi.fn(async () => ({ items: [] })),
+    fetchCostAutoRefreshQueue: vi.fn(async () => ({ items: [] })),
+    runCostAutoRefreshNow: vi.fn(async () => ({
+      run_id: 1,
+      trigger: "manual",
+      checked: 0,
+      updated: 0,
+      failed: 0,
+      queued: 0,
+    })),
+    updateCostSetting: vi.fn(async (key: string, body: Record<string, unknown>) => ({
+      key,
+      value: (body.value as string) ?? "fifo",
+      confirmed: (body.confirmed as boolean) ?? false,
+      note: (body.note as string | null) ?? null,
+      updated_at: null,
+      value_changed: false,
+      confirmed_changed: false,
+    })),
     fetchCostTableItems: vi.fn(async () => ITEMS),
     pickCostTableItem: vi.fn(async () => ({ recipe: PICKED })),
     unpickCostTableItem: vi.fn(async () => ({ recipe: STUCK })),

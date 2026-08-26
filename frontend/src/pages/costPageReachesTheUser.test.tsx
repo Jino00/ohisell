@@ -100,6 +100,12 @@ const KIT: CostMaterial = {
   latest_price_ex_vat: "190.82",
   latest_price_inc_vat: "209.90",
   latest_price_source: "ledger",
+  price_rule: "latest",
+  lot_price_min: "178.78",
+  lot_price_max: "190.82",
+  lot_price_has_span: true,
+  price_conflict: false,
+  price_conflict_price_id: null,
   prices: [
     {
       id: 11,
@@ -207,6 +213,12 @@ const FILM_WITH_REF: CostMaterial = {
   latest_price_ex_vat: null,
   latest_price_inc_vat: null,
   latest_price_source: null,
+  price_rule: "latest",
+  lot_price_min: null,
+  lot_price_max: null,
+  lot_price_has_span: false,
+  price_conflict: false,
+  price_conflict_price_id: null,
   prices: [],
   used_by: [],
   used_by_count: 0,
@@ -232,6 +244,12 @@ const JIG_NO_PART: CostMaterial = {
   latest_price_ex_vat: null,
   latest_price_inc_vat: null,
   latest_price_source: null,
+  price_rule: "latest",
+  lot_price_min: null,
+  lot_price_max: null,
+  lot_price_has_span: false,
+  price_conflict: false,
+  price_conflict_price_id: null,
   prices: [],
   used_by: [],
   used_by_count: 0,
@@ -261,6 +279,12 @@ function createdMaterialFixture(name: string): CostMaterial {
     latest_price_ex_vat: null,
     latest_price_inc_vat: null,
     latest_price_source: null,
+    price_rule: "latest",
+    lot_price_min: null,
+    lot_price_max: null,
+    lot_price_has_span: false,
+    price_conflict: false,
+    price_conflict_price_id: null,
     prices: [],
     used_by: [],
     used_by_count: 0,
@@ -564,6 +588,30 @@ vi.mock("../lib/api", async (importOriginal) => {
       items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
     })),
     fetchCostBoard: vi.fn(async () => BOARD),
+    // ★D-CPP-60 — `load()`가 이 넷을 항상 부른다(탭과 무관). 오버라이드가 없으면 `actual`의
+    //   진짜 구현이 이 파일 하단의 전역 `fetchSpy`(항상 `{}`를 돌려줌)를 타 `.items`가
+    //   `undefined`가 되고, `AutoRefreshPanel`의 `sweepSummaryText(undefined)`가 던진다 —
+    //   이 파일의 기존 테스트 전부가 그 자리에서 깨졌다(실측). 빈 목록으로 안전하게 채운다.
+    fetchCostSettingHistory: vi.fn(async () => ({ items: [] })),
+    fetchCostAutoRefreshRuns: vi.fn(async () => ({ items: [] })),
+    fetchCostAutoRefreshQueue: vi.fn(async () => ({ items: [] })),
+    runCostAutoRefreshNow: vi.fn(async () => ({
+      run_id: 1,
+      trigger: "manual",
+      checked: 0,
+      updated: 0,
+      failed: 0,
+      queued: 0,
+    })),
+    updateCostSetting: vi.fn(async (key: string, body: Record<string, unknown>) => ({
+      key,
+      value: (body.value as string) ?? "fifo",
+      confirmed: (body.confirmed as boolean) ?? false,
+      note: (body.note as string | null) ?? null,
+      updated_at: null,
+      value_changed: false,
+      confirmed_changed: false,
+    })),
     // ★P1-1 — 승인/승인취소가 «화면 클릭에서 실제로 불리는가»를 재려면 이 둘도
     //   vi.fn()이어야 한다. 오버라이드가 없으면 `actual`의 진짜 구현이 전역 fetchSpy를
     //   타는데, 그러면 「호출됐다/안 됐다」·「어떤 id로 불렸다」를 잴 수단이 없다.
