@@ -500,3 +500,36 @@ class TestReviewRound1Regressions:
                 "실패 사유가 비었다 — 사유 없는 실패는 화면에서 침묵과 같다"
             )
             assert runs[0]["failed"] == 1
+
+    def test_2R_P2_stale_queue_reason_is_dropped_when_the_pair_appears(self, client):
+        """★적대 리뷰 2R P2: 짝이 «생긴» 뒤에도 옛 사유가 「연결된 적 없다」로 남으면 안 된다.
+
+        사람이 같은 품목명을 다른 라인에서 연결하면 그 이름은 짝이 된다. 그런데 다음 회전
+        전까지 큐는 옛 회전의 사유를 그대로 보여줬다 — 「내가 방금 연결했는데?」에서 멈춘다.
+        ★반대로 `MAX_ATTEMPTS` 고정 사유는 **보존돼야 한다**(종이 같고 여전히 참이다).
+        """
+        with client.testing_session() as s:
+            m = CostMaterial(name="종Y", status="approved")
+            s.add(m)
+            s.flush()
+            sh = _shipment(s, "LOT-A", date(2026, 8, 1))
+            l1 = _line(s, sh, "같은품목", "100", "110", seq=1)
+            l2 = _line(s, sh, "같은품목", "100", "110", seq=2)
+            s.commit()
+
+            AR.run(s, trigger=AR.TRIGGER_CRON)   # 아직 짝이 없다 → 둘 다 큐
+            s.commit()
+            assert all("연결된 적이 없다" in q["message"] for q in AR.pending_queue(s))
+
+            # 사람이 l1을 연결한다 → 「같은품목」이 짝이 된다. 회전은 아직 안 돌았다.
+            from app.services.cost_menu.materials import link_ledger_line
+
+            link_ledger_line(s, m.id, l1.id, note="사람이 연결")
+            s.commit()
+
+            q = AR.pending_queue(s)
+            assert len(q) == 1 and q[0]["import_invoice_line_id"] == l2.id
+            assert "연결된 적이 없다" not in q[0]["message"], (
+                f"짝이 생겼는데 옛 사유가 남았다: {q[0]['message']}"
+            )
+            assert q[0]["material_id"] == m.id

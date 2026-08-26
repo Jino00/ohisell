@@ -489,12 +489,17 @@ afterEach(() => {
  *  (어긋남 있음 / 로트 구간 폭 있음)에서만 뜬다. 기본 픽스처는 둘 다 없는 «조용한» 종이라
  *  그대로 두면 그 렌더 자리를 원리적으로 못 잰다 — 실제로 리뷰어의 변이가 그 틈으로 살아남았다. */
 async function renderApp(over?: { materials?: CostMaterial[] }) {
-  if (over?.materials) {
-    const api = await import("../lib/api");
-    (api.fetchCostMaterials as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      items: over.materials,
-    });
-  }
+  // ★★**항상** 세운다 — 조건부로 덮어쓰면 그 값이 다음 테스트로 «샌다»(적대 리뷰 2R P1).
+  //   초판은 `over?.materials`가 있을 때만 `mockResolvedValue`를 불렀고 되돌리지 않아서,
+  //   SUR-F7이 주입한 `lot_price_has_span: true` 객체가 그 뒤 테스트에도 그대로 반환됐다
+  //   (리뷰어가 진단 테스트로 오염을 확정했다). 지금 초록인 것은 «마침» 뒤 테스트가 그
+  //   내용을 안 보기 때문이지 격리가 지켜져서가 아니다 — 이 저장소가 반복 지적해 온
+  //   「테스트가 초록인데 아무것도 안 지킨다」가 **이 PR의 새 테스트 안에서** 재발한 것이다.
+  //   ⇒ 매 호출이 자기 상태를 «전부» 정한다. 조건부 갈래를 없애는 것이 곧 누수의 제거다.
+  const api = await import("../lib/api");
+  (api.fetchCostMaterials as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    items: over?.materials ?? [MATERIAL_MIN],
+  });
   const { default: App } = await import("../App");
   return render(<App />);
 }
@@ -576,6 +581,16 @@ describe("★D-CPP-60 표면이 `/cost`에서 실제로 닿는가 (App 통째 �
     expect(screen.getByText(/178\.78~190\.82원/)).toBeTruthy();
     // ★그리고 「FIFO」로 부르지 않는다(§3 금지선) — 방향이 반대다.
     expect(screen.queryByText(/선입선출 근사|FIFO 근사/)).toBeNull();
+  });
+
+  // ★적대 리뷰 2R P1 회귀 — 픽스처 오염이 다음 테스트로 새면 안 된다.
+  //   이 테스트는 **SUR-F7 뒤에** 놓여야 의미가 있다(F7이 span 있는 종을 주입한다).
+  it("★렌더 픽스처가 다음 테스트로 새지 않는다(2R P1 회귀)", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    // 기본 픽스처엔 구간도 어긋남도 없다 — 앞 테스트의 주입이 새면 이 둘이 뜬다.
+    expect(screen.queryByTestId(`material-${MATERIAL_MIN.id}-lot-span`)).toBeNull();
+    expect(screen.queryByTestId(`material-${MATERIAL_MIN.id}-price-conflict`)).toBeNull();
   });
 
   it("「지금 검사」를 누르면 자동 갱신을 다시 부르고 목록이 새로고침된다", async () => {

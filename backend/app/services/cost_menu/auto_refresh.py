@@ -437,6 +437,13 @@ def pending_queue(db: Session) -> list[dict]:
         material_id = pairs.get(name)
         prev = notes.get(ln.id)
         ship = ln.shipment
+        # ★옛 사유가 «지금»과 어긋나면 버린다 (적대 리뷰 2R P2). 사람이 그 사이 같은 이름을
+        #   다른 라인에서 연결해 짝이 «생긴» 경우, 옛 사유는 아직 「연결된 적 없다」라고
+        #   말한다 — 그 문장은 이제 거짓이고, 사람은 「내가 방금 연결했는데?」에서 멈춘다.
+        #   판정 기준은 **그 사유가 겨눴던 종과 지금 종이 같은가**다. 그래서 MAX_ATTEMPTS로
+        #   고정된 사유(종이 같다)는 그대로 보존된다 — 그건 여전히 참이고 가장 중요한 사유다.
+        if prev is not None and prev.material_id != material_id:
+            prev = None
         if prev is not None:
             payload = entry_payload(prev)
         else:
