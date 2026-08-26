@@ -73,7 +73,7 @@ from app.models import (
     OtaoPurchaseOrderLine,
 )
 
-from .name_map import build_dictionary, resolve
+from .name_map import build_layered_dictionary, resolve
 from .parser import parse_order_pdf
 
 # ECOUNT에서 내려받은 사본의 파일명 규칙 (실측 26/26). 사람이 만든 원본은 `OHI_Order Sheet_…`.
@@ -310,26 +310,43 @@ def _mark_authoritative(session: Session, mtimes: dict[int, float], rep: IngestR
 
 
 def sync_name_map(session: Session, *, report: IngestReport | None = None) -> IngestReport:
-    """정본 발주서 라인으로 사전을 만들고 통관 원장 품목명을 대조해 저장한다.
+    """발주서 라인으로 사전을 만들고 통관 원장 품목명을 대조해 저장한다.
 
     ★사람이 확정한 행(`match_kind='manual'`)은 **덮지 않는다.** 규칙 2(공용 표기 ≡ 단일 표기)는
     상품 지식이라 코드가 못 풀고, 그 자리를 사람이 메우면 그게 정본이기 때문이다.
+
+    ★★**사전의 모집단은 발주서 «전체»다 — 수량의 모집단(정본만)과 다르다** (D-INV-5).
+    초판은 여기에도 `is_authoritative=True`를 걸었는데, 그러면 사전이 원리적으로 빈다:
+    ECOUNT 사본(=대개의 정본)에는 `영문상품명` 칸이 아예 없기 때문이다(B형 발주서).
+    prod 전수 실측(2026-08-26) — 넓혀서 새로 붙는 코드 17종이 **17/17 정본 라인에 실재**하는데
+    그 정본 라인의 `name_en`은 **0/17**이었다. 커버리지 **61.4% → 87.2%**(+8종 5,600개),
+    새 `ambiguous` **0건** · 코드 뒤바뀜 **0건**.
+
+    충돌 시 우선순위는 `build_layered_dictionary`가 지킨다 — 정본이 말한 키는 정본이 이긴다.
+    ★수량 집계(`roster.build_roster` ①)는 **여전히 정본만** 센다. 두 축을 섞으면 발주 누계가
+    개정 전 판본만큼 부풀려진다(실측 `20260107-2` 5,700 vs 1,300).
     """
     rep = report or IngestReport()
 
-    po_lines = [
+    rows_po = session.execute(
+        select(
+            OtaoPurchaseOrderLine.product_code,
+            OtaoPurchaseOrderLine.name_en,
+            OtaoPurchaseOrder.serial,
+            OtaoPurchaseOrder.is_authoritative,
+        ).join(OtaoPurchaseOrder, OtaoPurchaseOrderLine.order_id == OtaoPurchaseOrder.id)
+    ).all()
+    auth_lines = [
         {"code": code, "name_en": name_en, "serial": serial}
-        for code, name_en, serial in session.execute(
-            select(
-                OtaoPurchaseOrderLine.product_code,
-                OtaoPurchaseOrderLine.name_en,
-                OtaoPurchaseOrder.serial,
-            )
-            .join(OtaoPurchaseOrder, OtaoPurchaseOrderLine.order_id == OtaoPurchaseOrder.id)
-            .where(OtaoPurchaseOrder.is_authoritative.is_(True))
-        )
+        for code, name_en, serial, is_auth in rows_po
+        if is_auth
     ]
-    dictionary = build_dictionary(po_lines)
+    other_lines = [
+        {"code": code, "name_en": name_en, "serial": serial}
+        for code, name_en, serial, is_auth in rows_po
+        if not is_auth
+    ]
+    dictionary = build_layered_dictionary(auth_lines, other_lines)
 
     raw_names = sorted(
         {
