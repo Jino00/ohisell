@@ -186,6 +186,33 @@ export function unreachableReason(
   return `「${name ?? `종 id=${id}`}」의 라인인데 그 종이 지금 필터 밖이라 고를 수 없다 — 필터를 풀면 종별 표에서 보인다`;
 }
 
+/** `cost_material.category` — 수입 완제품 종의 표지 (백엔드 `IMPORTED_GOODS_CATEGORY`와 같은 값). */
+export const IMPORTED_GOODS_CATEGORY = "수입 완제품";
+
+/** 이 종에 원장 `product` 라인을 붙일 수 있나 (계약 D-CPP-61 §4-Q1).
+ *
+ * ★표지가 서는 자리는 **픽 하나뿐**이다 — 사람이 「이 레시피는 수입 완제품이다」라고 고른
+ * 순간이고, 그 앞엔 아무 문도 안 열려 있다. 그래서 이 판정을 화면이 스스로 넓히면 안 된다. */
+export function isImportedGoodsMaterial(m: CostMaterial | null): boolean {
+  return m?.category === IMPORTED_GOODS_CATEGORY;
+}
+
+/** 이 수입 완제품 종에 **고를 수 있는** 원장 완제품 라인 — 아직 아무 종에도 안 붙은 것 + 이 종 것.
+ *
+ * ★남의 종에 이미 붙은 라인은 뺀다(같은 로트가 두 번 세지면 이력이 거짓말이 된다 —
+ * `link_ledger_line`의 dup 규율과 같은 이유). 이 종에 붙은 것은 남긴다: 붙어 있는 것이
+ * 안 보이면 「연결했나 안 했나」를 화면이 못 말한다. */
+export function pickableProductLines(
+  rows: CostLedgerMaterialLine[],
+  materialId: number,
+): CostLedgerMaterialLine[] {
+  return rows.filter(
+    (r) =>
+      r.line_type === "product" &&
+      (r.linked_material_id === null || r.linked_material_id === materialId),
+  );
+}
+
 /** 원장 라인이 하나라도 가리키는 종의 id 집합 = **수입 종**. */
 export function importedMaterialIds(rows: CostLedgerMaterialLine[]): Set<number> {
   const out = new Set<number>();
@@ -775,6 +802,7 @@ export function LedgerMaterialLines({
   onLink,
   busy,
   emptyText,
+  linkTargetId,
 }: {
   rows: CostLedgerMaterialLine[];
   materials: CostMaterial[];
@@ -782,6 +810,16 @@ export function LedgerMaterialLines({
   busy?: boolean;
   /** 0건일 때 할 말. 호출부마다 «없다»의 뜻이 다르다(종별 표의 0건 ≠ 미귀속의 0건). */
   emptyText?: string;
+  /**
+   * 연결 대상 종을 **호출부가 지정**한다 (계약 D-CPP-61).
+   *
+   * ★없으면 종전대로 «제안된 종»에만 버튼이 뜬다. 그런데 픽이 방금 세운 수입 완제품 종은
+   * `match_rule`이 없어 제안이 **원리적으로 안 붙고**, 그러면 버튼이 영영 안 떠서 첫 연결을
+   * 할 길이 없다 — 화면이 「연결하라」고 안내하면서 연결 버튼은 안 주는 모양이 된다(n=11
+   * 적대 리뷰 P1-1과 **같은 병**이다). 호출부가 「이 표의 대상은 이 종이다」를 아는 자리에서만
+   * 이 값을 준다.
+   */
+  linkTargetId?: number;
 }) {
   if (rows.length === 0) {
     return (
@@ -807,7 +845,8 @@ export function LedgerMaterialLines({
       </thead>
       <tbody>
         {rows.map((r) => {
-          const suggested = r.suggestion.material_id;
+          // 호출부가 대상을 지정했으면 그것이 이긴다 — 제안이 없어도 연결할 수 있어야 한다.
+          const suggested = linkTargetId ?? r.suggestion.material_id;
           const suggestedName = materials.find((m) => m.id === suggested)?.name ?? null;
           return (
             <tr key={r.line_id} className="border-b last:border-0" data-testid={`ledger-line-${r.line_id}`}>
@@ -2250,6 +2289,10 @@ export function StandardCostBoard({
                 <th className="py-1 pr-2">상품</th>
                 <th className="py-1 pr-2">폼팩터</th>
                 <th className="py-1 pr-2 text-right">표준원가(VAT 포함)</th>
+                {/* ★합격 6의 「세 값 나란히」 — 원장 파생(표준원가) · 엑셀 표준 · 그 격차.
+                    엑셀 값은 대조값이라 계산에 유입되지 않는다(계약 A′ §3). */}
+                <th className="py-1 pr-2 text-right">엑셀 표준(참고)</th>
+                <th className="py-1 pr-2 text-right">엑셀 대비</th>
                 <th className="py-1 pr-2 text-right">현 cost_price</th>
                 <th className="py-1 pr-2 text-right">격차</th>
                 <th className="py-1">비고</th>
@@ -2261,10 +2304,42 @@ export function StandardCostBoard({
                   <td className="py-1 pr-2 font-mono">{row.internal_sku}</td>
                   <td className="py-1 pr-2 truncate max-w-[22rem]">
                     {row.product_name ?? row.recipe_product_name}
+                    {row.recipe_kind === "imported_goods" ? (
+                      <span
+                        className="ml-1 text-[10px] px-1 rounded bg-sky-50 text-sky-700 border border-sky-200"
+                        data-testid="board-imported-badge"
+                      >
+                        수입 완제품
+                      </span>
+                    ) : null}
                   </td>
-                  <td className="py-1 pr-2">{formFactorLabel(row.form_factor)}</td>
+                  <td className="py-1 pr-2">
+                    {formFactorLabel(row.form_factor)}
+                    {/* ★「모른다」를 「bar다」로 바꾼 자리를 화면이 자백한다(계약 D-CPP-61 §4-Q2).
+                        값 자체는 바뀌지 않는다 — 바뀌는 것은 침묵뿐이다. */}
+                    {row.form_source === "fallback" ? (
+                      <span
+                        className="ml-1 text-[10px] px-1 rounded bg-amber-50 text-amber-700 border border-amber-200"
+                        title="옵션명·상품명 어느 규칙도 안 걸려 bar로 단정한 값이다 — 확인 전이다"
+                        data-testid="board-form-estimated"
+                      >
+                        추정
+                      </span>
+                    ) : null}
+                  </td>
                   <td className="py-1 pr-2 text-right font-medium">
                     {formatCostWon(row.std_cost_inc_vat)}
+                  </td>
+                  {/* ★엑셀 표준은 «대조값»이다 — 회색으로 두어 원장 파생 값과 서열을 두지 않되
+                      출처가 다르다는 것을 색으로 말한다(D-CPP-56 규율 계승). */}
+                  <td
+                    className="py-1 pr-2 text-right text-gray-600"
+                    data-testid="board-excel-standard"
+                  >
+                    {formatCostWon(row.excel_total_inc_vat)}
+                  </td>
+                  <td className="py-1 pr-2 text-right" data-testid="board-excel-gap">
+                    {gapText(row.excel_gap_pct)}
                   </td>
                   {/* ★읽기 전용 대조값이다 — 이 화면은 이 칸에 쓰지 않는다(계약 §3 금지선). */}
                   <td className="py-1 pr-2 text-right text-gray-600">
@@ -2538,6 +2613,22 @@ export default function CostPage() {
     () => (selected ? ledgerLinesForMaterial(ledgerLines, selected.id) : []),
     [ledgerLines, selected],
   );
+  // ── D-CPP-61 — 수입 완제품 종의 «첫 연결» ──────────────────────────────────
+  //
+  // ★왜 별도 상태인가 (닭-달걀): 종별 원장 표는 `linked_material_id ?? suggestion.material_id`로
+  //   거르는데, 픽이 방금 세운 종은 `match_rule`이 없어 제안이 안 붙는다 — 즉 **첫 연결을
+  //   하려면 봐야 하는데, 보려면 이미 연결돼 있어야 하는** 상태다. 그래서 사람이 눌러서
+  //   불러오는 목록을 따로 둔다.
+  // ★그리고 `ledgerLines`에 합치지 않는다: prod `product` 라인이 150건이라 합치면
+  //   「도달할 수 없는 라인」 섹션이 그 150건으로 덮여 부자재 미매칭이 그 안에 파묻힌다
+  //   (합격 13이 지키려던 표면을 이 슬라이스가 되레 망가뜨리는 모양이 된다).
+  const selectedIsImportedGoods = isImportedGoodsMaterial(selected);
+  const [productLines, setProductLines] = useState<CostLedgerMaterialLine[]>([]);
+  const [productLinesLoaded, setProductLinesLoaded] = useState(false);
+  const pickableLines = useMemo(
+    () => (selected ? pickableProductLines(productLines, selected.id) : []),
+    [productLines, selected],
+  );
   // ★적대 리뷰 1R P1 — 「도달 가능」의 기준은 **지금 목록에 떠 있는 종**이다. `materials`
   //   (전체 129종)를 쓰면 필터가 만든 구멍을 원리적으로 못 본다 — 그게 1R P1의 뿌리였다.
   const unreachableLines = useMemo(
@@ -2607,12 +2698,22 @@ export default function CostPage() {
     try {
       await fn();
       await load();
+      // 완제품 라인을 이미 펼쳐 둔 상태면 함께 새로 고친다 — 연결하고 나서도 옛 목록이
+      // 그대로 서 있으면 「연결됐나」를 화면이 못 말한다.
+      if (productLinesLoaded) await loadProductLines();
       setMsg(ok);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  /** 수입 완제품 원장 라인을 **사람이 눌러서** 불러온다 (계약 D-CPP-61 §4-Q1). */
+  async function loadProductLines() {
+    const res = await fetchCostLedgerMaterialLines(true);
+    setProductLines(res.items.filter((r) => r.line_type === "product"));
+    setProductLinesLoaded(true);
   }
 
   // ★P1-1 수정(적대 리뷰 2R) — 필터가 걸린 채 종을 추가하면 새 종은 늘 필터 밖에
@@ -2973,6 +3074,60 @@ export default function CostPage() {
                         }
                       />
                     </div>
+                  </section>
+                ) : null}
+
+                {/* ★D-CPP-61 — 수입 완제품 종의 «첫 연결». 강화유리는 원장에서
+                    `line_type='product'`라 부자재 라인 목록엔 원리적으로 안 뜬다
+                    (Jino 2026-08-25 07:59 *"부자제가 아니고 제품으로 등록이 되어 있네"*).
+                    ★목록은 **사람이 눌러야** 온다 — prod `product` 라인이 150건이라 늘
+                    싣으면 부자재 표면이 그 안에 파묻힌다.
+                    ★그리고 여기서도 «연결»은 사람이 누른다(§2-2 불변식) — 자동은 그 뒤
+                    같은 품목명의 «반복»만 가져간다(D-CPP-60 자동 갱신). */}
+                {selectedIsImportedGoods ? (
+                  <section className="mt-6" data-testid="imported-goods-ledger-lines">
+                    <h2 className="text-sm font-semibold text-gray-700">
+                      「{selected.name}」 원장 수입 완제품 라인
+                    </h2>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      이 종은 <b>수입 완제품</b>이라 원장의 <code>product</code> 라인이 붙는다.
+                      한 번 연결하면 다음 로트부터는 같은 품목명을 자동 갱신이 스스로 따라온다 —
+                      <b>첫 연결만 사람이 한다.</b>
+                    </div>
+                    {!productLinesLoaded ? (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs border rounded px-2 py-1 disabled:opacity-50"
+                        disabled={busy}
+                        data-testid="load-imported-lines"
+                        onClick={() =>
+                          run(loadProductLines, "원장 수입 완제품 라인을 불러왔다")
+                        }
+                      >
+                        원장 수입 완제품 라인 불러오기
+                      </button>
+                    ) : pickableLines.length === 0 ? (
+                      <div className="mt-2 text-xs text-amber-700 border border-dashed rounded p-3">
+                        고를 수 있는 완제품 라인이 없다 — 확정된 수입건에 이 품목의{" "}
+                        <code>product</code> 라인이 없거나, 있는 것이 이미 다른 종에 붙어 있다.
+                        <b>0원짜리 단가를 만들지 않는다</b>(계약 §2-7).
+                      </div>
+                    ) : (
+                      <div className="mt-2">
+                        <LedgerMaterialLines
+                          rows={pickableLines}
+                          materials={materials}
+                          busy={busy}
+                          linkTargetId={selected.id}
+                          onLink={(materialId, lineId) =>
+                            run(
+                              () => linkCostLedgerPrice(materialId, lineId),
+                              "원장 로트를 수입 완제품 종에 연결했다",
+                            )
+                          }
+                        />
+                      </div>
+                    )}
                   </section>
                 ) : null}
               </section>

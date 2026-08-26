@@ -51,6 +51,19 @@ from app.services.cost_menu.matcher import LedgerItem, MaterialRule, Suggestion,
 MATERIAL_STATUSES = ("unconfirmed", "approved")
 PRICE_SOURCES = ("ledger", "manual")
 
+#: `cost_recipe.recipe_kind` / `cost_table_item.recipe_kind`의 수입 완제품 값
+#: (`recipe_parser.IMPORTED_SECTIONS`가 붙이는 것과 같은 문자열).
+IMPORTED_GOODS_KIND = "imported_goods"
+
+#: 수입 완제품 종의 `cost_material.category`.
+#:
+#: ★**이 값이 「원장 `product` 라인을 붙일 수 있다」의 유일한 표지다** (계약 D-CPP-61 §4-Q1).
+#: 원장엔 `product` 라인이 150건 있고 그걸 전부 부자재 표면에 쏟으면 부자재 탭이 못 쓰게
+#: 된다. 그래서 개방의 폭은 «전면»이 아니라 **이 카테고리의 종에 붙이는 경우**까지다.
+#: 표지를 세우는 자리는 픽 하나뿐이다(`recipes._apply_item_lines`) — 사람이 「이 레시피는
+#: 수입 완제품이다」라고 고른 순간이고, 그 앞엔 아무 문도 안 열려 있다.
+IMPORTED_GOODS_CATEGORY = "수입 완제품"
+
 
 class CostMenuError(ValueError):
     """호출자 잘못(입력 오류). 라우터가 4xx로 옮긴다."""
@@ -323,8 +336,15 @@ def list_materials(db: Session) -> list[dict]:
     ]
 
 
-def ledger_material_lines(db: Session) -> list[dict]:
+def ledger_material_lines(db: Session, *, include_products: bool = False) -> list[dict]:
     """확정된 수입건의 `line_type='material'` 라인 전건 + 링크 상태 + 제안.
+
+    ★`include_products=True`면 **수입 완제품(`product`) 라인도 함께** 싣는다 (계약 D-CPP-61
+    §4-Q1). 기본이 False인 이유는 prod에 `product` 라인이 **150건**이라 그냥 열면 부자재
+    8건이 그 안에 파묻히기 때문이다 — 첫 연결을 하려면 사람이 그 라인을 «봐야» 하므로
+    문을 닫아 둘 수도 없다. 그래서 **옵트인**이다: 화면이 「수입 완제품 라인 보기」를 눌러야
+    온다. 이미 연결된 `product` 라인은 옵트인과 **무관하게** 항상 실린다 — 어긋난 연결이
+    화면에서 사라지는 것이 1R P1-1이 고친 바로 그 병이다.
 
     ★**미매칭도 결과에 실린다.** 「원장에 부자재 라인이 있는데 어느 종에도 안 붙었다」가
     화면에 안 보이면 단가 이력이 조용히 비어 있게 된다(계약 §5-3 탭1: 「미매칭」 표면화).
@@ -351,11 +371,19 @@ def ledger_material_lines(db: Session) -> list[dict]:
     visible = ImportShipment.status == "confirmed"
     if linked_ids:
         visible = or_(visible, ImportInvoiceLine.id.in_(linked_ids))
+
+    # 종류 필터: 부자재는 항상 · 수입 완제품은 옵트인이거나 **이미 붙어 있으면** 항상.
+    kind = ImportInvoiceLine.line_type == "material"
+    if include_products:
+        kind = or_(kind, ImportInvoiceLine.line_type == "product")
+    elif linked_ids:
+        kind = or_(kind, ImportInvoiceLine.id.in_(linked_ids))
+
     rows = (
         db.query(ImportInvoiceLine)
         .join(ImportShipment, ImportInvoiceLine.shipment_id == ImportShipment.id)
         .options(selectinload(ImportInvoiceLine.shipment))
-        .filter(ImportInvoiceLine.line_type == "material", visible)
+        .filter(kind, visible)
         .order_by(ImportShipment.id.desc(), ImportInvoiceLine.seq)
         .all()
     )
@@ -383,6 +411,9 @@ def ledger_material_lines(db: Session) -> list[dict]:
                 "hbl_no": r.shipment.hbl_no,
                 "declaration_date": _date(r.shipment.declaration_date),
                 "item_name": r.item_name,
+                # ★화면이 부자재 라인과 수입 완제품 라인을 갈라 그릴 수 있게 실어 준다
+                #   — 섞어 놓으면 「이건 왜 여기 있나」를 사람이 물을 수밖에 없다.
+                "line_type": r.line_type,
                 "quantity": _d(r.quantity),
                 "unit_cost_ex_vat": _d(r.unit_cost_ex_vat),
                 "unit_cost_inc_vat": _d(r.unit_cost_inc_vat),
@@ -617,10 +648,24 @@ def link_ledger_line(
     )
     if line is None:
         raise CostMenuError(f"원장 라인 id={line_id}이 없다.")
-    if line.line_type != "material":
+    # ★수입 완제품 종에는 `product` 라인을 붙일 수 있다 (계약 D-CPP-61 §4-Q1).
+    #   강화유리는 원장에서 `line_type='product'`인데(부자재가 아니라 «제품»이다 — Jino
+    #   2026-08-25 07:59 *"부자제가 아니고 제품으로 등록이 되어 있네"*) 이 거부문이
+    #   합격 6의 마지막 관문이었다. 개방의 폭은 **이 종이 수입 완제품일 때**까지다 —
+    #   그 표지는 사람이 픽한 순간에만 서고(§4-Q1), 다른 종에는 종전대로 `material`만 붙는다.
+    allowed_types = {"material"}
+    if m.category == IMPORTED_GOODS_CATEGORY:
+        allowed_types.add("product")
+    if line.line_type not in allowed_types:
+        if m.category == IMPORTED_GOODS_CATEGORY:
+            raise CostMenuError(
+                f"원장 라인 id={line_id}은 `{line.line_type}`이다 — 수입 완제품 종에는 "
+                "`product`·`material` 라인만 붙는다."
+            )
         raise CostMenuError(
             f"원장 라인 id={line_id}은 부자재(`material`)가 아니라 `{line.line_type}`이다. "
-            "원장에서 분류를 먼저 고쳐야 한다."
+            f"종 「{m.name}」은 수입 완제품이 아니다 — 원장에서 분류를 고치거나, "
+            "원가표 항목을 픽해 수입 완제품 종으로 세워야 한다."
         )
     if line.shipment is None or line.shipment.status != "confirmed":
         raise CostMenuError(

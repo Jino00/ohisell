@@ -140,14 +140,31 @@ def _candidate_lines(db: Session, shipment_id: int | None = None):
         .join(ImportShipment, ImportInvoiceLine.shipment_id == ImportShipment.id)
         .filter(
             ImportShipment.status == "confirmed",
-            ImportInvoiceLine.line_type == "material",
+            # ★`product` 라인도 본다 (계약 D-CPP-61 §4-Q1) — 수입 완제품의 새 로트가
+            #   자동 갱신 궤도에 오르는 유일한 길이다. 폭은 아래에서 **사람이 만든 짝**으로
+            #   묶는다: 150건이 다 후보가 되는 것이 아니라, 그 품목명을 사람이 이미 수입
+            #   완제품 종에 연결해 둔 것만 온다. 「자동은 반복만 가져간다」(§2-2)의 집행이다.
+            ImportInvoiceLine.line_type.in_(("material", "product")),
             ImportInvoiceLine.unit_cost_ex_vat.isnot(None),
             ImportInvoiceLine.unit_cost_inc_vat.isnot(None),
         )
     )
     if shipment_id is not None:
         q = q.filter(ImportInvoiceLine.shipment_id == shipment_id)
-    return [ln for ln in q.all() if ln.id not in linked_ids]
+
+    pairs = known_pairs(db)
+    out = []
+    for ln in q.all():
+        if ln.id in linked_ids:
+            continue
+        if ln.line_type != "material" and (ln.item_name or "").strip() not in pairs:
+            # 사람이 한 번도 안 붙여 본 완제품 라인이다 — 자동의 대상이 아니다.
+            # ★큐로도 보내지 않는다: 큐는 「자동이 봤는데 못 정했다」의 목록이고, 이건
+            #   **애초에 자동의 관할이 아니다**. 관할 밖을 큐에 쌓으면 사람이 매일 150건을
+            #   지나치게 되고 그러면 큐 자체가 안 읽힌다.
+            continue
+        out.append(ln)
+    return out
 
 
 def _attempts(db: Session, line_id: int) -> int:

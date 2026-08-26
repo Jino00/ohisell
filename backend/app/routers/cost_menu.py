@@ -166,14 +166,16 @@ def patch_material(material_id: int, body: MaterialPatch, db: Session = Depends(
 
 
 @router.get("/ledger-material-lines")
-def ledger_material_lines(db: Session = Depends(get_db)):
+def ledger_material_lines(include_products: bool = False, db: Session = Depends(get_db)):
     """확정 수입건의 부자재 라인 전건 + 링크 상태 + **제안**.
 
     ★제안은 제안이다 — 이 GET은 아무것도 연결하지 않는다. 연결은 아래 POST를 화면의
     「연결」 버튼이 부를 때만 생긴다(계약 §5-2: 확정은 사람).
     ★미매칭 라인도 빠짐없이 실린다 — 안 보이면 단가 이력이 조용히 비어 있게 된다.
+    ★`include_products=true`면 수입 완제품(`product`) 라인도 함께 온다(계약 D-CPP-61) —
+    기본이 false인 이유·이미 연결된 라인이 항상 실리는 이유는 서비스 docstring 참조.
     """
-    return {"items": M.ledger_material_lines(db)}
+    return {"items": M.ledger_material_lines(db, include_products=include_products)}
 
 
 @router.post("/materials/{material_id}/prices/link", status_code=201)
