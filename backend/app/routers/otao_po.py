@@ -19,6 +19,8 @@ body에서 조용히 지워, 서비스층 테스트가 전부 초록인데 화�
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,6 +29,7 @@ from app.database import get_db
 from app.models import OtaoItemNameMap, OtaoPurchaseOrder
 from app.services.otao_po.roster import build_roster
 from app.services.otao_po.sales import build_sales_timeseries
+from app.services.otao_po.settlement import build_settlement
 
 router = APIRouter(prefix="/api/otao-po", tags=["otao-po"])
 
@@ -148,4 +151,81 @@ def get_sales(
         "unmapped": [{"channel": k, "quantity": v} for k, v in ts.unmapped.items()],
         "order_axis": ts.order_axis,
         "notes": ts.notes,
+    }
+
+
+@router.get("/settlement")
+def get_settlement(db: Session = Depends(get_db)) -> dict:
+    """S2 — 정산 창(전월 20~당월 19)별 픽업 합계 + 지급액 대조 상태.
+
+    화면이 반드시 말해야 하는 것(계약 §2-8 · `settlement.py` docstring):
+      ① **대조 대상이 없다는 사실**(`reconciliation.source == "none"`) — 「대조 불가」와
+         「대조했는데 틀렸다」는 다른 상태다. 지급액 원장이 이 저장소에 없다.
+      ② **`product`와 `material`이 갈라져 있는 것** — 부자재는 지급액엔 들어가고 S1의 픽업
+         누계 칸엔 안 들어간다. 합치면 두 숫자가 왜 다른지 아무도 설명 못 한다.
+      ③ **창 경계 ±2일 선적**(`boundary_shipment_ids`) — 이 원장엔 OTAO 픽업일이 없어
+         창이 밀렸을 수 있다. 대조가 어긋나면 첫 번째 후보다.
+      ④ **draft 선적이 합계에 들어 있다는 것** — 빼지도 숨기지도 않는다.
+
+    ★`response_model`을 쓰지 않는 이유는 `/roster`·`/sales`와 같다(교훈 #321) — 위 자백
+    필드가 조용히 지워지면 화면엔 아무 일도 없는 것처럼 보인다. 테스트가 **HTTP body를** 단언한다.
+
+    ★읽기 전용이다. 지급액을 «입력»받는 표면은 여기 열지 않는다 — 돈이 나가는 축이고,
+    값의 정본이 정해지기 전에 쓰기를 열면 그 숫자가 곧 정본 행세를 한다(계약 §3-2).
+    """
+    s = build_settlement(db)
+
+    def money(v) -> float | None:
+        return None if v is None else float(round(v, 2))
+
+    def qty(v) -> float:
+        return float(v)
+
+    return {
+        # ★원장이 비어 있는 것과 「픽업 0」은 다르다(`/roster`의 `ledger_empty`와 같은 결).
+        "ledger_empty": s.ledger_start is None,
+        "ledger_start": s.ledger_start.isoformat() if s.ledger_start else None,
+        "ledger_end": s.ledger_end.isoformat() if s.ledger_end else None,
+        "currency": s.currency,
+        "windows": [
+            {
+                "key": w.key,
+                "start": w.start.isoformat(),
+                "end": w.end.isoformat(),  # = 지급일(19일)
+                "shipments": w.shipments,
+                "lines": w.lines,
+                "product_quantity": qty(w.product_quantity),
+                "product_amount_cny": money(w.product_amount_cny),
+                "material_quantity": qty(w.material_quantity),
+                "material_amount_cny": money(w.material_amount_cny),
+                "other_quantity": qty(w.other_quantity),
+                "other_amount_cny": money(w.other_amount_cny),
+                "total_amount_cny": money(w.total_amount_cny),
+                "shipment_ids": w.shipment_ids,
+                "draft_shipment_ids": w.draft_shipment_ids,
+                "boundary_shipment_ids": w.boundary_shipment_ids,
+                # ★null은 「0원 지급」이 아니라 「모른다」다.
+                "payment_actual_cny": money(w.payment_actual_cny),
+                "difference_cny": money(w.difference_cny),
+                "reconciled": w.reconciled,
+            }
+            for w in s.windows
+        ],
+        "unassigned": {
+            "lines": s.unassigned_lines,
+            "quantity": qty(s.unassigned_quantity),
+            "amount_cny": money(s.unassigned_amount_cny),
+        },
+        "totals": {
+            **{k: v for k, v in s.totals.items() if not isinstance(v, Decimal)},
+            "product_quantity": qty(s.totals["product_quantity"]),
+            "product_amount_cny": money(s.totals["product_amount_cny"]),
+            "material_quantity": qty(s.totals["material_quantity"]),
+            "material_amount_cny": money(s.totals["material_amount_cny"]),
+            "other_quantity": qty(s.totals["other_quantity"]),
+            "other_amount_cny": money(s.totals["other_amount_cny"]),
+            "total_amount_cny": money(s.totals["total_amount_cny"]),
+        },
+        "reconciliation": s.reconciliation,
+        "notes": s.notes,
     }

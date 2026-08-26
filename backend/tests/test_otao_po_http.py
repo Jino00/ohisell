@@ -330,3 +330,112 @@ def test_sales_body_confesses_the_missing_bridge_to_the_order_axis(env):
     assert body["order_axis"]["overlap"] == 0
     assert body["order_axis"]["sales_axis_skus"] == 1
     assert any("다리가 아직 없다" in n for n in body["notes"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S2 — 정산 창의 HTTP 경계 (체인 `발주예측` n=7)
+#
+# 서비스층 테스트(`test_otao_po_settlement.py`)가 숫자를 잠그고, 여기서는 **자백 필드가 body까지
+# 살아 오는가**를 잠근다. 특히 `reconciled: null`은 «대조 불가»라는 상태 자체이므로, 직렬화에서
+# 지워지거나 `false`로 바뀌면 화면이 **「대조했는데 틀렸다」로 거짓말**한다 — 서비스층만 보면
+# 원리적으로 못 잡는 자리다(교훈 #321의 이 슬라이스판).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_settlement(session) -> None:
+    """창 둘에 걸치도록 심는다 — 07-23 픽업은 **8월 창**이다(20일부터 다음 창)."""
+    jul = ImportShipment(
+        hbl_no="SETR-JUL", declaration_date=date(2026, 7, 13), status="confirmed",
+        currency="CNY", fx_rate=Decimal("209.88"),
+    )
+    aug = ImportShipment(
+        hbl_no="SETR-AUG", declaration_date=date(2026, 7, 23), status="draft",
+        currency="CNY", fx_rate=Decimal("209.88"),
+    )
+    session.add_all([jul, aug])
+    session.flush()
+    session.add_all([
+        ImportInvoiceLine(
+            shipment_id=jul.id, seq=1, item_name="Glass_a",
+            quantity=Decimal(100), unit_price_foreign=Decimal(10), line_type="product",
+        ),
+        ImportInvoiceLine(
+            shipment_id=aug.id, seq=1, item_name="Glass_b",
+            quantity=Decimal(50), unit_price_foreign=Decimal(12), line_type="product",
+        ),
+        ImportInvoiceLine(
+            shipment_id=aug.id, seq=2, item_name="cleaning kits",
+            quantity=Decimal(2400), unit_price_foreign=Decimal("0.8"), line_type="material",
+        ),
+    ])
+    session.commit()
+
+
+def test_settlement_body_carries_every_confession_field(env):
+    tc, s = env
+    _seed_settlement(s)
+
+    body = tc.get("/api/otao-po/settlement").json()
+    for key in ("ledger_empty", "ledger_start", "ledger_end", "currency", "windows",
+                "unassigned", "totals", "reconciliation", "notes"):
+        assert key in body, f"body에 {key}가 없다"
+    w = body["windows"][0]
+    for key in ("key", "start", "end", "shipments", "lines",
+                "product_quantity", "product_amount_cny",
+                "material_quantity", "material_amount_cny",
+                "other_quantity", "other_amount_cny", "total_amount_cny",
+                "draft_shipment_ids", "boundary_shipment_ids",
+                "payment_actual_cny", "difference_cny", "reconciled"):
+        assert key in w, f"창 body에 {key}가 없다"
+
+
+def test_settlement_body_splits_the_window_at_the_twentieth(env):
+    """07-13은 7월 창, 07-23은 **8월 창**이다. 한 창으로 뭉치면 지급액 대조가 통째로 어긋난다."""
+    tc, s = env
+    _seed_settlement(s)
+
+    body = tc.get("/api/otao-po/settlement").json()
+    got = {w["key"]: w["total_amount_cny"] for w in body["windows"]}
+    assert got == {"2026-07": 1000.0, "2026-08": 2520.0}
+
+
+def test_settlement_body_keeps_reconciled_null_not_false(env):
+    """★`null`(대조 불가)이 `false`(불일치)로 바뀌면 화면이 없는 사실을 말한다."""
+    tc, s = env
+    _seed_settlement(s)
+
+    body = tc.get("/api/otao-po/settlement").json()
+    assert all(w["reconciled"] is None for w in body["windows"])
+    assert all(w["payment_actual_cny"] is None for w in body["windows"])
+    assert body["reconciliation"]["source"] == "none"
+    assert any("대조 불가" in n for n in body["notes"])
+
+
+def test_settlement_body_never_merges_product_and_material(env):
+    """부자재는 지급액엔 들어가고 S1 픽업 누계엔 안 들어간다 — 합치면 그 차이를 설명 못 한다."""
+    tc, s = env
+    _seed_settlement(s)
+
+    aug = next(w for w in tc.get("/api/otao-po/settlement").json()["windows"]
+               if w["key"] == "2026-08")
+    assert aug["product_amount_cny"] == 600.0
+    assert aug["material_amount_cny"] == 1920.0
+    assert aug["total_amount_cny"] == 2520.0
+    assert aug["material_quantity"] == 2400.0
+
+
+def test_settlement_body_confesses_draft_and_boundary_shipments(env):
+    tc, s = env
+    _seed_settlement(s)
+
+    aug = next(w for w in tc.get("/api/otao-po/settlement").json()["windows"]
+               if w["key"] == "2026-08")
+    assert len(aug["draft_shipment_ids"]) == 1, "draft가 body에서 사라지면 화면이 못 말한다"
+
+
+def test_settlement_empty_ledger_says_so_instead_of_showing_zeros(env):
+    tc, _ = env
+    body = tc.get("/api/otao-po/settlement").json()
+    assert body["ledger_empty"] is True
+    assert body["windows"] == []
+    assert any("픽업 0이 아니다" in n for n in body["notes"])
