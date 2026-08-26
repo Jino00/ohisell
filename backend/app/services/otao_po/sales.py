@@ -408,6 +408,9 @@ def build_sales_timeseries(session: Session, *, days: int = 60, today: date | No
                 row["series"][day_pos[d]] += qty
             else:
                 # 「모름」이지 「0」이 아니다 — 조용히 빼면 수요가 그만큼 사라진다(§2-9).
+                # ★수량 0인 미매핑 행도 «세되»(카운터는 정직해야 한다) 화면 목록에는 안 싣는다 —
+                #   아래에서 0인 채널을 걷어낸다. 「0개가 빠져 있다」는 정보가 아니라 잡음이고,
+                #   진짜 결손을 그 줄들 사이에 묻는다.
                 out.unmapped[key] = out.unmapped.get(key, 0) + qty
             if qty:
                 per_day[d][key] = per_day[d].get(key, 0) + qty
@@ -441,6 +444,7 @@ def build_sales_timeseries(session: Session, *, days: int = 60, today: date | No
         {"date": d.isoformat(), "by_channel": per_day[d], "total": sum(per_day[d].values())}
         for d in all_days
     ]
+    out.unmapped = {k: v for k, v in out.unmapped.items() if v}
     out.order_axis = _order_axis_bridge(session)
 
     out.notes.append(

@@ -401,3 +401,15 @@ def test_series_sums_channels_per_day(session):
     ts = build_sales_timeseries(session, days=2, today=TODAY)
     (row,) = ts.rows
     assert row["series"] == [0, 5]
+
+
+def test_zero_quantity_unmapped_channels_are_not_listed(session):
+    """수량 0인 미매핑은 목록에서 뺀다 — 「0개가 빠져 있다」는 정보가 아니라 잡음이고,
+    진짜 결손을 그 줄들 사이에 묻는다. (라이브에서 실제로 0짜리 줄이 나왔다.)"""
+    _master(session)
+    _order(session, channel_id=6, product_id=None, d=TODAY, qty=0)
+    _order(session, channel_id=7, product_id=None, d=TODAY, qty=3)
+    session.flush()
+
+    ts = build_sales_timeseries(session, days=7, today=TODAY)
+    assert ts.unmapped == {"cafe24": 3}, "0짜리 naver 줄이 남으면 안 된다"
