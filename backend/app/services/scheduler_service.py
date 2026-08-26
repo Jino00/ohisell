@@ -898,10 +898,17 @@ def run_naver_auto_operator_daily_job():
         from app.services.naver_ad.auto_operator import run_daily_lane
 
         result = run_daily_lane(db)
+        # ★D-NAO-258(S1-a): held 합계 옆에 **사유별 내역**을 함께 낸다. 합계만 있으면
+        # "held=37"이 소급채점 stale 37건인지 클릭부족 37건인지 구분이 안 되고, 실제로
+        # 2026-08-26에 그 구분을 얻으려고 prod DB의 rationale 문자열을 파싱해야 했다.
+        from app.services.naver_ad.auto_operator import format_held_by_reason
+
         log.info(
-            "[스케줄러] naver auto_operator daily: reviewed=%s approved=%s executed=%s held=%s failed=%s",
+            "[스케줄러] naver auto_operator daily: reviewed=%s approved=%s executed=%s held=%s "
+            "failed=%s | held_by_reason: %s",
             result["reviewed"], result["approved"], result["executed"],
             len(result["held"]), result["failed"],
+            format_held_by_reason(result.get("held_by_reason") or {}),
         )
     except Exception as e:
         log.exception("[스케줄러] run_naver_auto_operator_daily_job 에러: %s", e)
@@ -1014,7 +1021,7 @@ def run_naver_auto_operator_hourly_job():
     핫셋(클릭≥10 그룹)만, 순위·CPC·페이싱 기반 스텝 제안을 생성 즉시 심사·집행한다."""
     db = _get_own_db_session()
     try:
-        from app.services.naver_ad.auto_operator import run_hourly_lane
+        from app.services.naver_ad.auto_operator import format_held_by_reason, run_hourly_lane
 
         result = run_hourly_lane(db)
         # D-NAO-85 관측 갭①: 탐색/탐침 카운터도 함께 출력 — 레벨 소실(main.py에서 해소)에 더해,
@@ -1023,7 +1030,7 @@ def run_naver_auto_operator_hourly_job():
             "[스케줄러] naver auto_operator hourly: reviewed=%s approved=%s executed=%s "
             "held=%s skipped=%s failed=%s probed=%s | explored=%s explored_held=%s "
             "explored_capped=%s explored_not_rank=%s ghost_hold=%s(groups=%s) "
-            "not_serving=%s",
+            "not_serving=%s | held_by_reason: %s",
             result["reviewed"], result["approved"], result["executed"],
             len(result["held"]), result["skipped"], result["failed"], result["probed"],
             result["explored"], result["explored_held"], result["explored_capped"],
@@ -1033,6 +1040,9 @@ def run_naver_auto_operator_hourly_job():
             # 확인할 방법이 없다 — 같은 종류의 관측 구멍(D-NAO-85 관측 갭①·D-NAO-130)이 이미
             # 두 번 났으므로 신설과 동시에 로그에 싣는다.
             result["explored_not_serving"],
+            # ★D-NAO-258(S1-a): 시간당 레인이 탐색의 본진이다 — 2026-08-26 실측 「탐색 시도
+            # 3,834 중 94.1% 차단, 사유의 52%가 소급채점 stale」이 나온 곳. 그 분해를 여기서 낸다.
+            format_held_by_reason(result.get("held_by_reason") or {}),
         )
         # ★D-NAO-130 관측 구멍 수정(2026-07-29 실측): 소재 자동 실행 카운터 4종이 어느 로그
         # 라인에도 없어서, 레인 캡이 걸렸는지·중복으로 skip됐는지를 **로그로 알 수 없었다**
@@ -2138,6 +2148,12 @@ def _ensure_default_states(db):
         ("run_naver_profit_scorecard", "40 8 * * *"),  # P7 일일 이익 스코어카드(목적함수 표면화, D-NAO-85/ref39 P7, 관찰 전용)
         ("run_naver_wisdom", "45 8 * * *"),  # 운영 일기 지혜 승격·망각층(후보→판사→지혜+보고→망각, D-NAO-54 P3)
         ("run_naver_vault_export", "5 9 * * *"),  # 운영 일기·지혜 Obsidian 볼트 export(열람층, D-NAO-54 P5)
+        # ★D-NAO-258(S1-b): 당일 결손 보충 스윕(관측·보고 잡 4종만). 매시 :47인 이유 —
+        #   등록된 분 슬롯(2·3·5·7·10·12·15·20·25·30·35·37·40·45·50·55·57)에서 :47이 비어 있고,
+        #   :45(wisdom)로부터 2분·:50(auto_operator daily 집행)으로부터 3분 떨어져 있어 SQLite
+        #   라이터가 겹치지 않는다. 결손 0이면 SELECT 몇 번으로 끝나므로 매시가 부담이 아니다.
+        #   ★_CATCHUP_ORDER 제외 — 이 잡 자신이 catch-up 기제다(자기를 따라잡으면 순환).
+        ("run_naver_inday_catchup", "47 * * * *"),
         ("shopping_ad_product_sync", "45 7 * * *"),  # 쇼핑 그룹↔상품 매핑(상품 파생 target 소스, D-NAO-57 A — 07:30 BEP 뒤·08:00 제안 앞. 07:45인 이유: 07:40 검색어 잡과 SQLite 라이터 충돌 회피, 리뷰 3R P3)
         ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("run_naver_probe_settlement", "55 8 * * *"),  # 탐침 성과 정산 판정(유지/되돌림/보류, D-NAO-58 CD3 Stage 2 — 일 레인 08:50·retro 08:30 뒤)
@@ -2303,14 +2319,20 @@ _CATCHUP_NON_BLOCKING: frozenset[str] = frozenset({
 })
 
 
-def _missed_morning_jobs(db, now):
+def _missed_morning_jobs(db, now, *, only=None, min_lag=None):
     """오늘 예정 발화를 놓친 아침배치 잡을 cron(=의존) 순서로 반환.
 
     판정: 오늘 예정 발화 시각(cron hour:minute) <= now 이고, last_run_at이 그 시각 이전
     (또는 없음)이며, 12h 이내면 놓친 것. 비정형 cron(*/n·범위)은 안전하게 제외.
+
+    only: 주어지면 이 집합에 든 잡만 본다(D-NAO-258 당일 스윕이 관측 전용 잡으로 좁힐 때).
+    min_lag: 주어지면 «예정 시각 + min_lag»가 지나야 결손으로 본다. last_run_at은 성공 시에만
+        갱신되므로, 마진이 없으면 **아직 실행 중인 잡**을 결손으로 오판해 이중 실행한다.
     """
     missed: list[str] = []
     for job_name in _CATCHUP_ORDER:
+        if only is not None and job_name not in only:
+            continue
         state = db.query(SchedulerState).filter(
             SchedulerState.job_name == job_name
         ).first()
@@ -2324,12 +2346,40 @@ def _missed_morning_jobs(db, now):
         scheduled_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if now < scheduled_today:
             continue
+        if min_lag is not None and (now - scheduled_today) < min_lag:
+            continue  # 아직 정상 실행 중일 수 있다 — 결손으로 단정하지 않는다
         if (now - scheduled_today) > _CATCHUP_LOOKBACK:
             continue
         if state.last_run_at is not None and state.last_run_at >= scheduled_today:
             continue
         missed.append(job_name)
     return missed
+
+
+# ★D-NAO-258(S1-b) 당일 보충 스윕 — 「재시작해야만 따라잡는다」의 구멍을 메운다.
+#
+# 무엇이 문제였나: _run_morning_catchup은 **스케줄러 기동 시 1회**만 돈다. 그래서 크론이
+# 발화하지 못한 날(프로세스 다운·misfire grace 초과·스케줄러 스레드 정지) 프로세스가
+# 그날 안에 재시작하지 **않으면** 그 회차는 영영 안 돈다. 2026-08-26 08:45 판사 크론이
+# 통째로 결손(judged_at 48행 전건 NULL)된 것이 이 모양이다 — 그리고 그 사실은 아무 로그에도
+# 안 남았다(결손은 «없는 줄»이라 grep으로 안 잡힌다).
+#
+# 무엇을 «안» 하는가 (계약 §3 금지선): 돈 잡(proposals·auto_operator·집행 계열)은 이 스윕의
+# 대상이 아니다. 대상은 **관측·보고 전용 잡**뿐이다 — 늦게 돌아도 해가 없고, 안 돌면
+# 학습 사슬의 원료가 그날치만큼 영구 소실되는 부류. 돈 잡의 복구는 종전대로 재시작 체인이
+# 맡는다(순서 의존이 걸려 있어 단독 재실행이 위험하기 때문이다).
+_INDAY_CATCHUP_JOBS: frozenset[str] = frozenset({
+    "run_naver_diary_reflection",  # 08:35 — outcome 소급 기입(이게 없으면 아래 수확이 빈손)
+    "run_naver_profit_scorecard",  # 08:40 — 목적함수 표면화(관찰 전용)
+    "run_naver_wisdom",            # 08:45 — 후보 수확→판사→지혜 승격. ★2026-08-26 결손 당사자
+    "run_naver_vault_export",      # 09:05 — 열람층 재생성(멱등)
+})
+
+# ★두 번 돌리지 않기 위한 지연 마진. last_run_at은 «성공 시»에만 갱신되므로, 정상 발화한 잡이
+# 아직 **실행 중**이면(판사는 LLM 재시도로 회당 수 분) 그 순간엔 「미실행」과 구분이 안 된다.
+# 30분을 기다린 뒤에야 결손으로 본다 — 이 목록의 잡 중 가장 긴 것(wisdom)의 정상 실행 시간을
+# 넉넉히 넘긴다. 마진이 없으면 스윕이 판사를 이중 호출해 LLM 비용과 중복 승격을 만든다.
+_INDAY_CATCHUP_MIN_LAG = timedelta(minutes=30)
 
 
 def _record_catchup_status(job_name, *, ok, exception=None):
@@ -2464,6 +2514,67 @@ def _catch_up_morning_batch():
     threading.Thread(target=_run_chain, name="naver-morning-catchup", daemon=True).start()
 
 
+def run_naver_inday_catchup_job():
+    """★D-NAO-258(S1-b) 당일 결손 보충 스윕 — 관측·보고 잡에 한해 «그날 안에» 따라잡는다.
+
+    _run_morning_catchup(기동 시 1회)이 못 메우는 구멍을 맡는다: 프로세스가 그날 재시작하지
+    않으면 결손 회차는 영영 안 돈다. 2026-08-26 08:45 판사 크론이 그렇게 통째로 빠졌고
+    (judged_at 48행 전건 NULL) **아무 로그에도 안 남았다** — 결손은 「없는 줄」이라 grep으로
+    안 잡히기 때문이다. 그래서 이 잡은 «보충했다»뿐 아니라 «결손 0이었다»도 매 회차 찍는다.
+
+    안전 장치 셋:
+      ①대상은 _INDAY_CATCHUP_JOBS(관측·보고 전용)뿐 — 돈 잡·집행 잡은 손대지 않는다(계약 §3).
+      ②_INDAY_CATCHUP_MIN_LAG(30분) 이전엔 결손으로 안 본다 — 실행 중인 잡 이중 호출 방지.
+      ③last_run_at 기반이라 멱등: 한 번 성공하면 다음 회차 스윕에서 제외된다.
+
+    fail-open: 이 잡의 실패가 다른 크론을 막지 않는다(스윕은 관측 보조지 집행이 아니다).
+    """
+    now = kst_now()
+    db = _get_own_db_session()
+    try:
+        missed = _missed_morning_jobs(
+            db, now, only=_INDAY_CATCHUP_JOBS, min_lag=_INDAY_CATCHUP_MIN_LAG
+        )
+    except Exception as e:  # noqa: BLE001 — 감지 실패가 스케줄러를 죽이면 안 된다
+        log.exception("[스케줄러] 당일 catch-up 감지 에러(fail-open): %s", e)
+        return
+    finally:
+        db.close()
+
+    # ★결손 0도 «찍는다» — 이 줄이 없으면 「스윕이 도는가」와 「결손이 없는가」가 구분되지 않는다
+    #   (교훈 #123: 발견 0건과 실행 안 됨은 같은 숫자로 보인다).
+    if not missed:
+        log.info("[스케줄러] naver 당일 catch-up 스윕: missed=0 (대상 %s개 점검)", len(_INDAY_CATCHUP_JOBS))
+        return
+
+    log.warning("[스케줄러] naver 당일 catch-up 스윕: missed=%s → %s", len(missed), missed)
+    funcs = {
+        "run_naver_diary_reflection": run_naver_diary_reflection_job,
+        "run_naver_profit_scorecard": run_naver_profit_scorecard_job,
+        "run_naver_wisdom": run_naver_wisdom_job,
+        "run_naver_vault_export": run_naver_vault_export_job,
+    }
+
+    def _sweep():
+        for job_name in missed:  # _CATCHUP_ORDER 순서 유지(reflection이 wisdom보다 앞)
+            func = funcs.get(job_name)
+            if func is None:
+                # ★조용한 스킵 금지 — _INDAY_CATCHUP_JOBS에 이름만 넣고 여기 등록을 빠뜨리면
+                #   복구가 안 되는데 흔적도 안 남는다(_run_morning_catchup과 같은 경계).
+                log.error("[스케줄러] 당일 catch-up 함수 미등록: %s — funcs에 추가 필요", job_name)
+                continue
+            try:
+                log.warning("[스케줄러] 당일 catch-up 실행: %s", job_name)
+                func()
+            except Exception as e:  # noqa: BLE001 — 전부 관측 잡이라 서로 의존 없음: 체인 계속
+                _record_catchup_status(job_name, ok=False, exception=e)
+                log.exception("[스케줄러] 당일 catch-up %s 실패(계속): %s", job_name, e)
+                continue
+            _record_catchup_status(job_name, ok=True)
+
+    threading.Thread(target=_sweep, name="naver-inday-catchup", daemon=True).start()
+
+
 def job_func_for(job_name: str):
     """job_name → 등록할 잡 함수(단일 진실). 매핑에 없으면 None.
 
@@ -2498,6 +2609,9 @@ def job_func_for(job_name: str):
         "run_naver_profit_scorecard": run_naver_profit_scorecard_job,
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,
+        # ★D-NAO-258(S1-b): 당일 결손 보충 스윕. _CATCHUP_ORDER에는 «넣지 않는다» —
+        #   스윕 자신이 catch-up 기제라 자기를 따라잡을 대상으로 삼으면 순환이다.
+        "run_naver_inday_catchup": run_naver_inday_catchup_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
         "sweep_naver_today_hourly": sweep_naver_today_hourly_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,

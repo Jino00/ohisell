@@ -125,8 +125,12 @@ def _settlement_window():
 def test_daily_lane_reviews_nothing_when_no_auto_operate_campaign(db):
     _proposal(db)  # NaverCampaignSettings 행 자체 없음(auto_operate 기본 False 취급)
     result = auto_operator.run_daily_lane(db, now=NOW)
+    # ★완전 일치를 유지한다(부분집합으로 풀지 않는다) — 이 봉인이 「result에 키가 슬쩍 느는 것」을
+    #   잡는 장치이기 때문이다. D-NAO-258에서 held_by_reason이 늘어 여기가 빨간불이 됐고, 그게
+    #   이 테스트가 제 일을 한 것이다. 조기 반환 경로에서도 키가 있어야 스케줄러 로그 라인이
+    #   result["held_by_reason"]을 읽다 KeyError를 내지 않는다.
     assert result == {"reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0,
-                      "rejected_stale": 0,
+                      "rejected_stale": 0, "held_by_reason": {},
                       "budget_reviewed": 0, "budget_approved": 0, "budget_executed": 0,
                       "budget_failed": 0, "budget_rejected_stale": 0}
 
