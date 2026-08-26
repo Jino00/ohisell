@@ -6344,3 +6344,69 @@ export interface OtaoSales {
 export function fetchOtaoSales(days = 60): Promise<OtaoSales> {
   return fetchApi<OtaoSales>(`/api/otao-po/sales?days=${days}`);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S2 — 정산 창(전월 20~당월 19) 픽업 «금액» (계약 §4 S2 · 체인 `발주예측` n=7)
+//
+// ★금액 단위는 **CNY**다. 과세금액(원)은 관세청이 세금을 매기는 값이라 OTAO 지급액이 아니고,
+//   실송금 환율은 원장에 없어(prod 12/12 NULL) 원화 환산을 하지 않는다 — 하면 우리가 안 쓰는
+//   환율로 지어낸 숫자가 된다.
+// ★`reconciled: null`은 **「대조 불가」라는 상태 자체**다. `false`(불일치)로 접거나 `boolean`
+//   으로 타입을 좁히면 화면이 없는 사실을 말하게 된다 — 지급액 원장이 이 저장소에 없다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface OtaoSettlementWindow {
+  /** 지급월 `YYYY-MM` — 이 달 19일에 지급한다 */
+  key: string;
+  /** 창 시작 = 전월 20일 */
+  start: string;
+  /** 창 끝 = 당월 19일 = 지급일 */
+  end: string;
+  shipments: number;
+  lines: number;
+  product_quantity: number;
+  product_amount_cny: number;
+  /** ★부자재. 지급액엔 들어가고 S1의 «픽업 누계» 칸엔 안 들어간다 — 두 숫자가 다른 이유 */
+  material_quantity: number;
+  material_amount_cny: number;
+  /** 미분류(`unknown`). 판매 SKU로 접지 않는다 */
+  other_quantity: number;
+  other_amount_cny: number;
+  total_amount_cny: number;
+  shipment_ids: number[];
+  /** 아직 검산을 통과하지 못한 선적. 합계엔 들어 있고 화면이 그 사실을 말한다 */
+  draft_shipment_ids: number[];
+  /** 창 경계 ±2일 — 이 원장엔 OTAO 픽업일이 없어 창이 밀렸을 수 있다 */
+  boundary_shipment_ids: number[];
+  /** ★null = 「모른다」이지 「0원 지급」이 아니다 */
+  payment_actual_cny: number | null;
+  difference_cny: number | null;
+  /** ★null = 대조 «불가» / true = 일치 / false = 불일치. 셋은 서로 다른 상태다 */
+  reconciled: boolean | null;
+}
+
+export interface OtaoSettlement {
+  /** true = 통관 원장이 비어 있다. 「픽업 0」과 **다른 상태** */
+  ledger_empty: boolean;
+  ledger_start: string | null;
+  ledger_end: string | null;
+  currency: string;
+  windows: OtaoSettlementWindow[];
+  /** 신고일이 없어 어느 창에도 못 넣은 라인 — 0으로 덮지 않는다 */
+  unassigned: { lines: number; quantity: number; amount_cny: number | null };
+  totals: Record<string, number | null>;
+  reconciliation: {
+    payments_supplied: number;
+    windows_compared: number;
+    windows_matched: number;
+    matched_keys: string[];
+    mismatched: { key: string; expected: string; actual: string; difference: string }[];
+    /** ★"none" = 대조할 «대상»이 없다. "supplied" = 지급액을 받아서 실제로 대조했다 */
+    source: string;
+  };
+  notes: string[];
+}
+
+export function fetchOtaoSettlement(): Promise<OtaoSettlement> {
+  return fetchApi<OtaoSettlement>("/api/otao-po/settlement");
+}

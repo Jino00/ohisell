@@ -105,6 +105,9 @@ vi.mock("../lib/api", async () => {
       throw new Error("이 파일은 발주 3칸만 잰다");
     }),
     // 레이아웃이 부르는 헬스/스케줄러류는 조용히 실패해도 이 화면 판정과 무관하다.
+    // ★S2 정산 축도 같은 화면에 산다. 여기서 일부러 «실패»시키는 이유는 판매 축과 같다 —
+    //   한쪽이 죽어도 이 파일이 재는 축은 그대로 보여야 한다. 그 격리를 mock이 매번 검사한다.
+    fetchOtaoSettlement: vi.fn(async () => { throw new Error("이 파일은 발주 3칸만 잰다"); }),
     fetchHealth: vi.fn(async () => { throw new Error("not needed"); }),
     fetchSchedulerStatus: vi.fn(async () => { throw new Error("not needed"); }),
   };

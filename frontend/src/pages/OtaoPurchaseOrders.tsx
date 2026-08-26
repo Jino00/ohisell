@@ -24,8 +24,9 @@
 import { Card, Table, Th, Td, Badge, Loading, EmptyState } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
-import { fetchOtaoRoster, fetchOtaoSales } from "../lib/api";
+import { fetchOtaoRoster, fetchOtaoSales, fetchOtaoSettlement } from "../lib/api";
 import OtaoSalesPanel from "./otaoSalesPanel";
+import OtaoSettlementPanel from "./otaoSettlementPanel";
 
 /** 예약 잔량 셀 — 음수를 **음수로** 그린다. 깎으면 창 어긋남 신호가 사라진다(자백 ③). */
 function ReservedCell({ value }: { value: number }) {
@@ -47,6 +48,13 @@ export default function OtaoPurchaseOrders() {
   // ★판매 축(S3)은 **따로** 가져온다. 로스터가 비어 있어도 판매는 보여야 하고, 반대도 같다 —
   //   한쪽 실패가 다른 쪽을 통째로 지우면 화면이 「없다」고 거짓말한다.
   const { data: sales, error: salesError } = useAsyncData(() => fetchOtaoSales(60), []);
+  // ★정산 축(S2)도 **따로** 가져온다. 원천이 통관 원장이라 «발주» 원장이 비어 있어도 살아 있다 —
+  //   위 `ledger_empty`는 발주서 적재 여부이지 픽업 여부가 아니다. 묶으면 화면이 「픽업도 없다」로
+  //   거짓말한다(판매 축과 같은 이유).
+  const { data: settlement, error: settlementError } = useAsyncData(
+    () => fetchOtaoSettlement(),
+    [],
+  );
 
   if (error) {
     return (
@@ -56,6 +64,26 @@ export default function OtaoPurchaseOrders() {
     );
   }
   if (!data) return <Loading label="발주 로스터를 불러오는 중…" rows={6} />;
+
+  // ★정산 축(S2) 섹션. 계약 §4 S2의 표면이다 — 「전월 20~당월 19에 픽업한 «금액»」이 OTAO에
+  //   지급할 돈이고, 위 3칸의 「픽업 누계」는 수량이라 다른 질문에 답한다.
+  const settlementSection = (
+    <section className="space-y-4">
+      <div className="flex items-baseline justify-between border-t border-gray-200 pt-5">
+        <h2 className="text-base font-semibold text-gray-900">정산 창 (OTAO 지급)</h2>
+        <p className="text-xs text-gray-500">
+          창은 전월 20일 ~ 당월 19일이고 그 달 19일에 지급합니다 — 20일 픽업부터는 다음 창입니다.
+        </p>
+      </div>
+      {settlementError ? (
+        <EmptyState reason={`정산 창을 불러오지 못했습니다: ${settlementError}`} />
+      ) : !settlement ? (
+        <Loading label="정산 창을 불러오는 중…" rows={4} />
+      ) : (
+        <OtaoSettlementPanel data={settlement} />
+      )}
+    </section>
+  );
 
   // ★판매 축(S3) 섹션. 발주 원장이 비어 있어도 이건 보여야 한다 — 두 축은 원천이 다르다.
   const salesSection = (
@@ -88,7 +116,8 @@ export default function OtaoPurchaseOrders() {
             hint="발주서 PDF는 Google Drive에 있고 서버는 그 폴더를 못 봅니다. Mac에서 scripts/otao_po_export.py 로 페이로드를 만들고, 서버에서 scripts/otao_po_import.py 로 넣습니다."
           />
         </Card>
-        {/* ★발주가 비어도 판매 축은 살아 있다 — 여기서 지우면 「판매도 없다」로 읽힌다. */}
+        {/* ★발주가 비어도 정산·판매 축은 살아 있다 — 여기서 지우면 「픽업·판매도 없다」로 읽힌다. */}
+        {settlementSection}
         {salesSection}
       </div>
     );
@@ -205,6 +234,8 @@ export default function OtaoPurchaseOrders() {
         ★세 칸은 합치지 않습니다. 「발주할지」와 「가져올지」는 다른 결정이고, 합산하면 뒤의 결정이
         화면에서 사라집니다(계약 §3-9). 이 화면은 읽기 전용이며 발주를 보내지 않습니다.
       </p>
+
+      {settlementSection}
 
       {salesSection}
     </div>

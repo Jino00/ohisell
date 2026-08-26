@@ -4,6 +4,8 @@
 - `name_map.py` — 통관 원장 품목명 → 상품코드 사전 (Jino 확정 규칙 3 집행)
 - `ingest.py`   — 폴더 → 원장 적재(멱등·정본 판정 D-INV-3) + 사전 동기화
 - `roster.py`   — S1 3칸 집계 (발주 누계 · 픽업 누계 · 예약 잔량)
+- `sales.py`    — S3 채널 통합 판매 시계열 (축이 다르다 — `internal_sku`)
+- `settlement.py` — S2 정산 창(전월 20~당월 19) 픽업 «금액» 집계 + 지급액 대조 상태
 
 ★**적재는 사람 머신에서 돈다** — 발주서 PDF가 Google Drive 동기화 폴더에 있고 prod 서버는
 그 폴더를 못 본다. 원천의 위치가 정한 제약이지 설계 취향이 아니다(`ingest.py` docstring).
