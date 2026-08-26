@@ -219,3 +219,114 @@ def test_source_reports_authoritative_split(env):
     assert (src["orders_total"], src["orders_authoritative"], src["orders_superseded"]) == (3, 2, 1)
     assert src["last_order_date"] == "2026-06-01"
     assert (src["name_map_total"], src["name_map_resolved"]) == (2, 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 — 판매 시계열의 HTTP 경계 (체인 `발주예측` n=6)
+#
+# 여기서 지키는 것은 숫자가 아니라 **자백 필드가 body까지 살아 오는가**다. 서비스층이 아무리
+# 정직해도 `response_model`·직렬화에서 한 키가 지워지면 화면은 조용히 거짓말을 한다(교훈 #321).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_sales(session) -> None:
+    from datetime import datetime as _dt
+
+    from app.models import Order, ProductMaster, SyncLog
+
+    pm = ProductMaster(
+        internal_sku="OHI-0001", product_name="지문방지 필름", cost_price=Decimal("1000")
+    )
+    session.add(pm)
+    session.flush()
+    today = date.today()
+    session.add(
+        Order(
+            channel_id=6,
+            product_id=pm.id,
+            order_number="O-1",
+            quantity=4,
+            selling_price=Decimal("10000"),
+            order_date=_dt(today.year, today.month, today.day, 10, 0, 0),
+            status="delivered",
+        )
+    )
+    session.add(
+        Order(
+            channel_id=6,
+            product_id=None,  # 못 붙은 판매 — 조용히 사라지면 안 된다
+            order_number="O-2",
+            quantity=1,
+            selling_price=Decimal("10000"),
+            order_date=_dt(today.year, today.month, today.day, 11, 0, 0),
+            status="delivered",
+        )
+    )
+    session.add(
+        SyncLog(
+            channel_id=6,
+            sync_type="orders",
+            status="success",
+            date_from=_dt(today.year, today.month, today.day),
+            date_to=_dt(today.year, today.month, today.day),
+            started_at=_dt(today.year, today.month, today.day, 23, 0, 0),
+        )
+    )
+    session.flush()
+
+
+def test_sales_body_carries_every_confession_field(env):
+    """★자백 필드 5종이 **HTTP body에** 실려야 한다 — 하나라도 빠지면 화면이 못 그린다."""
+    tc, s = env
+    _seed_sales(s)
+
+    body = tc.get("/api/otao-po/sales?days=7").json()
+    # ★`dates`가 빠지면 화면이 「일별 추이 (undefined ~ undefined)」가 된다 — 값은 있는데
+    #   «좌표»가 사라지는 모양이라 서비스층 테스트가 원리적으로 못 잡는다(적대 리뷰 2R R2-A).
+    for key in ("window_start", "window_end", "dates", "channels", "rows", "daily",
+                "unmapped", "order_axis", "notes"):
+        assert key in body, f"body에 {key}가 없다"
+    assert len(body["dates"]) == 7
+    assert len(body["rows"][0]["series"]) == 7, "series가 날짜 축과 길이가 같아야 한다"
+    naver = next(c for c in body["channels"] if c["key"] == "naver")
+    # ★`quantity_ambiguous`가 빠지면 「매핑 모호」가 화면에서 **영구히 0**으로 그려진다.
+    for key in ("mapping_rate", "missing_day_evidence", "days_collected_zero",
+                "days_no_data", "quantity_excluded", "quantity_ambiguous",
+                "bridge", "source_table"):
+        assert key in naver, f"채널 body에 {key}가 없다"
+
+
+def test_sales_body_shows_unmapped_and_mapping_rate(env):
+    tc, s = env
+    _seed_sales(s)
+
+    body = tc.get("/api/otao-po/sales?days=7").json()
+    naver = next(c for c in body["channels"] if c["key"] == "naver")
+    assert (naver["quantity"], naver["quantity_mapped"]) == (5, 4)
+    assert naver["mapping_rate"] == 80.0
+    assert {"channel": "naver", "quantity": 1} in body["unmapped"]
+
+
+def test_sales_body_marks_channels_without_missing_day_evidence(env):
+    """근거가 없는 채널이 body에서 **false로 드러나야** 화면이 「구분 불가」를 그릴 수 있다."""
+    tc, s = env
+    _seed_sales(s)
+
+    body = tc.get("/api/otao-po/sales?days=7").json()
+    by_key = {c["key"]: c for c in body["channels"]}
+    assert by_key["naver"]["missing_day_evidence"] is True
+    assert by_key["cafe24"]["missing_day_evidence"] is True
+    for key in ("wing3p_ofix", "wing3p_ohitech", "rg2p_ofix", "rg2p_ohitech", "rocket1p"):
+        assert by_key[key]["missing_day_evidence"] is False
+    assert any("구분할 근거가" in n for n in body["notes"])
+
+
+def test_sales_body_confesses_the_missing_bridge_to_the_order_axis(env):
+    """★이 자백이 body에서 사라지면 화면이 판매를 예약 잔량 옆에 놓아 «거짓 대비»가 된다."""
+    tc, s = env
+    _seed_sales(s)
+
+    body = tc.get("/api/otao-po/sales?days=7").json()
+    assert body["order_axis"]["overlap"] == 0
+    assert body["order_axis"]["sales_axis_skus"] == 1
+    assert any("다리가 아직 없다" in n for n in body["notes"])

@@ -24,7 +24,8 @@
 import { Card, Table, Th, Td, Badge, Loading, EmptyState } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
-import { fetchOtaoRoster } from "../lib/api";
+import { fetchOtaoRoster, fetchOtaoSales } from "../lib/api";
+import OtaoSalesPanel from "./otaoSalesPanel";
 
 /** 예약 잔량 셀 — 음수를 **음수로** 그린다. 깎으면 창 어긋남 신호가 사라진다(자백 ③). */
 function ReservedCell({ value }: { value: number }) {
@@ -43,6 +44,9 @@ function ReservedCell({ value }: { value: number }) {
 
 export default function OtaoPurchaseOrders() {
   const { data, error } = useAsyncData(() => fetchOtaoRoster(), []);
+  // ★판매 축(S3)은 **따로** 가져온다. 로스터가 비어 있어도 판매는 보여야 하고, 반대도 같다 —
+  //   한쪽 실패가 다른 쪽을 통째로 지우면 화면이 「없다」고 거짓말한다.
+  const { data: sales, error: salesError } = useAsyncData(() => fetchOtaoSales(60), []);
 
   if (error) {
     return (
@@ -53,7 +57,27 @@ export default function OtaoPurchaseOrders() {
   }
   if (!data) return <Loading label="발주 로스터를 불러오는 중…" rows={6} />;
 
-  // ★자백 ⓪ — 「적재를 안 돌렸다」를 0으로 그리지 않는다. 이게 지금 prod의 실제 상태다.
+  // ★판매 축(S3) 섹션. 발주 원장이 비어 있어도 이건 보여야 한다 — 두 축은 원천이 다르다.
+  const salesSection = (
+    <section className="space-y-4">
+      <div className="flex items-baseline justify-between border-t border-gray-200 pt-5">
+        <h2 className="text-base font-semibold text-gray-900">판매 (채널 통합)</h2>
+        <p className="text-xs text-gray-500">
+          축은 상품 SKU(OHI-…)입니다 — 위 발주 표의 상품코드(GAPIP…)와 **다른 축**이라 같은 줄로
+          읽으면 안 됩니다.
+        </p>
+      </div>
+      {salesError ? (
+        <EmptyState reason={`판매 시계열을 불러오지 못했습니다: ${salesError}`} />
+      ) : !sales ? (
+        <Loading label="판매 시계열을 불러오는 중…" rows={4} />
+      ) : (
+        <OtaoSalesPanel data={sales} />
+      )}
+    </section>
+  );
+
+  // ★자백 ⓪ — 「적재를 안 돌렸다」를 0으로 그리지 않는다.
   if (data.ledger_empty) {
     return (
       <div className="p-6 space-y-4">
@@ -64,6 +88,8 @@ export default function OtaoPurchaseOrders() {
             hint="발주서 PDF는 Google Drive에 있고 서버는 그 폴더를 못 봅니다. Mac에서 scripts/otao_po_export.py 로 페이로드를 만들고, 서버에서 scripts/otao_po_import.py 로 넣습니다."
           />
         </Card>
+        {/* ★발주가 비어도 판매 축은 살아 있다 — 여기서 지우면 「판매도 없다」로 읽힌다. */}
+        {salesSection}
       </div>
     );
   }
@@ -179,6 +205,8 @@ export default function OtaoPurchaseOrders() {
         ★세 칸은 합치지 않습니다. 「발주할지」와 「가져올지」는 다른 결정이고, 합산하면 뒤의 결정이
         화면에서 사라집니다(계약 §3-9). 이 화면은 읽기 전용이며 발주를 보내지 않습니다.
       </p>
+
+      {salesSection}
     </div>
   );
 }

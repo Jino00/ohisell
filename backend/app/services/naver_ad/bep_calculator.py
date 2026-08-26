@@ -52,7 +52,11 @@ _EPOCH_DATETIME = datetime(1970, 1, 1)  # order_date 결측 행 정렬용 sentin
 # ★단가·판별의 단일 진실 원천 = services/order_delivery.py (Jino 지시 2026-07-28로 이관).
 #   여기서는 이름만 재수출한다 — 기존 소비자·테스트가 그대로 동작하도록.
 SHIPPING_COST_NORMAL = order_delivery.SHIPPING_COST_NORMAL      # 일반배송 건당 1,900
-SHIPPING_COST_NBAESONG = order_delivery.SHIPPING_COST_NBAESONG  # N배송 건당 3,020 (D-NAO-84)
+# ★N배송 건당 **3,377**(품고 7월 실정산서 (2,050+900+120)×1.1) — 정본은 order_delivery.py:56.
+#   종전 주석의 「3,020」은 D-NAO-84 시점 값이고 그 뒤 실정산서로 갱신됐는데 여기만 안 고쳐졌다.
+#   2026-08-26 실사고: 이 주석을 믿고 순배송원가를 20원으로 계산했다가(실제 377원) 저장값 368원과
+#   18배 어긋났고, 함수를 직접 돌려서야 잡혔다. 재수출 줄에 숫자를 쓰면 정본과 갈라진다.
+SHIPPING_COST_NBAESONG = order_delivery.SHIPPING_COST_NBAESONG
 SHIPPING_COST_BY_METHOD = order_delivery.SHIPPING_COST_BY_METHOD
 
 # ── D-NAO-57 (B) 광고 의사결정용 수수료율 분해 게이트 ──
@@ -166,7 +170,7 @@ def _order_shipping_cost(order_row=None) -> Decimal:
     ★판별 로직은 services/order_delivery.py로 이관됐다(Jino 지시 2026-07-28 — 동기화·백필·BEP가
     같은 함수를 쓰게). 이 함수는 그 SA로 위임하는 얇은 훅이고, **계약은 그대로**다:
       orders.shipping_cost_paid(영속 컬럼, 주문 시점 단가 스냅샷) 우선 →
-      없으면 raw_data의 productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송(3,020) →
+      없으면 raw_data의 productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송(3,377) →
       그 외·필드 부재·파싱 실패·raw_data 부재 → 일반배송(1,900) fail-safe.
     백필이 쓰는 값 = 폴백 파싱이 내는 값이라 두 경로의 산출은 항상 같다(회귀 0).
 
@@ -269,12 +273,15 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
 
     logistics(단가당) = 상품별 순배송원가(건당) ÷ 평균 주문수량.
       순배송원가 net_ship = max(0, 지불 배송비 − 평균 수취 배송비)
-        - 지불 배송비 = 1,900 + 1,120 × **N배송 혼합비** (N1 · D-NAO-99).
+        - 지불 배송비 = NORMAL + (NBAESONG − NORMAL) × **N배송 혼합비** (N1 · D-NAO-99).
+          ★계수를 숫자로 적지 않는다 — 단가는 order_delivery.py가 정본이고 갱신된다
+            (현재 1,900 / 3,377 ⇒ 차액 1,477. 2026-08-26까지 이 주석은 옛 차액 1,120으로
+             남아 있었다 — 값은 맞는데 설명만 틀린 표류가 7곳에서 동시에 발견됐다).
           ★혼합비는 **레짐 변수라 최근 10건 표본**에서 뽑는다(D-NAO-100 — 판매가와 같은 행
           집합). N배송은 2026-07-22 시작이라 120일 창이 이 레짐 전환을 1~29%로 희석해,
           전환 상품의 물류비를 최대 −766원 낙관 쪽으로 틀어 놓았다(ref 42 §2-①).
           값 자체는 종전과 같은 가중평균 형태다
-          (mean(paid) = 1,900·(1−p) + 3,020·p = 1,900 + 1,120p).
+          (mean(paid) = NORMAL·(1−p) + NBAESONG·p = NORMAL + (NBAESONG−NORMAL)·p).
           ★비율은 창이 바뀔 때 판매가보다 더 크게 튄다 — 사다리를 판매가에서만 걷어내면
           물류비가 계속 계단 진동을 탄다(ref 43 §7 말미). 그래서 함께 교체했다.
           단 N배송은 07-22 시작이라 백테스트할 과거가 없다 — 근거는 "같은 메커니즘이니 같은
@@ -335,7 +342,7 @@ def delivery_composition(db: Session) -> dict[str, dict]:
     "무엇으로 이 숫자가 됐는지" 화면(성과뷰 ⑤ · 계획서 §4-ⓓ)에서 되짚으려면 조회 시점에
     같은 함수로 다시 구하는 수밖에 없다.
     ★logistics_cost에서 nb_share를 **역산하지 않는다**: 저장값은 (지불−수취)÷수량이라
-      1,900+1,120p 를 두 번(수취·수량) 가려 놓아 역산이 성립하지 않는다. 억지로 역산하면
+      NORMAL+(NBAESONG−NORMAL)p 를 두 번(수취·수량) 가려 놓아 역산이 성립하지 않는다. 억지로 역산하면
       배송비 상수가 바뀌는 날 조용히 틀린 비율을 화면에 띄운다.
     """
     return _avg_qty_and_logistics(db)
@@ -387,7 +394,7 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     ★N1 (D-NAO-99, ref 42) — 배송방식 인지형 정합. **산식(공헌이익·BEP 정의)은 불변**이고,
     3개 입력의 산출 창·입자도만 바뀐다:
       ① 판매가        → 최근 10건 표본의 median (레짐 변수)
-      ② N배송 혼합비  → 같은 표본의 비율 → 지불 배송비 = 1,900 + 1,120 × 혼합비
+      ② N배송 혼합비  → 같은 표본의 비율 → 지불 배송비 = NORMAL + (NBAESONG−NORMAL) × 혼합비
       ③ 수수료율      → 계정 단일값 폐기, product_commission SA의 상품별 실측
                         (주문관리 + 기저 매출연동 + 1.5%p × N배송 혼합비)
     셋은 곱셈적으로 결합해 N배송 전환 + 가격 인하가 겹친 라인에서 BEP를 크게 움직인다

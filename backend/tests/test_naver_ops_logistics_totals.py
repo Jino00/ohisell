@@ -1,8 +1,8 @@
 # test_naver_ops_logistics_totals.py — naver_ops 이익회계의 택배비 SQL 경로 테스트.
 # 가드 대상 3종:
-#   ① N배송(3,020) vs 일반(1,900) 실단가 — 정액 1,900 회귀 방지
+#   ① N배송(3,377) vs 일반(1,900) 실단가 — 정액 1,900 회귀 방지
 #   ② shipping_cost_paid 결측 시 delivery_attribute_type 폴백 (codex P1)
-#      — 메인 엔진(order_delivery)은 3,020을 복구하는데 SQL만 1,900으로 떨어지면 두 엔진이 갈린다
+#      — 메인 엔진(order_delivery)은 3,377을 복구하는데 SQL만 1,900으로 떨어지면 두 엔진이 갈린다
 #   ③ 잘린 raw_data에서 json_extract가 던져 엔드포인트가 500 나는 것 (codex P1 조사 중 발견)
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def test_mixed_package_takes_max(db):
 
 # ── codex P1: 스냅샷 결측 시 배송속성 폴백 ─────────────────────────────────
 def test_null_snapshot_falls_back_to_delivery_attribute(db):
-    # shipping_cost_paid가 비어도 배송속성이 N배송이면 3,020 — 메인 엔진과 같은 답.
+    # shipping_cost_paid가 비어도 배송속성이 N배송이면 3,377 — 메인 엔진과 같은 답.
     _add(db, pkg="A", attr="ARRIVAL_GUARANTEE", paid=None)
     count, total = logistics_totals(db, START, END)
     assert (count, total) == (1, D("3377"))
