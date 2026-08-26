@@ -1206,3 +1206,29 @@ def test_scorecard_no_action_present_even_when_zero(db):
     na = _candidate_status(db)["no_action"]
     assert na["total"] == 0 and na["unresolved"] == 0
     assert na["by_status"] == {} and na["candidates"] == []
+
+
+def test_no_action_unresolved_uses_asymmetric_fixture(db):
+    """★적대 리뷰 변이 M3 상환 — `unresolved` 정의를 반전해도 안 잡히던 커버리지 갭.
+
+    기존 두 테스트의 픽스처가 「hidden 1·pending 1」(대칭)이거나 0건이라, `status not in
+    ('hidden','promoted')`를 `in`으로 뒤집어도 **우연히 같은 숫자**가 나왔다(1 vs 1).
+    ⇒ 비대칭 픽스처로 두 정의가 다른 값을 내게 만든다: hidden 2·promoted 1·rejected 1·pending 1
+      → 정답 unresolved = 2(rejected+pending) / 반전판이면 3(hidden 2+promoted 1).
+    ★이건 「대칭 픽스처는 반전 변이를 못 잡는다」의 일반형이다 — 값이 우연히 같아지는 픽스처는
+      테스트가 아니라 우연이다.
+    """
+    from app.services.naver_ad.wisdom_scorecard import _candidate_status
+    _c251(db, signature="na-h1", action=None, status="hidden")
+    _c251(db, signature="na-h2", action=None, status="hidden")
+    _c251(db, signature="na-p", action=None, status="promoted")
+    _c251(db, signature="na-r", action=None, status="rejected")
+    _c251(db, signature="na-pend", action=None, status="pending")
+    _c251(db, signature="has-action")  # action 있음 — 모집단 밖
+    db.commit()
+
+    na = _candidate_status(db)["no_action"]
+    assert na["total"] == 5
+    assert na["by_status"] == {"hidden": 2, "promoted": 1, "rejected": 1, "pending": 1}
+    # ★핵심 단정: 2 ≠ 3 이라 정의를 뒤집으면 반드시 깨진다.
+    assert na["unresolved"] == 2, "rejected+pending만 미처분이다(hidden·promoted는 처분된 것)"

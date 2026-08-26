@@ -260,3 +260,94 @@ $ git status --porcelain
 
 1R 종료 시점과 동일한 1줄뿐 — 리뷰 대상 diff와 무관한, 착수 이전부터 있던 변경이며 이번
 2R이 만든 변경은 0건 남았다.
+
+---
+
+## PR #462 리뷰 (2026-08-26, 별개 경계 — 완료 QA 미달 2건 상환)
+
+리뷰 범위: `git diff 213654cc..HEAD`, 단 이 범위엔 **무관한 병행 PR(#460 발주예측/otao_po)이
+같은 브랜치에 병합돼 섞여 있어**(diff --stat 32파일 중 대다수가 `otao_po`·발주 트랙),
+코디네이터가 지목한 7개 파일로 스코프를 좁혀서 봤다: `wisdom_scorecard.py`·
+`scheduler_service.py`·`test_naver_wisdom.py`·`test_naver_wisdom_scorecard.py`·`api.ts`·
+`NaverAdOptimizationConsole.tsx`·`naverAdWisdomScorecardPanel.test.tsx`. 나머지(otao_po 마이그·
+모델·라우터·발주 콘솔·`LESSONS_LEARNED.md` #359 등)는 다른 트랙 소관이라 이번 판정 대상이
+아니다(전역 §7 「다른 스코프의 작업은 가져오지 않는다」).
+
+### 종합 판정: **PASS** (P1 0건)
+
+### 1R 지적 재론 없음 확인
+
+새 지적을 만들지 말라는 지시대로, 이번 라운드는 완료 QA가 낸 미달 2건(①-b·②-b)의 해소
+여부만 본다.
+
+### 완료 QA 미달 2건 판정
+
+| # | 항목 | 판정 | 근거 |
+|---|---|---|---|
+| ②-b | `no_action` 카운터가 scorecard 응답에 없음 | **해소** | `wisdom_scorecard.py:534-570`에 `_no_action_status()` 신설, `_candidate_status()` 반환 dict의 `"no_action"` 키로 배선(`:657`). 백엔드 키(`total·by_status·unresolved·candidates·label`)와 프론트 타입(`api.ts` `NaverNoActionStatus`)·콘솔 접근자(`NaverAdOptimizationConsole.tsx:1582-1608`)를 문자 단위로 대조 — 전부 일치. 전용 테스트 6종(백엔드 2·프론트 4)이 ①응답에 키 존재 ②0건도 키 존재 ③구버전 응답 방어 렌더 ④미처분 강조 표시를 잠근다 |
+| ①-b | 크론이 harvest·judge totals를 로깅하지 않음 | **해소** | `scheduler_service.py:800-825`가 `hv`·`jd`를 `dict.get`으로만 읽어 13개 필드를 한 줄에 로깅. 신규 테스트 2종이 ①정상 회차 로그에 8개 카운터가 문자열로 남는지 ②단계 실패({"error":...})에도 잡이 안 죽는지를 잠근다. 직접 호출해 포맷 문자열(`%s` 13개)과 인자(13개)가 정확히 맞는지 재현 확인(아래 검증 참조) |
+
+### 특히 의심하라고 지시된 항목별 확인
+
+1. **모집단 일치**(`_no_action_status` vs `_judge_backlog` vs `_candidate_status`): `_no_action_status`는 SQL `action IS NULL OR action = ''`, `_judge_backlog`는 Python truthy `c.action`(`wisdom_judge.py` 경유), `harvest_candidates`의 생성 게이트는 `if not entry.action`. 셋 다 **공백 문자열(`"  "`)을 "액션 있음"으로 동일하게 처리**한다(SQL은 정확히 `''`만 매치, Python truthy도 `" "`는 True) — 어긋나는 입력을 찾지 못했다. `_no_action_status`는 status 필터가 전혀 없어 promoted까지 포함해 세는데(의도 — `unresolved` 계산에서 promoted를 제외하는 것으로 방어), `_judge_backlog`는 `status == "pending"`으로 이미 좁혀진 뒤 시작하므로 모집단이 다른 게 당연하다(하나는 "테이블 전체 스냅샷", 하나는 "판사 대기열"). **일치 확인, 문제 없음.**
+2. **크론 로깅 fail-open**: `result.get("harvest") or {}` 패턴이라 단계 실패({"error":...})에도 `.get()`이 `None`을 안전하게 반환. `result["stage_status"]`만 직접 인덱싱인데, `run_daily_wisdom()`이 함수 시작부에 `result = {"stage_status": {}}`로 초기화하고 반환하므로 이 키는 항상 존재한다(존재하지 않는 유일한 경로는 `run_daily_wisdom()` 자체가 그 초기화 줄 이전에 예외를 던지는 것인데, 그러면 `run_naver_wisdom_job`의 바깥쪽 `except Exception`이 애초에 잡는다). **문제 없음.**
+3. **로그 포맷 문자열**: `%s` 13개·인자 13개를 실제로 Python 인터프리터에 넣어 호출해 확인(아래 검증 결과) — 일치. **문제 없음.**
+4. **`unresolved` 정의**: `status not in ("hidden","promoted")`로 rejected도 unresolved로 잡히는 게 맞다 — "hidden·promoted가 아닌 채 남았다"는 라벨 문구와 일치하고, 정상 운영에선 마이그레이션이 rejected도 hidden으로 내려 안 나온다는 전제도 §5 문서와 일치한다. **정직함, 문제 없음.** 단, 이 정의가 테스트로 충분히 잠겨 있진 않다(아래 M3 생존 참조).
+5. **프론트 `by_status` 렌더 순서**: `Object.entries(cs.no_action.by_status)`는 JS 스펙상 문자열 키의 삽입 순서를 보존하므로(정수형 키가 아닌 한) 순서 자체는 안정적이다. 다만 **다건(2키 이상) `by_status`를 렌더해 각 항목 텍스트를 개별 검증하는 테스트가 없다**(2번째 신규 테스트는 `unresolved` 배지만 확인하고 `by_status` 항목별 텍스트는 안 봄) — 순서 불안정성 자체는 실재하지 않지만 다건 렌더 커버리지는 얕다. 크래시나 오표시 재현은 못 했다(사소).
+6. **성능**: `_candidate_status`가 이미 `OpsWisdomCandidate` 전건을 `.all()`로 가져오는데(`:606`), `_no_action_status`가 **같은 요청 안에서** 같은 테이블을 필터만 다르게 걸어 **다시** `.all()`한다 — 한 요청에 최소 2회 스캔(`judge_backlog`도 `pending` 필터로 3번째 스캔). 후보 테이블 규모가 현재 수십~수백 행 수준(메모리 기록 "27+N행")이라 즉각적인 문제는 아니지만, 패널이 하나씩 늘 때마다 스캔이 늘어나는 패턴이라 이 저장소가 반복 겪은 "카운터 늘 때마다 손을 덜 댄 비용이 쌓인다"류 위험과 결이 같다.
+
+### P2 트리아지
+
+- **P2-5(채택 권고)** — `unresolved` 계산의 의미(「hidden·promoted가 아닌 것」)를 뒤집어도
+  (`in (...)`로 반전) 백엔드 테스트 전건이 초록이다(아래 변이 M3). 원인: 기존 두 테스트
+  픽스처가 정확히 "hidden 1·pending 1"(대칭)이거나 "0건"이라 두 정의가 우연히 같은 숫자를
+  낸다. 비대칭 픽스처(예: hidden 2·rejected 1·pending 1 → 정답은 unresolved=2, 반전판은 2가
+  아닌 다른 값) 테스트 1건을 추가해 이 경계를 잠그길 권한다. **가드가 아니라 회귀 테스트
+  부재라 라운드 증식 없이 다음 슬라이스에서 처리 가능.**
+- **P2-6(이월 권고)** — 위 성능 관찰(같은 요청 3회 테이블 스캔)을 주기 감사·다음 패널 추가
+  시점에 함께 검토(현재 규모에선 급하지 않음).
+- **관찰(판정 대상 아님, 코디네이터 확인 요청)** — `_no_action_status` 도입 근거로 인용된
+  "2026-08-26 08:45 판사 회차, 후보 45(action=NULL) 11건 전승 → 기각" 사건은 커밋 시각상
+  **#461 병합(07:43 KST) 이후**에 일어난 것으로 보인다. #461은 ⓐ마이그레이션으로 기존
+  action 미상 후보를 hidden 처분 ⓑ`judge_ripe_candidates`의 `ripe_all = [c for c in ripe_all
+  if c.action]` 필터로 판사 대기열에서도 배제 — 이 둘 중 하나라도 정상 작동했다면 후보 45가
+  08:45에 판사에게 갈 수 없어야 한다. 이 리뷰는 prod 상태 변경·조회 권한이 없어(1R·2R과
+  동일한 경계) 검증하지 못했다 — **#461 배포가 08:45 이전에 실제로 완료됐는지, 그리고
+  됐다면 왜 후보 45가 필터를 통과했는지**는 이 PR(#462)의 diff 범위 밖이라 P1으로 올리지
+  않지만, #462의 존재 근거 자체가 그 사건이므로 코디네이터의 별도 확인을 권한다(prod
+  읽기 전용 조회로 충분 — 2R의 P2-1 prod 실측과 같은 방식).
+
+### 변이 주입 표 (4종, SUR-6·SUR-7 포함)
+
+| # | 무엇을 바꿨나 | 좌표 | 잡혔나 | 근거 |
+|---|---|---|---|---|
+| **SUR-6**(다른 방식) | `_no_action_status`의 SQL 필터를 반전(`action IS NULL OR ''` → `action IS NOT NULL AND != ''`) — 코디네이터가 이미 배선 절단으로 검증했으므로 이번엔 **필터 반전**으로 다르게 절단 | `wisdom_scorecard.py:546` | ✅ 잡힘 | `test_scorecard_exposes_no_action_status`·`test_scorecard_no_action_present_even_when_zero` 2건 실패 |
+| **SUR-7** | 콘솔 `no_action` 블록 렌더 조건을 `false &&`로 고정 | `NaverAdOptimizationConsole.tsx:1585` | ✅ 잡힘 | `naverAdWisdomScorecardPanel.test.tsx` 3건 실패("action 미상 후보 · N건" 텍스트 못 찾음) |
+| M3 | `unresolved` 계산을 반전(`not in`→`in`) | `wisdom_scorecard.py:552` | ❌ **생존** | 백엔드 66건 전부 초록 — 기존 픽스처(hidden1·pending1 대칭, 또는 0건)가 두 정의를 구분 못 함(P2-5) |
+| M4 | 크론 로그 마지막 인자(`jd.get("skipped_no_action")`) 누락 — `%s` 13개·인자 12개 불일치 | `scheduler_service.py:823` | ✅ 잡힘 | `test_wisdom_cron_logs_harvest_and_judge_totals`·`test_wisdom_cron_log_survives_stage_failure` 2건 실패(`getMessage()`가 `TypeError: not enough arguments for format string`를 던짐 — `run_naver_wisdom_job`의 외곽 `except`가 잡아 "에러(fail-open)"로 로깅되긴 하나 원래 로그 자체가 유실된다는 뜻이라 테스트가 정확히 이 실패 모양을 잡음) |
+
+### 검증 명령 결과
+
+- 백엔드: `cd backend && python3 -m pytest -q -p no:randomly` → **6697 passed, 0 failed**(기대치 일치)
+- 프론트 단위: `cd frontend && npx vitest run` → **901 passed (64 files)**(기대치 일치)
+- 프론트 타입: `cd frontend && npx tsc --noEmit` → **에러 0건**(기대치 일치)
+- 스키마 변경 확인: `git diff 213654cc..HEAD -- backend/alembic backend/app/models.py`에 마이그레이션 2건이 있으나 **둘 다 otao_po(발주) 스키마**이고 `OpsWisdomCandidate`·naver_ad 관련 모델 변경은 **0건**(grep 확인) — 이번 PR의 실질 스코프(wisdom/scorecard/scheduler)엔 스키마 변경이 없다는 지시 사항과 일치
+
+### 못 본 영역(INCONCLUSIVE 후보)
+
+- prod에서 후보 45의 실제 상태·#461 배포 완료 시각(위 「관찰」 참조) — 이 리뷰의 권한 경계
+  밖(읽기 전용 prod 접근 불가).
+- 크론이 실제 스케줄러 프로세스(APScheduler 등) 안에서 예외 후 재시도·알림 경로까지 타는지는
+  안 봄(`run_naver_wisdom_job()`의 외곽 try/except 안쪽만 확인) — 이건 이번 diff가 건드리지
+  않은 기존 스케줄러 인프라라 스코프 밖으로 판단.
+
+### 워킹트리 원복 증명
+
+이번 라운드에서 변이 4회(SUR-6·SUR-7·M3·M4) 전부 `git checkout --`로 원복. 최종 상태:
+
+```
+$ git status --porcelain
+ M ".claude/memory/chains/pao-논의.jsonl"
+```
+
+착수 이전부터 있던 1줄뿐 — 이번 라운드가 만든 변경은 0건 남았다.
