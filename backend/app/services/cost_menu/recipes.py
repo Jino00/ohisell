@@ -62,8 +62,21 @@ from app.models import (
 from app.services.cost_menu import ledger_check as LC
 from app.services.cost_menu import price_rule as PR
 from app.services.cost_menu import standard_cost as SC
-from app.services.cost_menu.mapping_parser import MappingParseResult, parse_mapping_table
-from app.services.cost_menu.materials import CostMenuConflict, CostMenuError, ledger_check
+from app.services.cost_menu.mapping_parser import (
+    FORM_SOURCE_FALLBACK,
+    FORM_SOURCE_RULE,
+    MappingParseResult,
+    form_source_for,
+    parse_mapping_table,
+)
+from app.utils.kst import kst_now
+from app.services.cost_menu.materials import (
+    IMPORTED_GOODS_CATEGORY,
+    IMPORTED_GOODS_KIND,
+    CostMenuConflict,
+    CostMenuError,
+    ledger_check,
+)
 from app.services.cost_menu.recipe_parser import (
     CLEANING_KIT_NAME,
     ParseResult,
@@ -434,6 +447,12 @@ def import_drafts(
             else None,
             "sku_count": len(skus),
             "option_count": len(rows),
+            # ★폼팩터를 «어떻게» 얻었나 (계약 D-CPP-61 §4-Q2). 한 그룹 안에서 규칙이 한 번이라도
+            #   걸렸으면 규칙 유래로 본다 — 폴백은 「아무 규칙도 안 걸렸다」는 뜻이라 그 그룹의
+            #   근거가 하나라도 있으면 「추정」이라 부를 수 없다.
+            "form_source": FORM_SOURCE_RULE
+            if any(r.form_source == FORM_SOURCE_RULE for r in rows)
+            else FORM_SOURCE_FALLBACK,
         }
         if preserve_composition:
             # ★★구성 소관 키를 **저장된 값으로 되돌린다**. 이 여섯 줄이 이 슬라이스의
@@ -802,21 +821,43 @@ def _resolve_pins(db: Session) -> dict[str, int]:
     return out
 
 
-def _material_for_name(db: Session, name: str) -> CostMaterial:
-    """픽이 만든 라인이 걸릴 부자재 종 — 없으면 `unconfirmed`로 만든다.
+def _material_for_name(
+    db: Session, name: str, *, category: str = "부자재"
+) -> CostMaterial:
+    """픽이 만든 라인이 걸릴 종 — 없으면 `unconfirmed`로 만든다.
 
     ★단가 행은 만들지 않는다(계약 §0-E-7 금지선). 새 종은 「빈 칸」이지 0이 아니다.
     보통은 같은 업로드의 `_upsert_materials`가 이미 만들어 뒀고, 이 갈래는 항목이
     먼저 저장된 뒤 종이 지워진 경우(D-CPP-58 병합 같은 정리)에만 탄다.
+
+    ★`category`가 오면 **기존 종에도 덮어쓴다** — 수입 완제품 픽이 「이 종은 원장 `product`
+    라인을 붙일 수 있다」를 선언하는 유일한 자리이기 때문이다(계약 D-CPP-61 §4-Q1). 기본값
+    호출에는 영향이 없다(기본이 곧 기존 값과 같은 `"부자재"`).
     """
 
     m = db.query(CostMaterial).filter(CostMaterial.name == name).first()
     if m is not None:
+        if category != "부자재" and m.category != category:
+            # ★**조용히 바꾸지 않는다** (적대 리뷰 1R P2-1). 이 한 줄이 §4-Q1이 「픽 하나뿐」
+            #   이라고 못 박은 표지를 세우는 자리라, 이름이 겹치는 기존 부자재 종이 여기서
+            #   수입 완제품이 되면 그 종에 원장 `product` 라인 문이 영구히 열린다. 사람의
+            #   명시적 행위(픽)이므로 허용하되 **무엇이 언제 바뀌었는지 종에 남긴다** —
+            #   나중에 「이 종이 왜 수입 완제품이지?」에 답할 수 있어야 한다.
+            before = m.category
+            m.category = category
+            # ★`datetime.now()`는 prod(UTC 서버)에서 UTC를 찍는다 — 사람이 읽는 감사
+            #   흔적이라 KST로 못 박고 라벨도 단다(전역 §0 · 적대 리뷰 2R 관찰).
+            stamp = (
+                f"[{kst_now():%Y-%m-%d %H:%M} KST] 픽으로 분류 변경: "
+                f"{before or '(없음)'} → {category}"
+            )
+            m.note = f"{m.note}\n{stamp}" if m.note else stamp
+            db.flush()
         return m
     m = CostMaterial(
         name=name,
         status="unconfirmed",
-        category="부자재",
+        category=category,
         excel_label=name,
         note="원가표 항목 픽(D-CPP-59)으로 생성 — 단가는 아직 없다",
     )
@@ -830,10 +871,34 @@ def _apply_item_lines(db: Session, recipe: CostRecipe, item: CostTableItem) -> i
 
     ★`ref_price`는 **옮기지 않는다** — 라인은 「무엇이 몇 개」이고 단가는 종이 가진다.
     참고값이 라인을 타고 계산에 스미면 §3 금지선(엑셀에서 단가 자동 유입)이 뚫린다.
+
+    ★★**수입 완제품은 «Σ의 퇴화형 1줄»이다** (계약 D-CPP-61 §4-Q1 β안). 파서가 그 섹션의
+    라인을 일부러 비우므로(`recipe_parser.ASSEMBLY_SECTIONS` — 열이 부자재가 아니라 계수라
+    낱칸으로 읽으면 「관세 0.056원짜리 부자재」 헛것이 생긴다) 픽만으로는 구성이 0줄이고
+    표준원가가 「구성 라인이 없다」로 멈춘다. 그래서 **항목 자신을 종 1개로 세우고 1줄로
+    잇는다** — 산술 분기도 `recipe_kind` 값도 늘리지 않고, 단가는 기존 사슬
+    (`link_ledger_line` → `cost_material_price(source='ledger')` → `price_rule.choose_price`
+    → D-CPP-60 자동 갱신)을 그대로 탄다. 매수(`quantity`)는 1로 세우고 **사람이 고친다** —
+    파서가 2p·1매입을 추정하지 않는다(§2-2·§9 [미상]).
     """
 
     recipe.lines.clear()
     db.flush()
+
+    if item.recipe_kind == IMPORTED_GOODS_KIND and not item.lines:
+        material = _material_for_name(
+            db, item.item_name, category=IMPORTED_GOODS_CATEGORY
+        )
+        recipe.lines.append(
+            CostRecipeLine(
+                material_id=material.id,
+                quantity=Decimal("1"),
+                note="수입 완제품 — 원장 로트 단가가 이 종에 붙는다(매수는 사람이 고친다)",
+            )
+        )
+        db.flush()
+        return 1
+
     for line in item.lines:
         material = _material_for_name(db, line.material_name)
         recipe.lines.append(
@@ -936,6 +1001,15 @@ def pick_cost_table_item(db: Session, recipe_id: int, item_id: int) -> CostRecip
     recipe.picked_item_id = item.id
     recipe.picked_item_key = item.natural_key
     recipe.picked_at = datetime.now()
+    # ★★**픽이 종류를 옮긴다** (계약 D-CPP-61 §4-Q1). 이 두 줄이 합격 6 차단의 관절이다:
+    #   파서는 수입 완제품 초안에 `recipe_kind="imported_goods"`를 이미 붙이는데, 자동 매칭이
+    #   그 초안을 **원리적으로 못 만난다**(초안은 `drafts_by_form[None]`에 쌓이고 조회 키는
+    #   `DEFAULT_FORM_FACTOR="bar"` 폴백 때문에 절대 None이 안 된다 — `recipes.py` `_match_draft`).
+    #   그래서 prod 100건이 전부 `assembly`로 굳었다. 픽은 그 버킷을 이미 횡단하고 있었으므로
+    #   (`list_cost_table_items`가 form_factor NULL 항목을 함께 싣는다) 남은 것은 **고른 항목의
+    #   종류를 레시피에 옮기는 것**뿐이었다. 자동 매칭은 고치지 않는다 — 가격 기반 매칭을
+    #   넓히는 것은 D-CPP-59가 「불신 컬럼에서 사람의 픽으로」 옮긴 결정의 역행이다.
+    recipe.recipe_kind = item.recipe_kind
     # 픽은 「없음 확인」과 상호배타다 — 고른 순간 부재 판정은 사실이 아니게 된다.
     recipe.absent_confirmed_at = None
     recipe.absent_note = None
@@ -974,6 +1048,9 @@ def unpick_cost_table_item(db: Session, recipe_id: int) -> CostRecipe:
     recipe.picked_item_key = None
     recipe.picked_at = None
     recipe.anomaly_flag = "no_recipe_match"
+    # 픽이 옮겨 온 종류도 함께 되돌린다 — 되돌린 뒤에도 「수입 완제품」이 남으면 화면이
+    # 구성 0줄짜리 레시피를 수입 완제품이라 부르게 되고, 그건 근거 없는 단정이다.
+    recipe.recipe_kind = "assembly"
 
     note = _note_dict(recipe)
     note.update(
@@ -1457,6 +1534,10 @@ def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False)
         "status": recipe.status,
         "source": recipe.source,
         "recipe_kind": recipe.recipe_kind,
+        # ★레시피 «탭»이 폼팩터의 출처를 말할 수 있게 payload에 싣는다 (적대 리뷰 1R P1-2).
+        #   보드에만 있으면 픽이 일어나는 그 탭에서 픽의 결과가 안 보인다.
+        "form_source": (note or {}).get("form_source")
+        or form_source_for(recipe.form_factor),
         "anomaly_flag": recipe.anomaly_flag,
         "approved_at": recipe.approved_at.isoformat() if recipe.approved_at else None,
         "match": note,
@@ -1526,6 +1607,17 @@ def board(db: Session) -> dict:
     for recipe in recipes:
         std = standards.get(recipe.id)
         result = SC.compute_standard_cost(_line_inputs(recipe, rule))
+        saved = _note_dict(recipe)
+        # ★엑셀 표준 — «대조값»이다(계약 A′ §3: 엑셀에서 단가가 계산에 유입되는 경로는 없다).
+        #   합격 6이 요구하는 「세 값 나란히」의 가운데 값이고, 여기 말고는 화면 어디에도
+        #   이 값이 서 있는 자리가 없었다(현 격차 열은 표준원가 vs `cost_price`다).
+        excel_total = saved.get("excel_total_inc_vat")
+        excel_dec: Optional[Decimal] = None
+        if excel_total is not None:
+            try:
+                excel_dec = Decimal(str(excel_total))
+            except (ArithmeticError, ValueError):
+                excel_dec = None
         for link in sorted(by_recipe.get(recipe.id, []), key=lambda x: x.internal_sku):
             pm = masters.get(link.internal_sku)
             std_inc = std.std_cost_inc_vat if std else None
@@ -1533,6 +1625,10 @@ def board(db: Session) -> dict:
             gap = None
             if std_inc is not None and current not in (None, 0):
                 gap = float((std_inc - current) / current * 100)
+            # 원장 파생 ↔ 엑셀 표준의 격차. 둘 다 VAT 포함 축이라 축이 섞이지 않는다.
+            excel_gap = None
+            if std_inc is not None and excel_dec not in (None, 0):
+                excel_gap = float((std_inc - excel_dec) / excel_dec * 100)
             rows.append(
                 {
                     "internal_sku": link.internal_sku,
@@ -1540,6 +1636,13 @@ def board(db: Session) -> dict:
                     "recipe_id": recipe.id,
                     "recipe_product_name": recipe.product_name,
                     "form_factor": recipe.form_factor,
+                    # ★폼팩터를 규칙으로 얻었나 폴백으로 단정했나 (계약 D-CPP-61 §4-Q2).
+                    #   저장된 값이 없으면 **파생**한다(적대 리뷰 1R P1-2) — 안 그러면 이미
+                    #   있는 100건은 매핑 정본을 다시 올려야 배지가 뜨고, 그건 §5가 「사람
+                    #   단계 없이 판정 가능」이라 못 박은 합격 5와 어긋난다.
+                    "form_source": saved.get("form_source")
+                    or form_source_for(recipe.form_factor),
+                    "recipe_kind": recipe.recipe_kind,
                     "recipe_status": recipe.status,
                     "link_status": link.status,
                     "std_cost_ex_vat": _d(std.std_cost_ex_vat) if std else None,
@@ -1547,6 +1650,8 @@ def board(db: Session) -> dict:
                     # ★읽기 전용 대조값. 이 계약은 이 칸에 쓰지 않는다(§3 금지선).
                     "current_cost_price": _d(current),
                     "gap_pct": None if gap is None else round(gap, 2),
+                    "excel_total_inc_vat": _d(excel_dec),
+                    "excel_gap_pct": None if excel_gap is None else round(excel_gap, 2),
                     # 왜 값이 없는지 — 빈 칸이 조용하지 않게(§2-7).
                     "reason": None if std else (result.reason or "레시피 미승인 — 계산 안 함"),
                 }

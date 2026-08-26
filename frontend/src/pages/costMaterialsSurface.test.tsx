@@ -189,6 +189,7 @@ function ledgerRow(over: Partial<CostLedgerMaterialLine> = {}): CostLedgerMateri
     hbl_no: "SETR2608170216",
     declaration_date: "2026-08-18",
     item_name: "cleaning kits",
+    line_type: "material",
     quantity: "2400.000",
     unit_cost_ex_vat: "190.82",
     unit_cost_inc_vat: "209.90",

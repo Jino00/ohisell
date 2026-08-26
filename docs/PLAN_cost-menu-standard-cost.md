@@ -454,7 +454,7 @@ Jino가 「이 SKU 원가가 왜 이 숫자인가」를 물으면 답이 시스�
 |---|---|---|
 | `cost_material` | 부자재·구성요소 1종 | name·unit·category·status(`unconfirmed`/`approved`)·excel_label(참고용 원문)·match_rule(원장 품목명 매칭 힌트)·**form_factor·part(내부/외부/후면/힌지 — 둘 다 nullable, 분류·필터용이지 단가 축이 아니다. ★원단 결정 아래)** |
 | `cost_material_price` | 단가 관측 1건 | material_id·source(`ledger`/`manual`)·import_invoice_line_id(nullable, ledger일 때)·**supplier**(공급처 문자열, nullable — `ledger` 행은 원장 shipper에서 자동, `manual` 행은 입력. 예: 조아테크)·unit_price_ex_vat·unit_price_inc_vat·effective_date(통관일/입력일)·note. **계산 시점 확정 저장**(계약 B 원칙 계승) |
-| `cost_recipe` | **상품명 × 폼팩터 1건**의 구성 헤더 (§0-B — 옛 초안·본 계약 초판의 `internal_sku` 키를 대체) | **product_name(매핑 정본 상품명 원문)·form_factor(★값 집합 아래 — 조립형은 필수, 수입 완제품·매입품은 «없음»(null), §2-7)**·status(`draft`/`approved`)·source(`excel`/`manual`)·approved_at·recipe_kind(`assembly`=부자재 단순합 / `imported_goods`=수입 완제품+국내 부자재). unique(product_name, form_factor). ★「국내 원단 + 매수」 조립형도, **매입 완제품 32건도** 값 신설 없이 기존 2값으로 표현한다(★매입품 결정 아래) — kind 값 증식은 판정 분기를 늘린다 |
+| `cost_recipe` | **상품명 × 폼팩터 1건**의 구성 헤더 (§0-B — 옛 초안·본 계약 초판의 `internal_sku` 키를 대체) | **product_name(매핑 정본 상품명 원문)·form_factor(★값 집합 아래 — 조립형은 필수. ★★**NULL 규칙은 «원가표 축»의 것이다**: `RecipeDraft`·`CostTableItem`에서 수입 완제품·매입품이 «없음»(null, §2-7)이고, **매핑에서 태어나는 이 레시피의 grain은 상품명×폼팩터를 유지**한다 — 계약 D-CPP-61 §8-2, Jino 2026-08-26 처분. 구판 문언 「수입 완제품·매입품은 null」은 **코드가 한 번도 그렇게 동작한 적이 없었고**(prod 100건 NULL 0건) 실측이 반증했다: 같은 수입 상품명이 bar(88)·flip(89)·fold(90) 세 레시피로 실재한다)**·status(`draft`/`approved`)·source(`excel`/`manual`)·approved_at·recipe_kind(`assembly`=부자재 단순합 / `imported_goods`=수입 완제품+국내 부자재). unique(product_name, form_factor). ★「국내 원단 + 매수」 조립형도, **매입 완제품 32건도** 값 신설 없이 기존 2값으로 표현한다(★매입품 결정 아래) — kind 값 증식은 판정 분기를 늘린다 |
 | `cost_recipe_line` | 구성 한 줄 | recipe_id·material_id·quantity·note. 수입 완제품 라인은 material 대신 «원장 품목» 참조(item_name 매칭). ★필름 원단 라인의 `quantity`는 **매수**다(3매 제품=3 — 원가표의 「매입」 열이 이 값이다. Jino 확인 2026-08-22: *"필름을 대량으로 조아테크에서 구매해서 … 1장제품도 만들고 2장 제품도 만들어"*). 매수는 상품명에 인코딩돼 있으므로(§0-B) **같은 원단·다른 매수 = 다른 상품명·다른 레시피**이지 별도 축이 아니다 |
 | `cost_recipe_link` | **SKU(옵션) 1건의 레시피 도달 경로** | internal_sku(문자열 참조 — FK 안 걺, 계약 B와 같은 이유)·recipe_id·status(`draft`/`approved`)·source(`excel`/`manual`)·note. 매핑 정본 파싱 초안 → 화면 승인. 폼팩터를 옵션이 정하므로(§0-B) 이 grain은 SKU다. ★링크 결정 아래 |
 | `cost_standard` | **레시피 1건**의 표준원가 계산 결과 | recipe_id·price_rule·std_cost_ex_vat·std_cost_inc_vat·computed_at·breakdown(라인별 단가×수량 내역, 근거 보존). grain을 SKU→레시피로 옮긴 이유: 같은 레시피의 SKU들은 값이 같다(원문 ①) — SKU별 행 944벌은 근거 없는 복제다. SKU별 표시·`cost_price` 격차는 보드가 링크 조인으로 계산해 **표시만** 한다(저장 안 함) |
@@ -663,9 +663,19 @@ A′는 **읽고 대조만** 한다. 격차가 보이는 것 자체가 산출물
 
 **S3:**
 6. **Jino가 표준원가 보드에서** 강화유리 12.2 CNY 품목의 «원장 파생 단가»가 최신 확정 로트
-   (8/18, SETR2608170216) 기준 **2,921.92원(VAT 제외)**으로 관측되고, 엑셀 표준 2,820.64원
-   대비 **+3.6%** 격차가 표시된다. (새 로트가 그 사이 확정되면 그 로트 값 기준 — ref 92 §2
-   표의 해당 로트 값으로 판정한다.)
+   (8/18, SETR2608170216) 기준 **2,909.96원(VAT 제외)** / 3,200.96원(VAT 포함)으로 관측되고,
+   엑셀 표준 대비 **+3.2%** 격차가 표시된다. (새 로트가 그 사이 확정되면 그 로트 값 기준.)
+
+   ★**개정 (계약 D-CPP-61 §8-1, Jino 2026-08-26 처분)**: 판정의 정본을 **ref 92 §2 표 →
+   `import_invoice_line.unit_cost_ex_vat`(원장)**로 바꾼다. 구판은 「2,921.92원 … ref 92 §2
+   표로 판정」이었는데 실측이 두 값의 어긋남을 확인했다 — ref 92는 **로트 전체 물류비율을
+   일괄 적용한 문서측 재계산**이고 원장은 **라인별 공정가치 배분**(일반기업회계기준 7.6,
+   계약 B `allocator.py`)이다. 부자재 비중이 큰 로트에서 크게 갈린다(SETR2607220324:
+   ref 92 3,291.70 vs 원장 2,878.34 = **−12.6%**). 원장이 이기는 이유 셋: ①화면에 실제로
+   뜨는 값이고 ②7.6 조문의 구현이며 ③**트랙 B2가 이미 그 값으로 QA 달성 판정**을 받았다
+   (`track_cost-truth-ledger.md` B2 항목 — 2026-08-22 15:53 `GET /api/import-cost/shipments/1`
+   → `2909.96`/`3200.96`). ref 92 §2 표는 별도 정정 커밋으로 방법론 차이를 병기한다 —
+   **어느 쪽 숫자도 «맞춰서» 고치지 않는다**(D-CPP-61 §3 금지선).
 7. **Jino가 표준원가 보드에서, 같은 상품명이 폼팩터로 갈리는 것을 한 화면에서** 본다 —
    키 변경(§0-B)이 화면에 실재함을 재는 표면(트랙 A2): 지문방지 매트 필름 상품명(원가 정본
    품목 `지문방지_내부3매+외부3매`)의 표준원가가 **플립 3,480.4원**과 **폴드 값**(이상①

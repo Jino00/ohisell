@@ -68,6 +68,8 @@ const STUCK: CostRecipe = {
   status: "draft",
   source: "excel",
   recipe_kind: "assembly",
+  // flip은 옵션명 규칙이 실제로 거는 값이다 — 폴백이 아니다(D-CPP-61 §4-Q2).
+  form_source: "rule",
   anomaly_flag: "no_recipe_match",
   approved_at: null,
   match: {

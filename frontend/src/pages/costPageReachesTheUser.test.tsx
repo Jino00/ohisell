@@ -297,6 +297,7 @@ const LEDGER_ROW: CostLedgerMaterialLine = {
   hbl_no: "SETR2608170216",
   declaration_date: "2026-08-18",
   item_name: "cleaning kits",
+  line_type: "material",
   quantity: "2400.000",
   unit_cost_ex_vat: "190.82",
   unit_cost_inc_vat: "209.90",
@@ -340,6 +341,7 @@ const RECIPE: CostRecipe = {
   id: 7,
   product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
   form_factor: "bar",
+  form_source: "rule",
   status: "approved",
   source: "excel",
   recipe_kind: "assembly",
@@ -412,6 +414,7 @@ const RECIPE_FLIP: CostRecipe = {
   id: 8,
   product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
   form_factor: "flip",
+  form_source: "rule",
   status: "draft",
   source: "excel",
   recipe_kind: "assembly",
@@ -438,6 +441,7 @@ const RECIPE_OTHER_PRODUCT: CostRecipe = {
   id: 9,
   product_name: "오하이 강화유리 풀커버",
   form_factor: "bar",
+  form_source: "rule",
   status: "draft",
   source: "excel",
   recipe_kind: "assembly",
@@ -467,11 +471,62 @@ const RECIPE_NULL_FORM: CostRecipe = {
   id: 10,
   product_name: "오하이 강화유리 풀커버",
   form_factor: null,
+  form_source: "rule",
   status: "draft",
   source: "excel",
   recipe_kind: "assembly",
   anomaly_flag: null,
   approved_at: null,
+  match: null,
+  line_count: 0,
+  link_count: 0,
+  standard: {
+    computable: false,
+    std_cost_ex_vat: null,
+    std_cost_inc_vat: null,
+    reason: "구성 없음",
+    unresolved: [],
+    partial_ex_vat: null,
+    partial_inc_vat: null,
+    line_count: 0,
+    lines: [],
+  },
+};
+
+// ── 적대 리뷰 1R P1-4용 — 수입 완제품 표면(D-CPP-61)의 레시피 배지 픽스처.
+//    「레시피」 탭 목록에서 `recipe_kind: "imported_goods"`·`form_source: "fallback"`가
+//    실제로 뜨는지를 App 경로로 재려면 그 값을 가진 레시피가 최소 하나씩 있어야 한다.
+//    `...RECIPE`로 나머지 필드를 물려받고 겨눈 두 값만 바꾼다 — RECIPE 자신은
+//    recipe_kind: "assembly" · form_source: "rule"이라 「배지가 안 뜨는」 대조군으로 쓴다.
+const RECIPE_IMPORTED: CostRecipe = {
+  ...RECIPE,
+  id: 50,
+  product_name: "완제품 폰케이스",
+  recipe_kind: "imported_goods",
+  form_source: "rule",
+  form_factor: null,
+  match: null,
+  line_count: 0,
+  link_count: 0,
+  standard: {
+    computable: false,
+    std_cost_ex_vat: null,
+    std_cost_inc_vat: null,
+    reason: "구성 없음",
+    unresolved: [],
+    partial_ex_vat: null,
+    partial_inc_vat: null,
+    line_count: 0,
+    lines: [],
+  },
+};
+
+const RECIPE_FORM_ESTIMATED: CostRecipe = {
+  ...RECIPE,
+  id: 51,
+  product_name: "폼팩터 추정 종",
+  recipe_kind: "assembly",
+  form_source: "fallback",
   match: null,
   line_count: 0,
   link_count: 0,
@@ -496,12 +551,16 @@ const BOARD: CostBoard = {
       recipe_id: 7,
       recipe_product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
       form_factor: "bar",
+      form_source: "rule",
+      recipe_kind: "assembly",
       recipe_status: "approved",
       link_status: "approved",
       std_cost_ex_vat: "2137.00",
       std_cost_inc_vat: "2350.70",
       current_cost_price: "2350.70",
       gap_pct: 0,
+      excel_total_inc_vat: null,
+      excel_gap_pct: null,
       reason: null,
     },
     {
@@ -510,12 +569,16 @@ const BOARD: CostBoard = {
       recipe_id: 7,
       recipe_product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
       form_factor: "bar",
+      form_source: "rule",
+      recipe_kind: "assembly",
       recipe_status: "approved",
       link_status: "approved",
       std_cost_ex_vat: "2137.00",
       std_cost_inc_vat: "2350.70",
       current_cost_price: "2350.70",
       gap_pct: 0,
+      excel_total_inc_vat: null,
+      excel_gap_pct: null,
       reason: null,
     },
     {
@@ -525,12 +588,16 @@ const BOARD: CostBoard = {
       recipe_id: 8,
       recipe_product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
       form_factor: "flip",
+      form_source: "rule",
+      recipe_kind: "assembly",
       recipe_status: "draft",
       link_status: "draft",
       std_cost_ex_vat: null,
       std_cost_inc_vat: null,
       current_cost_price: "3480.40",
       gap_pct: null,
+      excel_total_inc_vat: null,
+      excel_gap_pct: null,
       reason: "레시피 미승인 — 계산 안 함",
     },
     // ★다른 제품 — 필터가 「제품」 축으로 실제로 가르는지 재는 대조군.
@@ -540,12 +607,16 @@ const BOARD: CostBoard = {
       recipe_id: 9,
       recipe_product_name: "오하이 강화유리 풀커버",
       form_factor: "bar",
+      form_source: "rule",
+      recipe_kind: "assembly",
       recipe_status: "draft",
       link_status: "draft",
       std_cost_ex_vat: null,
       std_cost_inc_vat: null,
       current_cost_price: "1200.00",
       gap_pct: null,
+      excel_total_inc_vat: null,
+      excel_gap_pct: null,
       reason: "레시피 미승인 — 계산 안 함",
     },
     {
@@ -554,12 +625,16 @@ const BOARD: CostBoard = {
       recipe_id: 9,
       recipe_product_name: "오하이 강화유리 풀커버",
       form_factor: "bar",
+      form_source: "rule",
+      recipe_kind: "assembly",
       recipe_status: "draft",
       link_status: "draft",
       std_cost_ex_vat: null,
       std_cost_inc_vat: null,
       current_cost_price: "1200.00",
       gap_pct: null,
+      excel_total_inc_vat: null,
+      excel_gap_pct: null,
       reason: "레시피 미승인 — 계산 안 함",
     },
   ],
@@ -573,6 +648,68 @@ const BOARD: CostBoard = {
 const SETTINGS: CostSetting[] = [
   { key: "valuation_method", value: "fifo", confirmed: false, note: null, updated_at: null },
 ];
+
+// ── 적대 리뷰 1R P1-4용 — 수입 완제품 표면(D-CPP-61)의 호출부 픽스처.
+//    `category: IMPORTED_GOODS_CATEGORY`("수입 완제품")인 종을 골라야 `selectedIsImportedGoods`가
+//    참이 되고, 그래야 「원장 수입 완제품 라인」 섹션이 App 경로로 화면에 뜬다.
+const IMPORTED_GOODS_MATERIAL: CostMaterial = {
+  id: 40,
+  name: "완제품 폰케이스 (수입)",
+  unit: "ea",
+  category: "수입 완제품",
+  status: "unconfirmed",
+  excel_label: null,
+  excel_ref_price: null,
+  match_rule: null,
+  form_factor: null,
+  part: null,
+  note: null,
+  lot_count: 0,
+  price_count: 0,
+  stale_count: 0,
+  latest_price_ex_vat: null,
+  latest_price_inc_vat: null,
+  latest_price_source: null,
+  price_rule: "latest",
+  lot_price_min: null,
+  lot_price_max: null,
+  lot_price_has_span: false,
+  price_conflict: false,
+  price_conflict_price_id: null,
+  prices: [],
+  used_by: [],
+  used_by_count: 0,
+};
+
+// 원장 `product` 라인 — `suggestion.material_id: null`(제안 없음)이다. 방금 세운 수입
+// 완제품 종은 `match_rule`이 없어 제안이 원리적으로 안 붙는다(CostPage.tsx 813-822 주석) —
+// 그래서 이 라인은 «호출부가 `linkTargetId`를 주지 않으면 연결 버튼이 영영 안 뜨는» 경우다.
+const IMPORTED_PRODUCT_LINE: CostLedgerMaterialLine = {
+  line_id: 90,
+  shipment_id: 9,
+  hbl_no: "SETR2608300099",
+  declaration_date: "2026-08-28",
+  item_name: "완제품 폰케이스",
+  line_type: "product",
+  quantity: "500.000",
+  unit_cost_ex_vat: "1000.00",
+  unit_cost_inc_vat: "1100.00",
+  allocated_cost_krw: "500000.00",
+  linked_material_id: null,
+  linked_material_name: null,
+  linked_price_id: null,
+  shipment_status: "confirmed",
+  linked_price_check: null,
+  suggestion: {
+    line_id: 90,
+    item_name: "완제품 폰케이스",
+    material_id: null,
+    reason: "제안 없음 — 새로 세운 종이라 match_rule이 아직 없다",
+    candidates: [],
+    ambiguous: false,
+    unmatched: true,
+  },
+};
 
 // api 모듈 전체를 모킹한다 — Layout의 헬스·쿠키 조회까지 네트워크를 안 타게 하기 위해서다.
 vi.mock("../lib/api", async (importOriginal) => {
@@ -2697,6 +2834,110 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(recipePlaceholderText(0, 4)).toContain("필터가 전부 걸러냈다");
       expect(recipePlaceholderText(0, 0)).toContain("엑셀 2종을 올리면");
       expect(recipePlaceholderText(0, 4)).not.toBe(recipePlaceholderText(0, 0));
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // ★결함 수리 — 수입 완제품 표면(D-CPP-61)의 호출부가 App 경로로 도달한다
+  // (적대 리뷰 1R P1-4, 2026-08-26)
+  //
+  // 재현(리뷰어): `CostPage.tsx`의 `{selectedIsImportedGoods ? (` 섹션 조건을 `{false ? (`로
+  // 바꿔도, 같은 파일의 `linkTargetId={selected.id}` 한 줄을 지워도 **프론트 전건 초록**이었다.
+  // 원인은 `importedGoodsSurface.test.tsx`가 `LedgerMaterialLines`·`StandardCostBoard`를
+  // **직접 렌더**할 뿐 `App`/`CostPage` 경로를 안 타는 것 — 이 파일 머리말의 SUR-2와
+  // **같은 모양의 구멍**이다. 그 파일을 새로 만드는 대신, 이 파일의 「App 통째 렌더」
+  // 관례를 그대로 따라 여기에 붙인다.
+  // ══════════════════════════════════════════════════════════════════
+  describe("★결함 수리 — 수입 완제품 표면이 App 경로로 닿는다 (적대 리뷰 1R P1-4)", () => {
+    afterEach(() => {
+      vi.mocked(fetchCostMaterials).mockResolvedValue({
+        items: [KIT, FILM_WITH_REF, JIG_NO_PART],
+      });
+      vi.mocked(fetchCostLedgerMaterialLines).mockResolvedValue({ items: [LEDGER_ROW] });
+    });
+
+    it("SUR-9: 수입 완제품 섹션이 App 경로로 도달한다 — 종을 고르면 섹션과 불러오기 버튼이 뜬다", async () => {
+      vi.mocked(fetchCostMaterials).mockResolvedValue({
+        items: [KIT, FILM_WITH_REF, JIG_NO_PART, IMPORTED_GOODS_MATERIAL],
+      });
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${IMPORTED_GOODS_MATERIAL.id}`));
+
+      // ⇒ `{selectedIsImportedGoods ? (` 섹션 조건을 `{false ? (`로 바꾸면 이 findByTestId가
+      //   타임아웃으로 죽는다(리뷰어가 재현한 결함 그대로).
+      const section = await screen.findByTestId("imported-goods-ledger-lines");
+      expect(within(section).getByTestId("load-imported-lines")).toBeTruthy();
+      expect(section.textContent).toContain(IMPORTED_GOODS_MATERIAL.name);
+    });
+
+    it("SUR-10: `linkTargetId`가 호출부에서 실제로 전달된다 — 제안이 없어도 연결 버튼이 뜬다", async () => {
+      vi.mocked(fetchCostMaterials).mockResolvedValue({
+        items: [KIT, FILM_WITH_REF, JIG_NO_PART, IMPORTED_GOODS_MATERIAL],
+      });
+      // `fetchCostLedgerMaterialLines(true)`가 실제로 불렸을 때만 product 라인이 온다 —
+      // «사람이 불러오기를 눌러야 온다»는 CostPage.tsx의 설계를 픽스처에서도 지킨다.
+      vi.mocked(fetchCostLedgerMaterialLines).mockImplementation(async (includeProducts) =>
+        includeProducts
+          ? { items: [LEDGER_ROW, IMPORTED_PRODUCT_LINE] }
+          : { items: [LEDGER_ROW] },
+      );
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${IMPORTED_GOODS_MATERIAL.id}`));
+      fireEvent.click(await screen.findByTestId("load-imported-lines"));
+
+      // IMPORTED_PRODUCT_LINE.suggestion.material_id는 null이다 — 「연결」이 뜨려면
+      // 호출부가 `linkTargetId={selected.id}`를 줘야만 한다(LedgerMaterialLines.tsx:849
+      // `const suggested = linkTargetId ?? r.suggestion.material_id;`).
+      // ⇒ 그 줄을 지우면 `suggested`가 `null`이 되어 아래 버튼이 원리적으로 안 뜬다.
+      const row = await screen.findByTestId(`ledger-line-${IMPORTED_PRODUCT_LINE.line_id}`);
+      expect(within(row).getByRole("button", { name: /연결/ })).toBeTruthy();
+    });
+
+    it("비수입 종엔 그 섹션이 안 뜬다 — 반대 방향 잠금", async () => {
+      await openMaterialsTab();
+      fireEvent.click(screen.getByTestId(`material-${FILM_WITH_REF.id}`));
+      await screen.findByTestId("material-excel-ref-note");
+      expect(screen.queryByTestId("imported-goods-ledger-lines")).toBeNull();
+    });
+  });
+
+  describe("★결함 수리 — 레시피 탭 배지가 App 경로로 닿는다 (적대 리뷰 1R P1-4)", () => {
+    afterEach(() => {
+      vi.mocked(fetchCostRecipes).mockResolvedValue({
+        items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+      });
+    });
+
+    it("SUR-11: 「수입 완제품」·「폼팩터 추정」 배지가 App 경로로 목록에 뜬다 — assembly·rule 행엔 없다", async () => {
+      vi.mocked(fetchCostRecipes).mockResolvedValue({
+        items: [RECIPE, RECIPE_IMPORTED, RECIPE_FORM_ESTIMATED],
+      });
+      await renderApp();
+      await screen.findByRole("heading", { name: /원가/ });
+      fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+      await screen.findByTestId(`recipe-row-${RECIPE.id}`);
+
+      // ⇒ `data-testid={\`recipe-row-imported-${r.id}\`}` 배지 블록을 지우면 이 findByTestId가
+      //   타임아웃으로 죽는다.
+      expect(
+        await screen.findByTestId(`recipe-row-imported-${RECIPE_IMPORTED.id}`),
+      ).toBeTruthy();
+      expect(
+        screen.getByTestId(`recipe-row-form-estimated-${RECIPE_FORM_ESTIMATED.id}`),
+      ).toBeTruthy();
+
+      // 반대 방향 — RECIPE는 recipe_kind: "assembly" · form_source: "rule"이라 배지가 없다.
+      const assemblyRow = screen.getByTestId(`recipe-row-${RECIPE.id}`);
+      expect(within(assemblyRow).queryByTestId(`recipe-row-imported-${RECIPE.id}`)).toBeNull();
+      expect(
+        within(assemblyRow).queryByTestId(`recipe-row-form-estimated-${RECIPE.id}`),
+      ).toBeNull();
+      // RECIPE_IMPORTED 자신도 「폼팩터 추정」 배지는 없다(form_source: "rule") — 두 배지가
+      // 독립적으로 조건화돼 있는지를 함께 잰다.
+      const importedRow = screen.getByTestId(`recipe-row-${RECIPE_IMPORTED.id}`);
+      expect(
+        within(importedRow).queryByTestId(`recipe-row-form-estimated-${RECIPE_IMPORTED.id}`),
+      ).toBeNull();
     });
   });
 });

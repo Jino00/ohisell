@@ -69,7 +69,22 @@ _PRODUCT_RULES: tuple[tuple[str, str], ...] = (
     (r"버디필름", "buddy"),
 )
 
+#: 어느 규칙에도 안 걸릴 때의 폴백.
+#:
+#: ★**이 상수를 제거하지 않는다** (계약 D-CPP-61 §3 금지선). `bar`를 «내는» 양성 규칙이
+#: `_OPTION_RULES`·`_PRODUCT_RULES` 어디에도 없어서 **prod `bar` 67건 전부가 이 폴백의
+#: 산물**이다 — 없애거나 None을 반환하게 하면 정당한 bar 계열(승인 레시피 48·49 포함)까지
+#: 그룹 키가 흔들려 재업로드 시 중복 레시피가 생긴다.
+#:
+#: ★대신 고치는 것은 **침묵**이다: 이 상수의 병은 존재가 아니라 「모른다」를 「bar다」로
+#: 바꾸면서 그 사실을 어디에도 안 남긴 것이다. 그래서 ①비필름 46건이 필름 원가표와
+#: 비교되고 ②수입 완제품 초안이 영영 조회되지 않는 버킷에 갇혔는데 어느 화면도 그것을
+#: 말하지 않았다. `propose_form_factor_with_source`가 그 사실을 함께 돌려준다.
 DEFAULT_FORM_FACTOR = "bar"
+
+#: `propose_form_factor_with_source`의 두 번째 값 — 폼팩터를 «어떻게» 얻었나.
+FORM_SOURCE_RULE = "rule"
+FORM_SOURCE_FALLBACK = "fallback"
 
 
 def _norm(value: Any) -> str:
@@ -97,28 +112,64 @@ def detect_code_columns(header: Sequence[Any]) -> tuple[int, ...]:
     return tuple(cols) if cols else FALLBACK_CODE_COLUMNS
 
 
-def propose_form_factor(product_name: str, option_name: str) -> str:
-    """옵션명(1순위)·상품명(2순위) → 폼팩터 **제안**.
+def propose_form_factor_with_source(
+    product_name: str, option_name: str
+) -> tuple[str, str]:
+    """옵션명(1순위)·상품명(2순위) → **(폼팩터 제안, 그 값을 얻은 방법)**.
 
     ★확정이 아니다. 화면에서 사람이 승인하고, `cost_price` 교차와 어긋나면 이상으로 뜬다.
+
+    ★두 번째 값이 이 함수의 요점이다 (계약 D-CPP-61 §4-Q2). `FORM_SOURCE_RULE`이면
+    실제 규칙이 걸린 것이고, `FORM_SOURCE_FALLBACK`이면 **아무 규칙도 안 걸려 `bar`로
+    단정한 것**이다. 호출부는 그 사실을 레시피에 실어 화면이 「폼팩터 추정」을 말하게 한다 —
+    이 프로젝트의 상습병(추정 금지 — 모르면 모른다고 말한다)의 파서판이다.
     """
 
     option = _norm(option_name).replace(" ", "")
     for pattern, form in _OPTION_RULES:
         if re.search(pattern, option, re.IGNORECASE):
-            return form
+            return form, FORM_SOURCE_RULE
 
     product = _norm(product_name).replace(" ", "")
     for pattern, form in _PRODUCT_RULES:
         if re.search(pattern, product, re.IGNORECASE):
-            return form
+            return form, FORM_SOURCE_RULE
 
     # 상품명에도 기종 축이 걸릴 수 있다(옵션명이 비어 있는 행) — 옵션 규칙을 상품명에 한 번 더.
     for pattern, form in _OPTION_RULES:
         if re.search(pattern, product, re.IGNORECASE):
-            return form
+            return form, FORM_SOURCE_RULE
 
-    return DEFAULT_FORM_FACTOR
+    return DEFAULT_FORM_FACTOR, FORM_SOURCE_FALLBACK
+
+
+def propose_form_factor(product_name: str, option_name: str) -> str:
+    """`propose_form_factor_with_source`의 폼팩터만 — 기존 호출부 호환."""
+
+    return propose_form_factor_with_source(product_name, option_name)[0]
+
+
+def form_source_for(form_factor: Optional[str]) -> Optional[str]:
+    """저장된 note 없이 **이미 있는 레시피**의 폼팩터 출처를 파생한다.
+
+    ★왜 파생이 가능한가 (적대 리뷰 1R P1-2): `_OPTION_RULES`·`_PRODUCT_RULES` 어디에도
+    `bar`를 **내는** 규칙이 없다. 그러므로 `form_factor == DEFAULT_FORM_FACTOR`인 레시피는
+    **필연적으로 폴백의 산물**이다 — prod bar 67건 전부가 그렇다. 이 파생이 없으면 합격 5가
+    「Jino가 매핑 정본을 다시 올려야」 열리는데, 계약 §5는 항목 5를 **사람 단계 없이 판정
+    가능**한 것으로 두었다.
+
+    ★**자기 보호**: 누군가 나중에 폴백값을 «내는» 규칙을 추가하면 이 추론은 무너진다.
+    그때는 `None`(출처 미상)을 돌려준다 — **틀린 단정보다 「모른다」가 낫다**는 것이
+    애초에 이 필드를 만든 이유다.
+    """
+
+    if form_factor is None:
+        return None
+    if any(f == DEFAULT_FORM_FACTOR for _, f in _OPTION_RULES + _PRODUCT_RULES):
+        return None
+    return (
+        FORM_SOURCE_FALLBACK if form_factor == DEFAULT_FORM_FACTOR else FORM_SOURCE_RULE
+    )
 
 
 @dataclass(frozen=True)
@@ -130,6 +181,10 @@ class OptionRow:
     channel_codes: tuple[str, ...]
     form_factor: str
     row_number: int
+    #: 폼팩터를 «어떻게» 얻었나 — `rule`이면 규칙이 걸린 것, `fallback`이면 `bar`로 단정한 것.
+    #: 기본값을 `rule`로 두지 않는다: 모르는 채로 만들어진 행이 「규칙이 걸렸다」고 말하면
+    #: 이 필드를 만든 이유(침묵 제거)가 그대로 뒤집힌다.
+    form_source: str = FORM_SOURCE_FALLBACK
 
 
 @dataclass
@@ -181,13 +236,17 @@ def parse_mapping_table(rows: Iterable[Sequence[Any]]) -> MappingParseResult:
         if not codes:
             result.anomalies.append(f"행{row_number} {product_name}/{option_name}: 채널코드 0건")
 
+        form_factor, form_source = propose_form_factor_with_source(
+            product_name, option_name
+        )
         result.options.append(
             OptionRow(
                 product_name=product_name,
                 option_name=option_name,
                 channel_codes=tuple(codes),
-                form_factor=propose_form_factor(product_name, option_name),
+                form_factor=form_factor,
                 row_number=row_number,
+                form_source=form_source,
             )
         )
 

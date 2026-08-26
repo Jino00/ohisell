@@ -5545,6 +5545,8 @@ export interface CostLedgerMaterialLine {
   hbl_no: string;
   declaration_date: string | null;
   item_name: string;
+  /** `"material"`(부자재) | `"product"`(수입 완제품). 계약 D-CPP-61로 후자도 실린다. */
+  line_type: string;
   quantity: string | null;
   unit_cost_ex_vat: string | null;
   unit_cost_inc_vat: string | null;
@@ -5571,10 +5573,22 @@ export function fetchCostMaterials(): Promise<{ items: CostMaterial[] }> {
   return fetchApi("/api/cost/materials");
 }
 
-export function fetchCostLedgerMaterialLines(): Promise<{
+/**
+ * 원장 라인 목록.
+ *
+ * ★`includeProducts`가 참이면 수입 완제품(`product`) 라인도 함께 온다(계약 D-CPP-61).
+ * 기본이 거짓인 이유는 prod에 `product` 라인이 150건이라 그냥 열면 부자재 8건이 그 안에
+ * 파묻히기 때문이다. **이미 연결된 `product` 라인은 이 값과 무관하게 항상 온다** — 어긋난
+ * 연결이 화면에서 사라지면 그게 1R P1-1이 고친 병의 재발이다.
+ */
+export function fetchCostLedgerMaterialLines(
+  includeProducts = false,
+): Promise<{
   items: CostLedgerMaterialLine[];
 }> {
-  return fetchApi("/api/cost/ledger-material-lines");
+  return fetchApi(
+    `/api/cost/ledger-material-lines${includeProducts ? "?include_products=true" : ""}`,
+  );
 }
 
 export function fetchCostSettings(): Promise<{ items: CostSetting[] }> {
@@ -5839,7 +5853,16 @@ export interface CostRecipe {
   form_factor: string | null;
   status: string; // draft | approved
   source: string;
+  /** `"assembly"` | `"imported_goods"` — 픽이 원가표 항목에서 옮겨 온다(D-CPP-61). */
   recipe_kind: string;
+  /**
+   * 폼팩터를 «어떻게» 얻었나 — `"rule"` | `"fallback"` | null(출처 미상).
+   *
+   * ★저장된 값이 없으면 백엔드가 **파생**한다(`form_source_for`) — `bar`를 내는 양성
+   * 규칙이 0개라 `form_factor === "bar"`는 필연적으로 폴백의 산물이기 때문이다. 그래서
+   * 이미 있는 레시피도 재업로드 없이 「추정」을 말할 수 있다.
+   */
+  form_source: string | null;
   anomaly_flag: string | null;
   approved_at: string | null;
   match: CostRecipeMatch | null;
@@ -5856,6 +5879,14 @@ export interface CostBoardRow {
   recipe_id: number;
   recipe_product_name: string;
   form_factor: string | null;
+  /**
+   * 폼팩터를 «어떻게» 얻었나 — `"rule"`이면 규칙이 걸린 것, `"fallback"`이면 아무 규칙도
+   * 안 걸려 `bar`로 **단정**한 것이다(계약 D-CPP-61 §4-Q2). `null`은 이 필드가 생기기
+   * 전에 저장된 레시피 — 「모른다」이지 「규칙이 걸렸다」가 아니다.
+   */
+  form_source: string | null;
+  /** `"assembly"` | `"imported_goods"` — 픽이 원가표 항목에서 옮겨 온다. */
+  recipe_kind: string;
   recipe_status: string;
   link_status: string;
   std_cost_ex_vat: string | null;
@@ -5863,6 +5894,10 @@ export interface CostBoardRow {
   /** 현 `product_master.cost_price` — **읽기 전용 대조값**이다(계약 §3 금지선). */
   current_cost_price: string | null;
   gap_pct: number | null;
+  /** 엑셀 표준(원가표 품목 총액, VAT 포함) — **대조값**이다. 계산에 유입되지 않는다. */
+  excel_total_inc_vat: string | null;
+  /** 표준원가 ↔ 엑셀 표준의 격차 %. 둘 다 VAT 포함 축이라 축이 섞이지 않는다. */
+  excel_gap_pct: number | null;
   reason: string | null;
 }
 
