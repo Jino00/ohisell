@@ -82,6 +82,12 @@ const KIT: CostMaterial = {
   latest_price_ex_vat: "190.82",
   latest_price_inc_vat: "209.90",
   latest_price_source: "ledger",
+  price_rule: "latest",
+  lot_price_min: "178.78",
+  lot_price_max: "190.82",
+  lot_price_has_span: true,
+  price_conflict: false,
+  price_conflict_price_id: null,
   prices: [
     {
       id: 11,
