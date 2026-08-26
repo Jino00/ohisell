@@ -616,9 +616,32 @@ def test_rowid_reuse_is_caught_by_the_stored_item_name(client):
     assert p["ledger_check"]["status"] == "item_mismatch"
     assert p["ledger_check"]["ledger_item_name"] == now_at_that_id["item_name"]
     assert "cleaning kits" in p["ledger_check"]["detail"]   # 연결 당시 품목을 말한다
-    assert body["latest_price_ex_vat"] is None
     assert body["stale_count"] == 1
+
+    # ★★D-CPP-60으로 **여기서 동작이 바뀌었다 — 그리고 그건 개선이다.**
+    #
+    #   구판 단언은 `latest_price_ex_vat is None`이었다. 근거는 「사람의 유일한 연결이
+    #   깨졌으니 최신 단가는 «없음»이다」였고 그때는 참이었다.
+    #
+    #   지금은 재확정 «직후» 자동 갱신이 돈다(계약 §7-3 이벤트 방아쇠). 자동은 「cleaning
+    #   kits」가 **사람이 이미 연결해 둔 짝**임을 알고, 그 이름을 가진 «아직 어느 종에도 안
+    #   붙은» 새 라인을 다시 잇는다. 결과는 셋이다:
+    #     · 깨진 옛 행은 **그대로 남는다**(`stale_count == 1`) — 근거 보존 훼손 없음
+    #     · 유효한 새 행이 생겨 최신 단가가 **복구된다**(190.82)
+    #     · 그 복구는 판단이 아니라 **사람이 만든 짝의 반복**이다(§7-4 불변식 안)
+    #
+    #   ⇒ 이 테스트가 원래 지키려던 것(id만 믿지 않는다 · 어긋남을 자백한다 · 갱신으로
+    #     삼키지 않는다)은 **전부 그대로 지켜진다.** 바뀐 것은 「그 뒤에 아무 값도 없다」뿐이고
+    #     그건 자동이 없던 시절의 사실이었다.
+    assert body["latest_price_ex_vat"] == "190.82"
+    fresh = [x for x in body["prices"] if x["id"] != price_id]
+    assert len(fresh) == 1, "자동이 새 라인을 다시 잇지 않았다 — 이벤트 방아쇠가 끊겼다"
+    assert fresh[0]["ledger_check"]["ok"] is True
+    # ★복구가 «어디서 왔는지»가 보여야 한다 — 출처 없는 값이 조용히 앉으면 그게 더 나쁘다.
+    assert "자동 연결" in (fresh[0]["note"] or "")
+
     # ★갱신으로 «삼키지» 않는다 — 다른 품목의 단가를 조용히 받아들이면 그게 더 나쁘다.
+    #   (자동이 새 행을 만들었어도 **깨진 옛 행은 여전히 갱신 거부다.**)
     r = client.post(f"/api/cost/materials/{mid}/prices/{price_id}/refresh")
     assert r.status_code == 400
     assert "다른 품목" in r.json()["detail"]

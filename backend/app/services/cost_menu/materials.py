@@ -417,6 +417,123 @@ def list_settings(db: Session) -> list[dict]:
     ]
 
 
+#: 화면에서 바꿀 수 있는 설정. ★목록 밖 키는 API로 못 바꾼다 — 설정 테이블은 앞으로도
+#:  늘어날 텐데, 「바꿀 수 있는 것」과 「그냥 저장돼 있는 것」이 안 갈리면 아무 키나
+#:  화면에서 덮이게 된다.
+EDITABLE_SETTINGS = ("valuation_method", "standard_price_rule")
+
+#: `valuation_method`가 가질 수 있는 값. ★법정 방법 이름이지 **구현된 계산 규칙이 아니다** —
+#:  층3(계약 C) 소관이라 지금은 «선언»만 한다. 층1이 실제로 쓰는 단가 규칙은
+#:  `standard_price_rule`이고 그쪽 구현분은 `price_rule.SUPPORTED_RULES`가 정본이다.
+VALUATION_METHODS = ("fifo",)
+
+
+def list_setting_history(db: Session, limit: int = 50) -> list[dict]:
+    """설정 변경 이력 — **append 전용**(계약 §4-②).
+
+    ★비어 있는 것과 「바꾼 적 없음」은 같다 — 그건 사실이므로 화면이 그대로 말하면 된다.
+    """
+
+    from app.models import CostSettingHistory
+
+    rows = (
+        db.query(CostSettingHistory)
+        .order_by(CostSettingHistory.created_at.desc(), CostSettingHistory.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": h.id,
+            "key": h.key,
+            "old_value": h.old_value,
+            "new_value": h.new_value,
+            "old_confirmed": None if h.old_confirmed is None else bool(h.old_confirmed),
+            "new_confirmed": bool(h.new_confirmed),
+            "actor": h.actor,
+            "note": h.note,
+            "created_at": h.created_at.isoformat() if h.created_at else None,
+        }
+        for h in rows
+    ]
+
+
+def update_setting(
+    db: Session,
+    key: str,
+    *,
+    value: str | None = None,
+    confirmed: bool | None = None,
+    actor: str | None = None,
+    note: str | None = None,
+) -> dict:
+    """설정 1건을 바꾸고 **이력을 남긴다**(계약 §4-②).
+
+    ★**값이 안 바뀌어도 이력을 남긴다.** 「선입선출 재확인」은 값 변경이 아니라 **사람이
+    확인했다는 사건**이고, 그 사건이 곧 §74의 「신고한 방법」 확인 기록이다. 값 비교로
+    걸러 버리면 확인 행위가 통째로 사라진다.
+
+    ★`confirmed`를 True로 올리는 것은 **사람만** 한다 — 모델이 「신고방법 확인됨」을 대신
+    누르는 것은 §3 금지선이다(추정으로 확정 금지). 이 함수는 라우터의 POST에서만 불린다.
+    """
+
+    from app.models import CostSettingHistory
+
+    if key not in EDITABLE_SETTINGS:
+        raise CostMenuError(
+            f"`{key}`는 화면에서 바꿀 수 있는 설정이 아니다"
+            f"(가능: {', '.join(EDITABLE_SETTINGS)})."
+        )
+    row = db.query(CostSetting).filter(CostSetting.key == key).first()
+    if row is None:
+        raise CostMenuError(f"설정 `{key}`가 없다.")
+
+    old_value, old_confirmed = row.value, bool(row.confirmed)
+    new_value = old_value if value is None else str(value).strip()
+    new_confirmed = old_confirmed if confirmed is None else bool(confirmed)
+
+    if not new_value:
+        raise CostMenuError("설정 값이 비었다.")
+    if key == "valuation_method" and new_value not in VALUATION_METHODS:
+        raise CostMenuError(
+            f"`valuation_method`는 {', '.join(VALUATION_METHODS)} 중 하나여야 한다. "
+            "다른 방법으로 신고돼 있다면 그 구현은 새 계약이다(D-CPP-60 §7-1)."
+        )
+    if key == "standard_price_rule" and new_value not in PR.SUPPORTED_RULES:
+        raise CostMenuError(
+            f"`standard_price_rule` = `{new_value}`는 아직 구현된 규칙이 아니다"
+            f"(구현분: {', '.join(sorted(PR.SUPPORTED_RULES))}). "
+            "선언만 바꾸면 계산이 멈춘다 — 구현 없이 선언하지 않는다."
+        )
+
+    row.value = new_value
+    row.confirmed = new_confirmed
+    if note is not None:
+        row.note = note
+    db.add(
+        CostSettingHistory(
+            key=key,
+            old_value=old_value,
+            new_value=new_value,
+            old_confirmed=old_confirmed,
+            new_confirmed=new_confirmed,
+            actor=(actor or "jino").strip() or "jino",
+            note=note,
+        )
+    )
+    db.flush()
+    return {
+        "key": row.key,
+        "value": row.value,
+        "confirmed": bool(row.confirmed),
+        "note": row.note,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        # ★값이 안 바뀌었어도 이력은 남았다 — 화면이 그 사실을 말할 수 있게 알려 준다.
+        "value_changed": old_value != new_value,
+        "confirmed_changed": old_confirmed != new_confirmed,
+    }
+
+
 # ──────────────────────────────────────────────
 # 쓰기
 # ──────────────────────────────────────────────

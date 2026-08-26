@@ -1760,6 +1760,42 @@ def coupang_collection_watchdog_job():
         db.close()
 
 
+def cost_auto_refresh_job():
+    """부자재 단가 **일일 sweep** (09:40 KST) — D-CPP-60 갈래② 보조 방아쇠.
+
+    주(主) 방아쇠는 로트 확정 «직후» 이벤트다(`routers/import_cost.confirm_shipment`).
+    이 크론은 그 이벤트가 **누락됐을 때**를 줍는다 — sweep 없는 이벤트는 침묵 실패의
+    표준형이기 때문이다(계약 §7-3 버린 대안: *이벤트 단독 — 누락 시 아무도 모른다*).
+
+    ★**「변화 없음」도 행을 남긴다**(계약 §2-6 침묵 금지). `updated=0`인 `cost_auto_refresh_run`
+      행이 매일 쌓이는 것이 「자동이 살아 있다」의 유일한 증거다 — 아무것도 안 남기면
+      «돌았는데 바뀔 게 없었다»와 «죽었다»가 화면에서 똑같이 보인다.
+    ★이 잡은 **사람이 한 번 연결한 짝의 반복**만 한다. 신규 짝은 큐로 올리고 손대지 않는다
+      (계약 §7-4 불변식 — 첫 연결은 영원히 사람).
+    ★09:40인 이유: 쿠팡 수집대(05:xx)와 겹치지 않고 C10 상품 메타(09:55)보다 앞이며,
+      아침에 Jino가 화면을 열었을 때 그날 회전이 이미 한 줄 남아 있게 한다.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.cost_menu import auto_refresh
+
+        result = auto_refresh.run(db, trigger=auto_refresh.TRIGGER_CRON)
+        db.commit()
+        log.info(
+            "[스케줄러] 단가 자동 갱신 sweep — 검사 %s · 갱신 %s · 실패 %s · 대기 %s",
+            result.checked,
+            result.updated,
+            result.failed,
+            result.queued,
+        )
+    except Exception as e:
+        db.rollback()
+        log.exception("[스케줄러] cost_auto_refresh_job 에러: %s", e)
+        raise  # cron 경로는 APScheduler가 관용 — 삼키면 실패가 어느 표면에도 안 남는다
+    finally:
+        db.close()
+
+
 def sync_coupang_coupons_job():
     """쿠팡 쿠폰 운영 현황 자동 동기화 (06:00 KST) — 즉시할인쿠폰+예산/계약(P5). 트랙 D-8: 서버 IP에서만."""
     db = _get_own_db_session()
@@ -2141,6 +2177,9 @@ def _ensure_default_states(db):
         # 쿠팡 브라우저 수집 신선도 워치독 — 하루 1회(09:20). 알림 + 위급 시 자동 갱신.
         # 하루 1회인 것이 곧 알림 쿨다운이다(별도 상태 저장 없음).
         ("coupang_collection_watchdog", "20 9 * * *"),
+        # 부자재 단가 자동 갱신 sweep (D-CPP-60) — 09:40. 쿠팡 수집대(05:xx) 뒤,
+        # C10 상품 메타(09:55) 앞. 「변화 없음」도 행을 남겨 자동의 생존을 증명한다.
+        ("cost_auto_refresh", "40 9 * * *"),
         # ofix 광고비 «자동 fetch» 크론은 여전히 제거된 채다 — 이 문장의 그 부분은 아직 참이다.
         # 다만 D-CPP-45로 **«요청 트리거»만** 되살렸다(defaults 위쪽 request_coupang_ad_cost_daily
         # 참조). 옛 크론은 서버가 창을 스스로 띄워 fetch까지 했지만, 새 잡은 request_refresh로
@@ -2433,6 +2472,8 @@ def job_func_for(job_name: str):
     """
     return {
         "auto_sync_orders": sync_all_channels_job,
+        # 단가 자동 갱신 sweep (D-CPP-60 갈래② 보조 방아쇠 — 주 방아쇠는 로트 확정 이벤트)
+        "cost_auto_refresh": cost_auto_refresh_job,
         "sync_naver_orders_hourly": sync_naver_orders_hourly_job,
         "auto_profit_calc": recalculate_profit_job,
         "cafe24_token_refresh": cafe24_proactive_refresh_job,

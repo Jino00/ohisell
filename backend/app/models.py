@@ -4990,6 +4990,114 @@ class CostSetting(Base):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 원가 설정 이력 · 단가 자동 갱신 (계약 `CONTRACT_cost_valuation_autorefresh.md` D-CPP-60)
+#
+# ★왜 세 테이블인가 — 계약 §7-3의 자동 3요소(사후 가시성·정정 경로·근거 보존)가 각각
+#   «쌓이는 자리»를 요구하기 때문이다. 셋 중 하나라도 자리가 없으면 자동이 아니라 방치다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class CostSettingHistory(Base):
+    """`cost_setting` 변경 이력 — **append 전용**(계약 §4-②).
+
+    ★왜 이력이 따로 필요한가: `cost_setting`은 in-place로 갱신되는 단일 행이라 «지금 값»만
+    안다. 그런데 평가방법은 **누가 언제 왜 바꿨나**가 곧 회계 근거다 — 법인세법 시행령 §74의
+    「신고한 방법」이 나중에 확인되면 그 시점 전후를 갈라야 한다. 지금 값만 남기면 그 질문에
+    영영 답할 수 없다.
+
+    ★`old_*`를 함께 담는 이유: 새 값만 쌓으면 「무엇에서 무엇으로」가 행 사이 뺄셈이 되고
+    첫 행은 원본을 모른다. 정정 경로(§7-3 ②)는 옛 값을 알아야 성립한다.
+    """
+
+    __tablename__ = "cost_setting_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    old_value: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    new_value: Mapped[str] = mapped_column(String(200), nullable=False)
+    old_confirmed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # ★Boolean에 정수 리터럴을 쓰지 않는다(교훈 #341).
+    new_confirmed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    #: 누가. 이 앱엔 로그인이 없으므로 화면이 보내는 문자열이다(기본 `jino`).
+    #: ★자동 경로는 이 테이블에 **쓰지 않는다** — 평가방법 변경은 사람만 한다(§3 금지선).
+    actor: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), index=True
+    )
+
+
+class CostAutoRefreshRun(Base):
+    """단가 자동 갱신 **1회전**. 이벤트(로트 확정 직후)든 크론 sweep이든 한 행이 남는다.
+
+    ★**「변화 없음」도 행을 남긴다**(계약 §2-6 침묵 금지). `updated=0`인 행이 매일 쌓이는
+    것이 「자동이 살아 있다」의 유일한 증거다 — 아무것도 안 남기면 «잘 돌았는데 바뀔 게
+    없었다»와 «죽었다»가 화면에서 똑같이 보인다. 이 저장소가 반복 실측한 fail-open이다.
+    """
+
+    __tablename__ = "cost_auto_refresh_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: `event`(로트 확정 직후) / `cron`(일일 sweep) / `manual`(사람이 화면에서 지금 실행)
+    trigger: Mapped[str] = mapped_column(String(10), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), index=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    #: 검사한 «후보 라인» 수.
+    checked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 자동이 **안 건드리고 큐로 올린** 라인 수(신규 짝 — 계약 §7-4).
+    queued: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class CostAutoRefreshEntry(Base):
+    """자동 갱신 1회전 안의 **개별 사건** — 「무엇이 어떻게 바뀌었나」의 근거 보존(§7-3 ③).
+
+    ★`old_*`/`new_*`를 둘 다 담는다. 같으면 **멱등 확인**이고 그것도 사건이다 —
+    「검사했는데 안 바뀌었다」와 「검사 안 했다」는 다르다.
+    """
+
+    __tablename__ = "cost_auto_refresh_entry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("cost_auto_refresh_run.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    #: `linked`(새 단가 행 생성) / `unchanged`(이미 있음) / `failed` / `queued`(사람 대기)
+    outcome: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    material_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    material_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    #: 만들어진(또는 이미 있던) 단가 행. 실패·대기면 없다.
+    price_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    import_invoice_line_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    #: ★좌표 — 「어느 로트에서 왔나」. FK가 아니라 **스냅샷 문자열**이다: 원장이 재적재되면
+    #:  rowid가 재사용되므로(계약 A′ S1 적대 리뷰 1R P1-2 실증) id만으로는 추적이 끊긴다.
+    hbl_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    item_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    old_price_ex_vat: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    new_price_ex_vat: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    #: 실패·대기 사유. **비워 두지 않는다** — 사유 없는 실패는 화면에서 침묵과 같다.
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # OTAO 발주 원장 (계약 `CONTRACT_inventory_unified.md` §4 S1 · 트랙 D-INV-1·3)
 #
 # 왜 «새» 테이블인가: 발주 축의 SKU 라인은 **어디에도 없었다.** ECOUNT 발주서조회 API는

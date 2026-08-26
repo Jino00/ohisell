@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.services.cost_menu import auto_refresh as AR
 from app.services.cost_menu import materials as M
 from app.services.cost_menu import recipes as R
 
@@ -225,6 +226,83 @@ def delete_price(material_id: int, price_id: int, db: Session = Depends(get_db))
 def list_settings(db: Session = Depends(get_db)):
     """설정 전건 — `confirmed=false`가 화면의 자백 배지 원료다(계약 §9-1·합격 8)."""
     return {"items": M.list_settings(db)}
+
+
+# ──────────────────────────────────────────────
+# 평가방법 확인·변경 + 이력 (D-CPP-60 갈래① · 합격 ②)
+# ──────────────────────────────────────────────
+class SettingUpdateIn(BaseModel):
+    value: Optional[str] = None
+    confirmed: Optional[bool] = None
+    actor: Optional[str] = Field(default=None, max_length=50)
+    note: Optional[str] = None
+
+
+@router.get("/settings/history")
+def setting_history(limit: int = 50, db: Session = Depends(get_db)):
+    """설정 변경 이력. 비어 있으면 「아직 바꾼 적 없음」이고 그건 사실이다."""
+    return {"items": M.list_setting_history(db, limit=limit)}
+
+
+@router.post("/settings/{key}")
+def update_setting(
+    key: str, body: SettingUpdateIn, db: Session = Depends(get_db)
+):
+    """설정 1건 변경 — **값이 안 바뀌어도 이력이 남는다**(계약 §4-②).
+
+    ★「선입선출 재확인」은 값 변경이 아니라 «사람이 확인했다»는 사건이고, §74의 「신고한
+    방법」 확인 기록이 곧 그 사건이다. 값 비교로 걸러 버리면 확인 행위가 사라진다.
+    """
+    try:
+        out = M.update_setting(
+            db,
+            key,
+            value=body.value,
+            confirmed=body.confirmed,
+            actor=body.actor,
+            note=body.note,
+        )
+    except M.CostMenuError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    db.commit()
+    return out
+
+
+# ──────────────────────────────────────────────
+# 단가 자동 갱신 (D-CPP-60 갈래② · 합격 ③④⑤)
+# ──────────────────────────────────────────────
+@router.get("/auto-refresh/runs")
+def auto_refresh_runs(limit: int = 20, db: Session = Depends(get_db)):
+    """자동 갱신 회전 이력 — **`updated=0`인 회전도 실린다**(합격 ④ 침묵 금지).
+
+    목록이 비어 있으면 「바뀔 게 없었다」가 아니라 **「한 번도 안 돌았다」**다. 화면은 그
+    둘을 구별해 말해야 한다.
+    """
+    return {"items": AR.recent_runs(db, limit=limit)}
+
+
+@router.get("/auto-refresh/queue")
+def auto_refresh_queue(db: Session = Depends(get_db)):
+    """「연결 대기」 큐 — 자동이 **안 건드리고 사람에게 올린** 라인(합격 ⑤ · 계약 §7-4)."""
+    return {"items": AR.pending_queue(db)}
+
+
+@router.post("/auto-refresh/run")
+def auto_refresh_run(db: Session = Depends(get_db)):
+    """지금 1회전 — 화면의 「지금 검사」 버튼. 크론을 기다리지 않고 사람이 확인할 길이다.
+
+    ★이 경로도 «사람이 만든 짝의 반복»만 한다 — 수동 실행이 게이트를 여는 문이 되면 안 된다.
+    """
+    result = AR.run(db, trigger=AR.TRIGGER_MANUAL)
+    db.commit()
+    return {
+        "run_id": result.run_id,
+        "trigger": result.trigger,
+        "checked": result.checked,
+        "updated": result.updated,
+        "failed": result.failed,
+        "queued": result.queued,
+    }
 
 
 # ──────────────────────────────────────────────
