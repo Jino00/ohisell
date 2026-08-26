@@ -200,3 +200,109 @@ prod `file:/home/ubuntu/ohisell/backend/ohisell.db?mode=ro` 를 별도 스크립
 - 3상태 합산 단일 숫자 — **없음** (상품/부자재를 갈라 싣고 합계를 «같이» 준다)
 - 자동 발주 실행 — **없음** (읽기 전용 GET 하나)
 - prod 쓰기·배포·마이그레이션(리뷰어 측) — **0건**
+
+---
+
+# 2R 재판정 — 수정 커밋 `d3213319` 하나의 diff만
+
+- 범위: `git diff 888f050e..d3213319` (6파일 +428/−4 — 그중 202줄이 이 리뷰 문서 자체)
+- 질문: **1R P1 2건이 해소됐는가.** 전체 브랜치 재리뷰 안 함. 새 지적 생산 안 함.
+  이월 P2 3건(`_next_key`·`Math.round`·창 개수 상한)은 재검토 대상 아님.
+- 판정 시각: 2026-08-27 00:1x~00:2x KST
+
+## 판정: **PASS** (P1 = 0)
+
+## 기준선 — 저자 주장치를 내가 직접 재현
+
+| 항목 | 저자 주장 | 내 실측 | 일치 |
+|---|---|---|---|
+| 백엔드 전수 | 6,804 passed / 0 | **6,804 passed, 868 warnings in 278.61s** | ✅ |
+| 프론트 전수 | 973 / 68파일 | **68 passed (68) / 973 passed (973)** | ✅ |
+| `tsc -b` | 0 | **exit 0, 출력 없음** | ✅ |
+| eslint 래칫 | 96 warnings, 0 errors | **✖ 96 problems (0 errors, 96 warnings)** | ✅ |
+| 정산 2파일 타깃 | — | 39 → **44 passed** (+5) | — |
+
+## 저자의 사고(같은 파일 수리분 유실) — 커밋에서 살아 있는지 직접 확인
+
+`git checkout -- settlement.py`가 P1-1 수리분까지 지웠다는 자백에 대해, **커밋된 트리**를 직접 봤다.
+
+```
+grep -c "아직 분류되지 않은" backend/app/services/otao_po/settlement.py   → 1   (note 살아 있음, :340)
+grep -c "미분류"            frontend/src/pages/otaoSettlementPanel.tsx    → 5   (열머리·셀·주석)
+git diff --stat HEAD -- backend frontend                                  → 빈 출력
+```
+
+⇒ **유실 없음.** 그리고 이 자백 자체는 §2의 사후 가시성을 제대로 지킨 것이다 — 커밋 메시지에
+남겼고, 나에게 「내 자기채점이니 다시 재라」고 넘겼다. 판정에 감점 요소로 반영하지 않는다.
+
+## 변이 재주입 — 저자 표를 믿지 않고 내가 다시 쟀다
+
+`error`(문법 파손)와 `failed`를 구분했다: 백엔드는 매 변이마다 `ast.parse`를 먼저 돌려
+`syntax_ok=True`를 확인했고, 프론트는 `Transform failed`/`Failed to parse`/`SyntaxError`를
+따로 검사해 전건 `err=-`였다. **아래는 전부 진짜 `failed`다.**
+
+| # | 변이 | 결과 | 죽인 테스트 |
+|---|---|---|---|
+| ★R1 | `OtaoPurchaseOrders.tsx` **원장 «있음» 분기**의 `{settlementSection}` 제거 — 1R P1-2 그 변이 | **KILLED** 14 failed / 567 passed | `SUR-S1`·`S2`·`S3`·`S4`·`S5` 외 14건 |
+| ★R2 | 창 행에서 **미분류 CNY 셀** 제거 — 1R P1-1 그 표면 | **KILLED** 3 failed | `SUR-S8`, `SUR-S4`, `SUR-S5` |
+| ★R3 | 창 행에서 **미분류 수량** 값 제거 | **KILLED** 1 failed | `SUR-S8` |
+| ★R4 | **합계 줄**에서 미분류 두 칸 제거 | **SURVIVED** 581 passed | — → 2R-P2-1 |
+| ★R5 | 미분류 **열 머리(`Th`) 2개** 제거 | **KILLED** 1 failed | `SUR-S8` |
+| ★R6 | 서비스: 미분류 자백 `note` 삭제 | **KILLED** 2 failed | `test_unclassified_lines_are_confessed_in_notes`, `test_settlement_body_shows_unclassified_lines` |
+| ★R7 | 서비스: 미분류 금액을 갈라 싣지 않고 **조용히 누락**(합계엔 남김) = 1R P1-1의 서비스층판 | **KILLED** 4 failed | 위 2건 + `test_a_freshly_ingested_shipment_is_entirely_unclassified`, `test_unknown_line_type_is_not_folded_into_product` |
+| R8 | `_window_bounds` 1월 연도 롤백 제거 (1R P2-1) | **KILLED** 1 failed | `test_january_window_rolls_back_into_the_previous_december` |
+| R9 | 라우터 `totals`의 `material_amount_cny` 재기입 제거 (1R P2-2) | **KILLED** 1 failed | `test_settlement_body_carries_every_totals_key` |
+| R10 | 라우터 창 body에서 `other_amount_cny` 키 제거 | **KILLED** 2 failed | `test_settlement_body_carries_every_confession_field`, `test_settlement_body_shows_unclassified_lines` |
+
+원복 확인: `git status --short` = 체인 등록부 1건(리뷰 전부터 변경돼 있던, 내 것 아닌 파일)뿐 ·
+`git diff --stat HEAD -- backend frontend` **빈 출력** · `MUTATION`/`{/* r */}` 마커 **0건**.
+
+**저자 표와 어긋난 곳 1건(무해)**: 저자는 R9(M7)를 「2 failed」로 적었으나 내 실측은 **1 failed**
+(`test_settlement_body_carries_every_totals_key` 단독)이다. 죽었다는 결론은 같다.
+
+## 1R P1 2건 판정
+
+### P1-1 (미분류가 화면에 안 닿는다) → **해소**
+
+1R의 결함 문장은 셋이었고 셋 다 상환됐다.
+
+1. **「미분류 금액이 화면 어디에도 안 뜬다」** → 창 행에 미분류 수량·미분류 CNY **두 칸이 상품·
+   부자재와 같은 격으로** 섰다(값이 있으면 amber + ⚠ + 툴팁). R2·R3·R5 세 변이가 전부 `SUR-S8`에
+   죽는다.
+2. **「보이는 칸의 합 ≠ 픽업 합계」** → `SUR-S8`이 셀 인덱스로 못 박는다: `cells[7]`=5,000 ·
+   `cells[8]`=9,600 · `cells[9]`=**43,520**(22,400+11,520+9,600). 인덱스가 밀리면 즉시 빨개진다
+   (실제로 기존 `SUR-S4`·`SUR-S5`의 인덱스 7→9, 8→10 갱신이 이 커밋에 같이 들어 있다).
+3. **「차이를 설명하는 글자가 없다」** → 백엔드 `notes`에 미분류 문장 추가. R6(note 삭제)이 2건에
+   죽고, R7(서비스층에서 조용히 누락)이 4건에 죽는다.
+
+★특히 **`test_a_freshly_ingested_shipment_is_entirely_unclassified`가 `line_type`을 «지정하지
+않는»** 것으로 적재 직후 실제 모양을 재현한 것이 옳다. 1R이 P1으로 올린 근거가 정확히
+「`line_type` 기본값이 `unknown`이고 분류는 사람이 나중에 한다」였고, 테스트가 그 **기본값
+자체**를 밟는다 — 상수를 베껴 적은 테스트가 아니다.
+
+### P1-2 (표면 절단 변이 생존) → **해소**
+
+1R에서 **972 passed**로 살아남았던 바로 그 변이(원장 «있음» 분기의 `{settlementSection}` 제거)를
+같은 방식으로 다시 넣었더니 **14 failed / 567 passed**. 기본 목이 `EMPTY_ROSTER` →
+`FULL_ROSTER`로 바뀌었고, 빈 분기는 `SUR-S7`이 자기 안에서 `roster = EMPTY_ROSTER`로 덮어
+**두 분기를 다 밟는다.** 목을 모듈 스코프 `let roster`로 빼고 `beforeEach`에서 되돌리는 모양이라
+케이스 간 누수도 없다(`SUR-S7` 뒤에 오는 케이스들이 그대로 통과하는 것으로 확인).
+
+## 2R P2 (트리아지 — 라운드를 늘리지 않는다)
+
+| # | 내용 | 처분 | 근거 1줄 |
+|---|---|---|---|
+| 2R-P2-1 | ★R4 SURVIVED — **합계 줄**의 미분류 두 칸을 지워도 581 passed. 열 머리는 12개인데 합계 줄이 10칸이 되어 「픽업 합계」가 미분류 열 아래로 밀리는데 아무도 안 잡는다 | **채택 권고(비차단)** | 출하 코드는 **정상**이고(합계 줄에 두 칸이 실재) 1R P1-1 문장은 「창 행·설명」이라 이건 잔여 회귀 공백이다 — 기존 「합계 줄이 prod 총액을 그대로 그린다」에 `cells[7]`/`cells[8]` 인덱스 단언 두 줄이면 닫힌다 |
+
+**이건 P1이 아니다**: 재현되는 것은 «테스트가 안 지킨다»이지 «화면이 틀리다»가 아니고, 1R이 P1으로
+못 박은 세 문장은 전부 상환됐다. 이 한 건 때문에 3라운드를 열지 않는다(§4 라운드 증식 차단).
+
+## 2R에서 확인 못 한 것 — 1R과 동일하게 유효하다
+
+- **라이브 배포 검증 0건.** 여전히 브랜치는 prod에 없다. 「Jino가 브라우저에서 정산 창을 본다」는
+  아직 관측되지 않았다 — 배포 후 완료 QA가 라이브 표면을 따로 재야 한다.
+- **계약 §4 S2 합격기준 후반은 여전히 어떤 라이브 경로로도 달성 불가.** 이 커밋은 그 축을 건드리지
+  않았다(`payments`를 라우터가 부르지 않는 것은 계약이 결정한 설계). 판정 재료로 완료 QA에 넘긴다.
+- 금지선 재검사: 이 커밋 diff에 마이그레이션 0 · `models.py` 미변경 · ECOUNT 호출 0 · 원장 쓰기 0
+  (`settlement.py`에 `add`/`commit` 없음) · 자동 발주 없음. **리뷰어 측 prod 쓰기·배포 0건**
+  (2R에서는 prod 조회조차 안 했다 — 범위가 커밋 diff이므로).
