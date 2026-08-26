@@ -41,7 +41,14 @@ def main() -> int:
         ap.error("--payload가 필요하다 (또는 --sync-map-only)")
 
     payload = None
-    if args.payload:
+    if args.sync_map_only:
+        # ★적대 리뷰 P2-4 — `--sync-map-only`면 페이로드를 **열지 않는다.**
+        #   초판은 `--payload`가 주어지면 무조건 열어서 파싱한 뒤 버렸다. 즉 「페이로드가
+        #   필요 없다」고 적어 둔 경로가 페이로드 때문에 `FileNotFoundError`로 죽었다.
+        #   경로가 안 쓰는 입력 때문에 죽으면 그 경로의 약속이 거짓말이 된다.
+        if args.payload:
+            print("⚠️ --sync-map-only라 --payload는 읽지 않는다 (원장 무접촉).")
+    else:
         with open(args.payload, encoding="utf-8") as fh:
             payload = json.load(fh)
 

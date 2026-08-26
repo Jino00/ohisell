@@ -153,9 +153,13 @@ def build_layered_dictionary(primary: list[dict], fallback: list[dict]) -> Dicti
         if key in d.by_key:
             continue  # 정본이 이미 말했다 — 덮지 않는다(D-INV-3)
         d.by_key[key] = set(codes)
-        if key in supplement.evidence:
-            d.evidence[key] = supplement.evidence[key]
-        d.originals[key] = set(supplement.originals.get(key, set()))
+        # ★세 사전(`by_key`·`evidence`·`originals`)은 항상 «함께» 옮긴다 — `add()`가 셋을 같이
+        #   채우므로 여기서 하나라도 빠뜨리면 조용히 절름발이가 된다: `evidence`가 없으면
+        #   「어느 발주서를 근거로 붙였나」가 사라지고, `originals`가 없으면 `exact_en`이어야 할
+        #   것이 전부 `normalized`로 떨어져 「규칙에 얼마나 의존하나」를 못 잰다.
+        #   (적대 리뷰 M3·M4가 둘 다 SURVIVED였다 — 구멍은 없었으나 테스트가 안 잠그고 있었다.)
+        d.evidence[key] = supplement.evidence[key]
+        d.originals[key] = set(supplement.originals[key])
     return d
 
 

@@ -339,6 +339,11 @@ def test_sync_name_map_borrows_labels_when_authoritative_is_silent(session, fold
     rep = I.sync_name_map(session)
     (row,) = session.scalars(select(OtaoItemNameMap)).all()
     assert row.product_code == "GAPIP17"
+    # ★보충층은 «코드만» 옮기는 게 아니다 — 근거와 원문 표기도 같이 와야 한다.
+    #   `evidence`가 빠지면 「어느 발주서를 근거로 붙였나」가 사라지고, `originals`가 빠지면
+    #   원문이 그대로 같은데도 `normalized`로 떨어진다(적대 리뷰 M3·M4가 여기서 생존했다).
+    assert row.match_kind == "exact_en"
+    assert row.evidence == "20251121-1"
     assert rep.map_unresolved == []
     assert (rep.map_total, rep.map_resolved) == (1, 1)
 
