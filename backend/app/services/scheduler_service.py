@@ -1,6 +1,7 @@
 # scheduler_service.py — APScheduler 기반 자동 동기화/이익률 계산 스케줄러
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import threading
@@ -19,6 +20,58 @@ from app.database import SessionLocal, get_ad_db
 from app.models import Channel, OAuthToken, SchedulerState
 
 log = logging.getLogger(__name__)
+
+
+# ★D-NAO-258(적대 리뷰 P1-1 수정) 단일 실행 락 — 「같은 잡이 두 번 동시에 돌지 않는다」의 보장.
+#
+# 왜 last_run_at으로는 안 되나: 그 값은 성공 시에만 갱신되므로 «실행 중»이라는 상태를 표현하지
+# 못한다(SchedulerState에 in-flight 필드가 없다). 게다가 스윕은 APScheduler를 거치지 않고
+# func()를 **직접** 호출하므로 max_instances 보호도 못 받는다 — 정시 발화와 스윕이 같은 잡을
+# 동시에 돌릴 구조적 경로가 열려 있었다.
+#
+# ★범위의 정직한 한계: 이 락은 **프로세스 내**에서만 유효하다(백엔드 단일 프로세스 전제 —
+#   기존 catch-up도 threading.Thread로 같은 전제 위에 서 있다). 다중 워커로 가면 DB advisory
+#   lock이 필요하다. 그 부채의 좌표가 이 주석이다.
+_JOB_SINGLEFLIGHT: dict[str, threading.Lock] = {}
+_JOB_SINGLEFLIGHT_GUARD = threading.Lock()
+
+# 락을 못 잡아 이번 회차를 생략했음을 «호출부가 구분할 수 있게» 돌려주는 표식. None을 돌려주면
+# 「돌았는데 결과가 없다」와 구분되지 않아 스윕이 성공으로 오기록한다(멱등성이 조용히 깨진다).
+SKIPPED_ALREADY_RUNNING = object()
+
+
+def _singleflight_lock(job_name: str) -> threading.Lock:
+    with _JOB_SINGLEFLIGHT_GUARD:
+        lock = _JOB_SINGLEFLIGHT.get(job_name)
+        if lock is None:
+            lock = threading.Lock()
+            _JOB_SINGLEFLIGHT[job_name] = lock
+        return lock
+
+
+def singleflight(job_name: str):
+    """같은 job_name이 이미 돌고 있으면 이번 호출을 생략하고 SKIPPED_ALREADY_RUNNING을 반환한다.
+
+    ★정시 크론 경로와 catch-up 경로 **둘 다** 이 데코레이터를 통과해야 의미가 있다 — 한쪽만
+    잡으면 다른 쪽이 자유롭게 들어와 락이 장식이 된다(그게 초판의 상태였다).
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            lock = _singleflight_lock(job_name)
+            if not lock.acquire(blocking=False):
+                log.warning(
+                    "[스케줄러] %s 이미 실행 중 — 이번 회차 생략(중복 실행 방지, D-NAO-258)",
+                    job_name,
+                )
+                return SKIPPED_ALREADY_RUNNING
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                lock.release()
+        return wrapper
+    return deco
+
 
 # job_defaults: APScheduler 기본 misfire_grace_time은 1초라, 백엔드가 크론 발화 시각에
 # 다운/재시작 중이면 그 잡이 catch-up 없이 조용히 드롭된다. 2026-07-13 실사고 — pm2가
@@ -737,6 +790,7 @@ def run_naver_retro_scoring_job():
         db.close()
 
 
+@singleflight("run_naver_diary_reflection")
 def run_naver_diary_reflection_job():
     """운영 일기 해석층 — reflection_loop.run_daily_reflection (08:35 KST,
     run_naver_retro_scoring 08:30 이후 = outcome 최신, D-NAO-54 P2).
@@ -760,6 +814,7 @@ def run_naver_diary_reflection_job():
         db.close()
 
 
+@singleflight("run_naver_profit_scorecard")
 def run_naver_profit_scorecard_job():
     """P7 일일 이익 스코어카드 — profit_scorecard.run_profit_scorecard (08:40 KST, D-NAO-85/
     ref39 P7, run_naver_diary_reflection 08:35 뒤·run_naver_wisdom 08:45 앞).
@@ -784,6 +839,7 @@ def run_naver_profit_scorecard_job():
         db.close()
 
 
+@singleflight("run_naver_wisdom")
 def run_naver_wisdom_job():
     """운영 일기 지혜 승격·망각층 — wisdom_loop.run_daily_wisdom (08:45 KST, D-NAO-54 P3).
 
@@ -825,6 +881,7 @@ def run_naver_wisdom_job():
         db.close()
 
 
+@singleflight("run_naver_vault_export")
 def run_naver_vault_export_job():
     """운영 일기·지혜 Obsidian 볼트 export — vault_export.export_vault (09:05 KST, D-NAO-54 P5).
 
@@ -2375,10 +2432,19 @@ _INDAY_CATCHUP_JOBS: frozenset[str] = frozenset({
     "run_naver_vault_export",      # 09:05 — 열람층 재생성(멱등)
 })
 
-# ★두 번 돌리지 않기 위한 지연 마진. last_run_at은 «성공 시»에만 갱신되므로, 정상 발화한 잡이
-# 아직 **실행 중**이면(판사는 LLM 재시도로 회당 수 분) 그 순간엔 「미실행」과 구분이 안 된다.
-# 30분을 기다린 뒤에야 결손으로 본다 — 이 목록의 잡 중 가장 긴 것(wisdom)의 정상 실행 시간을
-# 넉넉히 넘긴다. 마진이 없으면 스윕이 판사를 이중 호출해 LLM 비용과 중복 승격을 만든다.
+# 결손으로 «단정»하기 전 기다리는 시간. last_run_at은 EVENT_JOB_EXECUTED(성공)에만 갱신되므로
+# (_apply_job_event), 정상 발화한 잡이 아직 실행 중이면 그 순간엔 「미실행」과 구분되지 않는다.
+#
+# ★★이 값은 «보장»이 아니라 «헛시도를 줄이는 1차 필터»다 — 초판 주석이 이걸 「가장 긴 잡의
+#   실행 시간을 넉넉히 넘긴다」고 썼는데 **사실이 아니었다**(적대 리뷰 P1-1, 실측 반증):
+#     wisdom_judge._MAX_PER_RUN_BACKLOG = 15(회차 상한)
+#     × expert_llm 재시도 총합(120 + 180 + 240초) = 540초 = 9분/건
+#     ⇒ **최악 135분** — 30분의 4.5배다. 그리고 적체가 쌓인 날이야말로 이 스윕이 대응하려는
+#       바로 그 시나리오라, 「30분을 넘겨 도는 것」이 예외가 아니라 정상이다.
+#   그 구간에 :47 스윕이 매시간 재호출하면 같은 후보에 LLM이 두 번 돌고, 나중 커밋이 먼저
+#   커밋을 **stale 스냅샷으로 덮어써** 이중 실행 사실 자체가 흔적 없이 사라진다(리뷰어 실증).
+#   ⇒ 진짜 방어는 아래 singleflight(프로세스 내 단일 실행 락)이고, 이 마진은 그 앞단에서
+#     쓸데없는 시도와 로그 소음을 줄이는 역할만 한다. 값이 30분인 근거도 그것뿐이다.
 _INDAY_CATCHUP_MIN_LAG = timedelta(minutes=30)
 
 
@@ -2565,10 +2631,17 @@ def run_naver_inday_catchup_job():
                 continue
             try:
                 log.warning("[스케줄러] 당일 catch-up 실행: %s", job_name)
-                func()
+                outcome = func()
             except Exception as e:  # noqa: BLE001 — 전부 관측 잡이라 서로 의존 없음: 체인 계속
                 _record_catchup_status(job_name, ok=False, exception=e)
                 log.exception("[스케줄러] 당일 catch-up %s 실패(계속): %s", job_name, e)
+                continue
+            # ★적대 리뷰 P1-1: 정시 발화가 아직 돌고 있으면 singleflight가 이번 호출을 생략한다.
+            #   그때 성공으로 기록하면 «안 돌았는데 돌았다»가 되어, 진짜 결손이 last_run_at
+            #   전진에 가려 영영 안 돈다. 생략은 성공도 실패도 아니므로 상태를 건드리지 않는다
+            #   (다음 :47 회차가 다시 본다 — 그게 이 스윕이 매시간인 이유이기도 하다).
+            if outcome is SKIPPED_ALREADY_RUNNING:
+                log.info("[스케줄러] 당일 catch-up %s — 정시분이 실행 중이라 생략(상태 미기록)", job_name)
                 continue
             _record_catchup_status(job_name, ok=True)
 

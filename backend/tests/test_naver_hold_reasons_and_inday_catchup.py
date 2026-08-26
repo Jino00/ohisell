@@ -329,6 +329,28 @@ def test_daily_lane_really_derives_held_by_reason(lane_db):
     assert set(counts) - {"unknown", "other"}, f"전건이 미분류로 떨어졌다: {counts}"
 
 
+def test_hourly_lane_really_derives_held_by_reason(lane_db):
+    """★적대 리뷰 P2-1: daily에만 mock-free 테스트가 있고 hourly엔 없어서, 시간당 레인의
+    파생 호출을 지우는 변이가 **살아남았다**. 시간당 레인이 탐색의 본진이므로 여기가 조용히
+    죽으면 S1-a는 통째로 무의미해진다 — 같은 병을 두 번 겪지 않도록 대칭으로 채운다."""
+    from app.models import NaverCampaignSettings
+
+    lane_db.add(
+        NaverCampaignSettings(campaign_id=_LANE_CAMPAIGN, auto_operate=True, optimizer="ours")
+    )
+    lane_db.commit()
+
+    result = auto_operator.run_hourly_lane(
+        lane_db, now=datetime(2026, 8, 26, 10, 20), fetch_intraday=lambda *a, **k: []
+    )
+
+    assert result["held"], "픽스처가 hold를 안 만들었다 — 이 테스트가 무의미해진다"
+    counts = result["held_by_reason"]
+    assert counts, "시간당 레인이 held_by_reason을 파생하지 않았다(집계 호출 누락)"
+    assert sum(counts.values()) == len(result["held"])
+    assert set(counts) - {"unknown", "other"}, f"전건이 미분류로 떨어졌다: {counts}"
+
+
 def test_daily_lane_early_return_still_exposes_the_key(lane_db):
     """auto_operate 캠페인이 0이면 조기 반환한다 — 그 경로에서도 키가 있어야 로그가 KeyError를
     안 낸다(로그 라인이 result[...]를 직접 읽기 때문이다)."""
@@ -473,3 +495,155 @@ def test_sweep_actually_calls_the_missed_job(monkeypatch, caplog):
 
     assert calls == ["wisdom"], "결손 감지만 하고 보충 실행을 안 했다"
     assert "naver-inday-catchup" in started
+
+
+# ═══════════ 적대 리뷰 P1-1 수정: 단일 실행 락(같은 잡 이중 실행 금지) ═══════════
+#
+# 리뷰어가 실증한 것: 08:45 판사가 아직 도는 중에 :47 스윕이 func()를 직접 호출하면 같은
+# 후보에 LLM이 두 번 돌고, 나중 커밋이 먼저 커밋을 stale 스냅샷으로 덮어써 **이중 실행
+# 사실 자체가 흔적 없이 사라진다**. 초판의 30분 마진은 보장이 아니었다 —
+# 판사 최악 실행시간은 _MAX_PER_RUN_BACKLOG(15) × 재시도 총합 9분 = **135분**이다.
+
+def test_observation_jobs_are_actually_decorated():
+    """★데코레이터 제거 변이를 죽인다. functools.wraps가 남기는 __wrapped__로 확인한다."""
+    for fn in (
+        scheduler_service.run_naver_wisdom_job,
+        scheduler_service.run_naver_diary_reflection_job,
+        scheduler_service.run_naver_profit_scorecard_job,
+        scheduler_service.run_naver_vault_export_job,
+    ):
+        assert hasattr(fn, "__wrapped__"), f"{fn.__name__}에 singleflight 데코레이터가 없다"
+
+
+def test_job_is_skipped_while_the_same_job_is_running():
+    """★핵심 계약: 락이 잡혀 있으면 잡 본체를 «호출하지 않고» 표식을 돌려준다.
+    본체가 안 돌았다는 것을 DB 접근 0으로 확인한다(_get_own_db_session이 불리면 실패)."""
+    lock = scheduler_service._singleflight_lock("run_naver_wisdom")
+    assert lock.acquire(blocking=False)
+    try:
+        result = scheduler_service.run_naver_wisdom_job()
+    finally:
+        lock.release()
+    assert result is scheduler_service.SKIPPED_ALREADY_RUNNING
+
+
+def test_lock_is_released_even_when_the_job_raises():
+    """락을 놓지 않으면 그 잡이 **영원히** 생략된다 — 조용한 영구 정지다."""
+    calls = []
+
+    @scheduler_service.singleflight("test-raises")
+    def _boom():
+        calls.append(1)
+        raise RuntimeError("의도된 실패")
+
+    with pytest.raises(RuntimeError):
+        _boom()
+    with pytest.raises(RuntimeError):
+        _boom()  # 락이 안 풀렸으면 여기서 SKIPPED가 돌아와 raise가 안 난다
+    assert calls == [1, 1]
+
+
+def test_concurrent_calls_execute_the_body_only_once():
+    """★리뷰어 재현의 축약판 — 동시 호출 시 본체는 한 번만 돈다."""
+    import threading as _t
+
+    entered, released = _t.Event(), _t.Event()
+    bodies = []
+
+    @scheduler_service.singleflight("test-concurrent")
+    def _slow():
+        bodies.append(1)
+        entered.set()
+        released.wait(timeout=5)
+        return "ran"
+
+    outcomes = {}
+    t = _t.Thread(target=lambda: outcomes.setdefault("first", _slow()))
+    t.start()
+    assert entered.wait(timeout=5), "첫 호출이 본체에 못 들어갔다"
+    outcomes["second"] = _slow()   # 첫 호출이 도는 중에 두 번째
+    released.set()
+    t.join(timeout=5)
+
+    assert bodies == [1], "본체가 두 번 돌았다 — 락이 장식이다"
+    assert outcomes["second"] is scheduler_service.SKIPPED_ALREADY_RUNNING
+    assert outcomes["first"] == "ran"
+
+
+def test_sweep_does_not_record_success_when_the_job_was_skipped():
+    """★가장 아픈 자리: 생략을 «성공»으로 기록하면 last_run_at이 전진해 **진짜 결손이
+    영영 안 돈다**. 생략은 성공도 실패도 아니므로 상태를 건드리면 안 된다."""
+    recorded = []
+    _patch = pytest.MonkeyPatch()
+    _patch.setattr(scheduler_service, "_get_own_db_session", lambda: _FakeDB())
+    _patch.setattr(scheduler_service, "_missed_morning_jobs", lambda *a, **k: ["run_naver_wisdom"])
+    _patch.setattr(
+        scheduler_service, "run_naver_wisdom_job",
+        lambda: scheduler_service.SKIPPED_ALREADY_RUNNING,
+    )
+    _patch.setattr(
+        scheduler_service, "_record_catchup_status",
+        lambda job_name, **kw: recorded.append((job_name, kw)),
+    )
+    _patch.setattr(scheduler_service.threading, "Thread", _sync_thread_factory())
+    try:
+        scheduler_service.run_naver_inday_catchup_job()
+    finally:
+        _patch.undo()
+    assert recorded == [], f"생략인데 상태를 기록했다: {recorded}"
+
+
+def _sync_thread_factory():
+    def _sync_thread(target=None, name=None, daemon=None, **kw):
+        class _T:
+            def start(self):
+                target()
+        return _T()
+    return _sync_thread
+
+
+# ═══════════ 적대 리뷰 P2-2 / P2-3: 살아남은 변이 두 개를 닫는다 ═══════════
+
+def test_only_filter_actually_excludes_money_jobs_at_runtime():
+    """★P2-2: 기존 테스트는 frozenset «내용»만 봤다 — 필터를 지우는 변이가 살아남았다.
+    돈 잡을 실제로 seed해서 «런타임에 배제되는지»를 본다. _CATCHUP_ORDER엔 돈 잡이
+    실재하므로(auto_operator_daily·proposals) 이 필터가 §3 금지선의 1차 방어선이다."""
+    now = datetime(2026, 8, 26, 12, 47)
+    states = [
+        _FakeState("run_naver_wisdom", "45 8 * * *", datetime(2026, 8, 25, 8, 45)),
+        _FakeState("run_naver_auto_operator_daily", "50 8 * * *", datetime(2026, 8, 25, 8, 50)),
+        _FakeState("generate_naver_proposals", "0 8 * * *", datetime(2026, 8, 25, 8, 0)),
+    ]
+    db = _StateQueryDB(states)
+    missed = scheduler_service._missed_morning_jobs(
+        db, now, only=scheduler_service._INDAY_CATCHUP_JOBS,
+        min_lag=scheduler_service._INDAY_CATCHUP_MIN_LAG,
+    )
+    assert missed == ["run_naver_wisdom"], f"돈 잡이 스윕 대상에 섞였다: {missed}"
+
+    # 필터 없이 부르면 셋 다 결손으로 잡힌다 — 위 결과가 «필터 덕»임을 증명한다
+    unfiltered = scheduler_service._missed_morning_jobs(
+        _StateQueryDB(states), now, min_lag=scheduler_service._INDAY_CATCHUP_MIN_LAG
+    )
+    assert "run_naver_auto_operator_daily" in unfiltered
+    assert "generate_naver_proposals" in unfiltered
+
+
+def test_sweep_records_success_exactly_once_so_it_is_idempotent():
+    """★P2-3: 성공 기록을 지우는 변이가 살아남았다. 이 줄이 없으면 catch-up 경로로는
+    last_run_at이 절대 안 갱신돼 **매시간 무한 재실행**된다(docstring이 주장하는 멱등성 붕괴)."""
+    recorded = []
+    _patch = pytest.MonkeyPatch()
+    _patch.setattr(scheduler_service, "_get_own_db_session", lambda: _FakeDB())
+    _patch.setattr(scheduler_service, "_missed_morning_jobs", lambda *a, **k: ["run_naver_wisdom"])
+    _patch.setattr(scheduler_service, "run_naver_wisdom_job", lambda: None)
+    _patch.setattr(
+        scheduler_service, "_record_catchup_status",
+        lambda job_name, **kw: recorded.append((job_name, kw.get("ok"))),
+    )
+    _patch.setattr(scheduler_service.threading, "Thread", _sync_thread_factory())
+    try:
+        scheduler_service.run_naver_inday_catchup_job()
+    finally:
+        _patch.undo()
+    assert recorded == [("run_naver_wisdom", True)], f"성공 기록이 정확히 1회가 아니다: {recorded}"
