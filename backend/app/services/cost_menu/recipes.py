@@ -60,6 +60,7 @@ from app.models import (
     ProductMaster,
 )
 from app.services.cost_menu import ledger_check as LC
+from app.services.cost_menu import price_rule as PR
 from app.services.cost_menu import standard_cost as SC
 from app.services.cost_menu.mapping_parser import MappingParseResult, parse_mapping_table
 from app.services.cost_menu.materials import CostMenuConflict, CostMenuError, ledger_check
@@ -73,7 +74,12 @@ from app.services.cost_menu.recipe_parser import (
 #: 원가표 「제품원가(+VAT)」 ↔ `cost_price` 대조 허용 오차(원). 엑셀 부동소수 꼬리만 흡수한다.
 MATCH_TOLERANCE = Decimal("0.05")
 
-DEFAULT_PRICE_RULE = "latest"
+#: ★설정 행이 없을 때만 쓰는 **구현 기본값**이다 — 「지금 쓰는 규칙」이 아니다(D-CPP-60 §0-A).
+#:  구판은 이 상수가 곧 규칙이었고 `cost_standard.price_rule`에도 이 값이 그대로 박혔다.
+#:  그래서 `cost_setting.standard_price_rule`을 바꿔도 계산도, 저장된 규칙 이름도 안 바뀌었다 —
+#:  **저장된 이름조차 「우리가 실제로 쓴 규칙」이 아니라 상수의 사본**이었다.
+#:  이제 실제 규칙은 `price_rule.read_rule(db)`가 읽고, 그 값이 `cost_standard.price_rule`에 간다.
+DEFAULT_PRICE_RULE = PR.DEFAULT_RULE
 
 #: 엑셀 참고값을 단가로 채택할 때 남기는 출처 문구의 접두사. 이 문구가 있으면 그 단가가
 #: 「사람이 엑셀을 보고 승인한 값」임을 화면·감사가 안다.
@@ -1063,28 +1069,26 @@ def _sync_links(db: Session, recipe: CostRecipe, skus: dict[str, Optional[Decima
 # ──────────────────────────────────────────────
 # 단가 해결 → 표준원가
 # ──────────────────────────────────────────────
-def _latest_price(m: CostMaterial) -> tuple[Optional[CostMaterialPrice], str]:
-    """`material_payload`와 **같은 규칙**으로 최신 단가를 고른다.
+def _latest_price(
+    m: CostMaterial, rule: str
+) -> tuple[Optional[CostMaterialPrice], str]:
+    """`material_payload`와 **같은 규칙**으로 단가를 고른다.
 
-    ★재검사를 통과한 행에서만 고른다 — 어긋난 행은 이력에 남되 최신 자리를 못 차지한다
-    (S1 적대 리뷰 1R P1-1). 규칙이 두 벌이 되면 화면의 「최신 단가」와 계산이 갈린다.
+    ★규칙 «본체»는 이제 `price_rule.choose_price` 한 벌뿐이다(D-CPP-60 §0-A). 이 함수는 그
+    호출 껍데기다 — 구판은 여기와 `material_payload`에 정렬이 **복제**돼 있었고 둘 다
+    `cost_setting`을 안 읽어서, `standard_price_rule` 선언이 계산에 닿지 않았다.
+
+    ★`rule`은 **필수 인자**다 — 호출부가 `price_rule.read_rule(db)`로 읽어 넘긴다. 기본값을
+    두면 이 경로만 설정을 안 읽는 상태로 되돌아간다(합격 ⑧).
     """
 
-    from datetime import date as _date
-
-    ordered = sorted(
-        m.prices, key=lambda p: (p.effective_date or _date.min, p.id), reverse=True
-    )
-    if not ordered:
-        return None, LC.STATUS_MISSING
-    for p in ordered:
-        check = ledger_check(p)
-        if check.counts_as_evidence:
-            return p, (LC.STATUS_MANUAL if p.source == "manual" else LC.STATUS_OK)
-    return None, ledger_check(ordered[0]).status
+    choice = PR.choose_price(list(m.prices), rule)
+    return choice.price, choice.status
 
 
-def _line_inputs(recipe: CostRecipe) -> list[SC.RecipeLineInput]:
+def _line_inputs(recipe: CostRecipe, rule: str) -> list[SC.RecipeLineInput]:
+    """구성 줄 → 계산기 입력. `rule`은 **필수**다 — 합격 ⑧의 배선이 여기를 지난다."""
+
     out: list[SC.RecipeLineInput] = []
     for line in recipe.lines:
         material = line.material
@@ -1098,7 +1102,7 @@ def _line_inputs(recipe: CostRecipe) -> list[SC.RecipeLineInput]:
                 )
             )
             continue
-        price, status = _latest_price(material)
+        price, status = _latest_price(material, rule)
         # ★미승인 종의 단가는 쓰지 않는다(`CostMaterial` docstring · 계약 §2-2) — 추론을
         #   확인분으로 만들지 않는다.
         #
@@ -1153,12 +1157,17 @@ def recompute(db: Session, recipe: CostRecipe) -> SC.StandardCostResult:
     것이 계약 §3 금지선이다. 그래서 미승인이면 기존 행을 지우고 결과만 돌려준다.
     """
 
-    result = SC.compute_standard_cost(_line_inputs(recipe))
+    # ★설정을 읽는다 — 「우연히 일치」와 「실제로 읽는다」의 경계가 이 한 줄이다(합격 ⑧).
+    #   모르는 규칙이면 `UnknownPriceRule`이 올라가 계산이 **멈춘다**(조용한 fallback 금지).
+    rule = PR.read_rule(db)
+    result = SC.compute_standard_cost(_line_inputs(recipe, rule))
     row = (
         db.query(CostStandard)
         .filter(
             CostStandard.recipe_id == recipe.id,
-            CostStandard.price_rule == DEFAULT_PRICE_RULE,
+            # ★저장된 규칙 이름도 실제 규칙으로 조회한다 — 상수로 조회하면 설정을 바꾼 뒤
+            #   옛 규칙 행을 찾지 못해 **행이 조용히 둘로 갈라진다.**
+            CostStandard.price_rule == rule,
         )
         .first()
     )
@@ -1171,7 +1180,9 @@ def recompute(db: Session, recipe: CostRecipe) -> SC.StandardCostResult:
         return result
 
     if row is None:
-        row = CostStandard(recipe_id=recipe.id, price_rule=DEFAULT_PRICE_RULE)
+        # ★저장되는 규칙 이름 = **실제로 쓴 규칙**이다. 구판은 상수 사본을 박아서
+        #   `cost_standard.price_rule`이 「우리가 쓴 규칙」이 아니라 「상수의 값」이었다.
+        row = CostStandard(recipe_id=recipe.id, price_rule=rule)
         db.add(row)
     row.std_cost_ex_vat = result.std_cost_ex_vat
     row.std_cost_inc_vat = result.std_cost_inc_vat
@@ -1433,7 +1444,7 @@ def _pick_payload(recipe: CostRecipe) -> dict:
 
 
 def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False) -> dict:
-    result = SC.compute_standard_cost(_line_inputs(recipe))
+    result = SC.compute_standard_cost(_line_inputs(recipe, PR.read_rule(db)))
     try:
         note = json.loads(recipe.note) if recipe.note else None
     except (TypeError, ValueError):
@@ -1487,11 +1498,12 @@ def board(db: Session) -> dict:
     그게 커버리지 착시의 출발점이다.
     """
 
+    rule = PR.read_rule(db)
     recipes = _recipes_query(db).all()
     standards = {
         s.recipe_id: s
         for s in db.query(CostStandard)
-        .filter(CostStandard.price_rule == DEFAULT_PRICE_RULE)
+        .filter(CostStandard.price_rule == rule)
         .all()
     }
     links = db.query(CostRecipeLink).all()
@@ -1513,7 +1525,7 @@ def board(db: Session) -> dict:
     rows: list[dict] = []
     for recipe in recipes:
         std = standards.get(recipe.id)
-        result = SC.compute_standard_cost(_line_inputs(recipe))
+        result = SC.compute_standard_cost(_line_inputs(recipe, rule))
         for link in sorted(by_recipe.get(recipe.id, []), key=lambda x: x.internal_sku):
             pm = masters.get(link.internal_sku)
             std_inc = std.std_cost_inc_vat if std else None

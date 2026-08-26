@@ -45,6 +45,7 @@ from app.models import (
     ImportShipment,
 )
 from app.services.cost_menu import ledger_check as LC
+from app.services.cost_menu import price_rule as PR
 from app.services.cost_menu.matcher import LedgerItem, MaterialRule, Suggestion, suggest
 
 MATERIAL_STATUSES = ("unconfirmed", "approved")
@@ -162,7 +163,10 @@ def _shipment_ref(p: CostMaterialPrice) -> dict | None:
 
 
 def material_payload(
-    m: CostMaterial, prices: list[CostMaterialPrice], used_by: list[dict]
+    m: CostMaterial,
+    prices: list[CostMaterialPrice],
+    used_by: list[dict],
+    rule: str,
 ) -> dict:
     """부자재 1종 + 단가 이력 + **사용처**.
 
@@ -178,6 +182,13 @@ def material_payload(
     ★`latest_price_*`는 **재검사를 통과한 행에서만** 고른다(적대 리뷰 1R P1-1). 어긋난 행은
       이력에 남되(근거 보존) 최신 자리를 못 차지한다. 전부 어긋나면 최신은 «없음»이고,
       `stale_count`가 **왜 없는지**를 화면에 말한다 — 조용히 비는 것과 다르다.
+
+    ★`rule`은 **필수 인자다**(D-CPP-60 §0-A). 구판은 이 함수 «안»에 정렬 규칙을 복제해 갖고
+      있었고 `cost_setting`을 안 읽었다 — 그래서 화면의 「최신 단가」는 계산과 같은 값을 내면서도
+      **같은 규칙을 쓴다는 보장이 없었다.** 이제 둘 다 `price_rule.choose_price` 한 벌을 쓴다.
+    ★`lot_price_min`/`lot_price_max`를 함께 낸다 — 계약 §4-⑥의 「관측 로트 구간」이고,
+      그 폭이 곧 **재고 원장(C1)이 없어서 우리가 못 고르는 폭**이다. 화면이 그걸 자백한다.
+    ★`price_conflict_*`는 §2-5의 자백: 채택은 `ledger`인데 더 늦은 `manual`이 있다.
     """
     ordered = sorted(
         prices,
@@ -185,9 +196,8 @@ def material_payload(
         reverse=True,
     )
     checks = {p.id: ledger_check(p) for p in ordered}
-    eligible = [p for p in ordered if checks[p.id].counts_as_evidence]
-    stale = [p for p in ordered if not checks[p.id].counts_as_evidence]
-    latest = eligible[0] if eligible else None
+    choice = PR.choose_price(list(prices), rule)
+    latest = choice.price
     return {
         "id": m.id,
         "name": m.name,
@@ -208,15 +218,23 @@ def material_payload(
         "part": m.part,
         "note": m.note,
         # 근거로 세는 로트 = 원장 파생 + 재검사 통과분.
-        "lot_count": sum(
-            1 for p in eligible if p.source == "ledger"
-        ),
+        "lot_count": choice.lot_count,
         "price_count": len(ordered),
         # ★어긋난 연결 수. 0이 아니면 화면이 「최신 단가에서 왜 빠졌나」를 말해야 한다.
-        "stale_count": len(stale),
+        "stale_count": choice.stale_count,
         "latest_price_ex_vat": _d(latest.unit_price_ex_vat) if latest else None,
         "latest_price_inc_vat": _d(latest.unit_price_inc_vat) if latest else None,
         "latest_price_source": latest.source if latest else None,
+        # ★적용된 규칙을 **값과 함께** 낸다 — 「이 숫자가 어느 규칙의 산물인가」를 화면이
+        #   말할 수 있어야 설정 변경이 화면에서 보인다(합격 ⑧).
+        "price_rule": choice.rule,
+        # ★관측 로트 구간(계약 §4-⑥). 로트가 1건이면 min==max이고 폭이 0이다 — 그것도 사실이다.
+        "lot_price_min": _d(choice.lot_min),
+        "lot_price_max": _d(choice.lot_max),
+        "lot_price_has_span": choice.has_span,
+        # ★§2-5 자백 — 채택은 `ledger`인데 더 늦은 `manual`이 있다.
+        "price_conflict": choice.conflict,
+        "price_conflict_price_id": choice.conflict_price_id,
         "prices": [price_payload(p, checks[p.id]) for p in ordered],
         # ★사용처 — 「이 부자재가 어느 제품에 들어가는가」. 없으면 빈 목록이고, 그건
         #   «아직 어느 레시피도 이 종을 안 쓴다»는 사실이지 미상이 아니다.
@@ -291,13 +309,18 @@ def payload_with_usage(db: Session, m: CostMaterial) -> dict:
     ★라우터의 단일 종 응답 7곳이 전부 이 함수를 지나게 한다. 각자 `usage_map`을 부르면
     그중 하나가 빠지고, 그 화면만 사용처가 비어 보인다."""
 
-    return material_payload(m, list(m.prices), usage_map(db, [m.id]).get(m.id, []))
+    return material_payload(
+        m, list(m.prices), usage_map(db, [m.id]).get(m.id, []), PR.read_rule(db)
+    )
 
 
 def list_materials(db: Session) -> list[dict]:
     rows = _materials_query(db).order_by(CostMaterial.name).all()
     usage = usage_map(db, [m.id for m in rows])
-    return [material_payload(m, list(m.prices), usage.get(m.id, [])) for m in rows]
+    rule = PR.read_rule(db)
+    return [
+        material_payload(m, list(m.prices), usage.get(m.id, []), rule) for m in rows
+    ]
 
 
 def ledger_material_lines(db: Session) -> list[dict]:
