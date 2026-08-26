@@ -19,6 +19,10 @@
 //      선적은 실제 정산 창이 한 칸 밀려 있을 수 있고, 대조가 어긋나면 첫 번째 후보다.
 //   ④ **draft 선적이 합계에 들어 있는 것** — 빼면 픽업이 축소되고, 말없이 넣으면 확정된 창과
 //      구별이 사라진다.
+//   ⑤ **미분류(`unknown`) 라인** — `line_type` 기본값이 `unknown`이고 분류는 사람이 나중에
+//      한다. 즉 **갓 적재된 선적은 전부 미분류다.** 이 칸을 안 그리면 「상품 0 · 부자재 0」인데
+//      픽업 합계만 서 있는 화면이 되고, 그 차이를 설명하는 글자가 한 자도 없다(적대 리뷰 P1-1).
+//      그래서 상품·부자재와 **같은 격으로** 칸을 둔다 — 세 칸의 합이 곧 픽업 합계다.
 import { Card, Table, Th, Td, Badge, EmptyState } from "../components/ui";
 import { num } from "../lib/format";
 import type { OtaoSettlement, OtaoSettlementWindow } from "../lib/api";
@@ -117,6 +121,9 @@ export default function OtaoSettlementPanel({ data }: { data: OtaoSettlement }) 
             {/* ★자백 ② — 부자재를 상품과 «같은 칸»에 넣지 않는다. */}
             <Th right>부자재 수량</Th>
             <Th right>부자재 {data.currency}</Th>
+            {/* ★자백 ⑤ — 미분류를 안 그리면 보이는 칸의 합이 픽업 합계와 안 맞는다. */}
+            <Th right>미분류 수량</Th>
+            <Th right>미분류 {data.currency}</Th>
             <Th right>픽업 합계 {data.currency}</Th>
             <Th right>실제 지급액</Th>
             <Th>대조</Th>
@@ -145,6 +152,25 @@ export default function OtaoSettlementPanel({ data }: { data: OtaoSettlement }) 
               {w.material_amount_cny ? cny(w.material_amount_cny) : <span className="text-gray-300">0</span>}
             </Td>
             <Td right>
+              {w.other_quantity ? (
+                <span
+                  className="text-amber-700"
+                  title="아직 분류되지 않은(unknown) 라인입니다 — 「상품」도 「부자재」도 아직 아닙니다. 갓 적재된 선적은 분류 전이라 전부 여기 있습니다."
+                >
+                  {num(w.other_quantity)} ⚠
+                </span>
+              ) : (
+                <span className="text-gray-300">0</span>
+              )}
+            </Td>
+            <Td right>
+              {w.other_amount_cny ? (
+                <span className="text-amber-700">{cny(w.other_amount_cny)} ⚠</span>
+              ) : (
+                <span className="text-gray-300">0</span>
+              )}
+            </Td>
+            <Td right>
               <span className="font-medium">{cny(w.total_amount_cny)}</span>
             </Td>
             {/* ★null을 0으로 그리지 않는다 — 「0원 지급」이 아니라 「모른다」다. */}
@@ -164,6 +190,8 @@ export default function OtaoSettlementPanel({ data }: { data: OtaoSettlement }) 
           <Td right>{cny(t.product_amount_cny)}</Td>
           <Td right>{num(Number(t.material_quantity ?? 0))}</Td>
           <Td right>{cny(t.material_amount_cny)}</Td>
+          <Td right>{num(Number(t.other_quantity ?? 0))}</Td>
+          <Td right>{cny(t.other_amount_cny)}</Td>
           <Td right>
             <span className="font-semibold">{cny(t.total_amount_cny)}</span>
           </Td>

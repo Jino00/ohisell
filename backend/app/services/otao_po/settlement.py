@@ -53,6 +53,16 @@ SKU별 예약 잔량을 재는 자리니까. 그런데 **지급액은 부자재�
 경계 ±`_BOUNDARY_DAYS`일 안에 든 선적을 `boundary_shipment_ids`로 **지목해서** 내보낸다 —
 대조가 어긋났을 때 「왜」의 첫 번째 후보이기 때문이다. 숨기면 그 창은 영문 모를 불일치가 된다.
 
+## ★미분류(`unknown`)는 «새 선적의 기본 상태»다 — 화면에서 빠지면 안 된다
+
+`ImportInvoiceLine.line_type`의 기본값이 `"unknown"`이고 적재 라우터도 그 값으로 넣는다.
+분류는 **사람이 나중에 확정한다**(원장 계약 §2-4). ⇒ **갓 적재된 선적은 항상 전부 미분류다.**
+
+그러니 미분류를 `product`로 접으면 「모름」이 「상품」으로 승격되고, 반대로 화면에서 빼면
+**보이는 칸(상품+부자재)의 합이 픽업 합계와 안 맞는데 그 차이를 설명하는 글자가 없다.**
+둘 다 안 된다 — 그래서 `other_*`로 **갈라서 싣고 화면도 칸을 따로 둔다.** 적대 리뷰 P1-1이
+정확히 이 자리였다(값은 맞는데 사람에게 안 닿았다).
+
 ## ★확정 안 된 선적을 조용히 섞지 않는다
 
 `status`는 `draft`/`confirmed` 둘뿐이고 **검산 3종을 통과해야 confirmed가 된다**(원장 계약 §3).
@@ -324,6 +334,12 @@ def build_settlement(
             f"부자재(cleaning kits 등) {out.totals['material_quantity']:,.0f}개 "
             f"{out.totals['material_amount_cny']:,.0f} CNY는 지급액에 들어가지만 "
             "S1의 «픽업 누계» 칸에는 안 들어간다(그 칸은 판매 SKU만 센다) — 두 숫자가 다른 이유다."
+        )
+    if out.totals["other_amount_cny"]:
+        out.notes.append(
+            f"아직 분류되지 않은(미분류) 라인이 {out.totals['other_quantity']:,.0f}개 "
+            f"{out.totals['other_amount_cny']:,.0f} CNY 있다 — 픽업 «합계»에는 들어가 있고 "
+            "상품·부자재 어느 칸에도 안 들어간다. 갓 적재된 선적은 분류 전이라 전부 여기 있다."
         )
     if out.totals["boundary_shipments"]:
         out.notes.append(

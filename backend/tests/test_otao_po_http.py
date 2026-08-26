@@ -439,3 +439,49 @@ def test_settlement_empty_ledger_says_so_instead_of_showing_zeros(env):
     assert body["ledger_empty"] is True
     assert body["windows"] == []
     assert any("픽업 0이 아니다" in n for n in body["notes"])
+
+
+def test_settlement_body_carries_every_totals_key(env):
+    """★적대 리뷰 변이 M7 생존분 — 라우터가 `totals`에서 `Decimal` 값을 거른 뒤 명시 키로
+    다시 채운다. 재기입을 하나라도 빠뜨리면 그 합계가 body에서 **조용히 사라지고** 화면의
+    합계 줄만 비는데, 서비스층 테스트는 그걸 원리적으로 못 본다.
+    """
+    tc, s = env
+    _seed_settlement(s)
+
+    totals = tc.get("/api/otao-po/settlement").json()["totals"]
+    for key in ("windows", "shipments", "lines",
+                "product_quantity", "product_amount_cny",
+                "material_quantity", "material_amount_cny",
+                "other_quantity", "other_amount_cny", "total_amount_cny",
+                "draft_shipments", "boundary_shipments"):
+        assert key in totals, f"totals에 {key}가 없다"
+    assert totals["total_amount_cny"] == 3520.0
+    assert totals["material_amount_cny"] == 1920.0
+
+
+def test_settlement_body_shows_unclassified_lines(env):
+    """★적대 리뷰 P1-1 — 미분류 금액이 body까지 와야 화면이 칸을 그릴 수 있다."""
+    tc, s = env
+    sh = ImportShipment(
+        hbl_no="SETR-NEW", declaration_date=date(2026, 8, 18), status="draft",
+        currency="CNY", fx_rate=Decimal("209.88"),
+    )
+    session_add = s.add
+    session_add(sh)
+    s.flush()
+    # ★`line_type`을 지정하지 «않는다» — 적재 직후의 실제 모양이다.
+    session_add(
+        ImportInvoiceLine(
+            shipment_id=sh.id, seq=1, item_name="갓 적재된 줄",
+            quantity=Decimal(100), unit_price_foreign=Decimal(3),
+        )
+    )
+    s.commit()
+
+    body = tc.get("/api/otao-po/settlement").json()
+    w = body["windows"][0]
+    assert w["other_amount_cny"] == 300.0
+    assert w["product_amount_cny"] == 0.0
+    assert w["total_amount_cny"] == 300.0
+    assert any("미분류" in n for n in body["notes"])

@@ -408,3 +408,56 @@ def test_payment_for_an_unknown_window_does_not_invent_a_window(session):
     s = build_settlement(session, payments={"2025-11": 100})
     assert [w.key for w in s.windows] == list(_PROD_WINDOWS)
     assert s.reconciliation["windows_compared"] == 0
+
+
+# ── ⑦ 적대 리뷰 1R 상환분 (PR #486) ─────────────────────────────────────
+
+
+def test_january_window_rolls_back_into_the_previous_december(session):
+    """★리뷰 변이 M6 생존분 — 1월 창의 시작이 «전년» 12월 20일이어야 한다.
+
+    연도를 안 되돌리면 창 시작이 창 «끝»보다 뒤로 가고(2026-12-20 ~ 2026-01-19), 그러면
+    1월 창의 픽업이 통째로 사라지거나 엉뚱한 창에 붙는다. 전건 초록이던 자리라 잠근다.
+    """
+    _line(session, _shipment(session, date(2026, 1, 5), hbl="JAN"), qty=10, price=1)
+    session.commit()
+    w = build_settlement(session).windows[0]
+    assert (w.key, w.start, w.end) == ("2026-01", date(2025, 12, 20), date(2026, 1, 19))
+    assert w.start < w.end, "창 시작이 끝보다 뒤면 그 창은 아무것도 담지 못한다"
+
+
+def test_unclassified_lines_are_confessed_in_notes(session):
+    """★적대 리뷰 P1-1 — 미분류가 합계엔 들어가는데 상품·부자재 어느 칸에도 없다.
+
+    `line_type` 기본값이 `unknown`이고 분류는 사람이 나중에 하므로 **갓 적재된 선적은 전부
+    이 상태다.** 화면이 이 사실을 말하지 않으면 「상품 0 · 부자재 0」인데 픽업 합계만 서 있는
+    표가 되고, 그 차이를 설명하는 글자가 한 자도 없다.
+    """
+    sh = _shipment(session, date(2026, 8, 18))
+    _line(session, sh, qty=5000, price=2, line_type="unknown", seq=1)
+    session.commit()
+    s = build_settlement(session)
+    assert int(s.totals["other_amount_cny"]) == 10000
+    assert any("미분류" in n for n in s.notes), "미분류를 자백하는 문장이 없다"
+    # 보이는 세 칸(상품·부자재·미분류)의 합이 픽업 합계와 같아야 화면이 앞뒤가 맞는다.
+    w = s.windows[0]
+    assert (
+        w.product_amount_cny + w.material_amount_cny + w.other_amount_cny
+        == w.total_amount_cny
+    )
+
+
+def test_a_freshly_ingested_shipment_is_entirely_unclassified(session):
+    """적재 직후 상태 자체를 재현한다 — `line_type`을 «지정하지 않으면» 전부 미분류다."""
+    sh = _shipment(session, date(2026, 8, 18))
+    session.add(
+        ImportInvoiceLine(
+            shipment_id=sh.id, seq=1, item_name="갓 적재된 줄",
+            quantity=Decimal(100), unit_price_foreign=Decimal(3),
+        )
+    )
+    session.commit()
+    w = build_settlement(session).windows[0]
+    assert int(w.product_amount_cny) == 0
+    assert int(w.other_amount_cny) == 300
+    assert int(w.total_amount_cny) == 300
