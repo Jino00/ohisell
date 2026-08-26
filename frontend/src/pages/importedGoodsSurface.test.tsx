@@ -23,13 +23,14 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, cleanup, within } from "@testing-library/react";
 
+import { LedgerMaterialLines, StandardCostBoard } from "./CostPage";
+// ★순수 헬퍼는 `CostPage.tsx`가 아니라 lib에 산다 — 컴포넌트 파일에서 함수를 export 하면
+//   `react-refresh/only-export-components`가 울고 CI lint 상한(96)을 넘는다.
 import {
-  LedgerMaterialLines,
-  StandardCostBoard,
   IMPORTED_GOODS_CATEGORY,
   isImportedGoodsMaterial,
   pickableProductLines,
-} from "./CostPage";
+} from "../lib/costImportedGoods";
 import type {
   CostBoard,
   CostBoardRow,

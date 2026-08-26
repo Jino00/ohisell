@@ -63,6 +63,10 @@ import {
   sweepSummaryText,
   triggerLabel,
 } from "../lib/costMenuSurface";
+import {
+  isImportedGoodsMaterial,
+  pickableProductLines,
+} from "../lib/costImportedGoods";
 
 export type CostTab = "materials" | "recipes" | "board";
 
@@ -184,33 +188,6 @@ export function unreachableReason(
   }
   const name = materials.find((m) => m.id === id)?.name;
   return `「${name ?? `종 id=${id}`}」의 라인인데 그 종이 지금 필터 밖이라 고를 수 없다 — 필터를 풀면 종별 표에서 보인다`;
-}
-
-/** `cost_material.category` — 수입 완제품 종의 표지 (백엔드 `IMPORTED_GOODS_CATEGORY`와 같은 값). */
-export const IMPORTED_GOODS_CATEGORY = "수입 완제품";
-
-/** 이 종에 원장 `product` 라인을 붙일 수 있나 (계약 D-CPP-61 §4-Q1).
- *
- * ★표지가 서는 자리는 **픽 하나뿐**이다 — 사람이 「이 레시피는 수입 완제품이다」라고 고른
- * 순간이고, 그 앞엔 아무 문도 안 열려 있다. 그래서 이 판정을 화면이 스스로 넓히면 안 된다. */
-export function isImportedGoodsMaterial(m: CostMaterial | null): boolean {
-  return m?.category === IMPORTED_GOODS_CATEGORY;
-}
-
-/** 이 수입 완제품 종에 **고를 수 있는** 원장 완제품 라인 — 아직 아무 종에도 안 붙은 것 + 이 종 것.
- *
- * ★남의 종에 이미 붙은 라인은 뺀다(같은 로트가 두 번 세지면 이력이 거짓말이 된다 —
- * `link_ledger_line`의 dup 규율과 같은 이유). 이 종에 붙은 것은 남긴다: 붙어 있는 것이
- * 안 보이면 「연결했나 안 했나」를 화면이 못 말한다. */
-export function pickableProductLines(
-  rows: CostLedgerMaterialLine[],
-  materialId: number,
-): CostLedgerMaterialLine[] {
-  return rows.filter(
-    (r) =>
-      r.line_type === "product" &&
-      (r.linked_material_id === null || r.linked_material_id === materialId),
-  );
 }
 
 /** 원장 라인이 하나라도 가리키는 종의 id 집합 = **수입 종**. */
