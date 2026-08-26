@@ -48,7 +48,7 @@ _Q2 = Decimal("0.01")
 _Z  = Decimal("0")
 _VAT_DIVISOR = Decimal("1.1")       # VAT 포함 → 공급가(부가세 제외) 환산
 # 택배 물리배송 1건당 단가(VAT 포함). 일반배송 기본가이자 shipping_cost_paid 결측 폴백 —
-# N배송(도착보장 3,020)은 주문 행의 shipping_cost_paid 스냅샷에서 읽는다(order_delivery 단가표).
+# N배송(도착보장 3,377)은 주문 행의 shipping_cost_paid 스냅샷에서 읽는다(order_delivery 단가표).
 _HANJIN_PER_SHIPMENT = Decimal("1900")
 
 
@@ -104,12 +104,12 @@ def logistics_totals(db: Session, start, end) -> tuple[int, Decimal]:
 
     메인 엔진(profit_calculator)과 동일 기준 — 매출 제외 주문은 빼고, 배송(패키지)당 1회.
     ★2026-08-03: 정액 1,900 × 배송건수 → 패키지별 max(단가)의 합으로 교체.
-      N배송(도착보장)은 3,020이라 정액을 곱하면 과소계상된다(D-NAO-84 단가표).
+      N배송(도착보장)은 3,377이라 정액을 곱하면 과소계상된다(order_delivery 단가표).
       패키지 내 단가가 갈리면 max(보수) — profit_calculator._shipment_cost_map과 같은 규칙.
 
     ★단가 폴백 3단(codex 리뷰 P1): shipping_cost_paid → delivery_attribute_type → 1,900.
       2단이 필요한 이유: 메인 엔진은 order_delivery를 통해 스냅샷이 없으면 배송속성으로
-      3,020을 복구하는데, SQL이 곧장 1,900으로 떨어지면 **같은 주문에 두 엔진이 다른
+      3,377을 복구하는데, SQL이 곧장 1,900으로 떨어지면 **같은 주문에 두 엔진이 다른
       배송비**를 쓴다. 두 엔진 정합이 이 변경의 목적이므로 폴백 경로까지 맞춘다.
       (현재 라이브 NULL 행은 1건뿐이고 그마저 반품이라 금액 영향 0 — 구조로 막는 것이다.)
 
