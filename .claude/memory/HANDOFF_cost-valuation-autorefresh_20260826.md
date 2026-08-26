@@ -108,9 +108,10 @@ PR **#466 머지 `787d1b6e`** + **#468 머지 `d3d91745`** · CI 각 **3/3 실�
   → CI 3/3 실통과 → 머지 787d1b6e
   → prod 배포: safe_deploy.sh --migrate --restart(무중단 0초) + --frontend
   → 기록물 PR #468(완료 QA 판정 + 계약 개정 2 + 트랙 확인줄) → CI 3/3 → 머지 d3d91745
+  → 기록물 PR #469(이 HANDOFF + 체인 등록부) → CI 3/3 → 머지 fe7ad082
 멈춘 단계: 없음
 재개 명령: 해당 없음
-리뷰 판정: PASS(P1 0) — #466 / ⚠️ 리뷰 생략: 기록물만 — CONTRACT_cost_valuation_autorefresh.md · track_cost-truth-ledger.md (#468)
+리뷰 판정: PASS(P1 0) — #466 / ⚠️ 리뷰 생략: 기록물만 — #468(계약·트랙) · #469(HANDOFF·등록부)
 ```
 ★**`--force` 미사용** — CI가 실제로 초록이었다.
 ★**L5로 「main에 세워둔다」는 생략** — 로컬 `main`이 공유 메인 폴더에 체크아웃돼 있다. 다음 세션은
