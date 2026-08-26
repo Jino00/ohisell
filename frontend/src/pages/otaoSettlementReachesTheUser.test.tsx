@@ -246,12 +246,21 @@ describe("★S2 정산 창이 사람에게 닿는 경로", () => {
     expect(cells[9]).toBe("33,920"); // 픽업 합계
   });
 
-  it("합계 줄이 prod 총액(310,742 CNY)을 그대로 그린다", async () => {
+  it("합계 줄이 prod 총액(310,742 CNY)을 그대로 그린다 — 칸 «자리»까지", async () => {
     await renderApp();
     const total = (await screen.findByText("합계")).closest("tr")!;
     expect(total.textContent).toContain("310,742");
     expect(total.textContent).toContain("282,662");
     expect(total.textContent).toContain("28,080");
+
+    // ★2R P2(R4) — 합계 줄의 미분류 두 칸을 지워도 581 passed였다. 열 머리는 12개인데 합계
+    //   줄만 10칸이 되면 「픽업 합계」가 미분류 열 «아래»로 밀려 표가 통째로 어긋난다.
+    //   문자열 포함 검사로는 원리적으로 못 잡는 자리라 **자리(index)로** 못 박는다.
+    const cells = Array.from(total.querySelectorAll("td")).map((td) => td.textContent?.trim());
+    expect(cells.length).toBe(12);
+    expect(cells[7]).toBe("0"); // 미분류 수량 (prod 실측 0)
+    expect(cells[8]).toBe("0"); // 미분류 CNY
+    expect(cells[9]).toBe("310,742"); // 픽업 합계가 «제자리»에 있다
   });
 
   it("SUR-S5: ★`reconciled: null`이 「대조 불가」로 그려진다 — 「일치」로도 「차액」으로도 그리지 않는다", async () => {
