@@ -6242,3 +6242,70 @@ export interface OtaoRoster {
 export function fetchOtaoRoster(): Promise<OtaoRoster> {
   return fetchApi<OtaoRoster>("/api/otao-po/roster");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 — 채널 통합 판매 시계열 (계약 §4 S3 · 체인 `발주예측` n=6)
+//
+// ★축이 발주 로스터와 **다르다**: 여기는 `product_master.internal_sku`(OHI-…), 로스터는
+//   발주서의 `product_code`(GAPIP…). 둘은 prod에서 0% 겹치고 다리가 아직 없다.
+//   그래서 두 표를 같은 줄에 놓지 않는다 — 이으면 「말이 되는 것처럼 보이는 거짓 대비」다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface OtaoSalesChannel {
+  key: string;
+  label: string;
+  company: string;
+  sell_type: string;
+  source_table: string;
+  /** 이 채널의 SKU 다리. 틀리면 예외가 아니라 «0%»가 나온다 */
+  bridge: string;
+  rows: number;
+  quantity: number;
+  quantity_mapped: number;
+  /** 취소·반품으로 «뺀» 몫. 조용히 빼지 않는다 */
+  quantity_excluded: number;
+  /** ★한 채널 상품 ID가 서로 다른 상품 여러 개를 가리켜 «안 붙인» 수량. 고르면 발주 오염이다 */
+  quantity_ambiguous: number;
+  /** ★수량 기준. null = 분모가 0이라 «잴 수 없음»(0%가 아니다) */
+  mapping_rate: number | null;
+  days_with_rows: number;
+  /** ★false = 「판매 0」과 「데이터 없음」을 가를 근거가 이 채널엔 없다 */
+  missing_day_evidence: boolean;
+  days_collected_zero: string[];
+  days_no_data: string[];
+}
+
+export interface OtaoSalesRow {
+  internal_sku: string;
+  product_name: string | null;
+  total: number;
+  by_channel: Record<string, number>;
+  /** ★일별 판매수량. `OtaoSales.dates`와 **자리로** 대응한다 — 이게 「시계열」의 본체다 */
+  series: number[];
+}
+
+export interface OtaoSales {
+  window_start: string;
+  window_end: string;
+  days: number;
+  /** 창의 날짜 축. `rows[*].series`가 이 배열과 자리로 대응한다 */
+  dates: string[];
+  channels: OtaoSalesChannel[];
+  rows: OtaoSalesRow[];
+  daily: { date: string; total: number; by_channel: Record<string, number> }[];
+  /** 상품코드에 못 붙은 판매 수량(채널별). 숨기면 그만큼 수요가 사라진다 */
+  unmapped: { channel: string; quantity: number }[];
+  /** ★발주 축과의 다리 상태. overlap=0이면 두 축을 같은 줄에 놓을 수 없다는 뜻 */
+  order_axis: {
+    order_axis_codes: number;
+    sales_axis_skus: number;
+    overlap: number;
+    order_codes_reached_by_name_map: number;
+    note: string;
+  };
+  notes: string[];
+}
+
+export function fetchOtaoSales(days = 60): Promise<OtaoSales> {
+  return fetchApi<OtaoSales>(`/api/otao-po/sales?days=${days}`);
+}

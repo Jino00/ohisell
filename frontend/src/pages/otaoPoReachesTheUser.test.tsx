@@ -97,6 +97,13 @@ vi.mock("../lib/api", async () => {
   return {
     ...actual,
     fetchOtaoRoster: vi.fn(async () => payload),
+    // ★S3 판매 축은 같은 화면에 살지만 이 파일이 재는 것은 **발주 3칸**이다. 그쪽 표면은
+    //   `otaoSalesReachesTheUser.test.tsx`가 따로 잡는다. 여기서 일부러 «실패»시키는 이유는,
+    //   판매 쪽이 죽어도 **발주 3칸은 그대로 보여야** 하기 때문이다 — 한쪽 실패가 다른 쪽을
+    //   지우면 화면이 「없다」고 거짓말한다. 그 격리를 이 mock이 매번 검사한다.
+    fetchOtaoSales: vi.fn(async () => {
+      throw new Error("이 파일은 발주 3칸만 잰다");
+    }),
     // 레이아웃이 부르는 헬스/스케줄러류는 조용히 실패해도 이 화면 판정과 무관하다.
     fetchHealth: vi.fn(async () => { throw new Error("not needed"); }),
     fetchSchedulerStatus: vi.fn(async () => { throw new Error("not needed"); }),

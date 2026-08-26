@@ -19,13 +19,14 @@ body에서 조용히 지워, 서비스층 테스트가 전부 초록인데 화�
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import OtaoItemNameMap, OtaoPurchaseOrder
 from app.services.otao_po.roster import build_roster
+from app.services.otao_po.sales import build_sales_timeseries
 
 router = APIRouter(prefix="/api/otao-po", tags=["otao-po"])
 
@@ -93,4 +94,58 @@ def get_roster(db: Session = Depends(get_db)) -> dict:
             "name_map_total": map_total,
             "name_map_resolved": map_resolved,
         },
+    }
+
+
+@router.get("/sales")
+def get_sales(
+    days: int = Query(60, ge=1, le=365), db: Session = Depends(get_db)
+) -> dict:
+    """S3 — 채널 통합 SKU별 판매수량 시계열 · 채널별 매핑률 · 결손일 구분.
+
+    화면이 반드시 말해야 하는 것(계약 §2-8·§2-9 · `sales.py` docstring):
+      ① **결손 구분 근거가 없는 채널이 어디인가**(`missing_day_evidence=false`) — 그 채널의 빈
+         날을 0으로도 결손으로도 단정하지 않는다.
+      ② **매핑 못 붙은 판매 수량**(`unmapped`) — 조용히 빼면 그만큼 수요가 사라진다.
+      ③ **발주 축과의 다리 상태**(`order_axis`) — 겹치는 값이 0이면 이 판매 숫자를 예약 잔량과
+         같은 줄에 놓을 수 없다는 뜻이고, 화면이 그렇게 말해야 한다.
+
+    ★`response_model`을 쓰지 않는 이유는 `/roster`와 같다(교훈 #321) — 자백 필드가 조용히
+    지워지면 화면엔 아무 일도 없는 것처럼 보인다. 테스트가 **HTTP body를** 단언한다.
+    """
+    ts = build_sales_timeseries(db, days=days)
+    return {
+        "window_start": ts.window_start.isoformat(),
+        "window_end": ts.window_end.isoformat(),
+        "days": days,
+        # ★`rows[*].series`가 이 배열과 «자리로» 대응한다. 없으면 시계열이 좌표를 잃는다.
+        "dates": ts.dates,
+        "channels": [
+            {
+                "key": c.key,
+                "label": c.label,
+                "company": c.company,
+                "sell_type": c.sell_type,
+                "source_table": c.source_table,
+                "bridge": c.bridge,
+                "rows": c.rows,
+                "quantity": c.quantity,
+                "quantity_mapped": c.quantity_mapped,
+                "quantity_excluded": c.quantity_excluded,
+                # ★한 채널 상품 ID가 여러 상품을 가리켜 «안 붙인» 수량(적대 리뷰 P1-1)
+                "quantity_ambiguous": c.quantity_ambiguous,
+                "mapping_rate": c.mapping_rate,
+                "days_with_rows": c.days_with_rows,
+                # ★false면 「결손일과 판매 0을 구분할 근거가 없다」는 뜻이다.
+                "missing_day_evidence": c.missing_day_evidence,
+                "days_collected_zero": c.days_collected_zero,
+                "days_no_data": c.days_no_data,
+            }
+            for c in ts.channels
+        ],
+        "rows": ts.rows,
+        "daily": ts.daily,
+        "unmapped": [{"channel": k, "quantity": v} for k, v in ts.unmapped.items()],
+        "order_axis": ts.order_axis,
+        "notes": ts.notes,
     }
