@@ -372,11 +372,16 @@ def ledger_material_lines(db: Session, *, include_products: bool = False) -> lis
     if linked_ids:
         visible = or_(visible, ImportInvoiceLine.id.in_(linked_ids))
 
-    # 종류 필터: 부자재는 항상 · 수입 완제품은 옵트인이거나 **이미 붙어 있으면** 항상.
+    # 종류 필터: 부자재는 항상 · 수입 완제품은 옵트인이면 항상 · 그리고 **이미 붙어 있는
+    # 라인은 종류를 불문하고 언제나**.
+    #
+    # ★두 갈래를 `elif`로 두면 비대칭이 생긴다 (적대 리뷰 1R P2-3): 옵트인을 «켰을 때만»
+    #   `linked_ids` 갈래가 빠져서, 원장에서 `material`·`product`가 아닌 종류로 재분류된
+    #   «이미 연결된» 라인이 그때만 목록에서 사라진다 — 1R P1-1이 고친 병의 반쪽 재발이다.
     kind = ImportInvoiceLine.line_type == "material"
     if include_products:
         kind = or_(kind, ImportInvoiceLine.line_type == "product")
-    elif linked_ids:
+    if linked_ids:
         kind = or_(kind, ImportInvoiceLine.id.in_(linked_ids))
 
     rows = (

@@ -66,6 +66,7 @@ from app.services.cost_menu.mapping_parser import (
     FORM_SOURCE_FALLBACK,
     FORM_SOURCE_RULE,
     MappingParseResult,
+    form_source_for,
     parse_mapping_table,
 )
 from app.services.cost_menu.materials import (
@@ -836,7 +837,15 @@ def _material_for_name(
     m = db.query(CostMaterial).filter(CostMaterial.name == name).first()
     if m is not None:
         if category != "부자재" and m.category != category:
+            # ★**조용히 바꾸지 않는다** (적대 리뷰 1R P2-1). 이 한 줄이 §4-Q1이 「픽 하나뿐」
+            #   이라고 못 박은 표지를 세우는 자리라, 이름이 겹치는 기존 부자재 종이 여기서
+            #   수입 완제품이 되면 그 종에 원장 `product` 라인 문이 영구히 열린다. 사람의
+            #   명시적 행위(픽)이므로 허용하되 **무엇이 언제 바뀌었는지 종에 남긴다** —
+            #   나중에 「이 종이 왜 수입 완제품이지?」에 답할 수 있어야 한다.
+            before = m.category
             m.category = category
+            stamp = f"[{datetime.now():%Y-%m-%d %H:%M}] 픽으로 분류 변경: {before or '(없음)'} → {category}"
+            m.note = f"{m.note}\n{stamp}" if m.note else stamp
             db.flush()
         return m
     m = CostMaterial(
@@ -1519,6 +1528,10 @@ def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False)
         "status": recipe.status,
         "source": recipe.source,
         "recipe_kind": recipe.recipe_kind,
+        # ★레시피 «탭»이 폼팩터의 출처를 말할 수 있게 payload에 싣는다 (적대 리뷰 1R P1-2).
+        #   보드에만 있으면 픽이 일어나는 그 탭에서 픽의 결과가 안 보인다.
+        "form_source": (note or {}).get("form_source")
+        or form_source_for(recipe.form_factor),
         "anomaly_flag": recipe.anomaly_flag,
         "approved_at": recipe.approved_at.isoformat() if recipe.approved_at else None,
         "match": note,
@@ -1618,7 +1631,11 @@ def board(db: Session) -> dict:
                     "recipe_product_name": recipe.product_name,
                     "form_factor": recipe.form_factor,
                     # ★폼팩터를 규칙으로 얻었나 폴백으로 단정했나 (계약 D-CPP-61 §4-Q2).
-                    "form_source": saved.get("form_source"),
+                    #   저장된 값이 없으면 **파생**한다(적대 리뷰 1R P1-2) — 안 그러면 이미
+                    #   있는 100건은 매핑 정본을 다시 올려야 배지가 뜨고, 그건 §5가 「사람
+                    #   단계 없이 판정 가능」이라 못 박은 합격 5와 어긋난다.
+                    "form_source": saved.get("form_source")
+                    or form_source_for(recipe.form_factor),
                     "recipe_kind": recipe.recipe_kind,
                     "recipe_status": recipe.status,
                     "link_status": link.status,

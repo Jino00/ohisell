@@ -1770,6 +1770,28 @@ export function RecipeList({
                   상세를 일일이 열지 않으면 「사람이 없다고 확인한 것」과 「아직 아무도 안 본 것」이
                   100건 목록에서 똑같이 보인다 — 침묵과 판정이 다시 뭉개지는 자리였다. */}
               <PickStateBadge pick={r.picked} />
+              {/* ★D-CPP-61 합격 1·5 — **픽이 일어나는 이 탭에서** 픽의 결과가 보여야 한다
+                  (적대 리뷰 1R P1-1·P1-2). 초판은 배지를 보드에만 뒀는데, 보드는 다른 탭이고
+                  **링크 없는 레시피는 보드에 행 자체가 안 선다** — 방금 픽한 것이 어디에도
+                  안 보이는 상태였다. 바로 위 주석이 같은 지적(합격 19)을 이미 기록해 뒀는데
+                  이번 슬라이스가 같은 자리를 다시 밟았다. */}
+              {r.recipe_kind === "imported_goods" ? (
+                <span
+                  className="text-xs px-1 rounded bg-sky-50 text-sky-700 border border-sky-200"
+                  data-testid={`recipe-row-imported-${r.id}`}
+                >
+                  수입 완제품
+                </span>
+              ) : null}
+              {r.form_source === "fallback" ? (
+                <span
+                  className="text-xs px-1 rounded bg-amber-50 text-amber-700 border border-amber-200"
+                  title="옵션명·상품명 어느 규칙도 안 걸려 bar로 단정한 값이다 — 확인 전이다"
+                  data-testid={`recipe-row-form-estimated-${r.id}`}
+                >
+                  폼팩터 추정
+                </span>
+              ) : null}
               <span className="text-xs text-gray-500">
                 구성 {r.line_count} · SKU {r.link_count}
               </span>

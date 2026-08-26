@@ -5853,7 +5853,16 @@ export interface CostRecipe {
   form_factor: string | null;
   status: string; // draft | approved
   source: string;
+  /** `"assembly"` | `"imported_goods"` — 픽이 원가표 항목에서 옮겨 온다(D-CPP-61). */
   recipe_kind: string;
+  /**
+   * 폼팩터를 «어떻게» 얻었나 — `"rule"` | `"fallback"` | null(출처 미상).
+   *
+   * ★저장된 값이 없으면 백엔드가 **파생**한다(`form_source_for`) — `bar`를 내는 양성
+   * 규칙이 0개라 `form_factor === "bar"`는 필연적으로 폴백의 산물이기 때문이다. 그래서
+   * 이미 있는 레시피도 재업로드 없이 「추정」을 말할 수 있다.
+   */
+  form_source: string | null;
   anomaly_flag: string | null;
   approved_at: string | null;
   match: CostRecipeMatch | null;

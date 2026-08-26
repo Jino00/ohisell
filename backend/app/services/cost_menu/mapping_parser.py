@@ -149,6 +149,29 @@ def propose_form_factor(product_name: str, option_name: str) -> str:
     return propose_form_factor_with_source(product_name, option_name)[0]
 
 
+def form_source_for(form_factor: Optional[str]) -> Optional[str]:
+    """저장된 note 없이 **이미 있는 레시피**의 폼팩터 출처를 파생한다.
+
+    ★왜 파생이 가능한가 (적대 리뷰 1R P1-2): `_OPTION_RULES`·`_PRODUCT_RULES` 어디에도
+    `bar`를 **내는** 규칙이 없다. 그러므로 `form_factor == DEFAULT_FORM_FACTOR`인 레시피는
+    **필연적으로 폴백의 산물**이다 — prod bar 67건 전부가 그렇다. 이 파생이 없으면 합격 5가
+    「Jino가 매핑 정본을 다시 올려야」 열리는데, 계약 §5는 항목 5를 **사람 단계 없이 판정
+    가능**한 것으로 두었다.
+
+    ★**자기 보호**: 누군가 나중에 폴백값을 «내는» 규칙을 추가하면 이 추론은 무너진다.
+    그때는 `None`(출처 미상)을 돌려준다 — **틀린 단정보다 「모른다」가 낫다**는 것이
+    애초에 이 필드를 만든 이유다.
+    """
+
+    if form_factor is None:
+        return None
+    if any(f == DEFAULT_FORM_FACTOR for _, f in _OPTION_RULES + _PRODUCT_RULES):
+        return None
+    return (
+        FORM_SOURCE_FALLBACK if form_factor == DEFAULT_FORM_FACTOR else FORM_SOURCE_RULE
+    )
+
+
 @dataclass(frozen=True)
 class OptionRow:
     """매핑 정본 한 행 = 옵션 1건."""

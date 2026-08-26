@@ -41,10 +41,12 @@ from app.models import (
     CostMaterial,
     CostMaterialPrice,
     CostRecipe,
+    CostRecipeLink,
     CostTableItem,
     CostTableItemLine,
     ImportInvoiceLine,
     ImportShipment,
+    ProductMaster,
 )
 from app.services.cost_menu import auto_refresh as AR
 from app.services.cost_menu import materials as M
@@ -453,37 +455,164 @@ def test_the_fallback_value_itself_is_unchanged():
 # ══════════════════════════════════════════════════════════════════
 # 6. 보드가 세 값을 나란히 낸다 — 합격 6이 지목한 표면
 # ══════════════════════════════════════════════════════════════════
-def test_board_carries_the_excel_standard_and_its_gap(client, db_session):
-    """★현 「격차」 열은 표준원가 vs `cost_price`다 — 엑셀 표준과의 격차는 어느 열에도 없었다."""
+def _board_ready_imported_recipe(client, db_session, *, excel="3102.70"):
+    """보드가 **실제로 행을 내는** 상태까지 세운다.
+
+    ★적대 리뷰 1R P1-3: 초판은 이 준비를 안 해서 `body["items"]`가 **빈 리스트**였고,
+    `for row in items:` 루프가 한 번도 안 돌아 **산술을 통째로 `None`으로 바꿔도 초록**이었다.
+    보드 행은 `CostRecipeLink`가 있어야 서고, `std_cost_inc_vat`는 승인 후 `recompute`가
+    `cost_standard`에 확정 저장해야 채워진다.
+    """
 
     recipe = _recipe(db_session)
-    item = _imported_item(db_session, total="3102.70")
+    item = _imported_item(db_session, total=excel)
     db_session.commit()
-    client.post(f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": item.id})
+    client.post(
+        f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": item.id}
+    )
+
+    # 종을 승인하고 원장 단가를 붙인다 — 미승인 종의 단가는 계산이 안 쓴다(§2-2).
+    sh = _shipment(db_session)
+    ln = _line(db_session, sh)
     db_session.commit()
+    species = db_session.query(CostMaterial).filter(CostMaterial.name == GLASS).one()
+    client.post(
+        f"/api/cost/materials/{species.id}/prices/link",
+        json={"import_invoice_line_id": ln.id},
+    )
+    species = db_session.query(CostMaterial).filter(CostMaterial.name == GLASS).one()
+    species.status = "approved"
+
+    db_session.add(ProductMaster(internal_sku="OHI-GLASS-1", product_name="강화유리 SKU"))
+    db_session.add(CostRecipeLink(internal_sku="OHI-GLASS-1", recipe_id=recipe.id))
+    db_session.commit()
+
+    R.approve_recipe(db_session, recipe.id)
+    db_session.commit()
+    return recipe
+
+
+def test_board_carries_the_excel_standard_and_its_gap(client, db_session):
+    """★현 「격차」 열은 표준원가 vs `cost_price`다 — 엑셀 표준과의 격차는 어느 열에도 없었다.
+
+    합격 3이 요구하는 **세 값 나란히**를 payload 수준에서 잠근다.
+    """
+
+    recipe = _board_ready_imported_recipe(client, db_session)
 
     res = client.get("/api/cost/board")
     assert res.status_code == 200, res.text
-    body = res.json()
-    # 링크가 없으면 SKU 행이 없다 — 그때도 응답 형태는 안 무너진다.
-    for row in body["items"]:
-        assert "excel_total_inc_vat" in row
-        assert "excel_gap_pct" in row
-        assert "recipe_kind" in row
-        assert "form_source" in row
+    rows = [r for r in res.json()["items"] if r["recipe_id"] == recipe.id]
+    assert rows, "보드에 행이 서야 이 테스트가 무엇이든 잰다 — 0건이면 아무것도 안 지킨다"
+    row = rows[0]
+
+    # ① 원장 파생 단가(표준원가) — 매수 1이라 로트 단가 그대로다.
+    assert row["std_cost_inc_vat"] == "3200.96"
+    # ② 엑셀 표준(대조값)
+    assert row["excel_total_inc_vat"] == "3102.70"
+    # ③ 그 둘의 격차 — 계약 §0-2의 +3.2%와 같은 자리다.
+    assert row["excel_gap_pct"] == pytest.approx(3.17, abs=0.01)
+    assert row["recipe_kind"] == "imported_goods"
 
 
-def test_board_gap_is_computed_against_the_excel_standard(db_session):
-    """격차 산술 자체를 잠근다 — 두 값 다 VAT 포함 축이라 축이 섞이지 않는다."""
+def test_board_excel_gap_is_absent_not_zero_when_there_is_no_excel_value(
+    client, db_session
+):
+    """엑셀 표준이 없으면 격차는 **없음**이다 — 0이 아니다(§2-7)."""
 
-    recipe = _recipe(db_session)
-    item = _imported_item(db_session, total="3102.70")
+    recipe = _recipe(db_session, product_name="엑셀값 없는 것")
+    item = _imported_item(db_session, item_name="엑셀 없는 항목")
+    item.total_inc_vat = None
     db_session.commit()
-    R.pick_cost_table_item(db_session, recipe.id, item.id)
+    client.post(
+        f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": item.id}
+    )
+    db_session.add(ProductMaster(internal_sku="OHI-NOEX-1", product_name="X"))
+    db_session.add(CostRecipeLink(internal_sku="OHI-NOEX-1", recipe_id=recipe.id))
     db_session.commit()
 
-    saved = R._note_dict(db_session.get(CostRecipe, recipe.id))
-    assert saved["excel_total_inc_vat"] == "3102.70"
-    # 원장 파생 3,200.96 대비 +3.2% — 초안 실측값(계약 §0-2)과 같은 자리다.
-    gap = (Decimal("3200.96") - Decimal("3102.70")) / Decimal("3102.70") * 100
-    assert round(float(gap), 1) == 3.2
+    rows = [
+        r
+        for r in client.get("/api/cost/board").json()["items"]
+        if r["recipe_id"] == recipe.id
+    ]
+    assert rows
+    assert rows[0]["excel_total_inc_vat"] is None
+    assert rows[0]["excel_gap_pct"] is None
+
+
+# ══════════════════════════════════════════════════════════════════
+# 7. 폴백 자백이 «이미 있는» 레시피에도 닿는다 (적대 리뷰 1R P1-2)
+# ══════════════════════════════════════════════════════════════════
+def test_form_source_is_derived_for_recipes_saved_before_the_field_existed(
+    client, db_session
+):
+    """★재업로드 없이 판정 가능해야 한다 — 계약 §5는 항목 5를 「사람 단계 없이」로 뒀다.
+
+    파생의 근거: `bar`를 «내는» 양성 규칙이 하나도 없으므로 `form_factor == "bar"`는
+    **필연적으로** 폴백의 산물이다(prod bar 67건 전부).
+    """
+
+    fallback = _recipe(db_session, product_name="GaN 충전기", form_factor="bar")
+    ruled = _recipe(db_session, product_name="Z플립 필름", form_factor="flip")
+    db_session.commit()
+
+    # ★GET은 payload를 감싸지 않는다(POST /pick 과 형태가 다르다) — 화면이 실제로 받는
+    #   모양 그대로 단언한다.
+    assert (
+        client.get(f"/api/cost/recipes/{fallback.id}").json()["form_source"]
+        == FORM_SOURCE_FALLBACK
+    )
+    assert (
+        client.get(f"/api/cost/recipes/{ruled.id}").json()["form_source"]
+        == FORM_SOURCE_RULE
+    )
+
+
+def test_derivation_refuses_to_guess_if_a_rule_could_ever_yield_the_fallback_value(
+    monkeypatch,
+):
+    """★자기 보호 — 폴백값을 «내는» 규칙이 생기면 더는 못 가른다. 그땐 「모른다」다."""
+
+    import app.services.cost_menu.mapping_parser as MP
+
+    monkeypatch.setattr(MP, "_OPTION_RULES", ((r"바형", "bar"),) + MP._OPTION_RULES)
+    assert MP.form_source_for("bar") is None
+    assert MP.form_source_for("flip") is None
+
+
+# ══════════════════════════════════════════════════════════════════
+# 8. 분류 변경은 조용하지 않다 (적대 리뷰 1R P2-1 채택)
+# ══════════════════════════════════════════════════════════════════
+def test_changing_an_existing_species_category_leaves_a_trace(db_session):
+    """★이름이 겹치는 기존 부자재 종이 수입 완제품이 되면 그 종에 `product` 문이 영구히 열린다.
+
+    사람의 명시적 행위(픽)이므로 막지는 않되, **무엇이 언제 바뀌었는지 종에 남긴다** —
+    나중에 「이 종이 왜 수입 완제품이지?」에 답할 수 있어야 한다.
+    """
+
+    existing = CostMaterial(name=GLASS, status="approved", category="부자재")
+    db_session.add(existing)
+    db_session.flush()
+
+    R._material_for_name(db_session, GLASS, category=M.IMPORTED_GOODS_CATEGORY)
+    db_session.flush()
+
+    db_session.expire_all()
+    m = db_session.query(CostMaterial).filter(CostMaterial.name == GLASS).one()
+    assert m.category == M.IMPORTED_GOODS_CATEGORY
+    assert m.note and "부자재 → 수입 완제품" in m.note
+
+
+def test_a_plain_pick_does_not_touch_an_existing_category(db_session):
+    """반대 방향 — 조립형 픽은 기존 분류를 안 건드린다."""
+
+    existing = CostMaterial(name="필름 원단", status="approved", category="원단")
+    db_session.add(existing)
+    db_session.flush()
+
+    R._material_for_name(db_session, "필름 원단")
+    db_session.flush()
+
+    assert existing.category == "원단"
+    assert existing.note is None
