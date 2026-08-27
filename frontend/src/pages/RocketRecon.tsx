@@ -24,6 +24,7 @@ import {
   type ReconSkuRow, type RocketRecon,
 } from "../lib/api";
 import { runStreamRefresh, describeOutcome, specByKey } from "../lib/streamRefresh";
+import { PipelineTab, RiQueueTab } from "./rocketPipelineTabs";
 
 // ── 포매터(로컬) ───────────────────────────────────────────────
 // lib/format.ts는 naver-ad 스코프 전용 계약이라 여기선 로컬 정의를 쓴다(그 파일 상단 경고).
@@ -67,6 +68,9 @@ function describeLastSuccess(iso: string | null): string {
 }
 
 export default function RocketRecon() {
+  // ★탭 기본값은 기존 「발주 대사」다 — 이 화면을 이미 쓰던 사람이 URL만 열었을 때
+  //   보던 것이 그대로 보여야 한다(기존 기능 무손상).
+  const [tab, setTab] = useState<TabKey>("recon");
   const [from, setFrom] = useState(kstDate(-89));   // 기본 최근 90일(발주 기준)
   const [to, setTo] = useState(kstDate(0));
   const [driftOnly, setDriftOnly] = useState(false);
@@ -158,28 +162,75 @@ export default function RocketRecon() {
         <div className="rounded border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700">{refreshMsg}</div>
       )}
 
-      <PeriodBar
-        from={from} to={to} onFrom={setFrom} onTo={setTo}
-        driftOnly={driftOnly} onDriftOnly={setDriftOnly}
-        unconfirmedOnly={unconfirmedOnly} onUnconfirmedOnly={setUnconfirmedOnly}
-      />
+      <TabBar tab={tab} onTab={setTab} />
 
-      {error ? (
-        <Card title="불러오지 못했습니다">
-          <EmptyState
-            reason={`대사 데이터를 불러오지 못했습니다: ${error}`}
-            hint="새로고침하거나 백엔드 상태를 확인하세요. (조회 실패는 '데이터 없음'과 다릅니다)"
-          />
-        </Card>
-      ) : data === null ? (
-        <Card title="불러오는 중"><Loading rows={6} /></Card>
-      ) : (
+      {/* ★기간바는 «발주일 축»이라 대사 탭에만 붙는다. 파이프라인 탭은 자기 «발송일» 창을
+          따로 가진다 — 한 기간바에 두 축을 얹으면 어느 날짜로 걸린 숫자인지 섞여 읽힌다. */}
+      {tab === "recon" && (
         <>
-          <SummaryTiles data={data} />
-          <StatusBreakdown data={data} />
-          <SkuTable data={data} from={from} to={to} />
+          <PeriodBar
+            from={from} to={to} onFrom={setFrom} onTo={setTo}
+            driftOnly={driftOnly} onDriftOnly={setDriftOnly}
+            unconfirmedOnly={unconfirmedOnly} onUnconfirmedOnly={setUnconfirmedOnly}
+          />
+
+          {error ? (
+            <Card title="불러오지 못했습니다">
+              <EmptyState
+                reason={`대사 데이터를 불러오지 못했습니다: ${error}`}
+                hint="새로고침하거나 백엔드 상태를 확인하세요. (조회 실패는 '데이터 없음'과 다릅니다)"
+              />
+            </Card>
+          ) : data === null ? (
+            <Card title="불러오는 중"><Loading rows={6} /></Card>
+          ) : (
+            <>
+              <SummaryTiles data={data} />
+              <StatusBreakdown data={data} />
+              <SkuTable data={data} from={from} to={to} />
+            </>
+          )}
         </>
       )}
+
+      {tab === "pipeline" && <PipelineTab />}
+      {tab === "ri" && <RiQueueTab />}
+    </div>
+  );
+}
+
+// ── 탭 바 ─────────────────────────────────────────────────────
+// 축이 다른 세 질문을 한 화면에 두되 섞이지 않게 가른다:
+//   대사=발주일×SKU「발주≠입고가 맞나」 / 파이프라인=창없음×PO「지금 어디에 얼마」 /
+//   확인요청함=상태축「내가 뭘 눌러야 하나」.
+const TABS = [
+  { key: "recon", label: "발주 대사", hint: "발주일 기준 · 상품(SKU)별 발주↔입고↔계산서 대조" },
+  { key: "pipeline", label: "열린 파이프라인", hint: "지금 어느 칸에 얼마가 걸려 있나 (계산서 미발행 포함)" },
+  { key: "ri", label: "확인요청함", hint: "거래명세서확인요청 — 내가 눌러야 할 건" },
+] as const;
+
+type TabKey = (typeof TABS)[number]["key"];
+
+function TabBar({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1 border-b border-gray-200" role="tablist">
+      {TABS.map((t) => (
+        <button
+          key={t.key}
+          type="button"
+          role="tab"
+          aria-selected={tab === t.key}
+          title={t.hint}
+          onClick={() => onTab(t.key)}
+          className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+            tab === t.key
+              ? "border-sky-600 font-medium text-sky-700"
+              : "border-transparent text-gray-500 hover:text-gray-800"
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
     </div>
   );
 }

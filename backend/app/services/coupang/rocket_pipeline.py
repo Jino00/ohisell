@@ -577,6 +577,61 @@ def compute_rocket_pipeline_rows(
 # ──────────────────────────────────────────────
 # ⑦ Harness — 「확인요청함」(RI)
 # ──────────────────────────────────────────────
+def stale_open_po_dates(db: Session, vendor_id: str | None, limit_days: int = 400) -> dict:
+    """미종결(비-CI) PO 중 **마지막 수집에 안 잡힌** 것들의 발주일(KST) 목록.
+
+    ★왜 «날짜»를 주나 — 페처가 그 날짜만 좁게 다시 훑게 하려고. 발주 목록 API는 발주일 범위로
+      거르는 `searchStartDate`/`searchEndDate`가 **검증된 파라미터**인 반면, 발주번호 배열
+      (`purchaseOrderIdArray`)·상태(`purchaseOrderStatus`)는 값 형식이 라이브로 확인된 적이 없다.
+      확인 안 된 파라미터로 거르면 **조용히 빈 결과**가 오고, 그건 「굳은 게 없다」로 읽힌다.
+      날짜는 대개 20개 안쪽이라(2026-08-27 실측 41건이 그 정도 날짜에 몰림) 좁은 재조회로 끝난다.
+
+    ★수집 창(발주일 기본 30~90일) 밖으로 밀려난 미종결 PO는 상태가 영구히 굳는다. 이 함수가
+      그 목록의 «어디를 다시 봐야 하나»를 낸다.
+
+    limit_days: 이보다 오래된 것은 내지 않는다(폭주 방지). 잘리면 `truncated_before`로 말한다 —
+      조용한 절단 금지(계약 §2).
+      ★기본 400일인 이유: 이 기능을 만든 원인인 굳은 RI 8건이 **2025-10~2026-01 발주**다.
+      120일로 두면 그 8건이 통째로 잘려 나가 «고치려던 것만 못 고치는» 기본값이 된다
+      (2026-08-27 실측: 120일이면 22개 날짜 중 4개·발주 8건이 잘렸고, 400일이면 22개 전부 =
+      발주 41건이 들어온다 — 날짜 수가 페처 상한 40 안이라 비용도 문제되지 않는다).
+    """
+    PO = CoupangRocketPurchaseOrder
+    last_day = _last_collection_day(db, vendor_id)
+    # po_created_at은 UTC naive 저장 → KST 날짜는 +9h.
+    kst_day = func.date(PO.po_created_at, "+9 hours")
+    q = db.query(kst_day.label("d"), func.count(PO.id).label("n")).filter(
+        PO.purchase_order_status.isnot(None),
+        # ★"CI"만 뺀다. RI(거래명세서확인요청)는 «입고 끝난 단계»지만 **아직 우리 손이 남은**
+        #   단계라 재훑기 대상이다 — 굳은 RI 8건이 이 기능을 만든 이유 자체다.
+        #   여기에 SETTLED_STAGE_STATUSES를 그대로 쓰면 RI가 빠져 원인이 대상에서 사라진다.
+        PO.purchase_order_status != "CI",
+        PO.po_created_at.isnot(None),
+    )
+    if vendor_id is not None:
+        q = q.filter(PO.vendor_id == vendor_id)
+    if last_day is not None:
+        # `synced_at`은 KST 저장이라 환산하지 않는다(_kst_naive_date_str와 같은 규약).
+        q = q.filter(func.date(PO.synced_at) != last_day)
+    rows = q.group_by("d").order_by("d").all()
+
+    cutoff = None
+    if last_day is not None:
+        cutoff = (date.fromisoformat(last_day) - timedelta(days=limit_days)).isoformat()
+    kept = [(r.d, int(r.n)) for r in rows if cutoff is None or r.d >= cutoff]
+    dropped = [(r.d, int(r.n)) for r in rows if cutoff is not None and r.d < cutoff]
+    return {
+        "dates": [d for d, _ in kept],
+        "po_count": sum(n for _, n in kept),
+        "last_collection_date_kst": last_day,
+        "limit_days": limit_days,
+        # 잘린 것을 «없는 것»으로 만들지 않는다 — 페처 로그와 화면이 이 값을 그대로 낸다.
+        "truncated_before": cutoff if dropped else None,
+        "truncated_date_count": len(dropped),
+        "truncated_po_count": sum(n for _, n in dropped),
+    }
+
+
 def compute_rocket_ri_queue(db: Session, vendor_id: str | None) -> dict:
     """거래명세서확인요청(RI) 상태 PO — 우리가 눌러야 할 일 목록.
 

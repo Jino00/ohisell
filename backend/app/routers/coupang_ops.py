@@ -1955,6 +1955,29 @@ def rocket_refresh_claim(
     return rocket_supplier_sync.claim_rocket_refresh(db)
 
 
+@router.get("/rocket/stale-open-po-dates")
+def rocket_stale_open_po_dates(
+    limit_days: int = Query(400, ge=1, le=400),
+    db: Session = Depends(get_db),
+):
+    """미종결(비-CI) 발주 중 마지막 수집에 안 잡힌 것들의 **발주일(KST) 목록**. 조회 전용.
+
+    페처가 이 날짜만 좁게 다시 훑어 굳은 상태를 갱신한다 — 수집 창이 발주일 기준이라 창 밖으로
+    밀려난 미종결 발주는 상태가 **영구히** 굳는다(2026-08-27 실측: RP 24 · PA 9 · RI 8 = 41건,
+    그중 RI 8건은 이미 지급까지 끝났는데 화면엔 「확인 요청」으로 남아 있었다).
+
+    ★날짜로 주는 이유: 발주 목록 API에서 **검증된 필터는 발주일 범위뿐**이고, 발주번호 배열
+      (`purchaseOrderIdArray`)·상태(`purchaseOrderStatus`)는 값 형식이 라이브로 확인된 적이 없다.
+      확인 안 된 파라미터로 거르면 **조용히 빈 결과**가 오고 그건 「굳은 게 없다」로 읽힌다.
+
+    `truncated_before`가 null이 아니면 limit_days 밖이라 **빠진 날짜가 있다**는 뜻이다(0으로 접지 않기).
+    """
+    from app.services.coupang.rocket_pipeline import stale_open_po_dates
+
+    vendor = os.getenv("COUPANG_ROCKET_VENDOR_ID") or None
+    return stale_open_po_dates(db, vendor, limit_days)
+
+
 @router.get("/collection-status")
 def coupang_collection_status(db: Session = Depends(get_db)):
     """쿠팡 4개 브라우저 수집 스트림(ofix 판매/광고, ohitech 광고, 로켓 발주)의
