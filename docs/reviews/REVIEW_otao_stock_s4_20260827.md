@@ -337,3 +337,192 @@ $ git diff HEAD --stat
 
 - 변이 harness: `<scratch>/mutate.py` (적용 → `ast.parse` → 테스트 → `git checkout --`)
 - 재현 스크립트: `<scratch>/repro_count_axis.py` (인메모리 SQLite, prod·ECOUNT 무접촉)
+
+---
+
+# 2R 재판정
+
+> ★**앞선 2R 시도가 미완주(스톨)로 죽어 재실행했다.** 그 시도가 화면에 남긴
+> "P1-2/P1-3 resolved"는 중간 발언이지 판정이 아니고 디스크에 아무것도 남기지 않았다
+> (미완주는 「발견 0건」이 아니다 — 교훈 #123). 아래는 **전부 이번 실행에서 직접 재현한
+> 관측**이고, 앞 시도의 발언은 근거로 쓰지 않았다.
+
+- 대상: **수정 커밋 `66361ec8` 하나** (`git diff 081ef96e..66361ec8`)
+- 범위 밖: 병합 커밋 `b0d1034a`(origin/main 5커밋) — 남의 코드. 전체 브랜치 재리뷰 안 함(전역 §4 종료 규칙 ③)
+- 실행 위치: `/Users/jino/.claude-worktrees/ohiselling/po-forecast-n8` · 2026-08-27 KST
+- 경계 준수: 코드 수정 0(변이는 전건 원복) · **prod DB 읽기 전용 1회**(`mode=ro`, 쓰기 0) · prod 배포 0 · **ECOUNT API 호출 0건**
+
+## P1 해소 판정
+
+### P1-1 병합 시 alembic head가 둘 — **해소**
+
+```
+$ cd backend && python3 -m alembic heads
+otaostk1s4a (head)                       ← ★단일
+
+$ python3 -m alembic branches | grep -c "otaostk1s4a\|exgrade1s2"
+0                                        ← 분기점 목록에 둘 다 없다(선형)
+
+$ grep -rl 'down_revision.*cst60auto' alembic/versions/
+alembic/versions/exgrade1s2_add_exclusion_grade.py     ← cst60auto의 자식은 이제 하나뿐
+$ grep -rl 'down_revision.*exgrade1s2' alembic/versions/
+alembic/versions/otaostk1s4a_add_otao_stock_snapshot.py
+
+$ python3 -m alembic history | head -2
+exgrade1s2 -> otaostk1s4a (head), S4: OTAO 자사 재고 스냅샷 원장 신설
+cst60auto  -> exgrade1s2,        제외 «임대» 등급 …
+```
+
+★이 워크트리는 `b0d1034a`로 **origin/main을 이미 병합한 상태**이므로 위 head 계산이 곧
+「병합 후」 계산이다. `git fetch` 후 `HEAD..origin/main` 5커밋을 확인했고 그중
+**alembic 파일은 0건**(`.claude/memory/…` 2건 + `docs/tracks/…` 1건뿐) — 새 분기 없음.
+
+**재부모화의 정당성 — prod 실측(읽기 전용)**
+
+```
+$ ssh ubuntu@sellc.ohitech.co.kr 'python3 -' < …   # sqlite3 file:…?mode=ro
+alembic_version rows: [('exgrade1s2',)]
+otao_stock_snapshot        -> ABSENT      ← ★이 리비전은 prod에 적용된 적이 없다
+naver_search_term_exclusion-> EXISTS  (grade True, grade_reason True)
+```
+
+prod는 `exgrade1s2`에 서 있고 `otao_stock_snapshot` 테이블이 **없다** ⇒ `otaostk1s4a`는
+미적용이므로 재부모화가 허용된다(적용됐다면 금지·merge 리비전이 정답이었다). 그리고
+prod가 선 자리가 곧 새 부모라 **업그레이드가 정확히 한 걸음**이다:
+
+```
+$ python3 -m alembic upgrade exgrade1s2:head --sql
+CREATE TABLE otao_stock_snapshot ( … CONSTRAINT uq_otao_stock_snapshot_grain UNIQUE(…) );
+CREATE INDEX ix_otao_stock_snapshot_snapshot_at …
+UPDATE alembic_version SET version_num='otaostk1s4a' WHERE … = 'exgrade1s2';
+```
+
+1R이 「그릇이 안 생긴다」고 적은 그 그릇이 정규 경로로 선다. **해소.**
+
+### P1-2 실사 창고가 응답·화면에 안 실림 — **해소**
+
+1R과 같은 입력(본사 스냅샷 340 ↔ `--warehouse 본사-포장` 실사 900)을 인메모리 SQLite로 재현.
+실사 행은 실제 경로와 동일하게 `warehouse_code='(실사)'`(`build_manual_count_payload` 기본값).
+
+```
+서비스층:
+  GAPIP16PR latest=340.000 counted=900.000 var=-560.000
+            wh='본사-포장' role='material' mismatch=True at=2026-09-03 18:00:00
+  stock.counted_axis_mismatches = ['GAPIP16PR']
+
+HTTP 200 body rows[*] (값으로 실림):
+  {"counted_quantity": 900.0, "counted_at": "2026-09-03T18:00:00",
+   "counted_warehouse": "본사-포장", "counted_warehouse_role": "material",
+   "counted_axis_mismatch": true}
+HTTP body top-level:
+  counted_from = "2026-09-03T18:00:00"
+  counted_axis_mismatches = ["GAPIP16PR"]
+HTTP notes[2]:
+  "기준 창고(본사)가 아닌 곳을 센 코드가 있다(GAPIP16PR) — 그 행의 차이는 «오차»가
+   아니라 서로 다른 창고를 뺀 값이다."
+```
+
+1R이 요구한 셋(`counted_warehouse`·`counted_warehouse_role`·`counted_axis_mismatch`)이
+**키가 아니라 값으로** HTTP body에 실린다. 화면은 그 행을 숫자가 아니라 다른 것으로 그린다 —
+프론트 `SUR-T12`가 `cells[8]`에 `"축 다름"`이 있고 `"-560"`이 **없음**을 단언하고 통과한다
+(`VarianceCell`이 `counted_axis_mismatch`에서 조기 반환). **해소.**
+
+부수 확인: 기준 창고가 아닌 다른 역할에서도 같게 동작한다 — 반품창고/아마존(`excluded`)
+실사도 `mismatch=True` + note 발생.
+
+### P1-3 나눠 센 실사의 앞 회차 소실 — **해소**
+
+```
+입력: 09-03 10:00 → A1=95, A2=190 실사 / 09-03 14:00 → A3=280 실사
+      (ECOUNT 스냅샷 A1=100 A2=200 A3=300)
+
+관측:
+  A3  latest=300 counted=280 var=20  at=2026-09-03 14:00:00
+  A2  latest=200 counted=190 var=10  at=2026-09-03 10:00:00   ← 1R에서는 counted=None
+  A1  latest=100 counted=95  var=5   at=2026-09-03 10:00:00   ← 1R에서는 counted=None
+  totals.counted_sku_count = 3        (1R: 1)
+  counted_from = 10:00 · counted_at = 14:00
+  notes: "실사가 여러 회차에 나뉘어 있다(2026-09-03 10:00 ~ 2026-09-03 14:00 KST) —
+          코드마다 «그 코드의 최신» 실사를 쓴다."
+```
+
+셋 다 살아 있고, `counted_sku_count == 3`이며, 1R이 「없다」고 지적한 경고 note가 뜬다. **해소.**
+
+**이 수정이 «새로» 만든 위험 — 노려서 재현했다** (4종 전수)
+
+| 입력 | 관측 | 판정 |
+|---|---|---|
+| 삽입 순서 ≠ 시각 순서 (18:00 본사 480을 먼저, 09:00 본사-포장 900을 나중에 삽입) | 최종 = **18:00 본사 480**, mismatch False, var=+20 | 정상 — `order_by(snapshot_at)`가 삽입 순서를 이긴다 |
+| 코드마다 창고가 다른 경우 (P1=본사 10:00 / P2=본사-포장 11:00) | P1 own·mismatch False / P2 material·**mismatch True**, note 2건(축·회차) | 정상 |
+| 같은 시각·같은 코드·**두 창고** (본사 100 + 본사-포장 800), 본사를 먼저 삽입 | counted=**900** 합산, `wh='본사'` `role='own'` **mismatch=False**, var=**−560이 「대조 오차」로** | ⚠️ 아래 P2-8 |
+| 같은 것, 삽입 순서만 뒤집음 (본사-포장 먼저) | counted=900, `wh='본사-포장'` **mismatch=True** + note | ⚠️ 같은 건 — **결과가 순서에 의존한다** |
+
+즉 `_latest_manual_counts`의 「같은 시각·같은 코드는 더한다」 가지는 **합계는 맞지만 창고
+라벨을 첫 행 것만 남긴다.** 첫 행이 `본사`면 `mismatch=False`가 되어 **P1-2가 정확히 그
+모양으로 되살아난다.**
+
+**그런데 출하된 진입점으로는 도달할 수 없다** — 이 가지는 `(snapshot_at, product_code)`가
+같으면서 `warehouse_code`가 **다른** manual 행 둘을 요구하는데,
+`build_manual_count_payload`가 `warehouse_code="(실사)"`를 **하드코딩**하고 CLI가 그 인자를
+노출하지 않는다. 실측:
+
+```
+payload1 wh_code/name: (실사) / 본사        payload2 wh_code/name: (실사) / 본사-포장
+run1: inserted=1  run2: inserted=0 unchanged=1
+원장에 남은 행: [('본사', '100.000')]        ← 두 번째가 UNIQUE 그레인에 막혀 통째로 버려진다
+```
+
+⇒ 재현 못 하는(=출하 경로로 안 닿는) 지적은 P1이 아니다(전역 §4). **P2-8로 이월**한다.
+단 `warehouse_code`는 이미 키워드 인자로 열려 있어 **미래의 호출자 한 명이면 P1이 된다.**
+
+## 변이 재측정 — 1R SURVIVED 5종
+
+각 변이는 적용 → 문법 확인(`ast.parse` / `npx tsc -b`) → 백엔드·프론트 실행 → `git checkout --` 원복.
+
+| # | 변이 | 문법 | 결과 | 죽인 테스트 |
+|---|---|---|---|---|
+| 1 | 라우터 `/stock` `sold_unavailable_reason` → `None` | `ast.parse` OK | **KILLED** (1 failed) | `test_http_body_values_are_asserted_not_just_keys` |
+| 2 | 라우터 `/stock` `unknown_warehouses` → `[]` | `ast.parse` OK | **KILLED** (1 failed) | 같은 테스트 |
+| 3 | 라우터 `/stock` `baseline_by_role` → 전 창고 **단일 합계**(`{"own": sum(...)}`) | `ast.parse` OK | **KILLED** (1 failed) | 같은 테스트 |
+| 4 | `otaoStockPanel.tsx` notes 배너 블록 **통째 제거** (★표면 절단 변이) | `npx tsc -b` exit 0 | **KILLED** (1 failed / 13 passed) | `SUR-T10: notes 배너가 화면에 뜬다` |
+| 5 | `ecount_stock_export.py` `ip_is_allowed` → 항상 True **+** `_MAX_ATTEMPTS = 10` | `ast.parse` OK | **KILLED** (1 failed) | `test_ip_guard_refuses_unlisted_and_unknown` |
+
+**5/5 KILLED.** 전부 `1 error`(문법 사망)가 아니라 `1 failed`(테스트가 잡음)임을 확인했다 —
+#4는 `tsc -b` exit 0으로 컴파일 성공을 먼저 확인한 뒤 vitest가 잡았다.
+
+관측 1건(지적 아님): #1·#2·#3을 죽인 것이 **전부 같은 한 테스트**다. 값 단언이 그 파일 하나에
+모여 있어 «그 테스트가 지워지면 세 자리가 한꺼번에 열린다» — 지금은 통과하므로 P1도 P2도 아니고,
+구조 관찰로만 적는다.
+
+## 변이 원복 검증 (n=4·n=5·n=7에서 세 번 사고 난 자리)
+
+```
+$ git status --porcelain
+                                  ← 빈 출력
+$ git diff HEAD
+                                  ← 빈 출력
+$ git rev-parse HEAD
+66361ec837241c771ae2ef71f396dc1c53947c80
+$ grep -rn "MUTATION" backend/app backend/scripts backend/tests frontend/src | wc -l
+0
+```
+
+원복 후 전체 스위트 재실행 — **백엔드 6,930 passed / 0** (301.6s) · **프론트 987 passed /
+69 파일** · **`npx tsc -b` exit 0**. 커밋 메시지가 주장한 숫자와 일치한다.
+
+## P2 (트리아지 — 라운드를 늘리지 않는다)
+
+- **[P2-8] `_latest_manual_counts`의 동시각 합산이 창고 라벨을 첫 행 것만 남긴다** —
+  `backend/app/services/otao_po/stock.py:246-262`. 결과가 **행 삽입 순서에 의존**하고,
+  첫 행이 `본사`면 `counted_axis_mismatch`가 False로 접혀 P1-2가 되살아난다. 출하된 CLI
+  경로로는 UNIQUE 그레인이 막아 도달 불가(위 실측) ⇒ **P1 아님**. 처방 후보: 같은 시각에
+  창고가 둘 이상이면 합치지 말고 「창고 혼재」로 자백하거나, 역할이 하나라도 `own`이 아니면
+  `mismatch=True`로 올린다.
+- **[P2-9] `_latest_manual_counts`가 manual 행을 전건 로드한다**(시간 창 없음) — 실사가
+  쌓일수록 선형 증가. 계약 표본이 10 SKU라 지금은 무해.
+- 1R의 P2-4·P2-5는 그대로 남아 있다(이번 커밋 범위 밖). P2-6·P2-7은 이번 수정으로 닫혔다
+  (`counted_at`이 행·화면에 실리고, HTTP 값 단언 테스트가 생겼다).
+
+## 판정
+
+**판정: PASS(P1 0건)**

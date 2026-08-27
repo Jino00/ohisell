@@ -641,3 +641,57 @@ def test_http_body_values_are_asserted_not_just_keys(env):
     assert row["baseline_by_role"] == {"own": 340.0, "material": 900.0, "channel": 120.0}
     assert row["counted_warehouse"] == "본사"
     assert row["counted_axis_mismatch"] is False
+
+
+def test_p2_8_same_time_different_warehouses_do_not_depend_on_insert_order(session):
+    """★2R P2-8: 같은 시각·같은 코드가 «다른 창고»로 오면 라벨이 첫 행 것만 남아 있었다.
+
+    본사를 먼저 넣으면 `own`으로 접혀 섞인 값이 「대조 오차」로 서고, 순서를 뒤집으면
+    안 선다 — **같은 데이터가 삽입 순서에 따라 다른 답을 냈다.** 지금 출하 경로로는
+    `build_manual_count_payload`의 `warehouse_code` 하드코딩이 막고 있지만 그 인자가
+    키워드로 열려 있어 호출자 하나면 되살아난다.
+    """
+    _seed_prod_shaped(session)
+    at = datetime(2026, 9, 3, 14, 0, 0)
+
+    # 순서 A: 본사 먼저
+    _snap(session, at, "본사", "(실사)", "GAPIP16PR", 300, source="manual")
+    _snap(session, at, "본사-포장", "(실사2)", "GAPIP16PR", 600, source="manual")
+    session.commit()
+    a = {r.product_code: r for r in build_stock(session).rows}["GAPIP16PR"]
+
+    # 순서 B: 포장 먼저 (같은 데이터, 삽입 순서만 반대)
+    session.query(OtaoStockSnapshot).filter_by(source="manual").delete()
+    session.commit()
+    _snap(session, at, "본사-포장", "(실사2)", "GAPIP16PR", 600, source="manual")
+    _snap(session, at, "본사", "(실사)", "GAPIP16PR", 300, source="manual")
+    session.commit()
+    b = {r.product_code: r for r in build_stock(session).rows}["GAPIP16PR"]
+
+    # 수량은 어느 순서든 같고(900), 판정도 같아야 한다.
+    assert a.counted_quantity == b.counted_quantity == Decimal("900")
+    assert a.counted_warehouse_role == b.counted_warehouse_role == "mixed"
+    assert a.counted_axis_mismatch is True and b.counted_axis_mismatch is True
+    # 창고 이름도 둘 다 남는다 — 하나로 접지 않는다.
+    for r in (a, b):
+        assert "본사" in (r.counted_warehouse or "")
+        assert "본사-포장" in (r.counted_warehouse or "")
+
+
+def test_same_time_same_role_folds_without_promoting_to_mixed(session):
+    """★역할이 같으면 종전대로 조용히 더한다 — `mixed`로 승격하지 않는다.
+
+    UNIQUE 그레인이 `(시각, 창고코드, 품목)`이라 «같은 창고코드» 중복은 DB가 막는다. 그래서
+    폴드 경로가 실제로 열리는 것은 **창고코드가 다를 때**뿐이고, 그중 역할까지 같은 경우가
+    이 테스트다(같은 본사를 두 코드로 적은 경우). 여기서까지 `mixed`로 올리면 정상 입력이
+    「축 다름」으로 오인된다 — 보수적인 것과 둔한 것은 다르다.
+    """
+    _seed_prod_shaped(session)
+    at = datetime(2026, 9, 3, 14, 0, 0)
+    _snap(session, at, "본사", "(실사)", "GAPIP16PR", 100, source="manual")
+    _snap(session, at, "본사", "(실사-2차)", "GAPIP16PR", 220, source="manual")
+    session.commit()
+    r = {x.product_code: x for x in build_stock(session).rows}["GAPIP16PR"]
+    assert r.counted_quantity == Decimal("320")
+    assert r.counted_warehouse_role == "own"
+    assert r.counted_axis_mismatch is False

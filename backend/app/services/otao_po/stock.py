@@ -248,16 +248,27 @@ def _latest_manual_counts(session: Session) -> dict[str, ManualCount]:
     ).all():
         code = snap.product_code
         qty = Decimal(snap.quantity or 0)
+        role = warehouse_role(snap.warehouse_name, snap.warehouse_code)
         prev = out.get(code)
         # 같은 시각에 같은 코드가 여러 창고로 오면 더한다(창고를 나눠 센 경우).
         if prev is not None and prev.at == snap.snapshot_at:
             prev.quantity += qty
+            # ★★라벨을 «첫 행 것»으로 남기면 결과가 삽입 순서에 의존한다 (2R P2-8).
+            #   본사를 먼저 넣으면 role='own'으로 접혀 다른 창고 수량이 「대조 오차」에 섞이고,
+            #   순서를 뒤집으면 안 섞인다 — 같은 데이터가 순서에 따라 다른 답을 낸다.
+            #   ⇒ 창고가 갈리면 **하나로 접지 않고 둘 다 남긴다.** 그리고 역할이 하나라도
+            #     기준(본사)이 아니면 «축 다름»으로 본다(보수적 쪽이 안전한 방향이다 —
+            #     섞인 값을 오차라 부르는 것보다 「오차라 부르지 않는」 쪽이 덜 위험하다).
+            if role != prev.warehouse_role:
+                names = [n for n in (prev.warehouse_name, snap.warehouse_name) if n]
+                prev.warehouse_name = " + ".join(dict.fromkeys(names)) or None
+                prev.warehouse_role = "mixed"
             continue
         out[code] = ManualCount(
             quantity=qty,
             at=snap.snapshot_at,
             warehouse_name=snap.warehouse_name,
-            warehouse_role=warehouse_role(snap.warehouse_name, snap.warehouse_code),
+            warehouse_role=role,
         )
     return out
 
