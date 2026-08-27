@@ -33,7 +33,7 @@ from app.services.coupang.ad_sell_type import (
     SELL_TYPE_TO_CHANNEL_TYPE,
     UNASSIGNED_CHANNEL_TYPE,
 )
-from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_file_sync, rocket_promo_sync, rocket_shipment_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_item_sales_sync, vendor_summary_sync
+from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_invoice_confirm, rocket_promo_file_sync, rocket_promo_sync, rocket_shipment_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_item_sales_sync, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1976,6 +1976,112 @@ def rocket_stale_open_po_dates(
 
     vendor = os.getenv("COUPANG_ROCKET_VENDOR_ID") or None
     return stale_open_po_dates(db, vendor, limit_days)
+
+
+# ════════════════════════════════════════════════
+# 「거래명세서확인」(RI→CI) 실행 — 계약 CONTRACT_1p_invoice_confirm_write (Jino 승인 2026-08-28)
+#   ★되돌릴 수 없는 회계 확정이다. dry_run 기본 + CONFIRM_LIVE_WRITE 토큰 + 사전 GET 게이트 +
+#     재시도 금지가 이 묶음의 전부다. 결정은 여기(백엔드), 실행은 Mac 페처.
+# ════════════════════════════════════════════════
+def _rocket_vendor() -> str | None:
+    return os.getenv("COUPANG_ROCKET_VENDOR_ID") or None
+
+
+@router.post("/rocket/invoice-confirm/preview")
+def rocket_invoice_confirm_preview(
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """모달용 dry-run 미리보기. **supplier로 아무것도 나가지 않고 명령도 만들지 않는다.**
+
+    body: {"purchase_order_seq": int}
+    검증 실패(RI 아님·굳음·진행 중·결과 미상 잠금)는 400 — 사유를 그대로 화면에 낸다.
+    """
+    seq = body.get("purchase_order_seq")
+    if not isinstance(seq, int) and not (isinstance(seq, str) and seq.isdigit()):
+        raise HTTPException(status_code=400, detail="purchase_order_seq(정수) 필요")
+    return _handle_write(
+        lambda: rocket_invoice_confirm.preview_confirm(db, int(seq), _rocket_vendor())
+    )
+
+
+@router.post("/rocket/invoice-confirm")
+def rocket_invoice_confirm_request(
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """모달 「실행」 클릭 → 확인 명령 **1건** 적재. 사람 클릭이 명령의 유일한 생성점이다.
+
+    body: {"purchase_order_seq": int, "confirm": "CONFIRM_LIVE_WRITE", "note": str?}
+    토큰이 없거나 틀리면 403(가드 거부). 배치 없음 — PO 여러 건을 받는 형태를 만들지 않는다.
+    """
+    seq = body.get("purchase_order_seq")
+    if not isinstance(seq, int) and not (isinstance(seq, str) and str(seq).isdigit()):
+        raise HTTPException(status_code=400, detail="purchase_order_seq(정수) 필요")
+    return _handle_write(
+        lambda: rocket_invoice_confirm.request_confirm(
+            db,
+            int(seq),
+            _rocket_vendor(),
+            confirm=body.get("confirm"),
+            note=body.get("note"),
+        )
+    )
+
+
+@router.get("/rocket/invoice-confirm/history")
+def rocket_invoice_confirm_history(
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """실행 이력(감사 레코드) — 탭 안 표면. 조회 전용."""
+    return rocket_invoice_confirm.recent_history(db, _rocket_vendor(), limit)
+
+
+@router.get("/rocket/invoice-confirm/pending")
+def rocket_invoice_confirm_pending(db: Session = Depends(get_db)):
+    """페처 폴링용 — 대기 중인 확인 명령 유무. 가벼운 GET(창 안 뜸)."""
+    return rocket_invoice_confirm.pending_status(db, _rocket_vendor())
+
+
+@router.post("/rocket/invoice-confirm/claim")
+def rocket_invoice_confirm_claim(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """페처가 확인 명령 1건을 **임대**. 토큰 인증(페처 전용 뮤테이션).
+
+    ★임대는 1회뿐이다 — 실패해도 반납하지 않고, TTL이 지나면 재임대가 아니라 unknown 종결이다.
+      `refresh_contract`(읽기용, 3회 재시도)와 **다른 계약**이다.
+    """
+    _check_ingest_token(x_ingest_token)
+    return rocket_invoice_confirm.claim_next(db, _rocket_vendor())
+
+
+@router.post("/rocket/invoice-confirm/report")
+def rocket_invoice_confirm_report(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """페처 보고 → 종결 상태 확정. 페처는 **관측값만** 보내고 판정은 백엔드가 한다.
+
+    body: {"lease", "precheck"(button_present|button_absent|fetch_failed),
+           "precheck_http_status"?, "http_status"?, "response_body"?, "error"?}
+    """
+    _check_ingest_token(x_ingest_token)
+    lease = str(body.get("lease") or "").strip()
+    if not lease:
+        raise HTTPException(status_code=400, detail="lease 필요")
+    return rocket_invoice_confirm.report_result(
+        db,
+        lease=lease,
+        precheck=body.get("precheck"),
+        precheck_http_status=body.get("precheck_http_status"),
+        http_status=body.get("http_status"),
+        response_body=body.get("response_body"),
+        error=body.get("error"),
+    )
 
 
 @router.get("/collection-status")

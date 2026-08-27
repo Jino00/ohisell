@@ -364,5 +364,21 @@ def rocket_ri_queue(db: Session = Depends(get_db)):
       마지막 수집일에 굳는다 — 굳은 행은 이미 닫혔을 수 있다(2026-08-27 실측: RI 12건 중 8건이
       2026-08-05에 굳었고 그 8건의 계산서는 지급일까지 지났다). 판정 근거(연결 계산서의
       confirmed/transmitted/payment_date + synced_date)를 행마다 실어 보낸다.
+
+    ★2026-08-28(계약 CONTRACT_1p_invoice_confirm_write): 행마다 `confirm`을 실어 보낸다 —
+      「지금 확인 버튼을 띄울 수 있는가(can_request)」와 **못 띄우면 그 이유**(진행 중 /
+      결과 미상 잠금). 버튼만 조용히 사라지면 사람은 왜 못 누르는지 모른다.
+      ★합성을 서비스가 아니라 여기서 하는 이유: `rocket_invoice_confirm`이
+      `rocket_pipeline`을 import하므로, 파이프라인이 거꾸로 부르면 순환 import가 된다.
     """
-    return _jsonify(compute_rocket_ri_queue(db, _ROCKET_VENDOR_ID))
+    from app.services.coupang import rocket_invoice_confirm
+
+    out = compute_rocket_ri_queue(db, _ROCKET_VENDOR_ID)
+    seqs = [int(r["purchase_order_seq"]) for r in out.get("rows", [])]
+    states = rocket_invoice_confirm.confirm_states(db, seqs, _ROCKET_VENDOR_ID)
+    for r in out.get("rows", []):
+        # ★굳음 판정은 `confirm_states`가 **직접** 한다(적대 리뷰 1R P2-1). 전엔 여기서
+        #   응답을 덧칠했는데, 그러면 같은 규칙이 서비스·라우터 두 곳에 갈라져 살고
+        #   **어느 쪽도 테스트가 없었다**(변이 D11이 살아남았다). 라우터는 이제 합성만 한다.
+        r["confirm"] = states.get(int(r["purchase_order_seq"]), {})
+    return _jsonify(out)
