@@ -371,6 +371,72 @@ describe("buildPipelineHealthBanner", () => {
   });
 });
 
+describe("제외 슬롯 소진 (S6-a, ref 66 §5-2)", () => {
+  // ★이 블록이 없으면 배너 분기를 통째로 지워도 전건 통과한다 — 바로 위 생존 감시 블록이
+  //   그 구멍으로 P1을 맞았다. 「백엔드는 세는데 화면이 안 읽음」이 이 저장소에서 3회 반복됐다.
+  const slots = (
+    over: Partial<NonNullable<SchedulerHealth["exclusion_slots"]>> = {},
+  ) => ({
+    cap: 70,
+    groups: 3,
+    exhausted: 0,
+    unknown: 0,
+    stale: 0,
+    healthy: false,
+    rows: [],
+    rows_truncated: 0,
+    ...over,
+  });
+
+  const row = (over: Record<string, unknown> = {}) => ({
+    adgroup_id: "grp-1", campaign_id: "cmp-1", name: "01. TPU",
+    state: "exhausted", used: 70, cap: 70, remaining: 0, usage_pct: 100,
+    ours: 2, agency: 60, other_source: 0, unattributed: 8,
+    exhaust_eta_days: 0, exhaust_eta_reason: "이미 70/70 — 남은 칸이 없다",
+    ...over,
+  });
+
+  it("칸이 꽉 차면 «브레이크가 없다»고 말한다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({ exclusion_slots: slots({ exhausted: 1, rows: [row()] }) }),
+    );
+    expect(banner!.summary).toContain("제외 슬롯이 꽉 찬 광고그룹 1개");
+    expect(banner!.summary).toContain("더 걸 브레이크가 없음");
+    expect(banner!.summary).toContain("01. TPU");
+  });
+
+  it("★«못 셌다»를 «소진»으로 읽히게 하지 않는다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({ exclusion_slots: slots({ unknown: 2, rows: [row({ state: "unknown", used: null })] }) }),
+    );
+    expect(banner!.summary).toContain("확인하지 못한");
+    expect(banner!.summary).toContain("«0칸»이 아니라 «모름»");
+    expect(banner!.summary).not.toContain("꽉 찬");
+  });
+
+  it("관측이 멈춘 것도 조용하지 않다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({ exclusion_slots: slots({ stale: 1 }) }),
+    );
+    expect(banner!.summary).toContain("관측이 멈춘");
+  });
+
+  it("정상이면 이 분기는 침묵(다른 문제만 나온다)", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        exclusion_slots: slots({ healthy: true }),
+        missing_jobs: ["auto_sync_orders"],
+      }),
+    );
+    expect(banner!.summary).toBe("잡 실패: auto_sync_orders");
+  });
+
+  it("구버전 백엔드(키 없음)에서도 다른 판정을 가리지 않는다", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ exclusion_slots: undefined }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({ exclusion_slots: null }))).toBeNull();
+  });
+});
+
 describe("광고비 괴리 (D-CPP-46)", () => {
   // ★이 분기가 없으면 백엔드가 healthy=false를 만드는데 화면은 조용하다 — disk_low가
   //   정확히 그 상태로 있었다(교훈 #223). 그래서 판정과 «같은 커밋»에 표시를 넣고,

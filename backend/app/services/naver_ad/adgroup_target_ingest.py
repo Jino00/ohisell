@@ -50,9 +50,14 @@ log = logging.getLogger(__name__)
 # ★`probe_status`·`target_types_json`이 여기 있는 이유(적대 리뷰 P2-5·변이 N5): 조회가
 #   실패했다 복구된 사실과, 그룹이 어떤 targetTp를 얻거나 잃은 사실은 **설정 변경만큼 중요한
 #   관측**이다. 이것들이 빠지면 원장은 「아무 일도 없었다」로 보인다.
+# ★`restrict_keyword_count`는 여기 «있어야» 한다(S6, D-NAO-264) — `black_media_count`와
+#   달리 **어느 저장 칸에서도 유도되지 않는다**(제외키워드 목록은 이 표에 없다). 그리고 이 축이
+#   답해야 하는 질문이 정확히 「칸이 언제 얼마나 찼나」다 — 원장에서 빼면 소진 속도(ref 66 §5-2의
+#   소진 예상일 분모)를 **영영 못 센다**. 소급이 불가능한 축이라 안 적은 날은 안 적은 채로 끝난다.
 _TRACKED_FIELDS = (
     "probe_status", "target_types_json", "media_type", "media_search", "media_contents",
     "media_white", "black_media_json", "black_mediagroup_json", "pc", "mobile",
+    "restrict_keyword_count",
 )
 
 # 스윕 데드라인(초). 09:35 시작 기준 09:50 `sync_naver_keyword_baseline`을 침범하지 않는 선.
@@ -122,6 +127,9 @@ def _values_from_parsed(adgroup_id: str, campaign_id: str, parsed: dict) -> dict
         "media_white": _dumps(mt.get("white")) if media else None,
         "black_media_json": _dumps(black) if media else None,
         "black_media_count": len(black),
+        # ★`parsed`가 이미 «모름(None)»과 «0건»을 갈라 둔다 — 여기서 `or 0`을 붙이면
+        #   그 구분이 이 한 줄에서 소멸한다(교훈 #123).
+        "restrict_keyword_count": parsed["restrict_keyword_count"],
         "black_mediagroup_json": _dumps(parsed["black_mediagroup"]) if media else None,
         "media_reg_tm": media.get("regTm"),
         "media_edit_tm": media.get("editTm"),

@@ -734,6 +734,39 @@ export interface SchedulerHealthConservation {
 //   survival_summary 반환 그대로). ★다른 항목과 또 다르다 — 나머지는 «우리 파이프라인»의 상태고,
 //   이건 **네이버 콘솔에 우리가 건 조치**가 사라졌는가다. 대행사가 되돌린 사례가 2회 있었고
 //   그중 1회는 change_log에 흔적조차 없었다(라이브 재조회로만 발견) — 그래서 배너가 유일한 감시망이다.
+// exclusion_slots: 제외 슬롯이 «몇 칸 남았는가»(S6-a, ref 66 §5). 위 survival과 **반대 방향의
+//   고장**이다 — 조치는 멀쩡히 걸려 있는데 더 걸 칸이 없다. 그룹당 70칸(네이버 제약)이고
+//   70/70이면 그 그룹의 음의 레버가 소멸한다. 파이프라인도 값도 정상이라 다른 감시엔 안 잡힌다.
+export interface SchedulerHealthExclusionSlots {
+  cap: number;
+  groups: number;
+  exhausted: number;
+  // ★«못 셌다»는 0이 아니다 — 이 칸을 안 보면 조회가 죽은 그룹이 «잔여 70칸»으로 보인다.
+  unknown: number;
+  stale: number;
+  healthy: boolean;
+  rows: {
+    adgroup_id: string;
+    campaign_id: string;
+    name: string;
+    state: string; // exhausted | unknown | stale | ok
+    used: number | null; // null = 못 셌다
+    cap: number;
+    remaining: number | null;
+    usage_pct: number | null;
+    ours: number;
+    agency: number;
+    other_source: number;
+    unattributed: number | null;
+    exhaust_eta_days: number | null;
+    // ★예상일을 못 낼 때 «왜»가 여기 온다 — 빈칸은 왜 비었는지 말하지 않는다.
+    exhaust_eta_reason: string;
+  }[];
+  // 목록은 상한(20건)까지만 실린다 — 잘렸다는 사실이 숨지 않게 총계를 따로 받는다.
+  rows_truncated: number;
+  reclaim_note?: string;
+}
+
 export interface SchedulerHealthExclusionSurvival {
   monitored: number;
   alive: number;
@@ -777,6 +810,8 @@ export interface SchedulerHealth {
   // 구백엔드 안전을 위해 optional · monitored=0(대상 없음)이어도 healthy=true로 온다
   // 백엔드는 요약 자체를 못 했을 때 명시적으로 null을 준다(cost_drift·vendor_item_conservation과 같은 관례).
   exclusion_survival?: SchedulerHealthExclusionSurvival | null;
+  // 제외 슬롯 사용률(S6-a) — 구백엔드 안전을 위해 optional · 집계 불가면 null.
+  exclusion_slots?: SchedulerHealthExclusionSlots | null;
   // 광고비 괴리(D-CPP-46) — 구백엔드 안전을 위해 optional · 대조 불가면 null.
   ad_cost_divergence?: SchedulerHealthAdCostDivergence | null;
   // 부분수집(D-NAO-204) — 주문 수집이 status='success'로 끝났는데 실제로는 덜 들어온 상태.

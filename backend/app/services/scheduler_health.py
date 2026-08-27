@@ -246,6 +246,7 @@ def build_health(
     cost_drift: dict | None = None,
     vendor_item_conservation: dict | None = None,
     exclusion_survival: dict | None = None,
+    exclusion_slots: dict | None = None,
     ad_cost_divergence: dict | None = None,
     partial_sync: list[dict] | None = None,
 ) -> dict:
@@ -349,6 +350,12 @@ def build_health(
     #   healthy 한 칸으로 합쳐 주므로 빌더는 그 결론만 읽는다(판정 규칙이 두 벌이 되지 않게).
     exclusion_survival_bad = bool(exclusion_survival) and not exclusion_survival.get("healthy", True)
 
+    # 제외 슬롯 소진 — «조치가 사라졌나»(위)와 **반대 방향의 고장**이다: 조치는 멀쩡히 걸려
+    # 있는데 **더 걸 칸이 없다**. 70/70이 되는 순간 그 그룹의 음의 레버가 소멸하는데, 어느
+    # 파이프라인도 죽지 않고 어느 값도 틀리지 않으므로 **다른 어떤 감시에도 안 잡힌다**
+    # (ref 66 §5-2). SA가 exhausted·unknown·stale 셋을 healthy 한 칸으로 합쳐 준다.
+    exclusion_slots_bad = bool(exclusion_slots) and not exclusion_slots.get("healthy", True)
+
     # 광고비 괴리 — 쿠팡이 정산에서 뗀 광고비가 우리가 뺀 광고비를 넘는다(D-CPP-46).
     # ★`insufficient_data`는 **비정상으로 세지 않는다**: 대조를 못 한 것이지 어긋난 게 아니다.
     #   (그렇다고 조용하지도 않다 — 응답에 verdict가 그대로 실려 화면이 «못 쟀다»고 말할 수 있다.)
@@ -380,6 +387,9 @@ def build_health(
         and not conservation_mismatch
         # ★조치 생존 — 파이프라인도 값도 정상인데 **우리가 한 조치만** 사라질 수 있다.
         and not exclusion_survival_bad
+        # ★제외 슬롯 소진 — 조치는 살아 있는데 **더 걸 칸이 없다**(70/70). 브레이크가 조용히
+        #   바닥나는 유일한 신호다.
+        and not exclusion_slots_bad
         # ★광고비 괴리 — D-CPP-43으로 정산 ad_sales 차감을 뺀 뒤 **안전망이 없어진 자리**다.
         #   PA 수집이 멈추면 ad_spend가 조용히 0이 되고 순이익이 그만큼 과대계상된다.
         and not ad_divergence_bad
@@ -408,6 +418,9 @@ def build_health(
         # 조치 생존 대조 결과. 대조 자체를 못 했으면 None이다(위 둘과 같은 이유 — 없는 키와
         # 0건이 같아 보이면 «판정 안 함»이 «이상 없음»으로 읽힌다).
         "exclusion_survival": exclusion_survival,
+        # 제외 슬롯 사용률·소진 예상일(S6-a). 집계 자체를 못 했으면 None — 위와 같은 이유로
+        # «판정 안 함»과 «이상 없음»을 구분한다.
+        "exclusion_slots": exclusion_slots,
         # 광고비 괴리 대조(D-CPP-46). 대조 자체를 못 했으면 None(위 셋과 같은 이유).
         # ★정상(`ok`)일 때도 `ratio`를 싣는다 — 숫자가 없으면 임계에 다가가는 과정을 아무도 못 본다.
         "ad_cost_divergence": ad_cost_divergence,
@@ -661,6 +674,17 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 제외 생존 요약 실패 — 이 감시만 생략(헬스 API는 유지)")
         exclusion_survival = None
 
+    # 제외 슬롯 사용률 — 「더 걸 칸이 남았나」(S6-a, ref 66 §5). 생존 감시와 마찬가지로
+    # **DB만 읽는다**(라이브 count는 일일 타겟 스윕이 이미 적재해 둔다 — 추가 API 콜 0).
+    exclusion_slots: dict | None = None
+    try:
+        from app.services.naver_ad import exclusion_slot_usage as _esu  # noqa: PLC0415
+
+        exclusion_slots = _esu.slot_usage(db, now=now)
+    except Exception:
+        log.exception("[워치독] 제외 슬롯 요약 실패 — 이 감시만 생략(헬스 API는 유지)")
+        exclusion_slots = None
+
     # 광고비 괴리 — 쿠팡이 정산에서 뗀 광고비 ↔ 우리가 손익에서 뺀 광고비(D-CPP-46).
     # ★D-CPP-43으로 정산 ad_sales 차감을 뺀 뒤 **안전망이 없어진 자리**를 메운다: PA 수집이
     #   멈추면 `ad_spend`가 조용히 0이 되고 순이익이 그만큼 과대계상되는데, 그전엔 정산 쪽
@@ -726,6 +750,7 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         cost_drift=cost_drift,
         vendor_item_conservation=vendor_item_conservation,
         exclusion_survival=exclusion_survival,
+        exclusion_slots=exclusion_slots,
         ad_cost_divergence=ad_cost_divergence,
         partial_sync=partial_sync,
     )

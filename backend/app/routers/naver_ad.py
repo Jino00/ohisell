@@ -105,7 +105,7 @@ from app.services.naver_ad import creative_scorecard
 from app.services.naver_ad import wisdom_scorecard
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
-from app.services.naver_ad import exclusion_survival
+from app.services.naver_ad import exclusion_slot_usage, exclusion_survival, ignition_preflight
 from app.services.naver_ad import search_term_exclusion_list
 from app.services.naver_ad import search_term_execution
 from app.services.naver_ad import search_term_scorecard
@@ -859,6 +859,14 @@ def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get
     ).first()
     before_optimizer = settings.optimizer if settings else "none"
 
+    # ★켜기 선행 검사 (S6-b) — **쓰기 «전»에** 재고, 응답에 실어 보낸다. 차단하지 않는다:
+    #   켜는 결정은 Jino의 것이고 여기서 막으면 새 게이트를 세우는 것이다(전역 §1).
+    #   끄는 방향('none')엔 경고를 달지 않는다 — 닫는 데 안전 경고는 소음이다.
+    preflight = (
+        ignition_preflight.check(db, body.campaign_id)
+        if body.optimizer != "none" else None
+    )
+
     if settings is None:
         # 없던 행은 optimizer만 세팅 — mode 등 기본값을 임의로 지어내지 않는다.
         settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer=body.optimizer)
@@ -882,7 +890,25 @@ def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get
 
     db.commit()
     db.refresh(settings)
-    return _serialize_settings(settings)
+    out = _serialize_settings(settings)
+    # ★키를 «항상» 싣지 않는다 — 켜는 요청에만 붙인다. 다만 붙일 땐 경고 0건이어도 붙여서
+    #   「검사를 안 했다」와 「검사했는데 깨끗하다」가 같아 보이지 않게 한다(교훈 #123).
+    if preflight is not None:
+        out["ignition_preflight"] = preflight
+    return out
+
+
+@router.get("/campaign-settings/ignition-preflight")
+def campaign_ignition_preflight(
+    campaign_id: str = Query(..., description="검사할 캠페인 id"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """켜기 선행 검사(읽기 전용·차단 0, S6-b).
+
+    ★`auto_operate`를 켜는 API 경로는 **존재하지 않는다**(점화는 직접 UPDATE다). 그래서
+    이 창구가 필요하다 — 켜기 «전에» 「지금 켜면 무엇이 열리는가」를 물어볼 수 있어야
+    검사가 정작 켜는 순간에 쓰인다. optimizer 스위치 응답에도 같은 판정기가 실린다."""
+    return ignition_preflight.check(db, campaign_id)
 
 
 # ── PAO 스코프 (D-NAO-244) — 「어떤 캠페인·광고그룹을 돌릴지 + 그 성과」 ──────────────
@@ -2410,6 +2436,19 @@ def get_search_term_exclusion_survival(db: Session = Depends(get_db)) -> dict:
     라이브 재조회는 하루 1회 잡(verify_search_term_exclusions, 08:25 KST)이 한다. 이 창구는
     그 결과를 읽기만 한다 — 화면을 열 때마다 네이버 API를 부르면 감시가 외부 지연에 묶인다."""
     return exclusion_survival.survival_summary(db)
+
+
+@router.get("/search-term/exclusion-slots")
+def get_search_term_exclusion_slots(db: Session = Depends(get_db)) -> dict:
+    """제외 슬롯 사용률·소진 예상일(읽기 전용, S6-a · ref 66 §5).
+
+    「우리가 건 제외가 아직 걸려 있나」(위 창구)와 **반대 방향의 질문**이다: 조치는 멀쩡한데
+    **더 걸 칸이 남았나**. 그룹당 70칸(네이버 제약)이고 70/70이면 그 그룹의 음의 레버가
+    소멸한다 — 파이프라인도 값도 정상이라 다른 어떤 감시에도 안 잡힌다.
+
+    라이브 count는 일일 타겟 스윕(`sync_naver_adgroup_targets`, 09:35 KST)이 적재한다.
+    이 창구는 그것을 읽기만 한다 — 화면을 열 때마다 네이버를 부르면 1,013콜이 튄다."""
+    return exclusion_slot_usage.slot_usage(db)
 
 
 # ══════════════════════════════════════════════════════════════════
