@@ -1,5 +1,29 @@
 # 트랙: 쿠팡 로켓배송(1P) 종합조망 편입
 
+<!-- TRACK-CONTRACT v1 -->
+목표: "우리가 지금까지 Ofix에서 한 일을 OhiTech에서도 구현할 수 있어? 물론 OhiTech는 로켓배송이 추가되지" / "발주한 금액, 납품한 공급가, 정산 금액을 모두 봐야지. 매출은 쿠팡이 발주한 금액이 될꺼고" / "광고비용이 빠지겠지?" (Jino 원문 — 아래 「사용자 원문 인용」 절에서 옮김, 발명 금지)
+안함:
+- 로켓그로스(RG)·3P(Wing) 매출·정산 → 소관: docs/tracks/active/track_coupang-rg-replenishment.md · track_revenue-wing-truth.md
+- 1P 발주확정수량 대 입고 채무 화면(「발주≠입고 22배」) → 소관: .claude/memory/HANDOFF_coupang-po-confirm-qty_20260826.md (Jino가 2026-08-26 CLOSE, 재개는 Jino 발의로만)
+- supplier.coupang.com에 대한 모든 상태 변경(쓰기) → 소관: docs/contracts/CONTRACT_1p_invoice_gap.md S3 정찰 후 별도 계약
+- 프로모션 분담금 손익 → 소관: docs/tracks/active/track_coupang-promo-pnl.md
+합격:
+- [x] S1 정찰 — supplier 발주/납품/정산 3단계 소스 확보 (2026-06-17, ref 20)
+- [x] S2 데이터 모델 + 수집 SA + 적재/마이그레이션 (2026-06-17, alembic p0q1r2s3t4u5)
+- [x] S3 헤드풀 CDP 페처 + prod push + launchd 데몬 (2026-06-17, tools/rocket_supplier_fetcher.py)
+- [x] S4 종합조망 편입 Harness (2026-06-17, D-11/D-12, rocket_intelligence.py)
+- [x] S4.5a 발주상세 per-SKU 수집·파서·ingest (2026-06-18, D-13, alembic q1r2s3t4u5v6)
+- [x] S4.5b 원가 브리지 매핑 + 미매핑 목록 + 확정/제외 (2026-06-18, D-13, alembic r2s3t4u5v6w7)
+- [x] S4.5c 원가 결합 — net_profit 원가 반영(has_cost=true) (2026-06-18, D-13)
+- [x] M1 파서가 버리던 원본 컬럼 2건 복원 (2026-07-28, alembic f6a8c0b2d4e6)
+- [x] M2 DOM 셀 추출의 마크업 들여쓰기 의존 제거 (2026-07-28, 커밋 412042e)
+- [x] M3 원장 대조 + leaf 배선 (2026-08-05, D-14)
+- [ ] S5 프론트 — 종합조망 로켓배송 뷰/축 + 갱신 버튼 + 원가 매핑 관리 UI + 커버리지% 배지
+- [ ] S6 prod 라이브 self-verify + 적대 리뷰 + 배포
+상태: 진행 중
+확인: 2026-08-27 21:0x KST [46832d30] — 계약 헤더 신설(lazy 부착). 진행률을 프로즈 「4/6」에서 체크박스 기계 판독 **10/12**로 옮겼다(자유 % 금지 — 본문 체크리스트를 그대로 옮겼을 뿐 항목을 발명하지 않았다). 이 세션의 작업(「1P계산서 목표」 — 열린 파이프라인·확인요청함 탭, docs/contracts/CONTRACT_1p_invoice_gap.md)은 **S5·S6 어디도 닫지 않는다**(S5는 종합조망 뷰·원가 매핑 UI라 대상이 다르다) ⇒ **진행률 10/12 불변**. 산출: 커밋 4c036ebc·442e3984.
+<!-- /TRACK-CONTRACT -->
+
 > 생성: 2026-06-15 · 상태: 🟢 Active (4/6, S4 완료 + S4.5(a 수집·b 매핑·c 원가결합) 완료 — net_profit 원가 반영 + M1~M3 완료 — leaf 배선 + 매출 축 토글·ASN 미수금 실측[D-15] + **회사 소계·전체 순이익이 광고비를 흡수하고 손익은 흡수 안 하던 누출 수리·배포 완료[D-22]**) · 계정: 주식회사 오하이테크
 > 단일 진실 원천. 이 파일을 무시·변형하지 말 것. 변경은 Jino 승인 후 D-N으로 기록.
 > 확인: 2026-08-21 23:4x KST [586fba5c] — 합격기준①(오픽스 RG 매출 배선) **선행 조사만** 수행(코드·배포 0건). RG 원장 괴리 원인 확정: 주문 API=gross·콘솔=net이고 **RG 주문 API에 취소·상태 축이 없다** → 주문 원장으로는 net 불가. net 유일 소스=`coupang_vendor_summary_daily`(RFM, 결손 0일). 오픽스 30일 +11.8%(694,070원·34개) 재현. ★승인 대기 계약의 전제(「우리 원장으로 맞춘다」)가 무너져 **새 계약 필요**. 산출: `docs/references/89_rg_ledger_gap_root_cause_20260821.md`. 진행률 4/6 불변.
