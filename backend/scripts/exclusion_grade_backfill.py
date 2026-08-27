@@ -77,7 +77,15 @@ def _print_report(report: dict) -> None:
         print("  이탈이 있으나 특수 처분으로 기록된 행이 없다 — **원인 미상**.")
         print("  원장 증감 또는 규칙 변경일 수 있다. 등급별 `grade_reason`을 직접 볼 것.")
         return
-    print("  계약 §4-B⑦의 합은 13+6+3,970 = 3,989로, 원장 총계 3,990과 1건 어긋난다.")
+    # ★2R P1: 초판 수정이 이 문장에 «3,990»과 «1건»을 리터럴로 박았다 — 관측 안 한 수를
+    #   사실로 단언한 것이라 1R P1-1과 **같은 결함 클래스**다. 원장은 라이브 엔드포인트
+    #   (`POST /search-term/executions/import`)로 언제든 커지고, 그때 이 줄은 바로 위
+    #   「실제 합계」와 자기모순이 된다. 숫자는 전부 report에서 뽑는다.
+    gap = report["total"] - report["expected_sum"]
+    print(
+        f"  계약 §4-B⑦의 합은 13+6+3,970 = {report['expected_sum']:,}로, "
+        f"원장 총계 {report['total']:,}과 {gap:+,}건 어긋난다."
+    )
     print("  부록 [E]가 A급을 16건이라 하면서 「BEP 초과 13 + 미달 2」로 15만 설명한 자국이다.")
     print("  그 자리에 해당하는 행:")
     for row in report["deviation_rows"]:
