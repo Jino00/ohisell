@@ -468,3 +468,31 @@ def test_스케줄러_잡은_미완주면_raise_한다(db, caplog, monkeypatch):
             ss.sync_naver_ad_creative_text_job()
     errs = [r for r in caplog.records if r.levelname == "ERROR"]
     assert errs and "reason=그룹 조회 실패 1/1" in "\n".join(r.getMessage() for r in errs)
+
+
+def test_VARCHAR_상한_초과값은_잘리고_Text는_안_잘린다(db):
+    """★적대 리뷰 1R P2-1 채택 — `_clip` 변이(무조건 원문 반환)가 **생존**했다.
+
+    SQLite는 초과 길이를 조용히 허용하지만 이 저장소의 이행 목표는 PostgreSQL이고
+    거기선 VARCHAR 초과가 **에러**다 ⇒ 로컬 테스트가 원리적으로 못 잡는 자리이고,
+    그래서 방어 로직이 회귀에 무방비였다(「존재 게이트 ≠ 성숙 게이트」의 한 사례).
+
+    ★같이 지키는 것: **Text 컬럼(문안·링크)은 자르면 안 된다.** 대체키워드 구문 때문에
+      표시 자수보다 길 수 있고, 원문이 손상되면 그게 곧 원복 좌표의 손실이다.
+    """
+    ag = "grp-a001-01-000000031176229"
+    _mk_group(db, ag)
+    long_headline = "가" * 500          # Text — 상한 없음
+    row = _fetch_row(LIVE_TEXT_AD)
+    row["headline"] = long_headline
+    row["ad_type"] = "T" * 100          # String(40) — 잘려야 한다
+    row["status"] = "S" * 80            # String(30) — 잘려야 한다
+    row["edit_tm"] = "E" * 90           # String(40) — 잘려야 한다
+
+    ingest.sync_ad_creative_text(db, ads_by_adgroup={ag: [row]})
+    stored = db.execute(select(NaverAdCreativeText)).scalars().one()
+
+    assert len(stored.ad_type) == 40      # _MAX_LEN["ad_type"]
+    assert len(stored.status) == 30
+    assert len(stored.edit_tm) == 40
+    assert stored.headline == long_headline   # ★Text는 원문 그대로 — 자르면 결함이다
