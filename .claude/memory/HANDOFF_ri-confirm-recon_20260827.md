@@ -76,6 +76,22 @@ n=1의 완료 QA는 S2-3 미달의 원인을 「Mac 페처가 그 세션 중 실
 - ★단 트랙 「안함」의 *"supplier 쓰기 → CONTRACT_1p_invoice_gap.md S3 정찰 후 별도 계약"* 의 **전제 조건이 충족됐다** — 이제 그 별도 계약을 초안할 수 있다(Jino 승인 지점).
 - **다음 세션 후보(트랙 기준)**: S5.
 
+## 2-3. 착지
+- **완료 단계**: 커밋 → push → PR → (적대 리뷰 **생략**) → 머지 → **완주**
+- **멈춘 단계**: 없음
+- **재개 명령**: 해당 없음
+- **좌표**: 커밋 `4886af3a` → PR **#513** → 머지 **`abe50a25`**  ·  종결 기록(이 절·`end_kst`)은 별도 PR
+- **CI**: **3/3 실통과** (backend py3.10 11m50s · py3.14 9m20s · frontend 51s), `--force` **미사용**
+  - ⚠️ 1차 `safe_merge` 시도는 `MERGE_WAIT` 기본 600초 안에 py3.10이 안 끝나 **거부**됐다(정상 동작). `--force`를 쓰지 않고 `MERGE_WAIT=900`으로 재시도해 통과.
+- **적대 리뷰**: ⚠️ **리뷰 생략: 기록물만** — 7파일 전부 문서·기록물(HANDOFF·LESSONS_LEARNED·체인 jsonl·claude-progress.txt·TRACKS.md·트랙 파일·ref 106), **코드 0파일**
+- **배포**: 없음(저장소 코드 0줄). 단 **Mac 런타임 배포 1건**은 했다 — `~/.ohisell/tools/rocket_supplier_fetcher.py` (CAS `ancestor` 통과, 매니페스트 `blob 2ed20509…` · `commit 704f5cfe` · `2026-08-27 22:22:08 KST`) + `launchctl kickstart -k gui/$(id -u)/com.ohisell.rocket`
+- **정정 경로**: 이 PR은 revert 커밋으로 되돌릴 수 있다. Mac 런타임은 `install_local_runtime.sh --force=rocket_supplier_fetcher.py`로 되돌린다(설치 시 백업 생성).
+- **L5**: 로컬 `main`이 공유 메인 폴더에 잡혀 있어 「main에 세워둔다」 **생략**
+
+## 2-4. 등록부
+- 체인 `1p-계산서` n=2 행은 `handoff`를 먼저 채우고 **착지가 끝난 뒤** `end_kst`를 채웠다(2단계 — 그 사이 구간에 커밋을 더 썼기 때문이다).
+- ⚠️ 이 절을 쓰는 중 실수 1건: `git switch -c <새브랜치>` 로 옮긴 뒤 `git checkout <옛브랜치> -- <파일>` 을 실행해 **방금 쓴 워킹트리 편집을 커밋본으로 덮었다**. 재작성해 복구했다. `checkout -- <경로>`는 그 경로의 미커밋 변경을 조용히 버린다.
+
 ## 3. 확정된 결정사항
 - **「거래명세서확인」은 벤더가 눌러 도달하는 종착 상태다**(CI). 쿠팡 자동이 아니다.
 - **확인은 지급의 선행조건이 아니다** — 안 눌러도 돈은 들어온다(8건 실증). 기한도 없다.
