@@ -53,6 +53,38 @@ def _daily(db, adgroup, term, *, clk, cost, conv=0, rev=0, day=date(2026, 8, 1))
 # S2-b ①  인구조사 — 원장 행이 태어나는 자리는 팩토리 하나뿐이다
 # ══════════════════════════════════════════════════════════════════════
 
+def _ledger_constructor_offenders() -> list[str]:
+    """원장 행 생성자를 팩토리 밖에서 부르는 자리를 센다.
+
+    ★적대 리뷰 P2-2가 초판의 두 구멍을 변이로 실증했다:
+      ①**별칭 import** — `from app.models import NaverSearchTermExclusion as _L` 뒤 `_L(...)`은
+        정규식 `NaverSearchTermExclusion\\s*\\(`에 안 걸린다
+      ②**스캔 루트가 `app/`뿐** — `backend/scripts/` 아래에 같은 생성자를 두면 안 잡힌다
+      둘 다 148 전건 초록으로 통과했다. 「자리를 센다」는 세는 «범위»가 곧 보장 범위다.
+    """
+    backend = Path(__file__).resolve().parents[1]
+    factory = backend / "app" / "services" / "naver_ad" / "exclusion_grade.py"
+    direct = re.compile(r"NaverSearchTermExclusion\s*\(")
+    alias_decl = re.compile(r"import\s+NaverSearchTermExclusion\s+as\s+(\w+)")
+
+    offenders: list[str] = []
+    for root in ("app", "scripts"):
+        for py in (backend / root).rglob("*.py"):
+            if py == factory:
+                continue
+            text = py.read_text(encoding="utf-8")
+            patterns = [direct]
+            for alias in alias_decl.findall(text):
+                patterns.append(re.compile(rf"\b{re.escape(alias)}\s*\("))
+            for lineno, line in enumerate(text.splitlines(), 1):
+                stripped = line.lstrip()
+                if stripped.startswith("#") or stripped.startswith("class "):
+                    continue  # 주석·클래스 «정의»는 생성자 호출이 아니다
+                if any(p.search(line) for p in patterns):
+                    offenders.append(f"{py.relative_to(backend)}:{lineno}: {stripped[:90]}")
+    return offenders
+
+
 def test_원장_행_생성자는_팩토리_밖에서_호출되지_않는다():
     """★이 파일의 본체. 개별 경로 테스트는 «내가 아는 경로»만 지키고, 계약이 아는 경로는
     실제보다 두 개 적었다. 그러니 「등급 없이 만들 수 없다」는 **자리의 수를 세서** 지킨다.
@@ -60,21 +92,7 @@ def test_원장_행_생성자는_팩토리_밖에서_호출되지_않는다():
     새 경로를 만들고 싶으면 `exclusion_grade.new_exclusion()`을 쓰면 된다 — 이 테스트는
     새 경로를 막는 게 아니라 **등급 없는 새 경로**를 막는다.
     """
-    app_dir = Path(__file__).resolve().parents[1] / "app"
-    factory = app_dir / "services" / "naver_ad" / "exclusion_grade.py"
-    pattern = re.compile(r"NaverSearchTermExclusion\s*\(")
-
-    offenders: list[str] = []
-    for py in app_dir.rglob("*.py"):
-        if py == factory:
-            continue
-        for lineno, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
-            stripped = line.lstrip()
-            if stripped.startswith("#") or stripped.startswith("class "):
-                continue  # 주석·클래스 «정의»는 생성자 호출이 아니다
-            if pattern.search(line):
-                offenders.append(f"{py.relative_to(app_dir)}:{lineno}: {stripped[:90]}")
-
+    offenders = _ledger_constructor_offenders()
     assert offenders == [], (
         "제외 원장 행을 팩토리 밖에서 직접 만드는 자리가 생겼다 — 그 경로는 등급 없는 행을 "
         "낳는다(계약 §4-C S2-b). `exclusion_grade.new_exclusion(...)`을 쓸 것:\n  "
@@ -260,9 +278,11 @@ def test_성과미달_식이_기존_백오프와_같다():
      eg.GRADE_UNDERPERFORM),                                   # RoAS 0.456 → 컷이 옳았다
     (eg.Evidence(clk=5, cost=8817, conv=1, revenue=15900, has_history=True), 1.711,
      eg.GRADE_MISCUT),                                         # RoAS 1.803 → BEP 초과
-    # ★★계약이 못 본 그 1건 — cost=0이라 RoAS 미정의
+    # ★★계약이 못 본 그 자리 — cost=0이라 RoAS 미정의 ⇒ 초과/미달 어느 쪽도 «실측»이 아니다.
+    #   초판은 `오컷의심`이었고 적대 리뷰 P2-3이 그 논증을 깼다(제외 후에도 노출이 계속 나서
+    #   컷이 그 매출을 막지 못했다 ⇒ 「컷이 틀렸다」의 실측이 아니다) ⇒ 보수적으로 `미검증`.
     (eg.Evidence(clk=0, cost=0, conv=1, revenue=12900, has_history=True), 1.711,
-     eg.GRADE_MISCUT),
+     eg.GRADE_UNVERIFIED),
     # 전환 없음 — 클릭이 표본 충분성을 가른다
     (eg.Evidence(clk=21, cost=1, conv=0, revenue=0, has_history=True), 1.711,
      eg.GRADE_UNDERPERFORM),                                   # B: 산업표준 통계컷 충족
@@ -353,9 +373,9 @@ def test_백필이_전건에_등급을_붙이고_만료일은_안_건드린다(d
     assert after == before
 
     dist = out["distribution"]
-    assert dist[eg.GRADE_MISCUT] == 2        # 흑자전환 + 비용0전환
+    assert dist[eg.GRADE_MISCUT] == 1        # 흑자전환
     assert dist[eg.GRADE_UNDERPERFORM] == 2  # 적자전환 + 표본충분
-    assert dist[eg.GRADE_UNVERIFIED] == 2    # 표본미달 + 이력없음
+    assert dist[eg.GRADE_UNVERIFIED] == 3    # 표본미달 + 이력없음 + 비용0전환(판정 보류)
 
 
 def test_백필은_이미_붙은_등급을_덮지_않는다(db, monkeypatch):
@@ -391,3 +411,78 @@ def test_분포_보고가_계약_기대치와의_이탈을_이유까지_싣는�
     # 비용0 행의 사유가 그대로 실려야 한다 — 숫자만 다르면 다음 세션이 원인을 다시 판다
     assert any("비용0" in (r["reason"] or "") for r in report["deviation_rows"])
     assert report["expected_sum"] == 3989  # 계약 원문의 합 — 고쳐 적지 않고 그대로 대조한다
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ★Jino가 «실제로 읽는 화면» (계약 §4-C S2-a) — 여기가 테스트 0건이었다
+# ══════════════════════════════════════════════════════════════════════
+#
+# 적대 리뷰가 변이 둘로 이 공백을 실증했다:
+#   M6 「이탈의 이유」 렌더 제거      → 148 전건 초록으로 **생존**
+#   M7 `_print_report` 호출 자체 삭제 → 148 전건 초록으로 **생존**
+# 즉 Jino가 아무것도 못 보게 만들어도 테스트는 전부 통과했다. 서비스 층에만 표면 변이를
+# 걸어 둔 탓이다 — 「만드는 층」은 지켜졌는데 «닿는 층»이 비어 있었다(교훈 #362의 세 번째).
+
+def _run_script(monkeypatch, db, capsys, argv: list[str]) -> str:
+    """실제 스크립트의 `main()`을 돌리고 표준출력을 그대로 돌려준다(mock 없음)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "exclusion_grade_backfill",
+        Path(__file__).resolve().parents[1] / "scripts" / "exclusion_grade_backfill.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "SessionLocal", lambda: _NoCloseSession(db))
+    monkeypatch.setattr(mod, "kst_today", lambda: TODAY)
+    monkeypatch.setattr("sys.argv", ["exclusion_grade_backfill.py", *argv])
+    mod.main()
+    return capsys.readouterr().out
+
+
+def test_화면이_백필_전에_계약_이탈을_사실로_단언하지_않는다(db, monkeypatch, capsys):
+    """★P1-1 그 자체. 백필 «전»엔 이탈이 −3,985인데 초판은 「1건 어긋난다」를 찍었다."""
+    from app.services.naver_ad import campaign_target_resolver
+
+    monkeypatch.setattr(campaign_target_resolver, "account_default_bep_roas", lambda _db: 1.711)
+    _seed_ledger(db)  # 전건 미분류 상태
+
+    out = _run_script(monkeypatch, db, capsys, [])  # 무인자 = 읽기 전용, docstring이 권하는 그 실행
+
+    assert "1건 어긋난다" not in out, "백필 전인데 계약 셈 이야기를 사실로 단언하면 안 된다"
+    # ★문자열을 좁게 잡는다 — 「미분류」는 분포표의 라벨로도 찍히므로 그것만 보면
+    #   경고 문단을 통째로 지워도 통과한다(자체 변이 M15가 그렇게 살아남았다).
+    assert "아직 등급이 없는 행" in out, "백필이 안 돌았다는 «경고»가 화면 위쪽에 없다"
+    assert "백필 미실행" in out, "이탈의 진짜 원인이 이유 절에 안 적혔다"
+    assert "--backfill" in out, "다음에 뭘 하라는 안내가 없다"
+
+
+def test_화면이_백필_후에_이탈과_그_이유를_함께_찍는다(db, monkeypatch, capsys):
+    """계약 §4-C S2-a: "수치가 [E]와 다르면 **다른 이유가 함께 출력·기록**돼 있다"."""
+    from app.services.naver_ad import campaign_target_resolver
+
+    monkeypatch.setattr(campaign_target_resolver, "account_default_bep_roas", lambda _db: 1.711)
+    _seed_ledger(db)
+
+    out = _run_script(monkeypatch, db, capsys, ["--backfill"])
+
+    assert "제외 «임대» 등급 분포" in out          # 분포표 자체가 사라지면 안 된다(M7)
+    assert "이탈의 이유" in out                    # 이유 절이 사라지면 안 된다(M6)
+    assert "비용0" in out, "이탈을 낳은 행의 «사유»가 화면에 없다"
+    assert "아직 등급이 없는 행" not in out         # 백필 후엔 미분류 경고가 없다
+    # ★라벨이 아니라 «값»을 단언한다 — 라벨만 보면 BEP를 통째로 숨겨도 통과한다
+    #   (자체 변이 M16이 그렇게 살아남았다). 판정에 실제로 쓴 자가 화면에 있어야 한다.
+    assert "계정 기본 BEP(현재) = 1.7110" in out
+
+
+def test_화면이_BEP_미상을_숨기지_않는다(db, monkeypatch, capsys):
+    """BEP를 못 구하면 A급이 전부 미검증으로 떨어진다 — 그 사실이 화면에 보여야 한다."""
+    from app.services.naver_ad import campaign_target_resolver
+
+    monkeypatch.setattr(campaign_target_resolver, "account_default_bep_roas", lambda _db: None)
+    _seed_ledger(db)
+
+    out = _run_script(monkeypatch, db, capsys, ["--backfill"])
+
+    assert "[미상]" in out, "BEP를 못 구했는데 화면이 그 사실을 안 알린다"
+    assert "BEP미상" in out, "BEP 미상으로 판정을 포기한 행의 사유가 화면에 없다"

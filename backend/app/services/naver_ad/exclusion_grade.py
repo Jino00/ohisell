@@ -78,6 +78,20 @@ REVIEW_BACKOFF_MAX = 90
 _BUCKET_B_MIN_CLK = 21
 _BUCKET_C_MIN_CLK = 10
 
+# 등급이 아직 안 붙은 행의 표시 라벨 — 분포표에서 «분류된 0»과 «분류 안 됨»을 가른다.
+UNGRADED_LABEL = "(미분류)"
+
+# «규칙의 보통 경로»가 아니라 특수 처분으로 등급이 정해진 행의 사유 접두어.
+# ★계약 §4-C S2-a가 「[E]와 다르면 이유를 함께 출력·기록」을 요구하므로, 이탈을 낳을 수 있는
+#   사유는 여기 등록돼야 관측 표면에 실린다. 새 특수 처분을 만들면 이 목록에 더한다.
+SPECIAL_REASON_PREFIXES: tuple[str, ...] = (
+    "backfill:A-비용0",     # RoAS 미정의(cost=0 ∧ conv≥1)
+    "backfill:A-BEP미상",   # 계정 기본 BEP를 못 구해 초과/미달 판정 포기
+)
+
+# IN 절 청크 크기 — SQLite 변수 상한(구버전 999)을 넘지 않게 나눈다.
+_IN_CHUNK = 500
+
 
 class ExclusionGradeError(ValueError):
     """등급 없이 / 모르는 등급으로 원장 행을 만들려 한 것. 조용히 넘기지 않는다.
@@ -200,16 +214,24 @@ def classify(ev: Evidence, *, bep_roas: float | None) -> tuple[str, str]:
     ★★계약이 못 본 사각 — A급 16건인데 「BEP 초과 13 + 미달 2」로 **15만 설명된다.**
       13+6+3,970 = **3,989**로 원장 3,990과 1건이 어긋나는 것이 그 자국이다(계약 §4-C S2-a가
       "불일치는 그 자체를 표면화한다"고 스스로 요구한 그 불일치). 실측으로 특정한 그 1건은
-      `id=579`(`지문방지필름`) — **clk=0 · cost=0 · conv=1 · 매출 12,900원**이라 RoAS가
-      0으로 나뉘어 «초과»에도 «미달»에도 안 들어간다. 전 원장에서 이 모양은 이 1건뿐이다.
+      `id=579`(`지문방지필름`) — **clk=0 · cost=0 · conv_direct=1 · 매출 12,900원**이라
+      RoAS가 0으로 나뉘어 «초과»에도 «미달»에도 안 들어간다.
 
-      처분: **오컷의심**. 목적함수가 RoAS가 아니라 **총이익 절대액**(D-NAO-59)이므로
-      «비용 0에 매출 발생»은 총이익 양수 = BEP 초과와 동치다. 그리고 이 행은 08-17에
-      제외됐는데 증거(08-24·25)가 **전부 제외 «후»**라, 계약 §4-B⑥의 오컷의심 정의
-      *"제외 후에도 남은 증거가 BEP 초과"*에 문자 그대로 걸린다.
-      ★새 상수를 만들지 않았다 — 기존 목적함수를 적용했을 뿐이다(계약 §2-3).
-      ★오컷의심은 재심사 «대상 목록»에 오를 뿐이고 실행은 소유권 분리 후라(계약 §1-2),
-        이 판단이 틀려도 광고 계정에는 아무 일도 일어나지 않는다.
+      처분: **미검증**(보류). 초판은 이걸 `오컷의심`으로 썼고 그 근거는 *"총이익 절대액
+      기준 비용0·매출>0은 BEP 초과와 동치"*였다 — **적대 리뷰가 그 논증을 깼다.**
+        · 오컷의심의 정의는 *"컷이 «틀렸다»는 실측이 있는 유일 부류"*인데, 이 행은 제외
+          시각(08-17) **이후**(08-24·25)에도 노출이 계속 났고 그 상태로 전환이 났다
+          (`live_state='missing'` — 우리 제외가 라이브에 안 걸려 있다). 즉 **컷이 그 매출을
+          막지 못했다** ⇒ 「컷이 틀렸다」의 실측이 아니다. 오히려 「컷은 돈을 안 쓰게 했고
+          매출은 어차피 났다」로도 똑같이 읽힌다 — 그러면 총이익은 **더 좋다.**
+        · 같은 데이터에서 정반대 두 해석이 나오면 그건 **판정 근거가 없는 것**이고, 계약
+          §4-B⑦이 *"텍스트 관련성 판단은 자동 부여 근거 없음"*을 이유로 무관·광의를 백필에서
+          뺀 것과 같은 보수성이 여기에도 적용된다.
+        · `clk=0`인데 `conv_direct=1`은 그 자체로 자기모순 레코드다. 이 모양은 계정 전체에
+          253행/236쌍(4,451,680원) 있고, `cost=0 ∧ conv≥1`인 쌍은 전 기간 **39쌍**이다 —
+          **일회 예외가 아니라 앞으로도 계속 걸릴 규칙**이라 더욱 단언하면 안 된다.
+      ⇒ 등급은 `미검증`, 만료는 **보류(NULL)**. 재료가 도래하면 재분류된다.
+      ★이 처분은 광고 계정에 아무 영향이 없다 — 미검증은 재심사 목록에도 안 오른다.
     """
     if not ev.has_history:
         return GRADE_UNVERIFIED, "backfill:이력없음 — 성과 행 0(판정 근거 없음)"
@@ -217,10 +239,11 @@ def classify(ev: Evidence, *, bep_roas: float | None) -> tuple[str, str]:
     if ev.conv >= 1:
         if ev.cost == 0:
             return (
-                GRADE_MISCUT,
-                f"backfill:A-비용0 — cost=0·conv={ev.conv}·매출={ev.revenue}원으로 RoAS 미정의. "
-                "총이익 절대액(D-NAO-59) 기준 비용0·매출>0은 BEP 초과와 동치 ⇒ 오컷의심. "
-                "★계약 §4-B⑦의 「13+2=15」가 A급 16건을 다 못 덮던 그 1건",
+                GRADE_UNVERIFIED,
+                f"backfill:A-비용0 — clk={ev.clk}·cost=0·conv={ev.conv}·매출={ev.revenue}원. "
+                "RoAS 미정의라 초과/미달 어느 쪽도 «실측»이 아니다(같은 데이터가 「컷이 틀렸다」와 "
+                "「컷은 돈을 안 쓰게 했고 매출은 어차피 났다」 둘 다로 읽힌다) ⇒ 판정 보류. "
+                "★계약 §4-B⑦의 「13+2=15」가 A급 16건을 다 못 덮던 그 자리",
             )
         if bep_roas is None:
             return (
@@ -253,19 +276,31 @@ def _evidence_map(db: Session) -> dict[tuple[str, str], Evidence]:
 
     ★한 방에 뜨는 이유: 3,990행을 행마다 조회하면 prod에서 3,990 쿼리가 되고, 그건 읽기
       전용이어도 배포 중 부하다. 계약 §5(예산)의 「신규 상시 비용 0」과 같은 결.
+
+    ★★단 «한 방»이 «전량»이면 안 된다(적대 리뷰 P2-1). 초판은 `naver_search_term_daily`
+      **314만 행 → 124만 그룹**을 통째로 떠서 dict로 안았다(실측 334.9MB). 원장에 있는
+      adgroup은 그 일부뿐이므로 **원장의 adgroup 집합으로 먼저 좁힌다.** OOM이 난 적은
+      없지만(prod 여유 9.1GB) 3,990건을 위해 314만 행을 읽을 이유가 없다.
+      IN 절은 SQLite 변수 상한을 피해 청크로 나눈다.
     """
-    rows = (
-        db.query(
-            NaverSearchTermDaily.adgroup_id,
-            NaverSearchTermDaily.search_term,
-            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.clk), 0),
-            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.cost), 0),
-            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_cnt), 0),
-            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_amt), 0),
+    adgroups = [
+        a for (a,) in db.query(NaverSearchTermExclusion.adgroup_id).distinct().all() if a
+    ]
+    rows: list = []
+    for i in range(0, len(adgroups), _IN_CHUNK):
+        rows += (
+            db.query(
+                NaverSearchTermDaily.adgroup_id,
+                NaverSearchTermDaily.search_term,
+                sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.clk), 0),
+                sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.cost), 0),
+                sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_cnt), 0),
+                sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_amt), 0),
+            )
+            .filter(NaverSearchTermDaily.adgroup_id.in_(adgroups[i:i + _IN_CHUNK]))
+            .group_by(NaverSearchTermDaily.adgroup_id, NaverSearchTermDaily.search_term)
+            .all()
         )
-        .group_by(NaverSearchTermDaily.adgroup_id, NaverSearchTermDaily.search_term)
-        .all()
-    )
     return {
         (adgroup_id, term): Evidence(
             clk=int(clk), cost=int(cost), conv=int(conv), revenue=int(rev), has_history=True
@@ -358,22 +393,37 @@ def distribution_report(db: Session) -> dict:
         .group_by(NaverSearchTermExclusion.grade)
         .all()
     )
-    distribution = {(g or "(미분류)"): int(n) for g, n in rows}
+    distribution = {(g or UNGRADED_LABEL): int(n) for g, n in rows}
     total = sum(distribution.values())
+    ungraded = distribution.get(UNGRADED_LABEL, 0)
     deviation = {
         g: {"actual": distribution.get(g, 0), "expected": n, "diff": distribution.get(g, 0) - n}
         for g, n in CONTRACT_EXPECTED.items()
         if distribution.get(g, 0) != n
     }
     # 이탈을 낳은 «행»의 사유를 같이 싣는다 — 숫자만 다르면 다음 세션이 원인을 다시 판다.
-    deviation_rows = [
-        {"id": r.id, "search_term": r.search_term, "grade": r.grade, "reason": r.grade_reason}
-        for r in db.query(NaverSearchTermExclusion)
-        .filter(NaverSearchTermExclusion.grade_reason.like("backfill:A-비용0%"))
-        .all()
-    ]
+    # ★적대 리뷰 P1-1: 종전엔 사유 필터가 `backfill:A-비용0%` **한 가지로 하드코딩**돼 있어
+    #   다른 원인(BEP 미상 등)으로 이탈이 나도 그 행이 안 실렸다. 「이탈은 있는데 이유는 없다」는
+    #   §4-C S2-a의 요구를 못 채운다. 특수 처분 사유를 목록으로 둔다.
+    deviation_rows: list[dict] = []
+    for prefix in SPECIAL_REASON_PREFIXES:
+        deviation_rows += [
+            {"id": r.id, "search_term": r.search_term, "grade": r.grade, "reason": r.grade_reason}
+            for r in db.query(NaverSearchTermExclusion)
+            .filter(NaverSearchTermExclusion.grade_reason.like(f"{prefix}%"))
+            .all()
+        ]
+
+    # 지금 계정 기본 BEP가 «해석되는가» — 읽기 전용 관측이라 여기서 같이 뜬다.
+    # ★없으면 A급(전환 있음)이 전부 `미검증`으로 떨어지는데, 그 사실이 분포표에 안 보이면
+    #   「BEP로 판정한 분포」와 「BEP를 못 구해 판정을 포기한 분포」가 같은 표로 보인다.
+    from . import campaign_target_resolver
+
+    bep_dec = campaign_target_resolver.account_default_bep_roas(db)
     return {
         "total": total,
+        "ungraded": ungraded,
+        "bep_roas_live": float(bep_dec) if bep_dec is not None else None,
         "distribution": distribution,
         "expected": dict(CONTRACT_EXPECTED),
         "expected_sum": sum(CONTRACT_EXPECTED.values()),

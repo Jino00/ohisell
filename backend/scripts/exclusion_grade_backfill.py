@@ -31,11 +31,29 @@ from app.utils.kst import kst_today  # noqa: E402
 
 
 def _print_report(report: dict) -> None:
+    """★계약 §4-C S2-a가 지목한 «Jino가 보는 표면». 여기 찍히는 문장은 전부 관측에서 나와야 한다.
+
+    ★★적대 리뷰 P1-1이 초판을 깼다: 「이탈의 이유」가 **무조건 출력되는 고정 문단**이라,
+      백필을 아직 안 돌린 상태(이탈 −3,985)에서도 화면이 *"1건 어긋난다"*를 사실로 단언했다.
+      그리고 그 사실을 **테스트가 0건** 지키고 있었다(변이 M6·M7이 전건 초록으로 생존).
+      고정 문단을 관측 조건 뒤로 넣고, 이 함수 자체를 테스트가 읽게 했다.
+    """
     print("── 제외 «임대» 등급 분포 " + "─" * 44)
     for grade, n in sorted(report["distribution"].items(), key=lambda kv: -kv[1]):
         print(f"  {grade:<10} {n:>6,}")
     print(f"  {'합계':<10} {report['total']:>6,}")
+    bep = report.get("bep_roas_live")
+    # ★BEP가 안 잡히면 A급이 전부 «미검증»으로 떨어진다 — 그 사실이 표에 안 보이면
+    #   「BEP로 판정한 분포」와 「판정을 포기한 분포」가 같은 표로 보인다.
+    print("  계정 기본 BEP(현재) = " + (f"{bep:.4f}" if bep is not None else "[미상]"))
     print()
+
+    ungraded = report.get("ungraded", 0)
+    if ungraded:
+        print(f"⚠️ 아직 등급이 없는 행 {ungraded:,}개 — 백필이 안 돌았거나 덜 돌았다.")
+        print("   `--backfill`을 먼저 실행하기 전에는 아래 대조가 «계약 대비 이탈»을 뜻하지 않는다.")
+        print()
+
     print("── 계약 §4-C S2-a 기대치 대조 " + "─" * 37)
     for grade, n in report["expected"].items():
         actual = report["distribution"].get(grade, 0)
@@ -45,11 +63,23 @@ def _print_report(report: dict) -> None:
     if not report["deviation"]:
         print("  ⇒ 이탈 없음")
         return
+
     # 계약 §4-C S2-a: "수치가 [E]와 다르면 **다른 이유가 함께 출력·기록**돼 있다"
     print()
     print("── 이탈의 이유 " + "─" * 52)
-    print("  계약 §4-B⑦의 합은 13+6+3,970 = 3,989로, 원장 총계와 1건 어긋난다.")
+    if ungraded:
+        # ★여기서 계약 셈 이야기를 꺼내면 «백필 미실행»을 «계약과 1건 차이»로 오독시킨다.
+        print(f"  이탈의 원인은 계약 셈이 아니라 **백필 미실행**이다 — 미분류 {ungraded:,}행.")
+        print("  `--backfill` 실행 후 다시 관측할 것.")
+        return
+    if not report["deviation_rows"]:
+        # 이탈은 있는데 등록된 특수 사유가 없다 — 모른다고 적는다(지어내지 않는다).
+        print("  이탈이 있으나 특수 처분으로 기록된 행이 없다 — **원인 미상**.")
+        print("  원장 증감 또는 규칙 변경일 수 있다. 등급별 `grade_reason`을 직접 볼 것.")
+        return
+    print("  계약 §4-B⑦의 합은 13+6+3,970 = 3,989로, 원장 총계 3,990과 1건 어긋난다.")
     print("  부록 [E]가 A급을 16건이라 하면서 「BEP 초과 13 + 미달 2」로 15만 설명한 자국이다.")
+    print("  그 자리에 해당하는 행:")
     for row in report["deviation_rows"]:
         print(f"  · id={row['id']} {row['search_term']!r} → {row['grade']}")
         print(f"    {row['reason']}")
