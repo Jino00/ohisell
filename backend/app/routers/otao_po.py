@@ -30,6 +30,7 @@ from app.models import OtaoItemNameMap, OtaoPurchaseOrder
 from app.services.otao_po.roster import build_roster
 from app.services.otao_po.sales import build_sales_timeseries
 from app.services.otao_po.settlement import build_settlement
+from app.services.otao_po.stock import build_stock
 
 router = APIRouter(prefix="/api/otao-po", tags=["otao-po"])
 
@@ -227,5 +228,88 @@ def get_settlement(db: Session = Depends(get_db)) -> dict:
             "total_amount_cny": money(s.totals["total_amount_cny"]),
         },
         "reconciliation": s.reconciliation,
+        "notes": s.notes,
+    }
+
+
+@router.get("/stock")
+def get_stock(db: Session = Depends(get_db)) -> dict:
+    """S4 — 파생 현재고(초기 실사 + 픽업 입고 − 판매) + 실사 표본 대조 오차.
+
+    화면이 반드시 말해야 하는 것(계약 §2-8 · `stock.py` docstring):
+      ① **파생값이 왜 없는가**(`rows[*].derived_blocked_by`) — 「재고 0」이 아니라 「판매를 이
+         축에 못 붙인다」다. 발주·픽업은 OTAO 품목코드 축, 판매는 우리 SKU 축이고 둘을 잇는
+         표가 prod에 없다(교집합 0). 다리 구축은 이 계약의 「안 함」이다.
+      ② **스냅샷이 몇 개인가**(`snapshot_count`) — 1개면 기준 시점이 곧 최신이라 되감을 구간이
+         없고 오차는 두 번째 스냅샷부터 잰다. 0개면 「재고 0」이 아니라 «찍은 적 없음»이다.
+      ③ **창고 역할별 분해**(`rows[*].baseline_by_role`) — 「본사에 있는 것」과 「이미 쿠팡
+         제트배송에 나가 있는 것」은 발주 판단에서 정반대 의미다(계약 §1 창고 5개 표).
+      ④ **실사가 실시됐는가**(`counted_at`) — 오차 칸이 빈 것은 오차가 0이어서가 아니다.
+      ⑤ **어느 창고를 셌는가**(`rows[*].counted_warehouse`·`counted_axis_mismatch`) — 기준은
+         「본사」인데 다른 창고를 셌다면 그 차이는 «오차»가 아니라 서로 다른 창고를 뺀 값이다
+         (적대 리뷰 1R P1-2).
+
+    ★`response_model`을 쓰지 않는 이유는 `/roster`·`/sales`·`/settlement`와 같다(교훈 #321).
+    자백 필드가 조용히 지워지면 화면엔 아무 일도 없는 것처럼 보인다. 테스트가 **HTTP body를**
+    단언한다.
+
+    ★읽기 전용이다. 실사값을 «입력»받는 표면을 HTTP에 열지 않는다 — 재고를 ohisell에 쓰기
+    시작하면 그것이 계약 §3-1 「재고 정본 이원화」의 입구다. 적재는 사람이 실행하는
+    `scripts/otao_stock_import.py --manual-count`가 하고, 그 행은 `source='manual'`로 갈려
+    ECOUNT 스냅샷 축과 섞이지 않는다.
+    """
+    s = build_stock(db)
+
+    def num(v) -> float | None:
+        return None if v is None else float(v)
+
+    return {
+        # ★스냅샷이 없는 것과 「재고 0」은 다르다(`/roster`의 `ledger_empty`와 같은 결).
+        "snapshot_empty": s.snapshot_count == 0,
+        "snapshot_count": s.snapshot_count,
+        "baseline_at": s.baseline_at.isoformat() if s.baseline_at else None,
+        "latest_at": s.latest_at.isoformat() if s.latest_at else None,
+        "counted_at": s.counted_at.isoformat() if s.counted_at else None,
+        "counted_from": s.counted_from.isoformat() if s.counted_from else None,
+        # ★기준 창고(본사)가 아닌 곳을 센 코드 — 그 행의 차이는 「오차」가 아니라 다른 축이다.
+        "counted_axis_mismatches": s.counted_axis_mismatches,
+        "inbound_window_start": (
+            s.inbound_window_start.isoformat() if s.inbound_window_start else None
+        ),
+        # ★null은 「판매 0」이 아니라 「근거 없음」이다. 화면이 이 문장을 그대로 읽는다.
+        "sold_unavailable_reason": s.sold_unavailable_reason,
+        "rows": [
+            {
+                "product_code": r.product_code,
+                "baseline_quantity": num(r.baseline_quantity),
+                "baseline_by_role": {k: num(v) for k, v in r.baseline_by_role.items()},
+                "inbound_quantity": num(r.inbound_quantity),
+                "sold_quantity": num(r.sold_quantity),
+                "derived_quantity": num(r.derived_quantity),
+                "derived_blocked_by": r.derived_blocked_by,
+                "upper_bound_if_no_sales": num(r.upper_bound_if_no_sales),
+                "counted_quantity": num(r.counted_quantity),
+                "counted_at": r.counted_at.isoformat() if r.counted_at else None,
+                # ★어느 창고를 셌나. 없으면 「본사 스냅샷 ↔ 다른 창고 실사」가 오차로 둔갑한다.
+                "counted_warehouse": r.counted_warehouse,
+                "counted_warehouse_role": r.counted_warehouse_role,
+                "counted_axis_mismatch": r.counted_axis_mismatch,
+                "latest_snapshot_quantity": num(r.latest_snapshot_quantity),
+                "variance_vs_snapshot": num(r.variance_vs_snapshot),
+                "variance_pct": r.variance_pct,
+                "variance_vs_derived": num(r.variance_vs_derived),
+            }
+            for r in s.rows
+        ],
+        "unknown_warehouses": [
+            {"warehouse": k, "quantity": num(v)} for k, v in s.unknown_warehouses.items()
+        ],
+        "totals": {
+            **{k: v for k, v in s.totals.items() if not isinstance(v, Decimal)},
+            "baseline_own": num(s.totals.get("baseline_own")),
+            "latest_own": num(s.totals.get("latest_own")),
+            "inbound": num(s.totals.get("inbound")),
+            "variance_abs_sum": num(s.totals.get("variance_abs_sum")),
+        },
         "notes": s.notes,
     }
