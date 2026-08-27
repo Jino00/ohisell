@@ -5263,3 +5263,89 @@ class OtaoItemNameMap(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class OtaoStockSnapshot(Base):
+    """ECOUNT 창고별 재고의 **읽기 전용 스냅샷 미러**. 계약 §4 S4 「초기 실사」 항의 재료.
+
+    계약 `CONTRACT_inventory_unified.md` §4 S4 · 트랙 `track_inventory-management.md`
+    · 체인 `발주예측` n=8.
+
+    ## ★왜 이 테이블이 필요한가 — 같은 것을 이미 한 번 잃었다
+
+    n=2(2026-08-25)가 ECOUNT에서 창고별 재고 1,391행을 받아 되감기를 실증했다
+    (`재고(t) = 현재고 − Σ입고(>t) + Σ판매(>t)`, 188칸 중 음수 2칸). 그런데 그 스냅샷과
+    크로스워크 스크립트가 **세션 스크래치패드에만 있었고 세션과 함께 사라졌다**
+    (`docs/references/99_*.md` §9가 스스로 "비커밋"이라 적어 뒀다). n=8 실측(2026-08-27):
+    저장소·prod 어디에도 사본이 없고 `inventory` 테이블은 **0행**이다.
+
+    ⇒ 「188칸 중 음수 2칸」이라는 이 트랙의 핵심 실증이 **지금은 재현 불가**다. 관측을 원장에
+    담지 않으면 관측은 주장으로만 남는다.
+
+    ## ★정본은 ECOUNT다 — 이 테이블은 «정본이 아니다» (금지선 1)
+
+    §3-1은 *"재고 정본 이원화 금지 — 이카운트·ohisell 양쪽에 자사창고 수량을 동시에 **쓰기**
+    시작하는 것"*을 금지한다. 이 테이블은 그 금지에 걸리지 않는다:
+
+      - **쓰기가 한 방향뿐이다** — ECOUNT → ohisell. 우리가 ECOUNT에 재고를 쓰는 경로는 없고
+        만들지도 않는다(§3-2 자동 «실행» 금지와 같은 결).
+      - **행을 고치지 않는다** — 스냅샷은 «그 시각에 그렇게 보였다»는 관측 기록이라 추후 정정
+        대상이 아니다. 값이 달라지면 새 `snapshot_at`으로 **새 행**이 쌓인다.
+      - **수량의 권위를 주장하지 않는다** — 화면은 항상 「ECOUNT 스냅샷(찍은 시각)」으로 부르고
+        「자사 재고」라고 단정하지 않는다. Jino 원문이 그 한계를 이미 말했다:
+        *"현재 본사 재고로 잡혀있는 수량들은 비슷한 수준이지 100%는 아니야"*(2026-08-25 18:08).
+
+    ## ★창고를 합치지 않는다 (§1 창고 5개 표)
+
+    같은 1,008개라도 「본사에 있는 것」과 「이미 쿠팡에 나가 있는 것」은 발주 판단에서 정반대
+    의미다. 초판 실측이 **전 창고 합계**를 내서 틀렸던 자리다. 그래서 창고를 행 키에 넣고
+    합계는 서비스 층이 «역할별로 갈라서» 만든다 — 이 테이블은 합치지 않는다.
+
+    창고 의미는 데이터에 안 적혀 있고 Jino만 안다(§1 표가 원문 정본):
+      본사(차감항 본체) · 본사-포장(부자재) · 쿠팡 제트배송(이미 채널에 나감) ·
+      반품창고(미사용) · 아마존(미사용)
+
+    ## 멱등성
+
+    `(snapshot_at, warehouse_code, product_code)`가 유일하다. 같은 스냅샷을 두 번 적재해도
+    행이 늘지 않는다. **다른 시각의 스냅샷은 서로 다른 행**이다 — 덮어쓰면 시계열이 사라지고,
+    시계열이 없으면 S4의 「오차」를 원리적으로 못 잰다(오차는 두 시점 사이에서만 생긴다).
+    """
+
+    __tablename__ = "otao_stock_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    # 이 스냅샷을 «찍은» 시각(KST naive). 되감기의 t0가 되는 축이라 인덱스가 필수다.
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    # ECOUNT 응답이 기준일자를 주면 담는다. 안 주면 NULL — `snapshot_at`으로 대체하지 않는다
+    # (「찍은 시각」과 「기준일」은 다를 수 있고, 같다고 지어내면 되감기 창이 어긋난다).
+    base_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    # ECOUNT 창고코드. 코드가 없으면 이름을 그대로 넣는다 — 빈 문자열로 접지 않는다.
+    warehouse_code: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    warehouse_name: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+
+    # ECOUNT 품목코드. 이 트랙의 라벨 공간(`GAPIP…`)과 같은 축이라 발주·픽업에 바로 붙는다.
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
+    # ★Integer가 아니라 Numeric이다 — ECOUNT가 소수를 돌려줄 수 있고, 임의 반올림은
+    # 「원장이 말한 값」을 우리가 바꾸는 것이다.
+    quantity: Mapped[Decimal] = mapped_column(Numeric(16, 3), nullable=False)
+
+    # 'ecount_api' | 'manual' — 사람이 센 실사값이 들어오면 출처가 갈려야 한다.
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="ecount_api")
+    # 응답 원문 1행. 컬럼으로 안 뽑은 필드를 나중에 되짚기 위해 남긴다.
+    raw_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_at",
+            "warehouse_code",
+            "product_code",
+            name="uq_otao_stock_snapshot_grain",
+        ),
+    )
