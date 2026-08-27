@@ -245,6 +245,9 @@ def get_stock(db: Session = Depends(get_db)) -> dict:
       ③ **창고 역할별 분해**(`rows[*].baseline_by_role`) — 「본사에 있는 것」과 「이미 쿠팡
          제트배송에 나가 있는 것」은 발주 판단에서 정반대 의미다(계약 §1 창고 5개 표).
       ④ **실사가 실시됐는가**(`counted_at`) — 오차 칸이 빈 것은 오차가 0이어서가 아니다.
+      ⑤ **어느 창고를 셌는가**(`rows[*].counted_warehouse`·`counted_axis_mismatch`) — 기준은
+         「본사」인데 다른 창고를 셌다면 그 차이는 «오차»가 아니라 서로 다른 창고를 뺀 값이다
+         (적대 리뷰 1R P1-2).
 
     ★`response_model`을 쓰지 않는 이유는 `/roster`·`/sales`·`/settlement`와 같다(교훈 #321).
     자백 필드가 조용히 지워지면 화면엔 아무 일도 없는 것처럼 보인다. 테스트가 **HTTP body를**
@@ -267,6 +270,9 @@ def get_stock(db: Session = Depends(get_db)) -> dict:
         "baseline_at": s.baseline_at.isoformat() if s.baseline_at else None,
         "latest_at": s.latest_at.isoformat() if s.latest_at else None,
         "counted_at": s.counted_at.isoformat() if s.counted_at else None,
+        "counted_from": s.counted_from.isoformat() if s.counted_from else None,
+        # ★기준 창고(본사)가 아닌 곳을 센 코드 — 그 행의 차이는 「오차」가 아니라 다른 축이다.
+        "counted_axis_mismatches": s.counted_axis_mismatches,
         "inbound_window_start": (
             s.inbound_window_start.isoformat() if s.inbound_window_start else None
         ),
@@ -283,6 +289,11 @@ def get_stock(db: Session = Depends(get_db)) -> dict:
                 "derived_blocked_by": r.derived_blocked_by,
                 "upper_bound_if_no_sales": num(r.upper_bound_if_no_sales),
                 "counted_quantity": num(r.counted_quantity),
+                "counted_at": r.counted_at.isoformat() if r.counted_at else None,
+                # ★어느 창고를 셌나. 없으면 「본사 스냅샷 ↔ 다른 창고 실사」가 오차로 둔갑한다.
+                "counted_warehouse": r.counted_warehouse,
+                "counted_warehouse_role": r.counted_warehouse_role,
+                "counted_axis_mismatch": r.counted_axis_mismatch,
                 "latest_snapshot_quantity": num(r.latest_snapshot_quantity),
                 "variance_vs_snapshot": num(r.variance_vs_snapshot),
                 "variance_pct": r.variance_pct,

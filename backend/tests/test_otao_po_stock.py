@@ -497,3 +497,147 @@ def test_http_empty_snapshot_is_not_an_empty_success(env):
     assert body["snapshot_empty"] is True
     assert body["snapshot_count"] == 0
     assert any("찍은 적 없음" in n for n in body["notes"])
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R 상환 — P1 3건 + 생존 변이 5종
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_p1_3_split_counts_do_not_erase_the_earlier_round(session):
+    """★P1-3: 10 SKU를 두 번에 나눠 세면 초판은 **앞 회차를 「실사 미실시」로 지웠다.**
+
+    경고 한 줄 없이 «센 것»이 «안 셌다»가 됐다. 계약 §4 S4가 요구하는 건 10 SKU이고
+    나눠 세는 쪽이 현실 경로다.
+    """
+    _seed_prod_shaped(session)
+    early = datetime(2026, 9, 3, 10, 0, 0)
+    late = datetime(2026, 9, 3, 14, 0, 0)
+    _snap(session, early, "본사", "(실사)", "GAPIP16PR", 320, source="manual")
+    _snap(session, early, "본사", "(실사)", "GAPIP15", 9, source="manual")
+    _snap(session, late, "본사", "(실사)", "GAPIP12MI", 0, source="manual")
+    session.commit()
+
+    s = build_stock(session)
+    row = {r.product_code: r for r in s.rows}
+    # 앞 회차 두 건이 살아 있다
+    assert row["GAPIP16PR"].counted_quantity == Decimal("320")
+    assert row["GAPIP15"].counted_quantity == Decimal("9")
+    assert row["GAPIP12MI"].counted_quantity == Decimal("0")
+    assert s.totals["counted_sku_count"] == 3
+    assert s.counted_from == early and s.counted_at == late
+    assert any("여러 회차에 나뉘어" in n for n in s.notes)
+
+
+def test_p1_3b_same_code_counted_twice_uses_the_later_one(session):
+    """같은 코드를 다시 세면 «그 코드의 최신»이 이긴다 — 회차 전체가 아니라 코드별로."""
+    _seed_prod_shaped(session)
+    _snap(session, datetime(2026, 9, 3, 10, 0), "본사", "(실사)", "GAPIP16PR", 320, source="manual")
+    _snap(session, datetime(2026, 9, 4, 10, 0), "본사", "(실사)", "GAPIP16PR", 330, source="manual")
+    session.commit()
+    row = {r.product_code: r for r in build_stock(session).rows}
+    assert row["GAPIP16PR"].counted_quantity == Decimal("330")
+
+
+def test_p1_2_counting_a_different_warehouse_is_not_called_a_variance(session):
+    """★P1-2: 기준은 «본사»인데 본사-포장을 세면 그 차이는 **오차가 아니라 다른 축**이다.
+
+    초판은 어느 창고를 셌는지 응답·화면 어디에도 안 실어서, `본사 340 vs 포장 900`의 차이가
+    「대조 오차 −560」이라는 이름으로 화면에 설 수 있었다.
+    """
+    _seed_prod_shaped(session)
+    _snap(session, T1, "본사-포장", "00011", "GAPIP16PR", 900, source="manual")
+    session.commit()
+
+    s = build_stock(session)
+    row = {r.product_code: r for r in s.rows}
+    r = row["GAPIP16PR"]
+    assert r.counted_warehouse == "본사-포장"
+    assert r.counted_warehouse_role == "material"
+    assert r.counted_axis_mismatch is True
+    assert "GAPIP16PR" in s.counted_axis_mismatches
+    assert any("기준 창고(본사)가 아닌" in n for n in s.notes)
+
+
+def test_counting_the_own_warehouse_is_not_flagged(session):
+    _seed_prod_shaped(session)
+    _snap(session, T1, "본사", "(실사)", "GAPIP16PR", 320, source="manual")
+    session.commit()
+    s = build_stock(session)
+    row = {r.product_code: r for r in s.rows}
+    assert row["GAPIP16PR"].counted_axis_mismatch is False
+    assert s.counted_axis_mismatches == []
+    assert row["GAPIP16PR"].counted_warehouse == "본사"
+
+
+def test_migration_parent_is_the_real_head():
+    """★P1-1: 병합 즉시 head가 둘이 되면 `alembic upgrade head`가 죽는다.
+
+    브랜치 단독으로는 head 1개라 PR 안에서 초록으로 보인다 — 그래서 **파일을 직접 읽어**
+    부모가 실제 head인지 잠근다. 이 테스트는 「이 리비전이 어떤 부모를 «선언»했는가」만 본다
+    (원칙 23-A: 세는 것만 한다 — 실제 head 계산은 배포 절차가 한다).
+    """
+    import pathlib
+    import re
+
+    text = pathlib.Path(
+        "alembic/versions/otaostk1s4a_add_otao_stock_snapshot.py"
+    ).read_text(encoding="utf-8")
+    m = re.search(r'^down_revision:[^=]*=\s*"([^"]+)"', text, re.M)
+    assert m, "down_revision 선언을 못 찾았다"
+    # ★`cst60auto`는 origin/main의 `exgrade1s2`와 부모가 겹쳐 head를 둘로 만든다.
+    assert m.group(1) != "cst60auto"
+
+
+def test_ip_guard_refuses_unlisted_and_unknown():
+    """★§3-3 집행에 테스트가 0건이었다 — 가드를 `if False:`로 지워도 전건 초록이었다.
+
+    「모르면 안전」이 아니라 **「모르면 중단」**이다.
+    """
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "_ecount_stock_export", pathlib.Path("scripts/ecount_stock_export.py")
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # 모듈 로드만 — 네트워크·ECOUNT 임포트는 main() 안에 있다
+
+    assert mod.ip_is_allowed("183.99.236.174") is True  # Jino 등록 Mac
+    assert mod.ip_is_allowed("168.107.19.222") is True  # 승인 VM(= sellc prod)
+    assert mod.ip_is_allowed("211.234.188.208") is False  # 2026-08-27 실측: 바뀐 IP
+    assert mod.ip_is_allowed(None) is False  # 못 알아냈으면 «중단»
+    assert mod.ip_is_allowed("") is False
+    # 계약 §3-3 집행 규칙 ②: 실패 최대 2회
+    assert mod._MAX_ATTEMPTS == 2
+
+
+def test_http_body_values_are_asserted_not_just_keys(env):
+    """★생존 변이 상환 — 초판 HTTP 테스트가 `key in body`만 봐서 **값을 비워도 안 잡혔다.**
+
+    교훈 #290(존재 게이트 ≠ 성숙 게이트)의 재현이다. 자백 필드는 «있는 것»이 아니라
+    «말하는 것»이라야 한다.
+    """
+    client, s = env
+    _seed_prod_shaped(s)
+    _snap(s, T0, "제3창고", "00099", "GAPIP15", 77)
+    _snap(s, T1, "본사", "(실사)", "GAPIP16PR", 320, source="manual")
+    s.commit()
+
+    body = client.get("/api/otao-po/stock").json()
+
+    # ① 이유가 «비어 있지 않다»
+    assert body["sold_unavailable_reason"]
+    assert "교집합" in body["sold_unavailable_reason"]
+    # ② 역할 미상 창고가 «값으로» 실린다
+    assert body["unknown_warehouses"] == [{"warehouse": "제3창고", "quantity": 77.0}]
+    # ③ notes가 비어 있지 않다
+    assert len(body["notes"]) >= 2
+    # ④ 실사 시각이 실린다
+    assert body["counted_at"] is not None
+    # ⑤ ★창고 역할이 **합쳐지지 않았다** — 계약 §1이 금지한 그 합계
+    row = {r["product_code"]: r for r in body["rows"]}["GAPIP16PR"]
+    assert row["baseline_by_role"] == {"own": 340.0, "material": 900.0, "channel": 120.0}
+    assert row["counted_warehouse"] == "본사"
+    assert row["counted_axis_mismatch"] is False

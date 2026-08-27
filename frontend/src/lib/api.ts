@@ -6438,6 +6438,13 @@ export interface OtaoStockRow {
   /** ★현재고가 «아니다» — 판매를 안 뺀 상한일 뿐 */
   upper_bound_if_no_sales: number | null;
   counted_quantity: number | null;
+  /** 그 코드를 «언제» 셌나 — 코드마다 다를 수 있다(나눠 세는 것이 현실 경로) */
+  counted_at: string | null;
+  /** ★어느 창고를 셌나. 없으면 「본사 스냅샷 ↔ 다른 창고 실사」가 «오차»로 둔갑한다 */
+  counted_warehouse: string | null;
+  counted_warehouse_role: string | null;
+  /** true = 기준 창고(본사)가 아닌 곳을 센 것 — 그 차이는 오차가 아니라 다른 축이다 */
+  counted_axis_mismatch: boolean;
   latest_snapshot_quantity: number | null;
   /** ★계약 §2-7C ④가 요구하는 숫자: ECOUNT가 말한 값 − 사람이 센 값 */
   variance_vs_snapshot: number | null;
@@ -6451,8 +6458,12 @@ export interface OtaoStock {
   snapshot_count: number;
   baseline_at: string | null;
   latest_at: string | null;
-  /** 실사(사람이 센 값)를 적재한 시각. null = 미실시 */
+  /** 가장 «최근» 실사 시각. null = 미실시 */
   counted_at: string | null;
+  /** 가장 «이른» 실사 시각 — counted_at과 다르면 회차가 나뉜 것이다 */
+  counted_from: string | null;
+  /** 기준 창고(본사)가 아닌 곳을 센 코드들 */
+  counted_axis_mismatches: string[];
   inbound_window_start: string | null;
   /** 판매를 못 붙이는 이유 원문 — 화면이 그대로 읽는다 */
   sold_unavailable_reason: string | null;

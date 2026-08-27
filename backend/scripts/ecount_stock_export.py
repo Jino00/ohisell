@@ -48,6 +48,18 @@ _ENDPOINT = "InventoryBalance/GetListInventoryBalanceStatusByLocation"
 _MAX_ATTEMPTS = 2  # 계약 §3-3 집행 규칙 ②
 
 
+def ip_is_allowed(ip: str | None) -> bool:
+    """★계약 §3-3의 판정 하나를 «함수»로 떼어 둔다 — 그래야 테스트가 잡을 수 있다.
+
+    적대 리뷰 1R이 지적한 자리다: 초판은 이 판정이 `main()` 안에 묻혀 있어 **가드를
+    `if False:`로 지워도 27/27이 초록**이었다. 계약을 코드로 강제한다면서 그 강제를
+    아무도 안 지키고 있었다.
+
+    `None`(공인 IP를 못 알아냄)은 **허용이 아니다** — 「모르면 안전」이 아니라 「모르면 중단」이다.
+    """
+    return ip is not None and ip in _ALLOWLISTED_IPS
+
+
 def _public_ip(timeout: float = 10.0) -> str | None:
     import urllib.request
 
@@ -86,7 +98,7 @@ def main() -> int:
     if ip is None:
         print("공인 IP를 확인하지 못했다 — 「허용목록에 있다」를 추정하지 않는다. 중단.", file=sys.stderr)
         return 2
-    if ip not in _ALLOWLISTED_IPS:
+    if not ip_is_allowed(ip):
         if not args.allow_unlisted_ip:
             print(
                 f"현재 공인 IP {ip} 가 ECOUNT 허용목록에 없다 — 부르지 않고 중단한다.\n"

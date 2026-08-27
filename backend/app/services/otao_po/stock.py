@@ -143,6 +143,13 @@ class StockRow:
 
     # ── 실사 대조 (다리 없이도 성립하는 쪽) ───────────────────────────────
     counted_quantity: Decimal | None = None  # 사람이 센 값
+    counted_at: datetime | None = None  # 그 코드를 «언제» 셌나 (코드마다 다를 수 있다)
+    # ★어느 창고를 셌나. 이게 없으면 「본사 스냅샷 ↔ 본사-포장 실사」를 비교한 숫자가
+    #   「대조 오차」라는 이름으로 화면에 설 수 있다(적대 리뷰 1R P1-2).
+    counted_warehouse: str | None = None
+    counted_warehouse_role: str | None = None
+    # 실사 창고가 기준 창고(본사)와 다르면 True — 화면이 그 행을 오차로 읽지 않게 한다.
+    counted_axis_mismatch: bool = False
     latest_snapshot_quantity: Decimal | None = None  # 최신 스냅샷의 `own` 수량
     # ★계약 §2-7C ④가 요구하는 그 숫자: ECOUNT가 말한 값 − 사람이 센 값
     variance_vs_snapshot: Decimal | None = None
@@ -156,7 +163,11 @@ class Stock:
     rows: list[StockRow] = field(default_factory=list)
     baseline_at: datetime | None = None  # t0 — 가장 이른 스냅샷 시각
     latest_at: datetime | None = None  # 최신 스냅샷 시각
-    counted_at: datetime | None = None  # 실사(사람이 센 값)를 적재한 시각
+    # 실사 시각의 범위. 코드마다 다를 수 있으므로 한 값이 아니다(나눠 세는 것이 현실 경로다).
+    counted_at: datetime | None = None  # 가장 최근 실사 시각
+    counted_from: datetime | None = None  # 가장 이른 실사 시각
+    # 기준 창고(본사)가 «아닌» 곳을 센 코드들 — 이 행들의 오차는 축이 다르다.
+    counted_axis_mismatches: list[str] = field(default_factory=list)
     snapshot_count: int = 0  # 서로 다른 `snapshot_at`의 개수
     inbound_window_start: date | None = None  # 입고를 세기 시작한 날 (= t0의 날짜)
     # 역할표에 없는 창고 → 수량. 있으면 화면이 자백한다.
@@ -207,30 +218,48 @@ def _rows_at(session: Session, at: datetime) -> list[OtaoStockSnapshot]:
     )
 
 
-def _latest_manual_count(session: Session) -> tuple[datetime | None, dict[str, Decimal]]:
-    """가장 최근 실사(사람이 센 값) 1회분 → `{product_code: 수량}`.
+@dataclass
+class ManualCount:
+    """사람이 센 값 한 건 — 수량만이 아니라 **언제·어느 창고를** 셌는지까지."""
 
-    ★창고 역할로 거르지 않는다 — 사람이 센 값은 「그 창고에 실제로 몇 개 있더라」이고,
-    어느 창고를 셌는지는 적재할 때 `warehouse_name`으로 남는다. 여기서 `own`만 남기면
-    사람이 다른 창고를 센 경우 그 수고가 조용히 사라진다.
+    quantity: Decimal
+    at: datetime
+    warehouse_name: str | None
+    warehouse_role: str
+
+
+def _latest_manual_counts(session: Session) -> dict[str, ManualCount]:
+    """**상품코드별로 «가장 최근» 실사**를 하나씩 고른다.
+
+    ★초판은 `max(snapshot_at)` **1회분만** 살렸는데, 적대 리뷰 1R P1-3이 그걸 깼다:
+    10 SKU를 두 번에 나눠 세면(10:00에 둘, 14:00에 하나) **앞 회차가 화면에서 「실사 미실시」로
+    사라진다.** 경고 한 줄 없이 «센 것»이 «안 셌다»가 된다 — 계약 §4 S4가 요구하는 건 10 SKU이고
+    나눠 세는 쪽이 현실 경로다. 그래서 회차가 아니라 **코드별로** 최신을 고른다.
+
+    ★창고 역할로 거르지 않는다 — 사람이 어느 창고를 셌든 그 수고를 버리지 않는다. 대신
+    **어느 창고였는지를 값과 함께 실어 보낸다**(P1-2). 초판은 안 실어서, 본사 스냅샷과
+    본사-포장 실사를 비교한 숫자가 「대조 오차」라는 이름으로 화면에 설 수 있었다.
     """
-    at = session.scalar(
-        select(func.max(OtaoStockSnapshot.snapshot_at)).where(
-            OtaoStockSnapshot.source == _MANUAL_SOURCE
-        )
-    )
-    if at is None:
-        return None, {}
-    counts: dict[str, Decimal] = {}
+    out: dict[str, ManualCount] = {}
     for snap in session.scalars(
         select(OtaoStockSnapshot)
-        .where(OtaoStockSnapshot.snapshot_at == at)
         .where(OtaoStockSnapshot.source == _MANUAL_SOURCE)
+        .order_by(OtaoStockSnapshot.snapshot_at)
     ).all():
-        counts[snap.product_code] = counts.get(snap.product_code, _ZERO) + Decimal(
-            snap.quantity or 0
+        code = snap.product_code
+        qty = Decimal(snap.quantity or 0)
+        prev = out.get(code)
+        # 같은 시각에 같은 코드가 여러 창고로 오면 더한다(창고를 나눠 센 경우).
+        if prev is not None and prev.at == snap.snapshot_at:
+            prev.quantity += qty
+            continue
+        out[code] = ManualCount(
+            quantity=qty,
+            at=snap.snapshot_at,
+            warehouse_name=snap.warehouse_name,
+            warehouse_role=warehouse_role(snap.warehouse_name, snap.warehouse_code),
         )
-    return at, counts
+    return out
 
 
 def build_stock(
@@ -311,11 +340,24 @@ def build_stock(
     #     (다리가 생기면 여기서 채운다. 그때까지 `sold_quantity`는 None이다.)
 
     # ── 파생 + 실사 대조 ──────────────────────────────────────────────────
-    # 인자가 오면 그것이 이긴다(임시 대조·테스트용). 없으면 원장에 적재된 최신 실사를 쓴다 —
+    # 인자가 오면 그것이 이긴다(임시 대조·테스트용). 없으면 원장에 적재된 실사를 쓴다 —
     # 그래야 Jino가 한 번 센 값이 화면에 «남는다».
+    counted_norm: dict[str, Decimal] = {}
     if counted is None:
-        counted_at, counted_norm = _latest_manual_count(session)
-        out.counted_at = counted_at
+        manual = _latest_manual_counts(session)
+        for code, mc in manual.items():
+            counted_norm[code] = mc.quantity
+            r = row(code)
+            r.counted_at = mc.at
+            r.counted_warehouse = mc.warehouse_name
+            r.counted_warehouse_role = mc.warehouse_role
+            r.counted_axis_mismatch = mc.warehouse_role != _BASELINE_ROLE
+            if r.counted_axis_mismatch:
+                out.counted_axis_mismatches.append(code)
+        if manual:
+            times = [mc.at for mc in manual.values()]
+            out.counted_at = max(times)
+            out.counted_from = min(times)
     else:
         counted_norm = {k: Decimal(str(v)) for k, v in counted.items()}
     for code, qty in counted_norm.items():
@@ -402,5 +444,17 @@ def build_stock(
             "실사값은 있는데 스냅샷에 없는 코드가 있다("
             + ", ".join(out.totals["counted_without_snapshot"][:5])
             + ") — 대조가 성립하지 않은 것이지 오차 0이 아니다."
+        )
+    if out.counted_axis_mismatches:
+        # ★기준은 «본사»인데 다른 창고를 센 것이면 그 차이는 오차가 아니라 «다른 축»이다.
+        out.notes.append(
+            "기준 창고(본사)가 아닌 곳을 센 코드가 있다("
+            + ", ".join(out.counted_axis_mismatches[:5])
+            + ") — 그 행의 차이는 «오차»가 아니라 서로 다른 창고를 뺀 값이다."
+        )
+    if out.counted_from and out.counted_at and out.counted_from != out.counted_at:
+        out.notes.append(
+            f"실사가 여러 회차에 나뉘어 있다({out.counted_from:%Y-%m-%d %H:%M} ~ "
+            f"{out.counted_at:%Y-%m-%d %H:%M} KST) — 코드마다 «그 코드의 최신» 실사를 쓴다."
         )
     return out

@@ -33,8 +33,18 @@ grep에서 실사 데이터 **0건**.
 ★`quantity`는 Integer가 아니라 **Numeric(16,3)**이다 — ECOUNT가 소수를 돌려줄 수 있고, 임의
 반올림은 「원장이 말한 값」을 우리가 바꾸는 것이다.
 
+★**부모는 `exgrade1s2`이지 `cst60auto`가 아니다** (적대 리뷰 1R P1-1로 정정). 초판은
+`cst60auto`를 부모로 잡았는데, 그 사이 origin/main에 들어온 `exgrade1s2`도 같은 부모를 갖는다
+— **브랜치 단독으로는 head가 1개라 PR 안에서 초록으로 보이고, 병합하는 순간 head가 둘이 되어
+`alembic upgrade head`가 `Multiple head revisions are present`로 죽는다.** 즉 이 파일이 만드는
+그릇이 prod에 서지 못하고, 그 뒤 모든 마이그 배포가 같이 막힌다.
+
+재부모화(merge 리비전이 아니라)로 고치는 근거: **이 리비전은 아직 어디에도 적용된 적이 없다**
+(prod 미적용·로컬 미적용). 이미 적용된 리비전이었다면 재부모화는 금지고 n=5처럼 merge 리비전을
+따로 세워야 한다.
+
 Revision ID: otaostk1s4a
-Revises: cst60auto
+Revises: exgrade1s2
 Create Date: 2026-08-27 KST
 """
 from typing import Sequence, Union
@@ -43,7 +53,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "otaostk1s4a"
-down_revision: Union[str, None] = "cst60auto"
+down_revision: Union[str, None] = "exgrade1s2"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

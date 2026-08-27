@@ -43,6 +43,10 @@ function row(
     derived_blocked_by: baselineOwn === null ? "baseline" : "sold",
     upper_bound_if_no_sales: baselineOwn === null ? null : baselineOwn + inbound,
     counted_quantity: null,
+    counted_at: null,
+    counted_warehouse: null,
+    counted_warehouse_role: null,
+    counted_axis_mismatch: false,
     latest_snapshot_quantity: baselineOwn,
     variance_vs_snapshot: null,
     variance_pct: null,
@@ -59,6 +63,8 @@ const STOCK: OtaoStock = {
   baseline_at: "2026-08-27T10:00:00",
   latest_at: "2026-09-03T10:00:00",
   counted_at: "2026-09-03T18:00:00",
+  counted_from: "2026-09-03T18:00:00",
+  counted_axis_mismatches: [],
   inbound_window_start: "2026-08-27",
   sold_unavailable_reason:
     "판매를 이 축에 못 붙인다 — 발주·픽업은 OTAO 품목코드(GAPIP…) 축이고 판매는 우리 SKU(internal_sku) 축인데 두 집합의 교집합이 0이고 이어 주는 표가 prod에 없다.",
@@ -68,6 +74,9 @@ const STOCK: OtaoStock = {
       baseline_by_role: { own: 340, material: 900, channel: 120 },
       latest_snapshot_quantity: 340,
       counted_quantity: 320,
+      counted_at: "2026-09-03T18:00:00",
+      counted_warehouse: "본사",
+      counted_warehouse_role: "own",
       variance_vs_snapshot: 20,
       variance_pct: 6.25,
     },
@@ -100,6 +109,8 @@ const EMPTY_STOCK: OtaoStock = {
   baseline_at: null,
   latest_at: null,
   counted_at: null,
+  counted_from: null,
+  counted_axis_mismatches: [],
   inbound_window_start: null,
   sold_unavailable_reason: STOCK.sold_unavailable_reason,
   rows: [],
@@ -274,7 +285,7 @@ describe("★S4 자사 현재고가 사람에게 닿는 경로", () => {
     const tr = await stockRow("GAPIP16PR");
     expect(screen.getByRole("columnheader", { name: "대조 오차" })).toBeTruthy();
     const cells = Array.from(tr.querySelectorAll("td")).map((td) => td.textContent?.trim());
-    expect(cells[7]).toBe("320"); // 사람이 센 값
+    expect(cells[7]).toContain("320"); // 사람이 센 값 (+ 어느 창고인지 — SUR-T11)
     expect(cells[8]).toContain("+20"); // ECOUNT 340 − 실사 320
     expect(cells[8]).toContain("6.3%");
   });
@@ -320,5 +331,52 @@ describe("★S4 자사 현재고가 사람에게 닿는 경로", () => {
     await screen.findByRole("heading", { name: /자사 현재고 \(파생\)/ });
     const hits = screen.getAllByText(/교집합이 0/);
     expect(hits.length).toBeGreaterThan(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 적대 리뷰 1R 상환 — 살아남은 표면 변이를 닫는다
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("★1R 생존 변이 상환", () => {
+  it("SUR-T10: notes 배너가 화면에 뜬다 — 초판은 배너를 통째로 지워도 안 잡혔다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /자사 현재고 \(파생\)/ });
+    // t0(기준 시각)가 사람에게 닿는 **유일한 표면**이 이 배너다.
+    expect(await screen.findByText(/기준 2026-08-27 10:00 → 최신/)).toBeTruthy();
+  });
+
+  it("SUR-T11: ★실사 «어느 창고를» 셌는지가 칸에 뜬다 — 없으면 옆 칸 오차가 무엇 대비인지 모른다", async () => {
+    await renderApp();
+    const tr = await stockRow("GAPIP16PR");
+    const cells = Array.from(tr.querySelectorAll("td")).map((td) => td.textContent?.trim());
+    expect(cells[7]).toContain("320");
+    expect(cells[7]).toContain("본사");
+  });
+
+  it("SUR-T12: ★기준 창고가 아닌 곳을 센 행은 «오차»가 아니라 「축 다름」으로 뜬다", async () => {
+    stock = {
+      ...STOCK,
+      counted_axis_mismatches: ["GAPIP16PR"],
+      rows: STOCK.rows.map((r) =>
+        r.product_code === "GAPIP16PR"
+          ? {
+              ...r,
+              counted_quantity: 900,
+              counted_warehouse: "본사-포장",
+              counted_warehouse_role: "material",
+              counted_axis_mismatch: true,
+              variance_vs_snapshot: -560,
+              variance_pct: -62.2,
+            }
+          : r,
+      ),
+    };
+    await renderApp();
+    const tr = await stockRow("GAPIP16PR");
+    const cells = Array.from(tr.querySelectorAll("td")).map((td) => td.textContent?.trim());
+    // 숫자를 「오차」라 부르지 않는다 — 그건 서로 다른 창고를 뺀 값이다.
+    expect(cells[8]).toContain("축 다름");
+    expect(cells[8]).not.toContain("-560");
   });
 });

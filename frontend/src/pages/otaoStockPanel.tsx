@@ -73,6 +73,18 @@ function VarianceCell({ row }: { row: OtaoStockRow }) {
     );
   }
   const v = row.variance_vs_snapshot;
+  // ★기준은 «본사»인데 다른 창고를 센 것이면 그 차이는 오차가 아니라 서로 다른 창고를 뺀 값이다.
+  //   숫자를 그대로 「오차」라 부르면 화면이 없는 사실을 말한다(적대 리뷰 1R P1-2).
+  if (row.counted_axis_mismatch) {
+    return (
+      <span
+        className="text-amber-700"
+        title={`실사한 창고가 「${row.counted_warehouse ?? "?"}」로 기준 창고(본사)와 다릅니다 — 이 차이는 오차가 아니라 서로 다른 창고를 뺀 값입니다.`}
+      >
+        축 다름 ⚠
+      </span>
+    );
+  }
   const tone = v === 0 ? "text-emerald-700" : Math.abs(v) > 0 ? "text-amber-700" : "";
   return (
     <span className={`font-medium ${tone}`} title="ECOUNT가 말한 값 − 사람이 센 값">
@@ -197,7 +209,18 @@ export default function OtaoStockPanel({ data }: { data: OtaoStock }) {
                 {r.counted_quantity === null ? (
                   <Unknown why="실사 미실시" />
                 ) : (
-                  num(r.counted_quantity)
+                  // ★수량만 그리면 「어느 창고를 언제 셌나」가 사라진다 — 그 둘이 없으면
+                  //   옆 칸의 «오차»가 무엇 대비 오차인지 화면에서 알 수 없다(1R P1-2).
+                  <span
+                    title={`${r.counted_warehouse ?? "창고 미상"} · ${
+                      r.counted_at?.replace("T", " ").slice(0, 16) ?? "시각 미상"
+                    }`}
+                  >
+                    {num(r.counted_quantity)}
+                    <span className="ml-1 text-xs text-gray-400">
+                      {r.counted_warehouse ?? "창고 미상"}
+                    </span>
+                  </span>
                 )}
               </Td>
               <Td right>
