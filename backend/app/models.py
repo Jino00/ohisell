@@ -5365,3 +5365,101 @@ class OtaoStockSnapshot(Base):
             name="uq_otao_stock_snapshot_grain",
         ),
     )
+
+
+# ──────────────────────────────────────────────
+# 파워링크(WEB_SITE) 텍스트 소재 — GET /ncc/ads가 버리던 절반
+# 계약 docs/contracts/CONTRACT_ignition_readiness.md §4-A S5 · D-NAO-263
+# ──────────────────────────────────────────────
+class NaverAdCreativeText(Base):
+    """파워링크 텍스트 소재의 **현재 단면** 1행 — `GET /ncc/ads` 응답의 `ad{}` 블록 적재.
+
+    grain: (ad_id). upsert — 역사는 이 표에 없다(역사는 `NaverAdCreativeTextChange`).
+
+    ★**왜 지금까지 DB 0행이었나**: `naver_sa_ad_fetcher.get_ads()`가 `referenceData.mallProductId`가
+    없는 소재를 `continue`로 버린다(같은 파일, 쇼핑 매핑 전용으로 태어난 함수라 의도된 필터다).
+    파워링크 소재는 `referenceData`가 **아예 None**이고 문안이 `ad{headline,description,pc,mobile}`에
+    실려 오므로 **한 건도 남지 않았다**(ref 103 §5). 이 표가 그 절반을 받는다.
+
+    ★**「쇼핑엔 키워드가 원리적으로 없다」의 짝**(D-NAO-255 · ref 102): 쇼핑 소재는
+    `SHOPPING_PRODUCT_AD`라 별도 광고 제목 칸이 없고 상품명이 곧 광고 제목이라 광고 축에서
+    손댈 수 없다. 반대로 파워링크는 **문안이 광고 자산 자체**라 상품명을 안 건드리고 고칠 수
+    있다 — 계약 §7-3이 이 슬라이스를 「액셀 쪽 짝」으로 배정한 근거다.
+    ⚠️단 이 표는 **적재만** 한다. 쓰기(문안 수정)는 계약 §1 「안 하는 것」 6이 점화 후 별도
+    계약으로 미뤘다 — 이 표의 존재가 그 승인을 대신하지 않는다.
+
+    ★`headline`은 대체키워드 구문을 **원문 그대로** 담는다(라이브 실측 2026-08-27:
+    `"오하이 {keyword:갤럭시 지문방지필름}"`). 치환 후 문구가 아니라 **등록된 문안**이 이 표의
+    대상이다 — 치환 결과는 검색어마다 달라 소재 grain에 담기지 않는다.
+
+    ★`edit_tm`은 **문자열 원문**이다(UTC ISO8601 `"2023-09-18T04:35:35.000Z"`). 파싱하면 타임존
+    가정이 섞이는데, 이 축에 지금 필요한 것은 «값이 바뀌었는가»이지 «언제인가»가 아니다
+    (`NaverProductMetaCurrent.reg_date`와 같은 판단).
+
+    ★소급 불가: `/ncc/ads`는 **현재값만** 준다. 즉 **수집 개통일 = 관측 창의 시작일**이고,
+    그 전의 문안 변경은 어디에도 없다(C10·검색량 기준선 D-NAO-186과 같은 성질). 계약 §5가
+    *"제목·태그는 콘솔에서 누가 만지는 순간 원복 좌표가 사라지므로 S5는 늦을수록 잃는다"*고
+    적은 것이 이 뜻이다.
+    """
+
+    __tablename__ = "naver_ad_creative_text"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_id: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    # 캠페인 좌표는 `naver_entity`(adgroup 행)에서 채운다 — 응답엔 캠페인 id가 없다.
+    campaign_id: Mapped[str] = mapped_column(String(60), nullable=False, default="", index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    # 타입은 원문 그대로 — 실측은 TEXT_45 하나지만 상수로 굳히지 않는다(다른 타입이 오면
+    # 필터가 아니라 이 컬럼이 그 사실을 보여야 한다).
+    ad_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+
+    # 문안·링크는 Text — 대체키워드 구문 때문에 «표시 15/45자»보다 길 수 있다(자르면 원문이 손상된다).
+    headline: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pc_final: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pc_display: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mobile_final: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mobile_display: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    inspect_status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    user_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # 컬럼으로 안 뽑은 키를 되짚기 위한 원문(`ad` 블록 + 소재 상태 필드). 키 부재와 null의
+    # 구분이 필요하면 이쪽이 정본이다(교훈 #315).
+    raw_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    last_changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("ad_id", name="uq_naver_ad_creative_text_ad"),
+        Index("ix_naver_ad_creative_text_ag", "adgroup_id", "last_seen_at"),
+    )
+
+
+class NaverAdCreativeTextChange(Base):
+    """파워링크 문안의 **변경분만** append (S5 · D-NAO-263).
+
+    grain: (ad_id, observed_at). 변경이 있을 때만 행이 생긴다.
+
+    ★`observed_at`은 «폴링 시각»이지 «변경 시각»이 아니다 — 폴링이 일 1회라 실제 변경 시각은
+    ±1일 불확실하다. 정확한 변경 시각을 원하면 `edit_tm`이 그 앵커다(단 네이버가 피드를
+    재적용해도 전진할 수 있다 — D-NAO-137의 쇼핑 실측이 그랬다. 파워링크에서도 같은지는 [미상]).
+
+    ★첫 회차는 전건 신규라 이 표가 **0행인 것이 정상**이다(신규 insert는 변경이 아니다).
+    """
+
+    __tablename__ = "naver_ad_creative_text_change"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_id: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    # {필드명: [old, new]} — 키 부재는 null로 접힌다(구분이 필요하면 current.raw_json이 정본)
+    changed_fields: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_naver_ad_creative_text_change_ad_at", "ad_id", "observed_at"),
+    )

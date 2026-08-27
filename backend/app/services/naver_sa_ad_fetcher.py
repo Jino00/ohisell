@@ -1082,6 +1082,60 @@ def get_ads(adgroup_id: str) -> list[dict]:
     return out
 
 
+def get_text_ads(adgroup_id: str) -> list[dict]:
+    """광고그룹의 **텍스트 소재**(파워링크 문안) 목록 — `get_ads`가 버리던 절반 (S5 · D-NAO-263).
+
+    GET /ncc/ads?nccAdgroupId=... — `get_ads`와 **같은 엔드포인트**다(새 API 아님, 추가 권한 0).
+
+    ★왜 별도 함수인가: `get_ads()`는 `referenceData.mallProductId`가 없는 소재를 버린다 —
+    쇼핑 상품 매핑 전용으로 태어났고 그 필터가 그 함수의 계약이다. 파워링크 소재는
+    `referenceData`가 **아예 None**이라 거기선 한 건도 안 남는다. `get_ads`에 분기를 더하면
+    쇼핑 매핑·소재입찰 가드(`naver_sa_writer`)·외부변경 탐지 세 호출부의 반환 모양이 같이
+    바뀌므로, **그 함수는 그대로 두고** 이 함수가 반대쪽 절반을 가져간다.
+
+    ★필터는 「타입이 TEXT_45인가」가 아니라 **「`ad` 블록에 내용이 있는가」**다(라이브 실측
+    2026-08-27: 파워링크 = `type=TEXT_45`·`ad={description,headline,mobile,pc}` / 쇼핑 =
+    `ad={}` 빈 dict·`referenceData` 충실). 타입 문자열로 거르면 다른 텍스트 소재 타입이
+    생겼을 때 **조용히 0건**이 되는데, 이 축은 소급이 불가능해서 그 침묵의 대가가 영구적이다.
+    실제 타입은 거르지 않고 `ad_type`으로 **그대로 실어 보낸다**.
+
+    반환: [{"ad_id","adgroup_id","ad_type","headline","description","pc_final","pc_display",
+            "mobile_final","mobile_display","status","inspect_status","user_lock","edit_tm",
+            "raw_json"}, ...]
+
+    ★`headline`은 대체키워드 구문을 **원문 그대로** 담는다(실측 `"오하이 {keyword:갤럭시 지문방지필름}"`).
+      치환 결과는 검색어마다 달라 소재 grain에 존재하지 않는다 — 등록된 문안이 이 함수의 대상이다.
+    ★`edit_tm`은 원문 문자열 그대로(UTC ISO8601). 파싱하지 않는다 — `get_ads`와 같은 판단.
+    """
+    resp = _get("/ncc/ads", {"nccAdgroupId": adgroup_id})
+    resp.raise_for_status()
+    out: list[dict] = []
+    for a in resp.json():
+        ad = a.get("ad")
+        if not isinstance(ad, dict) or not ad:
+            continue  # 쇼핑 상품 소재(ad={}) 등 — 문안이 없는 소재는 이 축의 대상이 아니다
+        pc = ad.get("pc") if isinstance(ad.get("pc"), dict) else {}
+        mobile = ad.get("mobile") if isinstance(ad.get("mobile"), dict) else {}
+        out.append({
+            "ad_id": a.get("nccAdId", ""),
+            "adgroup_id": a.get("nccAdgroupId", adgroup_id),
+            "ad_type": a.get("type", ""),
+            "headline": ad.get("headline"),
+            "description": ad.get("description"),
+            "pc_final": (pc or {}).get("final"),
+            "pc_display": (pc or {}).get("display"),
+            "mobile_final": (mobile or {}).get("final"),
+            "mobile_display": (mobile or {}).get("display"),
+            "status": a.get("status"),
+            "inspect_status": a.get("inspectStatus"),
+            "user_lock": bool(a.get("userLock", False)),
+            "edit_tm": a.get("editTm"),
+            # 컬럼으로 안 뽑은 키(punyCode·regTm·delFlag·statusReason 등)를 되짚기 위한 원문.
+            "raw_json": json.dumps(a, ensure_ascii=False),
+        })
+    return out
+
+
 # ── BM Phase 3 주간 deep 차원 GET 전용 함수 (D-NAO-78, bm_deep 레인) ──
 # 둘 다 읽기 전용(GET만). SA-1(bm_snapshot)이 실행 손(naver_sa_writer/naver_execution_harness)을
 # import하지 않고도 같은 엔드포인트를 쓸 수 있도록 이 순수 GET fetcher에 독립 구현한다
