@@ -24,9 +24,15 @@
 import { Card, Table, Th, Td, Badge, Loading, EmptyState } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
-import { fetchOtaoRoster, fetchOtaoSales, fetchOtaoSettlement } from "../lib/api";
+import {
+  fetchOtaoRoster,
+  fetchOtaoSales,
+  fetchOtaoSettlement,
+  fetchOtaoStock,
+} from "../lib/api";
 import OtaoSalesPanel from "./otaoSalesPanel";
 import OtaoSettlementPanel from "./otaoSettlementPanel";
+import OtaoStockPanel from "./otaoStockPanel";
 
 /** 예약 잔량 셀 — 음수를 **음수로** 그린다. 깎으면 창 어긋남 신호가 사라진다(자백 ③). */
 function ReservedCell({ value }: { value: number }) {
@@ -55,6 +61,9 @@ export default function OtaoPurchaseOrders() {
     () => fetchOtaoSettlement(),
     [],
   );
+  // ★재고 축(S4)도 **따로** 가져온다. 원천이 ECOUNT 스냅샷이라 발주·픽업·판매 어느 것이
+  //   비어도 살아 있다 — 묶으면 화면이 「재고도 없다」로 거짓말한다(위 둘과 같은 이유).
+  const { data: stock, error: stockError } = useAsyncData(() => fetchOtaoStock(), []);
 
   if (error) {
     return (
@@ -81,6 +90,27 @@ export default function OtaoPurchaseOrders() {
         <Loading label="정산 창을 불러오는 중…" rows={4} />
       ) : (
         <OtaoSettlementPanel data={settlement} />
+      )}
+    </section>
+  );
+
+  // ★재고 축(S4) 섹션. 계약 §4 S4의 표면 — 「지금 우리 창고에 얼마나 있나」는 발주식의
+  //   차감항이고, 위 3칸의 어느 칸도 그 질문에 답하지 않는다(예약 잔량은 OTAO 쪽 몫이다).
+  const stockSection = (
+    <section className="space-y-4">
+      <div className="flex items-baseline justify-between border-t border-gray-200 pt-5">
+        <h2 className="text-base font-semibold text-gray-900">자사 현재고 (파생)</h2>
+        <p className="text-xs text-gray-500">
+          기준 재고(ECOUNT 스냅샷) + 픽업 입고 − 판매. 정본은 ECOUNT이고 이 표는 읽기 전용
+          사본입니다.
+        </p>
+      </div>
+      {stockError ? (
+        <EmptyState reason={`자사 현재고를 불러오지 못했습니다: ${stockError}`} />
+      ) : !stock ? (
+        <Loading label="자사 현재고를 불러오는 중…" rows={4} />
+      ) : (
+        <OtaoStockPanel data={stock} />
       )}
     </section>
   );
@@ -116,8 +146,9 @@ export default function OtaoPurchaseOrders() {
             hint="발주서 PDF는 Google Drive에 있고 서버는 그 폴더를 못 봅니다. Mac에서 scripts/otao_po_export.py 로 페이로드를 만들고, 서버에서 scripts/otao_po_import.py 로 넣습니다."
           />
         </Card>
-        {/* ★발주가 비어도 정산·판매 축은 살아 있다 — 여기서 지우면 「픽업·판매도 없다」로 읽힌다. */}
+        {/* ★발주가 비어도 정산·재고·판매 축은 살아 있다 — 지우면 「픽업·재고·판매도 없다」로 읽힌다. */}
         {settlementSection}
+        {stockSection}
         {salesSection}
       </div>
     );
@@ -236,6 +267,8 @@ export default function OtaoPurchaseOrders() {
       </p>
 
       {settlementSection}
+
+      {stockSection}
 
       {salesSection}
     </div>

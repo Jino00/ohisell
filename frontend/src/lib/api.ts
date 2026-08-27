@@ -6410,3 +6410,70 @@ export interface OtaoSettlement {
 export function fetchOtaoSettlement(): Promise<OtaoSettlement> {
   return fetchApi<OtaoSettlement>("/api/otao-po/settlement");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S4 파생 현재고 — 계약 `CONTRACT_inventory_unified.md` §4 S4 · 체인 `발주예측` n=8
+//
+// ★`number | null`을 `number`로 좁히지 마라. 이 응답의 null은 전부 «모른다»이고 「0」이 아니다:
+//     sold_quantity   = null → 판매를 이 축에 «못 붙인다»(다리 부재). 0이면 재고가 부푼다.
+//     derived_*       = null → 위 때문에 파생값이 «산출 불가».
+//     baseline_*      = null → 스냅샷에 그 코드가 «없다». 「재고 0」이 아니다.
+//     variance_*      = null → 실사 «미실시». 오차 0이 아니다.
+//   `?? 0`을 한 줄이라도 쓰면 화면이 없는 사실을 말하게 된다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface OtaoStockRow {
+  product_code: string;
+  /** t0(가장 이른 스냅샷)의 **본사** 재고. null = 스냅샷에 없다 */
+  baseline_quantity: number | null;
+  /** 창고 역할별 분해 — own / material / channel / excluded / unknown. 합치지 않는다(계약 §1) */
+  baseline_by_role: Record<string, number | null>;
+  /** t0 «이후» 통관 원장 입고 */
+  inbound_quantity: number | null;
+  /** ★항상 null이다 — 발주축(GAPIP)과 판매축(internal_sku)을 잇는 표가 없다 */
+  sold_quantity: number | null;
+  derived_quantity: number | null;
+  /** 파생이 null인 이유: 'baseline' | 'sold' */
+  derived_blocked_by: string | null;
+  /** ★현재고가 «아니다» — 판매를 안 뺀 상한일 뿐 */
+  upper_bound_if_no_sales: number | null;
+  counted_quantity: number | null;
+  /** 그 코드를 «언제» 셌나 — 코드마다 다를 수 있다(나눠 세는 것이 현실 경로) */
+  counted_at: string | null;
+  /** ★어느 창고를 셌나. 없으면 「본사 스냅샷 ↔ 다른 창고 실사」가 «오차»로 둔갑한다 */
+  counted_warehouse: string | null;
+  counted_warehouse_role: string | null;
+  /** true = 기준 창고(본사)가 아닌 곳을 센 것 — 그 차이는 오차가 아니라 다른 축이다 */
+  counted_axis_mismatch: boolean;
+  latest_snapshot_quantity: number | null;
+  /** ★계약 §2-7C ④가 요구하는 숫자: ECOUNT가 말한 값 − 사람이 센 값 */
+  variance_vs_snapshot: number | null;
+  variance_pct: number | null;
+  variance_vs_derived: number | null;
+}
+
+export interface OtaoStock {
+  /** true = 스냅샷을 «찍은 적 없다». 「재고 0」과 다른 상태 */
+  snapshot_empty: boolean;
+  snapshot_count: number;
+  baseline_at: string | null;
+  latest_at: string | null;
+  /** 가장 «최근» 실사 시각. null = 미실시 */
+  counted_at: string | null;
+  /** 가장 «이른» 실사 시각 — counted_at과 다르면 회차가 나뉜 것이다 */
+  counted_from: string | null;
+  /** 기준 창고(본사)가 아닌 곳을 센 코드들 */
+  counted_axis_mismatches: string[];
+  inbound_window_start: string | null;
+  /** 판매를 못 붙이는 이유 원문 — 화면이 그대로 읽는다 */
+  sold_unavailable_reason: string | null;
+  rows: OtaoStockRow[];
+  /** 계약 §1 창고 표에 없는 이름 — 본사 재고에 합치지 않았다 */
+  unknown_warehouses: { warehouse: string; quantity: number | null }[];
+  totals: Record<string, number | string[] | null>;
+  notes: string[];
+}
+
+export function fetchOtaoStock(): Promise<OtaoStock> {
+  return fetchApi<OtaoStock>("/api/otao-po/stock");
+}
