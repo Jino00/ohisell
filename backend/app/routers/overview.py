@@ -20,6 +20,12 @@ from app.services.coupang.revenue_reconcile import reconcile_revenue
 from app.services.coupang.rocket_1p_funnel import compute_rocket_1p_funnel
 from app.services.coupang.rocket_1p_revenue import compute_rocket_1p_revenue
 from app.services.coupang.rocket_intelligence import compute_rocket_overview
+from app.services.coupang.rocket_pipeline import (
+    PRE_INVOICE_STAGES,
+    compute_rocket_pipeline,
+    compute_rocket_pipeline_rows,
+    compute_rocket_ri_queue,
+)
 from app.services.coupang.rocket_promo_pnl import compute_promo_pnl_overview
 from app.services.coupang.rocket_recon import compute_rocket_recon, compute_rocket_recon_sku
 
@@ -272,3 +278,91 @@ def rocket_recon_sku(
     dfrom, dto = _recon_window(from_, to)
     result = compute_rocket_recon_sku(db, product_number, dfrom, dto, _ROCKET_VENDOR_ID)
     return _jsonify(result)
+
+
+def _ship_window(from_: str | None, to: str | None) -> tuple[date | None, date | None]:
+    """발송일 창 파싱 — **기본값이 없다(=창 없음, 열려 있는 것 전부)**.
+
+    ★`_recon_window`(발주일 기본 90일)와 일부러 다르다. 파이프라인의 질문은 「지금 어느 칸에
+      얼마가 걸려 있나」라서 기본이 «전부»여야 한다 — 기본 창을 두면 창 밖에 굳어 있는 돈이
+      화면에서 사라지고, 그게 정확히 이 화면이 잡으려는 병이다.
+    """
+    dfrom = _parse_date(from_, None) if from_ else None
+    dto = _parse_date(to, None) if to else None
+    if dfrom and dto and dfrom > dto:
+        raise HTTPException(status_code=422, detail="ship_from이 ship_to보다 늦습니다")
+    return dfrom, dto
+
+
+@router.get("/rocket-pipeline")
+def rocket_pipeline(
+    ship_from: str | None = Query(None, description="③입고대기 칸에만 적용되는 발송일 창 시작"),
+    ship_to: str | None = Query(None, description="③입고대기 칸에만 적용되는 발송일 창 끝"),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 열린 파이프라인 — 발주가 돈이 되기까지 어느 칸에 얼마가 걸려 있나. 조회 전용.
+
+    ★읽기 전용 신규 API다. 기존 회계·종합조망·수집 경로는 한 톨도 바뀌지 않는다.
+
+    칸 넷(`stages`): ①await_confirm(발주 왔고 우리가 미확정, RP) ②await_ship(확정했고 미발송, PA)
+      ③await_receive(보냈는데 쿠팡 미입고 = **계산서 미발행**, PA) ④await_payment(계산서 나감,
+      지급일 미도래 — **계산서 그레인**).
+      `pre_invoice_subtotal` = ①②③ 합. ④는 축이 달라(계산서 그레인) 소계에 안 들어간다.
+
+    소계 밖 두 덩어리:
+      - `closed_unshipped` 확정했는데 발송 없이 닫힘(영영 못 보내는 분)
+      - `unexplained` 발송 신고 > 쿠팡 인정 입고. **확정 숫자가 아니다** — 덜 보냄·반송·진짜
+        미수금이 구별 불가로 섞여 있다(`confirmed: false`). 소계 합산 금지.
+
+    `clamp`(음수 절단 표면화) · `unpriced_shipped_qty`(단가 못 붙인 발송수량) ·
+      `freshness`(수집 신선도)로 «이 숫자가 언제 것이고 무엇을 못 보는지»를 함께 낸다(원칙22).
+
+    ship_from/ship_to는 **③에만** 적용된다(「8/20 이후 발송분 중 미발행」). 창을 줘도 금액은
+      PO 전체 기준이고, 창 밖 발송이 섞인 PO 수를 `ship_window`가 함께 낸다.
+    """
+    dfrom, dto = _ship_window(ship_from, ship_to)
+    return _jsonify(
+        compute_rocket_pipeline(db, _ROCKET_VENDOR_ID, kst_today(), dfrom, dto)
+    )
+
+
+@router.get("/rocket-pipeline/stage/{stage}")
+def rocket_pipeline_stage(
+    stage: str,
+    ship_from: str | None = Query(None),
+    ship_to: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """한 칸에 걸린 PO 목록 — 요약 타일 확장용. 조회 전용.
+
+    `stage` = await_confirm | await_ship | await_receive | closed_unshipped | unexplained.
+      (await_payment은 계산서 그레인이라 PO 목록이 없다 — 400.)
+    각 행의 `stage_amount`가 **그 칸에 계상된 금액**이다(PO 총액이 아니다). `is_stale`은
+      마지막 수집일과 그 PO의 수집일이 다르다는 뜻 — 「지금 참인 상태」가 아닐 수 있다.
+    """
+    allowed = set(PRE_INVOICE_STAGES) | {"closed_unshipped", "unexplained"}
+    if stage not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"알 수 없는 칸: {stage} (가능: {', '.join(sorted(allowed))})",
+        )
+    dfrom, dto = _ship_window(ship_from, ship_to)
+    return _jsonify(
+        compute_rocket_pipeline_rows(db, _ROCKET_VENDOR_ID, stage, dfrom, dto, limit)
+    )
+
+
+@router.get("/rocket-ri-queue")
+def rocket_ri_queue(db: Session = Depends(get_db)):
+    """거래명세서확인요청(RI) — 우리가 눌러야 할 일 목록. 조회 전용.
+
+    ★파이프라인 칸이 **아니다**. RI PO의 입고금액은 이미 계산서가 나가 ④지급대기에 포함돼
+      있으므로 합계에 더하면 중복이다.
+
+    ★★`is_stale`이 이 응답의 핵심이다. 수집 창(발주일 기준)이 좁아 오래된 미종결 PO는 상태가
+      마지막 수집일에 굳는다 — 굳은 행은 이미 닫혔을 수 있다(2026-08-27 실측: RI 12건 중 8건이
+      2026-08-05에 굳었고 그 8건의 계산서는 지급일까지 지났다). 판정 근거(연결 계산서의
+      confirmed/transmitted/payment_date + synced_date)를 행마다 실어 보낸다.
+    """
+    return _jsonify(compute_rocket_ri_queue(db, _ROCKET_VENDOR_ID))
