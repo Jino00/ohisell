@@ -64,25 +64,23 @@ def check(db: Session, campaign_id: str) -> dict:
     try:
         from app.services.naver_ad import exclusion_slot_usage as _esu  # noqa: PLC0415
 
-        usage = _esu.slot_usage(db)
-        # ★`rows`는 표본 상한에 잘려 있다 — 잘린 뒤 세면 과소보고다. 그래서 «이 캠페인에
-        #   빨강이 있나»는 잘리지 않은 총계로 답할 수 없고(총계는 계정 단위), 표본에서
-        #   찾되 **잘렸다는 사실을 같이 싣는다**. 정렬이 빨강 우선이라 표본에 남을 확률이 높다.
-        exhausted = [
-            r for r in usage.get("rows", [])
-            if r.get("campaign_id") == campaign_id and r.get("state") == _esu.STATE_EXHAUSTED
-        ]
+        # ★★**이 캠페인 몫만 직접 질의한다** (적대 리뷰 1R P1-1). 초판은 `slot_usage()["rows"]`
+        #   를 훑었는데 그건 배너 payload용이라 `SAMPLE_CAP`(20)에서 **잘린다** — 계정 전체
+        #   exhausted가 21개를 넘으면 이 캠페인의 70/70 그룹이 표본 밖으로 밀려나 **경고가
+        #   통째로 사라지고 `safe_to_ignite: true`가 나갔다**(리뷰어가 재현). 라이브는 이미
+        #   그 문턱에 붙어 있다(70/70 도달 15개 vs 상한 20).
+        #   ⇒ **게이트 판정에 절단된 컬렉션을 쓰지 않는다.**
+        exhausted = _esu.exhausted_adgroups(db, campaign_id)
         if exhausted:
             warnings.append({
                 "code": WARN_SLOTS_EXHAUSTED,
                 "message": (
-                    f"제외 슬롯이 이미 70/70인 광고그룹이 {len(exhausted)}개 있다 — "
-                    "켜도 그 그룹엔 **더 걸 브레이크가 없다**."
+                    f"제외 슬롯이 이미 {_esu.EXCLUSION_SLOT_CAP}/{_esu.EXCLUSION_SLOT_CAP}인 "
+                    f"광고그룹이 {len(exhausted)}개 있다 — 켜도 그 그룹엔 **더 걸 브레이크가 없다**."
                 ),
                 "detail": {
-                    "adgroup_ids": [r["adgroup_id"] for r in exhausted],
-                    "rows_truncated": usage.get("rows_truncated", 0),
-                    "reclaim_note": usage.get("reclaim_note"),
+                    "adgroup_ids": exhausted,
+                    "reclaim_note": _esu.RECLAIM_NOTE,
                 },
             })
     except Exception:  # noqa: BLE001 — 이 경고가 실패해도 W1은 그대로 서야 한다

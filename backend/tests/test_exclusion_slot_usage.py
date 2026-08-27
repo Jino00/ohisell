@@ -313,6 +313,46 @@ def test_full_slots_warn_that_there_is_no_brake_left(db):
     assert codes == [pre.WARN_SLOTS_EXHAUSTED]
 
 
+def test_gate_does_not_read_a_truncated_sample(db):
+    """★★적대 리뷰 1R P1-1의 재현을 고정한다.
+
+    초판 W2는 `slot_usage()["rows"]`(표본 상한 20건)를 훑었다. 계정 전체 exhausted가 21개를
+    넘으면 **점검 대상 캠페인의 70/70 그룹이 표본 밖으로 밀려나** 경고가 통째로 사라지고
+    `safe_to_ignite: true`가 나갔다 — 「검사했는데 깨끗하다」와 「검사가 놓쳤다」가 응답에서
+    구분되지 않았다. 초판 주석의 「정렬이 빨강 우선이라 표본에 남을 확률이 높다」는 **확률이지
+    보장이 아니었고**, 라이브는 이미 그 문턱에 붙어 있다(70/70 도달 15개 vs 상한 20).
+    """
+    # 다른 캠페인들에 표본을 가득 채운다 — adgroup_id가 알파벳순으로 앞서게 둔다.
+    for i in range(esu.SAMPLE_CAP + 6):
+        db.add(_target(adgroup_id=f"aaa-{i:03d}", campaign_id=f"other-{i}",
+                       restrict_keyword_count=esu.EXCLUSION_SLOT_CAP))
+    # 점검 대상 캠페인의 70/70 그룹은 정렬상 **맨 뒤**에 온다.
+    db.add(_target(adgroup_id="zzz-target-group", campaign_id=CAMPAIGN,
+                   restrict_keyword_count=esu.EXCLUSION_SLOT_CAP))
+    db.add(NaverAdgroupScope(campaign_id=CAMPAIGN, adgroup_id="zzz-target-group", enabled=True))
+    db.commit()
+
+    # 전제 확인: 표본은 실제로 잘렸고, 대상 그룹은 그 표본 «밖»에 있다.
+    usage = esu.slot_usage(db, now=NOW)
+    assert usage["rows_truncated"] > 0
+    assert "zzz-target-group" not in [r["adgroup_id"] for r in usage["rows"]]
+
+    out = pre.check(db, CAMPAIGN)
+    codes = [w["code"] for w in out["warnings"]]
+    assert pre.WARN_SLOTS_EXHAUSTED in codes, "표본 밖이라고 경고가 사라지면 안 된다"
+    assert out["safe_to_ignite"] is False
+
+
+def test_exhausted_lookup_is_scoped_to_the_campaign(db):
+    """★남의 캠페인 빨강을 이 캠페인 경고로 옮기면 매번 빨강이라 아무도 안 읽는다."""
+    db.add(_target(adgroup_id="g-other", campaign_id="other-cmp",
+                   restrict_keyword_count=esu.EXCLUSION_SLOT_CAP))
+    db.add(_target(adgroup_id="g-mine", campaign_id=CAMPAIGN, restrict_keyword_count=1))
+    db.commit()
+    assert esu.exhausted_adgroups(db, CAMPAIGN, now=NOW) == []
+    assert esu.exhausted_adgroups(db, "other-cmp", now=NOW) == ["g-other"]
+
+
 def test_preflight_reads_gates_fail_closed(db):
     """★행이 없으면 «꺼짐»이다 — 없는 설정을 켜진 것으로 읽으면 안 된다."""
     out = pre.check(db, "no-such-campaign")

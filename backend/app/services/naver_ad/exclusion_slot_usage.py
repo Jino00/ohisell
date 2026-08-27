@@ -146,6 +146,31 @@ def _ledger_by_group(db: Session, now: datetime) -> dict[str, dict]:
     return out
 
 
+def exhausted_adgroups(db: Session, campaign_id: str, *, now: datetime | None = None) -> list[str]:
+    """그 캠페인에서 슬롯이 바닥난 광고그룹 id **전건** (표본 절단 없음).
+
+    ★★왜 `slot_usage()["rows"]`를 쓰면 안 되는가 (적대 리뷰 1R P1-1, 재현됨): 저쪽 `rows`는
+      배너 payload용이라 `SAMPLE_CAP`(20)에서 **잘린다.** 계정 전체 exhausted가 21개를 넘으면
+      점검 대상 캠페인의 70/70 그룹이 표본 밖으로 밀려나 **경고가 통째로 사라지고
+      `safe_to_ignite: true`가 나간다** — 「검사했는데 깨끗하다」와 「검사가 놓쳤다」가
+      응답에서 구분되지 않는다(교훈 #123의 변형).
+      초판은 「정렬이 빨강 우선이라 표본에 남을 확률이 높다」고 자백해 뒀는데, 그건 **확률이지
+      보장이 아니다.** 그리고 라이브가 이미 그 문턱에 붙어 있다 — 70/70 도달 그룹 **15개**
+      (ref 103 §4)에 상한이 20이다.
+    ⇒ **게이트 판정에는 절단된 컬렉션을 절대 쓰지 않는다.** 표본 절단은 목록·배너 몫이다.
+
+    ★판정기는 늘리지 않는다 — 상태 판정은 `_state()` 한 벌을 그대로 쓴다(두 벌이 되면 갈린다).
+    """
+    now = now or kst_now()
+    return [
+        t.adgroup_id
+        for t in db.query(NaverAdgroupTargetCurrent)
+        .filter(NaverAdgroupTargetCurrent.campaign_id == campaign_id)
+        .all()
+        if _state(t.restrict_keyword_count, t.observed_at, now) == STATE_EXHAUSTED
+    ]
+
+
 def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
     """제외 슬롯 사용률·소진 예상일 요약 (읽기 전용 · 외부 호출 0).
 
