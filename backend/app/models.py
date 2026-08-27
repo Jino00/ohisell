@@ -3787,6 +3787,22 @@ class NaverSearchTermExclusion(Base):
     #   실제 시각을 그 칸에 넣으면 2024년 날짜 하나로 일기 매칭 창이 1년 반으로 벌어지고
     #   편입 직후 전역 배너가 거짓 빨강이 된다. 그래서 칸을 나눈다.
     console_excluded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # ── 제외 «임대» 등급 (S2, 계약 CONTRACT_ignition_readiness.md §4-B⑥) ──
+    # ★왜 이 칸이 필요한가: `next_review_at`이 NULL인 행이 3,987/3,990인데, 그 NULL이
+    #   «영구 제외»(무관 — 경쟁사 브랜드처럼 다시 볼 이유가 없다)인지 «보류»(미검증 — 판정
+    #   근거가 없어서 아직 못 정했다)인지 **칸 하나로는 구분이 안 된다.** 두 뜻을 같은 NULL로
+    #   두면 재개방 로직이 「영영 안 볼 것」과 「나중에 볼 것」을 못 가른다. 그래서 만료일과
+    #   «왜 그 만료일인가»를 나눠 적는다 — 제외를 사형에서 **임대**로 바꾸는 것이 S2다.
+    # 값: 무관(영구 NULL) / 광의(+90일) / 성과미달(+min(30×cycle,90)일) / 미검증(보류 NULL)
+    #     / 오컷의심(즉시 도래 — 재심사 «대상 목록»에만 오르고 실행은 소유권 분리 후)
+    # ★nullable인 이유(계약 §3 금지선): 신설 컬럼은 additive nullable만 — 구코드가 새 스키마
+    #   위에서 그대로 돈다. 강제는 DB가 아니라 **코드 입구**(exclusion_grade.new_exclusion)와
+    #   테스트가 진다. 백필 후에도 NULL이 남으면 그것이 곧 «분류 못 한 행»의 표면이다.
+    grade: Mapped[Optional[str]] = mapped_column(String(12), nullable=True, index=True)
+    # 그 등급이 «어느 근거로» 붙었는가 — 백필 버킷 코드·생성 경로·규칙 이탈 사유.
+    # ★계약 §4-C S2-a가 "수치가 [E]와 다르면 다른 이유가 함께 출력·기록돼 있다"를 요구한다.
+    #   그 «기록»의 자리가 여기다 — 분포표만 있고 이유가 없으면 다음 세션이 숫자를 못 믿는다.
+    grade_reason: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import NaverSearchTermDaily, NaverSearchTermExclusion, OpsDiaryEntry
-from app.services.naver_ad import diary
+from app.services.naver_ad import diary, exclusion_grade
 from app.utils.kst import KST, kst_now
 
 log = logging.getLogger(__name__)
@@ -64,8 +64,11 @@ VOIDED_EVENT_TYPE = "voided"
 
 # 재심사 백오프 — 기존 PX 상태기계 관례(cycle당 30일, 상한 90일)를 그대로 따른다.
 # 여기서 새 정책을 만들지 않는다(같은 테이블에 두 가지 주기가 섞이면 재심사가 예측 불가해진다).
-_REVIEW_BACKOFF_DAYS = 30
-_REVIEW_BACKOFF_MAX = 90
+# ★S2에서 «정의 자리»가 `exclusion_grade`로 옮겨졌다(값 불변). 같은 식이 세 파일에 세 벌로
+#   흩어져 있었고 그중 하나는 cycle을 무시했다 — 등급별 만료 규칙을 그 위에 얹으면 갈라짐이
+#   등급까지 번진다. 이름은 그대로 두어 기존 참조가 안 깨진다.
+_REVIEW_BACKOFF_DAYS = exclusion_grade.REVIEW_BACKOFF_DAYS
+_REVIEW_BACKOFF_MAX = exclusion_grade.REVIEW_BACKOFF_MAX
 
 # 근거 수치를 붙일 조회 창(제외 시점 비용 = 감사용 스냅샷). 리스트 생성기의 창과 같은 30일.
 _COST_WINDOW_DAYS = 30
@@ -224,6 +227,7 @@ def record_execution(
     restrict_kwd_id: str | None = None,
     discovered: bool = False,
     now: datetime | None = None,
+    grade: str | None = None,
 ) -> dict:
     """사람이 콘솔에서 실행한 제외 1건을 등록한다(원장 upsert + 운영일기 execute 1행).
 
@@ -234,6 +238,11 @@ def record_execution(
             대조로 회수한다).
         discovered: True면 **라이브 대조가 스스로 발견**한 것(사람이 화면에서 알린 게 아니라).
             근거 문장에 그 출처를 남긴다 — 나중에 「누가 이 행을 만들었나」가 감사 대상이 된다.
+        grade: 제외 «임대» 등급(계약 §4-B⑥). 기본 `성과미달` — 이 경로로 들어오는 컷은
+            리스트 생성기의 근거 문장이 붙은 «창 내 확정 손해»라 그 등급의 정의 그대로다.
+            **기본값이 곧 종전 동작이다**(만료일 = min(30×cycle,90), 하루도 안 옮긴다).
+            텍스트 관련성 판단(`무관`·`광의`)은 자동 부여 근거가 없어 백필이 안 붙이고
+            (계약 §4-B⑦), 사람이 판별했을 때만 여기로 넘어온다.
 
     반환: {result, exclusion_id, cost_at_exclusion, cycle, next_review_at, diary: bool}
       result ∈ {created, re_excluded, already_recorded}
@@ -284,14 +293,16 @@ def record_execution(
         cycle = 1
     else:
         cycle = (row.cycle + 1) if row is not None else 1
-    review_at = today + timedelta(days=min(_REVIEW_BACKOFF_DAYS * cycle, _REVIEW_BACKOFF_MAX))
+    # 등급이 만료일을 정한다(S2) — 기본 `성과미달`의 식은 종전 백오프와 글자 그대로 같다.
+    grade = grade or exclusion_grade.GRADE_UNDERPERFORM
+    grade_reason = f"record_execution — 사람 실행 보고(cycle={cycle})"
+    review_at = exclusion_grade.default_next_review_at(grade, cycle=cycle, today=today)
 
     if row is None:
-        row = NaverSearchTermExclusion(
+        row = exclusion_grade.new_exclusion(
             campaign_id=campaign_id, adgroup_id=adgroup_id, search_term=search_term,
-            restrict_kwd_id=restrict_kwd_id, status="excluded", cycle=cycle,
-            excluded_at=now, last_transition_at=now, next_review_at=review_at,
-            cost_at_exclusion=cost,
+            restrict_kwd_id=restrict_kwd_id, cycle=cycle, now=now,
+            cost_at_exclusion=cost, grade=grade, grade_reason=grade_reason,
         )
         db.add(row)
         result = "created"
@@ -300,7 +311,7 @@ def record_execution(
         row.cycle = cycle
         row.excluded_at = now
         row.last_transition_at = now
-        row.next_review_at = review_at
+        exclusion_grade.set_grade(row, grade, cycle=cycle, today=today, reason=grade_reason)
         row.cost_at_exclusion = cost
         if restrict_kwd_id:
             row.restrict_kwd_id = restrict_kwd_id
@@ -342,7 +353,10 @@ def record_execution(
 
     return {
         "result": result, "exclusion_id": exclusion_id, "cost_at_exclusion": cost,
-        "cycle": cycle_out, "next_review_at": review_at.isoformat(), "diary": wrote,
+        # ★None 가능 — `무관`·`미검증` 등급은 만료일이 없다(영구·보류). 종전 기본값
+        #   (`성과미달`)에서는 항상 날짜라 기존 호출부의 동작이 바뀌지 않는다.
+        "cycle": cycle_out, "grade": grade,
+        "next_review_at": review_at.isoformat() if review_at else None, "diary": wrote,
     }
 
 
@@ -440,19 +454,26 @@ def import_console_exclusions(
             continue
 
         note = (raw.get("note") or "콘솔에 이미 걸려 있던 제외를 장부에 편입")[:200]
+        # ★편입분의 등급은 «미검증»이다(계약 §4-B⑥·⑦) — 실행 시점도 근거도 모르는 과거
+        #   조치라 판정 근거가 없다. 그리고 미검증의 기본 만료는 **보류(NULL)**이므로
+        #   종전의 `next_review_at=None`과 글자 그대로 같다. 등급이 붙는 이유는 이 NULL이
+        #   «영구»(무관)가 아니라 «보류»임을 다음 재개방 로직이 알아야 하기 때문이다.
+        import_grade = exclusion_grade.GRADE_UNVERIFIED
+        import_reason = "import_console_exclusions — 콘솔 편입(실행 시점·근거 미상)"
         if existing is None:
-            row = NaverSearchTermExclusion(
+            row = exclusion_grade.new_exclusion(
                 campaign_id=campaign_id, adgroup_id=adgroup_id, search_term=search_term,
                 restrict_kwd_id=(raw.get("restrict_kwd_id") or None),
-                status="excluded", cycle=1,
+                cycle=1,
                 # ★`excluded_at`은 편입 시각이지 실제 제외 시각이 아니다 — 이 칸의 뜻은
                 #   「장부가 이 행을 제외로 세운 시각」이고 일기 매칭·방치 판정이 거기 기대어
                 #   있다. 실제 시각은 옆 칸(`console_excluded_at`)에 넣고, 모르면 **NULL**이다.
                 #   어느 쪽이든 이 행은 성적표 판정 대상에서 빠진다(source로 가른다).
-                excluded_at=now, last_transition_at=now, next_review_at=None,
-                console_excluded_at=console_at,
-                cost_at_exclusion=0, source=CONSOLE_IMPORT_SOURCE, live_note=note,
+                now=now, console_excluded_at=console_at,
+                cost_at_exclusion=0, source=CONSOLE_IMPORT_SOURCE,
+                grade=import_grade, grade_reason=import_reason,
             )
+            row.live_note = note
             db.add(row)
             outcome = "imported"
         else:
@@ -461,7 +482,9 @@ def import_console_exclusions(
             row.status = "excluded"
             row.last_transition_at = now
             row.excluded_at = now
-            row.next_review_at = None
+            exclusion_grade.set_grade(
+                row, import_grade, cycle=row.cycle, today=now.date(), reason=import_reason,
+            )
             row.source = CONSOLE_IMPORT_SOURCE
             row.live_state = None
             row.live_checked_at = None

@@ -30,7 +30,7 @@ from app.models import (
     NaverProposal,
     NaverSearchTermExclusion,
 )
-from app.services.naver_ad import diary, naver_sa_writer, search_term_judge
+from app.services.naver_ad import diary, exclusion_grade, naver_sa_writer, search_term_judge
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now
 
@@ -143,7 +143,14 @@ def _apply_exclusion_fields(
     row.restrict_kwd_id = restrict_kwd_id
     row.status = "excluded"
     row.probation_until = None
-    row.next_review_at = now.date() + timedelta(days=min(30 * cycle, 90))
+    # ★만료일은 등급이 정한다(S2). autofire의 컷은 «창 내 확정 손해»라 등급이 `성과미달`이고,
+    #   그 등급의 식이 종전 리터럴 `min(30×cycle, 90)`과 **같다** — 재개방 시점을 하루도
+    #   안 옮긴다. 식을 여기 다시 쓰지 않는 이유: 같은 식이 세 파일에 세 벌 있었고 그중
+    #   고아 치유 경로는 cycle을 무시한 `+30` 고정이었다(2026-08-27 실측).
+    exclusion_grade.set_grade(
+        row, exclusion_grade.GRADE_UNDERPERFORM, cycle=cycle, today=now.date(),
+        reason=f"_upsert_exclusion — autofire 실쓰기 후(cycle={cycle}·cost={cand.get('cost', 0)})",
+    )
     row.cost_at_exclusion = int(cand.get("cost", 0))
 
 
@@ -163,9 +170,13 @@ def _upsert_exclusion(db: Session, cand: dict, restrict_kwd_id: str | None, now:
     ).first()
     if row is None:
         cycle = 1
-        row = NaverSearchTermExclusion(
+        # 등급은 바로 아래 `_apply_exclusion_fields`가 확정한다 — 여기선 행의 «틀»만 만든다.
+        # 그래도 팩토리를 거치는 이유: 원장 행이 태어나는 자리를 한 곳으로 묶어야 다섯 번째
+        # 경로가 생겨도 등급 없는 행이 못 들어온다(S2-b).
+        row = exclusion_grade.new_exclusion(
             campaign_id=cand["campaign_id"], adgroup_id=cand["adgroup_id"],
-            search_term=cand["search_term"],
+            search_term=cand["search_term"], cycle=cycle, now=now,
+            grade=exclusion_grade.GRADE_UNDERPERFORM,
         )
         db.add(row)
     else:
@@ -461,12 +472,14 @@ def _reconcile_orphan_exclusions(db: Session, now: datetime) -> int:
                 "— skip(fail-open)", adgroup_id, term, e,
             )
             continue
-        db.add(NaverSearchTermExclusion(
+        # ★종전엔 여기만 `+30일` **고정**이라 cycle을 무시했다(다른 두 경로는 min(30×cycle,90)).
+        #   지금은 cycle=1 신규 생성이라 결과가 같지만, 식이 갈라져 있다는 사실 자체가 부채였다.
+        #   등급 팩토리를 거치면서 세 벌이 한 벌이 된다 — 값은 그대로다.
+        db.add(exclusion_grade.new_exclusion(
             campaign_id=cl.campaign_id, adgroup_id=adgroup_id, search_term=term,
-            restrict_kwd_id=restrict_kwd_id, status="excluded", cycle=1,
-            excluded_at=now, last_transition_at=now,
-            next_review_at=now.date() + timedelta(days=30), probation_until=None,
-            cost_at_exclusion=0,
+            restrict_kwd_id=restrict_kwd_id, cycle=1, now=now, cost_at_exclusion=0,
+            grade=exclusion_grade.GRADE_UNDERPERFORM,
+            grade_reason=f"_reconcile_orphan_exclusions — 크래시 고아 치유(change_log {cl.id} 실쓰기 확정)",
         ))
         try:
             db.commit()
