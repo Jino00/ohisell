@@ -615,6 +615,9 @@ class SchedulerHealthOut(BaseModel):
     # 선언이 필수다(선언 없으면 서비스층 판정을 response_model이 지운다). 짝이 되는 테스트는
     # `test_exclusion_survival.py::test_health_route_actually_returns_exclusion_survival`.
     exclusion_survival: dict | None = None
+    # 제외 슬롯 사용률·소진 예상일(S6-a) — 스키마에 없으면 FastAPI가 응답에서 **말없이
+    # 떨어뜨린다**. 백엔드가 세는데 화면이 못 읽는 그 결함이 이 저장소에서 3회 반복됐다.
+    exclusion_slots: dict | None = None
     # 광고비 괴리 — 쿠팡이 정산에서 뗀 광고비 ↔ 우리가 손익에서 뺀 광고비(D-CPP-46).
     # `verdict`가 ok/diverged/pipe_stopped/insufficient_data. 대조 자체를 못 했으면 None.
     # ★위 세 필드와 **같은 이유로** 이 줄이 필수다: 선언이 없으면 서비스층이 판정을 내도

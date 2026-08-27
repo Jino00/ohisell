@@ -152,6 +152,29 @@ export function buildPipelineHealthBanner(
     }
   }
 
+  // 7-b) 제외 슬롯 소진 — 조치는 살아 있는데 «더 걸 칸이 없다»(S6-a, ref 66 §5-2).
+  //    ★7)과 반대 방향의 고장이다. 파이프라인도 값도 정상이고 조치도 멀쩡한데, 그룹당 70칸이
+  //      다 차면 그 그룹의 음의 레버가 그 순간 소멸한다 — 다른 어떤 감시에도 안 잡힌다.
+  //    ★분기를 «판정과 같은 커밋에» 넣는다(교훈 #223): 백엔드가 healthy=false를 만드는데
+  //      여기에 분기가 없으면 parts가 비어 배너가 통째로 안 뜬다 — disk_low가 정확히 그랬다.
+  //    ★«소진»과 «못 셌다»를 한 문장으로 뭉치지 않는다(7)의 allUnknown과 같은 규율):
+  //      조회가 실패한 것을 소진으로 읽히게 하면 대응(칸 회수)이 헛돈다.
+  const slots = health.exclusion_slots;
+  if (slots && slots.healthy === false) {
+    if (slots.exhausted > 0) {
+      const worst = slots.rows.find((r) => r.state === "exhausted");
+      const where = worst ? ` (예: ${worst.name || worst.adgroup_id})` : "";
+      push(1,
+        `제외 슬롯이 꽉 찬 광고그룹 ${slots.exhausted}개 — 그 그룹엔 더 걸 브레이크가 없음` +
+          `${where} [${slots.cap}/${slots.cap}]`,
+      );
+    } else if (slots.unknown > 0) {
+      push(1, `제외 슬롯 사용량을 확인하지 못한 광고그룹 ${slots.unknown}개 — «0칸»이 아니라 «모름»`);
+    } else if (slots.stale > 0) {
+      push(1, `제외 슬롯 관측이 멈춘 광고그룹 ${slots.stale}개 — 지금 값이라 말할 수 없음`);
+    }
+  }
+
   // 8) 광고비 괴리 — 쿠팡이 정산에서 뗀 광고비가 우리가 뺀 광고비를 넘는다(D-CPP-46).
   //    ★이 분기가 없으면 disk_low와 같은 방식으로 통째로 숨는다(교훈 #223): 백엔드는
   //      healthy=false를 만드는데 화면엔 아무 말이 없다. **판정과 같은 커밋에** 넣는다.

@@ -767,6 +767,44 @@ def get_adgroups(campaign_id: str) -> list[dict]:
     } for a in resp.json()]
 
 
+def _count_restrict_keywords(items: list, adgroup_id: str) -> int | None:
+    """`/ncc/targets` 응답에서 **그 그룹에 걸린 제외키워드 수**를 센다 (S6, ref 66 §5-1).
+
+    판정 규칙은 `naver_ad/naver_sa_writer.get_shopping_exclusions`와 **같아야 한다** —
+    한 사실을 두 곳에서 다르게 세면 화면과 쓰기 경로가 갈린다(이 파일 P1-1의 교훈:
+    「한 사실을 두 곳에 쓰면서 한쪽에만 규율을 적용」). 그래서 거기서 하드하게 얻은
+    규칙 셋을 그대로 옮긴다:
+
+    · 타겟 행 자체가 `delFlag`면 그 안의 키워드는 효력이 없다 → 안 센다.
+    · `target`이 `None`이면 **「한 번도 설정한 적 없다」 = 0건**이지 스키마 이상이 아니다
+      (2026-08-17 대조군 확정 — `regTm == editTm`인 미편집 그룹). 0건을 에러로 세는 것은
+      모름을 0건으로 세는 것만큼 나쁘다, 방향만 반대다.
+    · 리스트도 `None`도 아니면 스키마가 바뀐 것이다 → **0이라 말하지 않고 `None`(모름)**.
+      쓰기 경로는 여기서 raise하지만 이쪽은 1,013그룹 일일 스윕이라, 한 그룹의 스키마
+      이상이 스윕 전체를 죽이면 안 된다. 대신 그 그룹만 «모름»으로 남기고 로그를 남긴다.
+
+    Returns: 제외키워드 수(0 포함) / `None` = 셀 수 없었다(스키마 이상 — 0이 아니다).
+    """
+    total = 0
+    for it in items:
+        if not isinstance(it, dict) or it.get("targetTp") != "RESTRICT_KEYWORD_TARGET":
+            continue
+        if it.get("delFlag"):
+            continue
+        kws = it.get("target")
+        if kws is None:
+            continue
+        if not isinstance(kws, list):
+            log.warning(
+                "[targets] adgroup=%s RESTRICT_KEYWORD_TARGET.target이 리스트가 아니다(%s) "
+                "— 제외 슬롯 사용량을 «모름»으로 남긴다",
+                adgroup_id, type(kws).__name__,
+            )
+            return None
+        total += sum(1 for k in kws if isinstance(k, dict) and k.get("keyword"))
+    return total
+
+
 def get_adgroup_targets(adgroup_id: str) -> dict:
     """GET /ncc/targets?ownerId=… — 그 광고그룹의 **타겟팅 설정 전건**을 파싱해 돌려준다 (D-NAO-201).
 
@@ -797,7 +835,9 @@ def get_adgroup_targets(adgroup_id: str) -> dict:
         # 본문을 버리지 않는다 — 1018(삭제)인지 다른 사유인지 로그로 갈린다.
         log.info("[targets] adgroup=%s HTTP %s body=%s", adgroup_id, resp.status_code, resp.text[:200])
         return {"status": resp.status_code, "target_types": [], "media": None,
-                "pc_mobile": None, "black_media": [], "black_mediagroup": []}
+                "pc_mobile": None, "black_media": [], "black_mediagroup": [],
+                # ★0이 아니라 None — 「제외가 0건」과 「지금 못 본다」는 다르다(교훈 #123).
+                "restrict_keyword_count": None}
 
     items = resp.json() or []
     media = pcm = None
@@ -824,6 +864,10 @@ def get_adgroup_targets(adgroup_id: str) -> dict:
         #   올려 둘 이유가 없다 — 방어 비용이 set() 한 번이다.
         "black_media": sorted(set(black.get("media") or [])),
         "black_mediagroup": sorted(set(black.get("mediaGroup") or [])),
+        # ★S6(D-NAO-264): 종전엔 RESTRICT_KEYWORD_TARGET을 «있었다»는 이름(target_types)만
+        #   남기고 버렸다 — 제외 슬롯 사용량이 이 응답에 이미 실려 오는데 아무도 안 셌다.
+        #   `get_ads`가 파워링크 소재를 버리던 것과 같은 자리다(D-NAO-263).
+        "restrict_keyword_count": _count_restrict_keywords(items, adgroup_id),
     }
 
 

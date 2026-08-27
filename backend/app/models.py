@@ -3405,6 +3405,14 @@ class NaverAdgroupTargetCurrent(Base):
     pc: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     mobile: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     pcm_edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # ── RESTRICT_KEYWORD_TARGET (S6 제외 슬롯 사용량, D-NAO-264 · ref 66 §5-1) ──
+    # 그 그룹에 **지금 걸려 있는 제외키워드 수**. 상한은 그룹당 70칸(ref 24·30 — 네이버 공식).
+    # ★**nullable이 이 칸의 전부다**: `None` = 「셀 수 없었다」(프로브 비-200 또는 스키마 이상)
+    #   이고 `0` = 「제외가 하나도 없다」다. 둘을 0으로 뭉개면 조회가 죽은 그룹이 **잔여 70칸의
+    #   여유로운 초록**으로 보인다 — 이 계열 감시가 실제로 죽는 방식이다(교훈 #123).
+    # ★원장(`NaverSearchTermExclusion`) 집계가 아니라 **라이브 count가 정본**이다(ref 66 §5-1).
+    #   원장은 편입 누락·대행사 신규분만큼 적게 나오고, 그 차이 자체가 표면화 대상이다.
+    restrict_keyword_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # ── 관측 메타 ──
     # 응답에 실재한 targetTp 목록(JSON). 「무엇이 없었나」를 나중에 되물을 수 있게 남긴다.
     target_types_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
