@@ -424,8 +424,12 @@ def build_stock(
     # ── 화면이 읽을 자백문 ────────────────────────────────────────────────
     if snapshot_count == 0:
         out.notes.append(
+            # ★명령 이름을 «실재하는 것»으로 적는다 — 라이브 확인에서 잡혔다(2026-08-27 13:5x).
+            #   초판은 `ecount_stock_snapshot.py`라는 **없는 파일**을 가리켰다. 자백문이 사람을
+            #   엉뚱한 명령으로 보내면 그건 자백이 아니라 또 하나의 막다른 길이다.
             "ECOUNT 재고 스냅샷이 아직 하나도 없다 — 「재고 0」이 아니라 «찍은 적 없음»이다. "
-            "scripts/ecount_stock_snapshot.py 로 1회 적재하면 이 표가 선다."
+            "허용목록 IP에서 scripts/ecount_stock_export.py 로 받아 "
+            "scripts/otao_stock_import.py --payload 로 넣으면 이 표가 선다."
         )
     elif snapshot_count == 1:
         out.notes.append(

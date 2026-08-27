@@ -695,3 +695,22 @@ def test_same_time_same_role_folds_without_promoting_to_mixed(session):
     assert r.counted_quantity == Decimal("320")
     assert r.counted_warehouse_role == "own"
     assert r.counted_axis_mismatch is False
+
+
+def test_empty_snapshot_note_names_a_script_that_actually_exists(session):
+    """★자백문이 «없는 파일»을 가리키면 그건 자백이 아니라 또 하나의 막다른 길이다.
+
+    라이브 확인에서 잡혔다(2026-08-27): 초판 note가 `scripts/ecount_stock_snapshot.py`를
+    가리켰는데 그런 파일은 없다(실제는 `ecount_stock_export.py` + `otao_stock_import.py`).
+    화면이 그 문장을 그대로 읽어 Jino에게 보여 주므로 **사람을 엉뚱한 명령으로 보낸다.**
+    """
+    import pathlib
+
+    s = build_stock(session)
+    note = next(n for n in s.notes if "찍은 적 없음" in n)
+    import re
+
+    named = re.findall(r"scripts/[\w.]+\.py", note)
+    assert named, "적재 방법을 가리키는 스크립트 이름이 note에 없다"
+    for path in named:
+        assert pathlib.Path(path).exists(), f"note가 없는 파일을 가리킨다: {path}"
