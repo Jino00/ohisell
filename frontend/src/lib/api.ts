@@ -6168,6 +6168,15 @@ export interface CostImportResult {
   cost_table_items?: number;
   /** 핀 재해석 결과. `lost`·`ambiguous`가 0이 아니면 **화면이 말해야 한다**(조용한 소실 금지). */
   pins?: { relinked: number; lost: number; ambiguous: number };
+  /** 부자재 참고값 미러 리포트 (D-CPP-62 S1 → S2 화면 배선).
+   *  `refreshed` = 파일 값으로 갱신된 종(옛값→새값) · `conflicted` = 파일이 한 종에
+   *  두 값 이상을 말해 아무것도 안 고르고 보류한 종. **옵셔널** — 구버전 백엔드 응답 방어. */
+  material_refs?: {
+    refreshed: { name: string; old: string | null; new: string | null }[];
+    refreshed_count: number;
+    conflicted: { name: string; values: (string | null)[]; kept: string | null }[];
+    conflicted_count: number;
+  };
 }
 
 export function fetchCostRecipes(formFactor?: string): Promise<{ items: CostRecipe[] }> {

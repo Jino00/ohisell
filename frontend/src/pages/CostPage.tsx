@@ -1665,6 +1665,49 @@ export function RecipeImportPanel({
               그대로 둔 것: {result.untouched.join(" · ")}
             </div>
           ) : null}
+          {/* ★참고값 미러 리포트 (D-CPP-62 S2) — S1 적대 리뷰가 승인 조건으로 건 배선.
+              «미러라는 걸 사람이 볼 수 있을 때만» 안전하다: 옛 값이 여기 남고, 갱신·모순 둘
+              다 0건일 때도 그 사실이 그려진다(「안 실림」과 「0건」을 갈라야 한다). */}
+          {result.material_refs ? (
+            <>
+              <div data-testid="import-material-refs-refreshed">
+                참고값 갱신 <b>{result.material_refs.refreshed_count}</b>건
+                {result.material_refs.refreshed.length ? (
+                  <ul className="mt-1 ml-4 list-disc text-gray-600">
+                    {result.material_refs.refreshed.map((r) => (
+                      <li key={r.name}>
+                        {r.name} · {r.old ?? "(없음)"} → {r.new ?? "(없음)"}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+              <div className="text-amber-800" data-testid="import-material-refs-conflicted">
+                참고값 모순 보류 <b>{result.material_refs.conflicted_count}</b>건
+                {result.material_refs.conflicted.length ? (
+                  <>
+                    <ul className="mt-1 ml-4 list-disc text-gray-600">
+                      {result.material_refs.conflicted.map((c) => (
+                        <li key={c.name}>
+                          {c.name} · 파일이 말한 값: {c.values.map((v) => v ?? "(없음)").join(" / ")} ·
+                          그대로 둔 값 {c.kept ?? "(없음)"}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-1 text-gray-500">
+                      이 목록은 «어느 값이 파일 몇 행에서 왔는지»를 아직 못 보인다 — 파일 좌표는
+                      S4 확인 화면에서 붙는다.
+                    </p>
+                  </>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="text-amber-800" data-testid="import-material-refs-missing">
+              ⚠ 참고값 리포트가 응답에 없다 — 백엔드 버전을 확인한다 (「모순 0건」이 아니라
+              「못 받았다」이다)
+            </div>
+          )}
           {/* ★이상은 숨기지 않는다 — 「몇 건 파싱됨」만 보이면 무엇이 빠졌는지 모른다. */}
           {result.cost_table_anomalies.length ? (
             <details>
