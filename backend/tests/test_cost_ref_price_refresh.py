@@ -6,8 +6,8 @@
 
 1. **거짓 「단가 없음」** — 표준원가는 `unit_price_ex_vat`를 읽고 없으면 ×1.1로 만들어 쓰는데,
    부자재 목록의 「현재 단가」는 `unit_price_inc_vat` 칸**만** 읽었다. 수동 입력은 사람이 준
-   칸만 채우므로(의도된 설계), 「부가세 제외」로 넣은 단가 17건이 목록에서 「단가 없음」으로
-   떴다 — **값은 원가에 정상으로 들어가 있는데도.** prod 실증: `패키지 (flip)`이
+   칸만 채우므로(의도된 설계), 「부가세 제외」로 넣은 단가가 목록에서 「단가 없음」으로
+   떴다 — 최초 실측 17종, 이 세션이 6건을 더 넣은 뒤 **종 18개 · 단가 행 23개** — **값은 원가에 정상으로 들어가 있는데도.** prod 실증: `패키지 (flip)`이
    `ex=171 · inc=NULL`인데 레시피 34 breakdown엔 **188.10**으로 실려 있었다.
 2. **얼어붙은 참고값** — `excel_ref_price`를 「비어 있을 때만」 채워, 첫 업로드 값이 영원히
    남았다. prod 실증 10종(`패키지` 98인데 파일은 171 등). 그리고 **「채택」이 그 낡은 값을
@@ -24,7 +24,7 @@
 - `SC.resolve_inc_vat`이 `_round`한 값을 돌려주게 하면 → 금액 단언이 죽는다(이중 반올림).
 - `material_payload`가 다시 `latest.unit_price_inc_vat`만 읽게 하면 → 파생 단언이 죽는다.
 - `_upsert_materials`가 `setdefault`로 돌아가면 → 모순 보류 단언이 죽는다.
-- **화면 배지**(`×1.1 파생`)를 지우는 변이는 여기서 못 잡는다 — `costPageDerivedPrice.test.tsx`가 잡는다.
+- **화면 배지**(`×1.1 파생`)를 지우는 변이는 여기서 못 잡는다 — `costMaterialsSurface.test.tsx`가 잡는다.
 """
 
 from __future__ import annotations
@@ -149,7 +149,8 @@ def _material(db, *, ex, inc, name="패키지 (flip)"):
 def test_ex_only_price_is_shown_as_a_value_not_as_missing(db_session):
     """★★구판이 「단가 없음」이라 거짓말하던 바로 그 자리.
 
-    prod의 17건이 전부 이 모양이다 — `ex`만 있고 `inc`는 NULL.
+    prod의 파생 종 18개(단가 행 23개)가 전부 이 모양이다 — `ex`만 있고 `inc`는 NULL.
+    그리고 그 18종은 **출처가 100% `manual`**이다(적대 리뷰 MF3이 픽스처의 `ledger` 편향을 잡았다).
     """
 
     m = _material(db_session, ex=Decimal("171"), inc=None)
@@ -192,16 +193,33 @@ _FLIP_HEADER = (
 )
 
 
-def _rows(package_price, *, item_name="지문방지_내부3매+외부3매", total=3480.4):
+def _rows(package_price, *, item_name="지문방지_내부3매+외부3매", total=3480.4, inner_film=600):
+    """`parse_cost_table`이 먹는 최소 시트.
+
+    ★`inner_film`(내부 필름 단가)을 따로 뺀 이유: **빈 칸 규칙은 «필름 라인»에서만 재진다.**
+    비-필름 부자재는 값이 비면 `recipe_parser`가 라인 자체를 안 만들어(`recipe_parser.py:407`)
+    `_upsert_materials`의 `if ref is not None` 가드에 **애초에 닿지 않는다.** 적대 리뷰 변이
+    MB3이 그걸 잡았다 — 그 가드를 지워도 초판 테스트가 통과했다. 이름은 「빈 칸」인데 코드는
+    빈 칸을 안 지나던 것이다.
+    """
+
     return [
         (None, "*원가표_26년") + (None,) * 16,
         (None,) * 18,
         _FLIP_HEADER,
         (
-            None, item_name, None, total, 3, 600, 1800, 3, 350, 1050,
+            None, item_name, None, total, 3, inner_film, 1800, 3, 350, 1050,
             30, 80, 22, 60, 8, 10, package_price, 6,
         ),
     ]
+
+
+def _film(db):
+    return (
+        db.query(CostMaterial)
+        .filter(CostMaterial.name == "지문방지_내부3매+외부3매 · 내부 필름 (flip · 내부)")
+        .one()
+    )
 
 
 def _reimport(db, rows):
@@ -293,21 +311,47 @@ def test_file_that_says_two_values_for_one_material_is_not_chosen_silently(db_se
 
 
 def test_a_blank_cell_is_silence_not_a_conflicting_value(db_session):
-    """★빈 칸은 «말 안 함»이지 «다른 값»이 아니다.
+    """★빈 칸은 «말 안 함»이지 «다른 값»이 아니다 — **필름 라인에서 잰다.**
 
     실증: 08-27 이전 파일의 태블릿 두 블록에서 `하드보드지`는 한쪽만 228이고 다른 쪽은 빈
     칸이었다 — Jino 확인 결과 **누락이지 모순이 아니었다**. 빈 칸을 모순으로 세면 그 종은
     영영 갱신되지 않는다.
+
+    ★초판은 «패키지»(비-필름) 칸을 비워 이 규칙을 재려 했는데, 파서가 그런 라인을 아예
+    안 만들어 **가드에 닿지 않았다**(적대 리뷰 MB3 SURVIVED). 필름 라인으로 옮겨 실제로
+    `ref is None`이 도달하게 한다.
     """
 
     _reimport(db_session, _rows(98))
+    assert _film(db_session).excel_ref_price == Decimal("600.00")
 
-    blank_and_value = _rows(None) + _rows(171, item_name="지문방지_내부2매+외부2매", total=2667.5)[2:]
+    # ★두 블록의 **품목 이름이 같아야** 같은 종을 가리킨다 — 이름이 다르면 필름 종도 갈려
+    #   (`… · 내부 필름 (flip · 내부)`가 품목명을 앞에 달고 만들어진다) 빈 칸 규칙을 못 잰다.
+    #   초판이 그 함정에 빠져 «다른 종»을 재고 있었다.
+    blank_and_value = _rows(98, inner_film=None) + _rows(98, inner_film=650)[2:]
     out = _reimport(db_session, blank_and_value)
 
     db_session.expire_all()
-    assert _package(db_session).excel_ref_price == Decimal("171.00")
+    assert _film(db_session).excel_ref_price == Decimal("650.00"), "빈 칸이 갱신을 막으면 안 된다"
     assert out["material_refs"]["conflicted_count"] == 0
+
+
+def test_a_blank_film_cell_does_not_erase_an_existing_reference_price(db_session):
+    """★★빈 칸이 **값을 지우면** 안 된다 — 「파일에서 사라짐」은 계약 §4 S4의 확인 화면 몫이다.
+
+    적대 리뷰 변이 MB2가 이 자리를 잡았다: 갱신 가드를 `ref_price is None` → `len(values) > 1`로
+    바꾸면 **필름 참고값이 `600.00 → None`으로 조용히 지워지는데 185건이 전부 초록**이었다.
+    조용한 소실은 미달이다.
+    """
+
+    _reimport(db_session, _rows(98))
+    assert _film(db_session).excel_ref_price == Decimal("600.00")
+
+    out = _reimport(db_session, _rows(98, inner_film=None))
+
+    db_session.expire_all()
+    assert _film(db_session).excel_ref_price == Decimal("600.00"), "빈 칸이 값을 지우면 안 된다"
+    assert out["material_refs"]["refreshed_count"] == 0
 
 
 def test_a_material_missing_from_the_file_keeps_its_reference_price(db_session):
