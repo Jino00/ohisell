@@ -37,7 +37,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverEntity, OpsDiaryEntry, OpsWisdomCandidate
-from app.services.naver_ad import campaign_target_resolver
+from app.services.naver_ad import campaign_target_resolver, exclusion_lifecycle
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -352,6 +352,11 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
               "skipped_search_term_unknown_status": 0,  # status가 알려진 4값 밖(fail-closed)
               "search_term_good": 0,  # d1_st.status == stopped (good 판정)
               "search_term_bad": 0,   # d1_st.status == leaking (bad 판정)
+              # ★복귀(재개방·복귀확정) 행 — d1_st가 **원리적으로 영원히 안 채워진다**(제외
+              #   성적표의 자를 복귀에 쓰면 부호가 뒤집혀 diary_outcome이 배제한다). 이걸
+              #   "no_d1_st"(주석: 「아직 스윕 전」)로 세면 영원히 안 오는 것을 곧 올 것처럼
+              #   말하게 된다 — `not_harvestable`을 가른 것과 같은 이유로 자기 칸을 준다.
+              "skipped_search_term_return_experiment": 0,
               # D-NAO-248: 전역 풀에 못 들어간(=분리된) 관찰 수. 카운터일 뿐 실패가 아니다.
               "separated_experiment": 0, "separated_unknown": 0,
               # 이 수확이 새 학습이 아니라 기존 90일 일기의 «재집계»임을 호출부가 화면에
@@ -362,6 +367,11 @@ def harvest_candidates(db: Session, *, now: datetime | None = None) -> dict:
             outcome = json.loads(entry.outcome_json) if entry.outcome_json else {}
 
             if entry.target_type == "search_term":
+                # ⓪ 복귀 실험 행은 d1_st 축 밖이다(위 카운터 주석 참조) — 「아직 안 온 것」이
+                #    아니라 「여기서 재지 않는 것」이므로 no_d1_st에 섞지 않는다.
+                if entry.action in exclusion_lifecycle.RETURN_ACTIONS:
+                    totals["skipped_search_term_return_experiment"] += 1
+                    continue
                 # ★S8(D-NAO-178 해제) — d1(캠페인 폴백)은 절대 안 읽는다. d1_st.status만 소비
                 #   (금지선·이유는 _search_term_direction 문서 참조).
                 direction, skip_reason = _search_term_direction(outcome)

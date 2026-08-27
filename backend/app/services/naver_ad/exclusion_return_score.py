@@ -101,6 +101,11 @@ def _window_view(db: Session, entry: OpsDiaryEntry, date_from: date, date_to: da
         matched = scoped.filter(diary_outcome.st_term_clause(entry.target_id)).all()
         view: dict = {
             "present": True,
+            # ★적대 리뷰 P2: `present`는 창 14일 중 **하루만** 보고서가 있어도 True다. 그
+            #   반대 극단(1/14일만 존재)을 표면화하지 않으면 부분 합계를 완결값처럼 읽는다.
+            #   창을 no_data로 뒤집지는 않되(하루 결손은 흔하다) 관측일수를 함께 싣는다.
+            "observed_days": scoped.with_entities(NaverSearchTermDaily.ad_date).distinct().count(),
+            "window_days": (date_to - date_from).days + 1,
             "imp": sum(int(r.imp or 0) for r in matched),
             "clk": sum(int(r.clk or 0) for r in matched),
             "cost": sum(int(r.cost or 0) for r in matched),
@@ -189,12 +194,30 @@ def score_probation_window(
         "excluded_cost_no_attribution": cost_total - shop_cost,
     }
     bep = _bep_roas(db)
+    outside = base["conv_scope"]["excluded_cost_no_attribution"]
     if shop_cost <= 0 or bep is None:
         # 비용이 전환 귀속 불가 source에서만 났거나 BEP를 모른다 → 판정 근거가 없다.
         # 「보류」가 정직하다(D-NAO-259가 id=579를 오컷의심에서 미검증으로 되돌린 것과 같은 규율).
         base["status"] = STATUS_UNVERIFIED
         base["unverified_reason"] = (
             "BEP 부재" if bep is None else "전환 귀속 가능 source(shopping)에 비용 0 — expkeyword 단독 지출"
+        )
+        return base
+    if outside > shop_cost:
+        # ★★적대 리뷰 P1-3 — **대칭**. 초판은 `shop_cost <= 0`이면 보류하면서(브레이크 쪽 보수)
+        # `shop_cost > 0`이면 귀속 불가 지출이 아무리 커도 shopping 안의 RoAS만으로 `profitable`
+        # (= "컷이 틀렸다는 실측")을 단언했다 — 액셀 쪽으로만 관대했다. 리뷰어 재현: shopping
+        # 10,000원/매출 20,000원 + expkeyword 75,000원 ⇒ 판정 profitable(roas 2.0)인데
+        # **총이익 −65,000원**. 이 모듈은 「브레이크 어휘로 액셀을 채점하면 부호가 뒤집힌다」를
+        # 고치러 왔는데 새 자가 액셀 쪽에서 같은 부호 오류를 냈다(북극성 §7 대칭 검사에 정면).
+        #
+        # 두 source를 합산하지 «않는다»(금지선 5 유지) — 이미 가진 `unverified` 어휘로 보류한다.
+        # 문턱은 새 상수를 발명하지 않는다(계약 §2-3): 「분모 밖 비용이 분모 비용보다 크면」이라는
+        # 무상수 규칙이다. 즉 판정의 근거가 되는 비용이 전체의 절반에 못 미치면 판정하지 않는다.
+        base["status"] = STATUS_UNVERIFIED
+        base["unverified_reason"] = (
+            f"창 비용 {cost_total:,}원 중 {outside:,}원({outside / cost_total:.0%})이 전환 귀속 불가 "
+            f"source — 판정 분모({shop_cost:,}원)가 그보다 작아 총이익 방향을 단언할 수 없다"
         )
         return base
 

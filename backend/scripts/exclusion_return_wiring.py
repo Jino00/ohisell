@@ -50,6 +50,12 @@ def format_report(report: dict) -> list[str]:
     else:
         for status, n in sorted(report["probation_distribution"].items(), key=lambda kv: -kv[1]):
             out.append(f"  {status:<14} {n:>6,}")
+        # ★적대 리뷰 P1-3 후속 — 보류의 «이유»를 화면이 말한다. 이게 없으면 unverified가 느는 것이
+        #   「자가 엄격해서」인지 「원료가 나빠서」인지 화면만 봐서는 못 가른다.
+        if report["unverified_reasons"]:
+            out.append("  ─ unverified 사유별")
+            for reason, n in sorted(report["unverified_reasons"].items(), key=lambda kv: -kv[1]):
+                out.append(f"    · {n:>4,}건 — {reason}")
 
     out.append("── 0의 이유 (실행 게이트 실측) " + "─" * 35)
     for row in report["gate"]["rows"]:

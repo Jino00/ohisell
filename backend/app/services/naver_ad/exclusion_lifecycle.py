@@ -99,7 +99,13 @@ def record_return_opened(
     ★fail-open: 일기 실패가 개방을 되돌리면 안 된다. diary.write_diary_entry가 이미 내부에서
     전부 삼키지만, 인자 평가(change_log.after_value 등)가 commit 후 refresh SELECT를 유발해
     **여기서** 터질 수 있다 — harness가 같은 이유로 호출부 try를 두고 있고(독립 리뷰 P2-1),
-    그 전례를 그대로 따른다."""
+    그 전례를 그대로 따른다.
+
+    ★★적대 리뷰 P2: 로그 인자를 **try 앞에서** 지역변수로 뽑는다. 초판은 except 절 안에서
+    `row.adgroup_id`를 다시 읽었는데, 실패 원인이 바로 그 row의 refresh 실패(경합 삭제·쓰기락 —
+    이 repo의 D-NAO-46② 상습 모드)면 **except 안에서 예외가 재발해 밖으로 샌다.** 그러면
+    fail-open이 아니라 fail-loud가 되고, 호출부(`_open_exclusion`)엔 try가 없어 레인이 죽는다."""
+    ag, term = row.adgroup_id, row.search_term  # ← 여기서 미리 뽑는다(except가 row를 다시 안 읽게)
     try:
         diary.write_diary_entry(
             db, "execute", row.campaign_id, actor=ACTOR,
@@ -113,7 +119,7 @@ def record_return_opened(
         )
     except Exception as e:  # noqa: BLE001 — fail-open(인자 평가 포함): 기록 실패가 집행을 못 막는다
         log.warning("exclusion_lifecycle: 개방 일기 기록 실패(fail-open, 개방은 확정): "
-                    "adgroup=%s term=%r: %s", row.adgroup_id, row.search_term, e)
+                    "adgroup=%s term=%r: %s", ag, term, e)
 
 
 def record_return_settled(
@@ -133,15 +139,17 @@ def record_return_settled(
     광고계정 무접촉 — restored는 순수 DB 전이다(네이버엔 이미 개방 시 삭제가 끝나 있다)."""
     if verdict == VERDICT_REEXCLUDED:
         return  # harness가 기록함(중복 방지) — 위 docstring 참조
+    # 적대 리뷰 P2: except가 row를 다시 읽지 않도록 미리 뽑는다(위 record_return_opened 참조).
+    ag, term, cycle = row.adgroup_id, row.search_term, row.cycle
     try:
         diary.write_diary_entry(
             db, "execute", row.campaign_id, actor=ACTOR,
             **_target_fields(row),
             action=RETURN_SETTLED_ACTION,
-            before_value=json.dumps({"status": "probation", "cycle": row.cycle}, ensure_ascii=False),
-            after_value=json.dumps({"status": verdict, "cycle": row.cycle}, ensure_ascii=False),
+            before_value=json.dumps({"status": "probation", "cycle": cycle}, ensure_ascii=False),
+            after_value=json.dumps({"status": verdict, "cycle": cycle}, ensure_ascii=False),
             rationale=(
-                f"[검색어제외 복귀] 관찰창 만료 재판정 → {verdict}(cycle={row.cycle}) — "
+                f"[검색어제외 복귀] 관찰창 만료 재판정 → {verdict}(cycle={cycle}) — "
                 "더는 §1 손실 후보가 아니어서 제외 해제를 확정한다. 행은 보존(기억) — "
                 "재충족 시 일반 경로로 다시 제외된다."
             ),
@@ -150,7 +158,7 @@ def record_return_settled(
         )
     except Exception as e:  # noqa: BLE001 — fail-open: 기록 실패가 상태 전이를 되돌리면 안 된다
         log.warning("exclusion_lifecycle: 복귀 확정 일기 기록 실패(fail-open, 전이는 확정): "
-                    "adgroup=%s term=%r verdict=%s: %s", row.adgroup_id, row.search_term, verdict, e)
+                    "adgroup=%s term=%r verdict=%s: %s", ag, term, verdict, e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -194,6 +202,7 @@ def wiring_report(db: Session) -> dict:
     # 복귀 관찰창 성적 분포 — outcome_json은 문자열이라 파이썬에서 센다(행 수가 작다: 복귀는
     # 일일 캡 10건). SQLite JSON 함수에 의존하지 않아 PostgreSQL 이관에도 그대로 산다.
     probation: dict[str, int] = {}
+    unverified_reasons: dict[str, int] = {}
     open_entries = (
         db.query(OpsDiaryEntry.outcome_json)
         .filter(OpsDiaryEntry.event_type == "execute",
@@ -202,14 +211,21 @@ def wiring_report(db: Session) -> dict:
     )
     for (raw,) in open_entries:
         try:
-            status = ((json.loads(raw) if raw else {}) or {}).get("probation", {}).get("status")
+            prob = ((json.loads(raw) if raw else {}) or {}).get("probation") or {}
+            status = prob.get("status")
         except (ValueError, TypeError):
-            status = None
+            prob, status = {}, None
         probation[status or "미채점"] = probation.get(status or "미채점", 0) + 1
+        # ★적대 리뷰 P1-3 후속: «왜 판정을 못 했나»가 화면에 없으면, 보류가 늘어나는 것과
+        #   보류의 «이유»가 바뀌는 것을 구분할 수 없다. 이유별로 센다.
+        if status == "unverified":
+            r = str(prob.get("unverified_reason") or "사유 미기재")
+            unverified_reasons[r] = unverified_reasons.get(r, 0) + 1
 
     return {
         "by_action": by_action,
         "gate": {"rows": gate_rows, "ignited": ignited},
         "probation_distribution": probation,
+        "unverified_reasons": unverified_reasons,
         "return_open_total": len(open_entries),
     }

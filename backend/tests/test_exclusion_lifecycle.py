@@ -95,31 +95,49 @@ def _diaries(db, *, action=None):
 # S3-a ①  인구조사 — 상태 전이마다 「일기를 누가 남기는가」가 정해져 있다
 # ══════════════════════════════════════════════════════════════════════
 
-# 제외 원장 status를 쓰는 자리의 정본 목록. 키 = (파일, 함수, 쓰는 값), 값 = 분류와 이유.
-#   lifecycle : 일기를 `exclusion_lifecycle`이 남긴다(harness 우회 경로)
-#   harness   : 일기를 `naver_execution_harness.execute`가 남긴다(제안 경로)
+# 제외 원장 행이 «태어나거나 상태가 바뀌는» 자리의 정본 목록.
+# 키 = (파일, 함수, 쓰는 값 또는 `new_exclusion()`), 값 = 「일기를 누가 남기는가」 분류.
+#   lifecycle : `exclusion_lifecycle`이 남긴다(harness 우회 경로 — 이 PR이 만든 자리)
+#   harness   : `naver_execution_harness.execute`가 남긴다(제안 경로)
+#   self      : 그 함수가 직접 `diary.write_diary_entry`를 부른다(콘솔 실행 보고 경로)
+#   voided    : 그 함수가 짝 일기(`event_type="voided"`)를 남긴다 — 무효화 전용 축
+#   import    : 남이 콘솔에서 한 제외를 «장부에 편입»만 한다 — 우리 조치가 아니라 일기 대상이 아니다
 #   claim     : 같은 사건의 원자 전이 보조 — 일기는 사건이 «확정»될 때 1건만 남는다
-#   heal      : 크래시 고아 치유 — 광고계정 무접촉이고 «우리가 한 조치»가 아니다(아래 이유 참조)
+#   heal      : 크래시 고아 치유 — 아래 이유 참조(일기 없음이 옳다)
 _STATUS_WRITE_INVENTORY: dict[tuple[str, str, str], str] = {
-    ("search_term_execution.py", "record_execution", "excluded"): "harness",
-    ("search_term_execution.py", "import_console_exclusions", "excluded"): "harness",
+    ("search_term_execution.py", "record_execution", "new_exclusion()"): "self",
+    ("search_term_execution.py", "record_execution", "excluded"): "self",
+    ("search_term_execution.py", "import_console_exclusions", "new_exclusion()"): "import",
+    ("search_term_execution.py", "import_console_exclusions", "excluded"): "import",
+    ("search_term_execution.py", "void_execution", "VOID_STATUS"): "voided",
     ("search_term_ss_lane.py", "_apply_exclusion_fields", "excluded"): "harness",
+    ("search_term_ss_lane.py", "_upsert_exclusion", "new_exclusion()"): "harness",
     ("search_term_ss_lane.py", "_open_exclusion", "probation"): "claim",
     ("search_term_ss_lane.py", "_open_exclusion", "excluded"): "claim",
+    ("search_term_ss_lane.py", "_reconcile_orphan_exclusions", "new_exclusion()"): "heal",
     ("search_term_ss_lane.py", "_reconcile_probation_orphans", "excluded"): "heal",
     ("search_term_ss_lane.py", "_run_reexamination", "probation"): "lifecycle",
     ("search_term_ss_lane.py", "_run_reexamination", "restored"): "lifecycle",
 }
 
 # heal 분류의 근거(코드가 아니라 «판단»이라 여기 적어 둔다 — 다음 사람이 재발명하지 않도록):
-#   `_reconcile_probation_orphans` 창①은 「개방 클레임은 커밋됐는데 delete는 안 나갔다」를
-#   excluded로 되돌리는 것이다. 그 경우 개방 일기는 **애초에 안 쓰였다**(일기는 delete 성공 +
-#   change_log 커밋 «후»에만 쓴다). 되돌림에 일기를 남기면 «일어나지 않은 실험»이 사슬에 뜬다.
-#   창②는 probation_until 소급 세팅뿐이라 status를 안 쓴다(개방 일기는 이미 있다).
+#   ·`_reconcile_probation_orphans` 창①은 「개방 클레임은 커밋됐는데 delete는 안 나갔다」를
+#     excluded로 되돌리는 것이다. 그 경우 개방 일기는 **애초에 안 쓰였다**(일기는 delete 성공 +
+#     change_log 커밋 «후»에만 쓴다). 되돌림에 일기를 남기면 «일어나지 않은 실험»이 사슬에 뜬다.
+#     창②는 probation_until 소급 세팅뿐이라 status를 안 쓴다(개방 일기는 이미 있다).
+#   ·`_reconcile_orphan_exclusions`는 harness가 실쓰기·일기를 이미 끝낸 제외의 **상태 행만**
+#     재생성한다. 일기를 또 남기면 한 제외가 두 번 집행된 것처럼 보인다.
 
-_STATUS_VALUES = ("excluded", "probation", "restored")
-_ASSIGN = re.compile(r"\.status\s*=\s*[\"'](%s)[\"']" % "|".join(_STATUS_VALUES))
-_UPDATE = re.compile(r"[\"']status[\"']\s*:\s*[\"'](%s)[\"']" % "|".join(_STATUS_VALUES))
+# ★적대 리뷰 P2가 구멍 셋을 실증했다 — 초판 정규식은 **문자열 리터럴 status만** 봤다:
+#   ① `row.status = VOID_STATUS` (상수 참조) — prod에 `status='void'` 4행 실재인데 안 잡혔다
+#   ② `exclusion_grade.new_exclusion(status=...)`로 **태어나는** 행 — `_reconcile_orphan_exclusions`가
+#      이미 그렇게 행을 만드는데 목록에 아예 없었다. 새 전이를 팩토리로 구현하면 인구조사는
+#      초록인 채 일기가 조용히 빠진다(이 PR이 고치러 온 병 그 자체)
+#   ③ assert 메시지가 「전수」를 주장하는데 ①②가 빠져 그 주장이 거짓이었다
+# ⇒ 값을 리터럴로 한정하지 않고(상수 참조 포함), 팩토리 «출생»도 같은 인구조사에 넣는다.
+_ASSIGN = re.compile(r"\.status\s*=\s*(\"[^\"]+\"|'[^']+'|[A-Z_][A-Z0-9_]*)")
+_UPDATE = re.compile(r"[\"']status[\"']\s*:\s*(\"[^\"]+\"|'[^']+'|[A-Z_][A-Z0-9_]*)")
+_BIRTH = re.compile(r"\bnew_exclusion\s*\(")
 # 원장을 다루는 파일만 본다 — 같은 문자열은 다른 도메인(쿠팡 원가 등)에도 흔하다.
 _LEDGER_FILES = ("search_term_ss_lane.py", "search_term_execution.py")
 
@@ -146,9 +164,10 @@ def _status_write_sites() -> dict[tuple[str, str, str], list[int]]:
             if stripped.startswith("#"):
                 continue  # 주석 속 예시는 쓰기가 아니다
             m = _ASSIGN.search(line) or _UPDATE.search(line)
-            if not m:
+            token = m.group(1).strip("\"'") if m else ("new_exclusion()" if _BIRTH.search(line) else None)
+            if token is None:
                 continue
-            sites.setdefault((name, _enclosing_def(lines, idx), m.group(1)), []).append(idx + 1)
+            sites.setdefault((name, _enclosing_def(lines, idx), token), []).append(idx + 1)
     return sites
 
 
@@ -529,6 +548,152 @@ def test_복귀_일기가_생기면_화면_카운트가_따라_움직인다(db, 
     text = "\n".join(_wiring_lines(db))
     assert "채점할 대상이 없다" not in text
     assert "미채점" in text  # 아직 소급 채점 전 — 「모른다」가 화면에 그대로 선다
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R 상환 — P1 3건 + 생존 변이 6종의 회귀 잠금
+# ══════════════════════════════════════════════════════════════════════
+
+def test_화면이_관측한_숫자를_실제로_찍는다(db, bep):
+    """★P1-1 상환. 리뷰어가 표면 변이 **3종을 전부 생존**시켰다 — probation 건수를 상수 0으로,
+    복귀 개방 카운트를 상수 0으로, 「복귀 실험 일기」 렌더 블록을 통째로 제거해도 527건이
+    전부 초록이었다. 테스트가 스크립트를 «읽기는» 했지만 **문단만 읽고 숫자는 안 읽었다**.
+    n=58이 1R·2R 연속 FAIL을 맞은 그 층과 문자 그대로 같은 자리다."""
+    open_date = TODAY - timedelta(days=30)
+    _return_entry(db, open_date=open_date)
+    _st_daily(db, open_date + timedelta(days=2), imp=100, clk=10, cost=10_000, rev=30_000)
+    diary_outcome.backfill_outcomes(db, now=NOW)
+    db.commit()
+
+    text = "\n".join(_wiring_lines(db))
+    # ① 렌더 블록이 존재한다(블록 제거 변이 사망)
+    assert "복귀 실험 일기" in text and "exclude_search_term" in text
+    # ② 복귀 개방 카운트가 관측값 1을 찍는다(상수 0 변이 사망)
+    assert re.search(r"restore_search_term\s+1\b", text), text
+    # ③ probation 분포가 관측값 1을 찍는다(상수 0 변이 사망)
+    assert re.search(r"profitable\s+1\b", text), text
+
+
+def test_귀속불가_지출이_판정분모보다_크면_보류한다(db, bep):
+    """★P1-3 상환. 초판은 `shop_cost<=0`이면 보류하면서(브레이크 쪽 보수) `shop_cost>0`이면
+    expkeyword 지출이 아무리 커도 shopping 안 RoAS만으로 `profitable`(=「컷이 틀렸다는 실측」)을
+    단언했다 — **액셀 쪽으로만 관대**했다. 리뷰어 재현: shopping 10,000/매출 20,000 +
+    expkeyword 75,000 ⇒ profitable(roas 2.0)인데 **총이익 −65,000원**. 이 모듈은 「브레이크
+    어휘로 액셀을 채점하면 부호가 뒤집힌다」를 고치러 왔는데 새 자가 액셀 쪽에서 같은 부호
+    오류를 냈다(북극성 §7 대칭)."""
+    open_date = TODAY - timedelta(days=30)
+    entry = _return_entry(db, open_date=open_date)
+    day = open_date + timedelta(days=2)
+    _st_daily(db, day, imp=100, clk=10, cost=10_000, rev=20_000)                    # shopping
+    _st_daily(db, day, source="expkeyword", imp=500, clk=50, cost=75_000)           # 귀속 불가
+
+    got = _score(db, entry, open_date)
+    assert got["status"] == exclusion_return_score.STATUS_UNVERIFIED, (
+        f"총이익 −65,000원인 창을 {got['status']!r}로 판정했다 — 액셀 쪽 부호 오류"
+    )
+    assert "88%" in got["unverified_reason"]
+    # 화면이 그 사유를 스스로 말한다(P1-1과 같은 규율 — 숫자가 화면에 닿는지까지 본다)
+    diary_outcome.backfill_outcomes(db, now=NOW)
+    db.commit()
+    assert "unverified 사유별" in "\n".join(_wiring_lines(db))
+
+
+def test_귀속불가_지출이_분모보다_작으면_판정한다(db, bep):
+    """대칭의 반대쪽 — 보류가 «모든 것을 보류»가 되면 그것도 자가 죽은 것이다."""
+    open_date = TODAY - timedelta(days=30)
+    entry = _return_entry(db, open_date=open_date)
+    day = open_date + timedelta(days=2)
+    _st_daily(db, day, imp=100, clk=10, cost=10_000, rev=30_000)
+    _st_daily(db, day, source="expkeyword", imp=20, clk=2, cost=3_000)
+    assert _score(db, entry, open_date)["status"] == exclusion_return_score.STATUS_PROFITABLE
+
+
+def test_복귀행은_지혜_성적표의_absent에_들어가지_않는다(db, bep):
+    """★P1-2 상환. 복귀 행은 `d1_st`가 **원리적으로 영원히** 안 채워지는데,
+    `wisdom_scorecard._search_term_material`이 그런 행을 `absent`로 셌다 — 그 버킷의 뜻은
+    「아직 안 왔을 뿐 언젠가 올 것」이고, 그게 거짓이라 2026-08-25에 `not_harvestable`을
+    따로 가른 것이다. 규모: 일일 복귀 캡 10 × harvest 창 90일 ⇒ 최대 ~860행이 상시 눌러앉는다.
+    이 값은 콘솔(NaverAdOptimizationConsole)에 그대로 그려진다."""
+    from app.services.naver_ad import wisdom_scorecard
+
+    open_date = TODAY - timedelta(days=30)
+    _return_entry(db, open_date=open_date)
+    _st_daily(db, open_date + timedelta(days=2), imp=100, clk=10, cost=10_000, rev=30_000)
+    diary_outcome.backfill_outcomes(db, now=NOW)
+    db.commit()
+
+    mat = wisdom_scorecard._search_term_material(db)
+    assert mat["by_status"]["absent"] == 0, "복귀 행이 absent에 계상됐다 — 영영 안 오는 것을 곧 올 것처럼 센다"
+    assert mat["by_status"]["return_experiment"] == 1
+    assert "수확 대상 0건" in mat["label"] and "복귀 실험 1건" in mat["label"]
+
+
+def test_수확_카운터도_복귀행을_no_d1_st로_세지_않는다(db, bep):
+    """P1-2의 짝 — `wisdom_candidates`의 `skipped_search_term_no_d1_st`는 주석이
+    「아직 스윕 전」이라 같은 거짓을 센다."""
+    from app.services.naver_ad import wisdom_candidates
+
+    open_date = TODAY - timedelta(days=30)
+    _return_entry(db, open_date=open_date)
+    _st_daily(db, open_date + timedelta(days=2), imp=100, clk=10, cost=10_000, rev=30_000)
+    diary_outcome.backfill_outcomes(db, now=NOW)
+    db.commit()
+
+    totals = wisdom_candidates.harvest_candidates(db, now=NOW)
+    assert totals["skipped_search_term_no_d1_st"] == 0
+    assert totals["skipped_search_term_return_experiment"] == 1
+
+
+def test_관찰창_경계가_고정돼_있다(db, bep):
+    """생존 변이 M-L1(`open+1`→`open`, 제외구간 혼입)·M-L2(`open+14`→`open+21`) 상환.
+    창 경계를 검증하는 assert가 하나도 없었다."""
+    open_date = TODAY - timedelta(days=30)
+    entry = _return_entry(db, open_date=open_date)
+    got = _score(db, entry, open_date)
+    assert got["window"] == {
+        "from": (open_date + timedelta(days=1)).isoformat(),   # 개방 당일은 제외구간이 섞인다
+        "to": (open_date + timedelta(days=14)).isoformat(),    # _PROBATION_DAYS
+        "days": 14,
+    }
+
+
+def test_BEP_경계에서_profitable이다(db, bep):
+    """생존 변이 M-L5(`>=`→`>`) 상환 — 분기점 자체가 테스트에 없었다.
+    RoAS == BEP는 손익분기 «도달»이므로 `profitable` 쪽이다(BEP의 정의)."""
+    open_date = TODAY - timedelta(days=30)
+    entry = _return_entry(db, open_date=open_date)
+    _st_daily(db, open_date + timedelta(days=2), imp=100, clk=10, cost=10_000, rev=16_760)
+    got = _score(db, entry, open_date)
+    assert got["roas"] == 1.676 and got["bep_roas"] == 1.676
+    assert got["status"] == exclusion_return_score.STATUS_PROFITABLE
+
+
+def test_재제외_갈래도_recorder를_지난다(db, monkeypatch):
+    """생존 변이 M-D2 상환. `record_return_settled` 주석이 *"인구조사 테스트가 「종료 전이는
+    예외 없이 이 모듈을 지난다」를 셀 수 있어야 하기 때문"*이라 no-op 호출을 정당화하는데,
+    **그걸 세는 테스트가 없었다** — 지우면 전건 초록이었다. 주석이 약속한 것을 여기서 지킨다.
+
+    `_autofire_exclude`(harness 경로)는 이 테스트의 대상 층이 아니라 대역을 쓴다 — 여기서 보는
+    것은 「레인이 종료 전이를 recorder에 통과시키는가」뿐이다."""
+    row = _excluded_row(db, status="probation")
+    row.probation_until = TODAY - timedelta(days=1)
+    db.commit()
+    monkeypatch.setattr(lane, "_autofire_exclude", lambda db_, cand, now: object())
+    seen: list[str] = []
+    real = exclusion_lifecycle.record_return_settled
+    monkeypatch.setattr(
+        lane.exclusion_lifecycle, "record_return_settled",
+        lambda db_, r, *, verdict, now: (seen.append(verdict), real(db_, r, verdict=verdict, now=now))[1],
+    )
+
+    cand = {"adgroup_id": ADGROUP, "search_term": TERM, "campaign_id": CAMPAIGN,
+            "reason": "여전히 손실", "cost": 1000}
+    res = lane._run_reexamination(db, [cand], NOW)
+
+    assert res["reexcluded"] == 1
+    assert seen == [exclusion_lifecycle.VERDICT_REEXCLUDED]
+    # 그리고 recorder는 no-op이어야 한다(harness가 이미 남긴다 — 이중 계상 금지)
+    assert _diaries(db, action=exclusion_lifecycle.RETURN_SETTLED_ACTION) == []
 
 
 def test_silent_건수가_따로_세어진다(db, bep):

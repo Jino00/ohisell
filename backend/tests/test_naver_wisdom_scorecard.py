@@ -868,6 +868,9 @@ def test_search_term_material_counts_status_distribution(db):
     assert out["by_status"] == {
         "stopped": 1, "leaking": 1, "ambiguous": 1, "no_data": 1, "absent": 0, "unknown": 0,
         "not_harvestable": 1,
+        # 복귀(재개방) 실험 행 — d1_st가 원리적으로 안 채워지는 축이라 absent와 갈라 센다
+        # (계약 §4-A S3-b). 이 표본엔 복귀 행이 없어 0이다.
+        "return_experiment": 0,
     }
 
 
@@ -909,13 +912,13 @@ def test_search_term_material_unknown_status_is_fail_closed(db):
 
 
 def test_search_term_material_present_even_with_zero_rows(db):
-    """0건이어도 7개 status 키(+not_harvestable) + total + label이 침묵하지 않고 전부
-    나온다(교훈 #318)."""
+    """0건이어도 status 키(+not_harvestable+return_experiment) + total + label이 침묵하지 않고
+    전부 나온다(교훈 #318)."""
     out = ws.build(db)["candidate_status"]["search_term_material"]
     assert out["total"] == 0
     assert out["by_status"] == {
         "stopped": 0, "leaking": 0, "ambiguous": 0, "no_data": 0, "absent": 0, "unknown": 0,
-        "not_harvestable": 0,
+        "not_harvestable": 0, "return_experiment": 0,
     }
     assert "재료 0건" in out["label"]
     assert "지혜가 났다" in out["label"]  # 「검색어 지혜가 났다」 주장 금지 취지가 라벨에 있어야 한다
