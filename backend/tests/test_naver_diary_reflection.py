@@ -146,8 +146,11 @@ def test_out_of_window_row_untouched(db):
 
     res = diary_outcome.backfill_outcomes(db, now=NOW)
 
+    # probation_* = 복귀 관찰창 성적(계약 §4-A S3-b). 이 행은 캠페인 grain이라 복귀 채점 대상이
+    # 아니고, 「아무것도 안 채워졌다」에 두 키가 0으로 함께 서는 것이 이 테스트의 뜻 그대로다.
     assert res == {"d1_filled": 0, "d7_filled": 0, "retro_linked": 0,
-                   "d1_st_filled": 0, "d1_st_no_data": 0, "errors": 0}
+                   "d1_st_filled": 0, "d1_st_no_data": 0,
+                   "probation_filled": 0, "probation_silent": 0, "errors": 0}
     assert db.query(OpsDiaryEntry).one().outcome_json is None
 
 
