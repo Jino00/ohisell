@@ -80,10 +80,10 @@ ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python3 sc
 
 ## 2-3. 착지
 
-- **완료 단계**: 커밋 → push → PR → 리뷰 → 머지 → **prod 배포 → 백필 → 라이브 관측**까지 완주(코드 PR #494). 기록물 PR #496은 **PR까지**(반착지 — 기록물만이라 리뷰 생략).
-- **멈춘 단계**: 없음. ★단 PR **#496은 머지 전**이다(이 HANDOFF와 종료 블록을 담을 커밋이 아직 남아 있어 같은 브랜치에 얹는다).
-- **재개 명령**: `gh pr view 496` · 필요 시 `MERGE_WAIT=1500 bash scripts/safe_merge.sh 496`
-- **좌표**: 커밋 `2c91c8e0`(S2 구현) → `291ff0c6`(1R P1 수정) → `45abc5a1`(2R P1 수정) → `67836b26`(ref 104·트랙 착수줄·체인) / PR **#494** → 머지 **`d9132d10`** / PR **#496**(트랙 결과줄 + 이 HANDOFF)
+- **완료 단계**: **전 단계 완주.** 코드 PR #494 = 커밋 → push → PR → 적대 리뷰 2R → 머지 → **prod 무중단 배포 → 백필 → 라이브 관측**. 기록물 PR #496 = 커밋 → push → PR → (리뷰 생략·기록물만) → 머지.
+- **멈춘 단계**: **없음** — 코드 PR #494·기록물 PR #496 **둘 다 머지 완료**.
+- **재개 명령**: 해당 없음(전 단계 완주). 검증은 `gh pr view 494` · `gh pr view 496` · `git log origin/main --oneline -3`
+- **좌표**: 커밋 `2c91c8e0`(S2 구현) → `291ff0c6`(1R P1 수정) → `45abc5a1`(2R P1 수정) → `67836b26`(ref 104·트랙 착수줄·체인) / PR **#494** → 머지 **`d9132d10`** / PR **#496** → 머지 **`87754f78`**(트랙 결과줄 + 이 HANDOFF + 체인) · CI **3/3 실통과**(py3.10 8m52s·py3.14 9m23s·frontend 1m28s)·`--force` 미사용
 - **리뷰 판정**: PR #494 = 적대 리뷰 **1R FAIL(P1-1) → 2R FAIL(P1 잔여) → 수정 후 P1=0** / PR #496 = `⚠️ 리뷰 생략: 기록물만 — docs/tracks/active/track_naver-ad-optimization.md · .claude/memory/HANDOFF_ignition-readiness-s2_20260827.md · .claude/memory/chains/pao-논의.jsonl`
 - **배포**: `safe_deploy.sh --migrate --restart` · 마이그 `cst60auto → exgrade1s2` · CAS 3/3 · **무중단(다운타임 0초)** · 활성 `:8001`
 - **L5**: 「저장소를 main에 세워둔다」 **생략** — 로컬 `main`이 공유 메인 폴더에 점유돼 있다. 다음 세션은 `git switch -c <새> origin/main`으로 시작할 것.
