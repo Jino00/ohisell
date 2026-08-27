@@ -1598,6 +1598,174 @@ export function fetchRocketReconSku(
   );
 }
 
+// ── 로켓1P 열린 파이프라인 (계약 1P계산서 목표 S1·S2) ──
+// ★백엔드에 pydantic 응답 모델이 없다(서비스가 plain dict, 라우터가 `_jsonify`로 Decimal→str).
+//   그래서 이 인터페이스가 사실상 응답 계약이고 **수동 동기화**다 — 서비스 dict의 키를 바꾸면
+//   여기도 같이 바꿔야 하고, 안 바꾸면 타입은 초록인데 화면이 undefined를 그린다.
+//   금액은 전부 Decimal → **문자열**로 온다(정밀도 보존). 표시 직전에만 숫자로 바꿀 것.
+
+/** 파이프라인 칸 키 — 백엔드 `rocket_pipeline.STAGE_*`와 1:1. */
+export type RocketPipelineStageKey =
+  | "await_confirm" | "await_ship" | "await_receive" | "await_payment";
+
+/** ①②③ 칸 — PO 그레인. `amount` = 그 칸에 걸린 금액(VAT 포함 gross). */
+export interface RocketPipelinePoStage {
+  key: Exclude<RocketPipelineStageKey, "await_payment">;
+  po_count: number;
+  amount: string;
+  /** 마지막 수집일에 갱신된 분 — 「지금 참인 상태」로 볼 수 있는 금액. */
+  fresh_amount: string;
+  /** 수집 창 밖이라 상태가 굳은 분 — 이미 처리됐을 수 있다. */
+  stale_amount: string;
+  stale_po_count: number;
+  oldest_stale_synced_date: string | null;
+}
+
+/** ④ 지급 대기 — **계산서 그레인**이라 ①②③ 소계에 안 들어간다(더하면 이중계상). */
+export interface RocketPipelinePaymentStage {
+  key: "await_payment";
+  invoice_count: number;
+  amount: string;
+  next_payment_date: string | null;
+  last_payment_date: string | null;
+}
+
+export type RocketPipelineStage = RocketPipelinePoStage | RocketPipelinePaymentStage;
+
+export function isPoStage(s: RocketPipelineStage): s is RocketPipelinePoStage {
+  return s.key !== "await_payment";
+}
+
+export interface RocketPipelineRow {
+  purchase_order_seq: number;
+  status: string | null;
+  status_label: string | null;
+  po_date: string | null;
+  receiving_finished_date: string | null;
+  synced_date: string | null;
+  order_qty: number;
+  confirmed_qty: number;
+  received_qty: number;
+  shipped_qty: number;
+  order_amount: string;
+  confirmed_amount: string;
+  shipped_amount: string;
+  received_amount: string;
+  /** max(발송, 입고) — 입고는 발송의 하한이다(ASN 미수집 PO를 「안 보냄」으로 읽지 않기 위해). */
+  effective_shipped_amount: string;
+  /** 입고는 있는데 ASN 라인 0건 = **발송 기록 없음**(안 보낸 것이 아니다). */
+  asn_missing: boolean;
+  unpriced_shipped_qty: number;
+  invoice_seqs: number[];
+  has_invoice: boolean;
+  center_name: string | null;
+  first_sku_name: string | null;
+  sku_count: number;
+  unshipped_raw: string;
+  unreceived_raw: string;
+  /** 이 칸에 계상된 금액. PO 총액이 아니다. */
+  stage_amount: string;
+  /** 마지막 수집일과 이 PO의 수집일이 다름 = 「지금 참인 상태」가 아닐 수 있다. */
+  is_stale: boolean;
+}
+
+export interface RocketPipeline {
+  as_of_kst: string;
+  ship_window: {
+    from: string | null; to: string | null;
+    applies_to: "await_receive";
+    /** 창 밖 발송이 섞인 PO 수 — 금액은 PO 전체 기준이라는 자백. */
+    po_with_out_of_window_shipment: number;
+  } | null;
+  stages: RocketPipelineStage[];
+  pre_invoice_subtotal: { amount: string; stages: string[] };
+  /** 확정했는데 발송 없이 닫힘 = 영영 못 보내는 분. */
+  closed_unshipped: { po_count: number; amount: string };
+  /** ★발송 신고 > 쿠팡 인정 입고. `confirmed:false` — 소계에 넣으면 안 된다. */
+  unexplained: {
+    po_count: number; amount: string;
+    oldest_po_date: string | null; newest_po_date: string | null;
+    confirmed: false; reason: string;
+  };
+  clamp: {
+    over_shipped: { po_count: number; amount: string };
+    over_received: { po_count: number; amount: string };
+    asn_missing: { po_count: number; received_amount: string };
+  };
+  /** ★실측 4종(RP/PA/RI/CI) 밖의 상태 코드 — 어느 칸에도 안 들어간 «모르는 돈». */
+  unknown_status: { po_count: number; confirmed_amount: string; codes: string[] };
+  unpriced_shipped_qty: number;
+  last_collection_date_kst: string | null;
+  freshness: {
+    po_synced_at_kst: string | null;
+    shipment_synced_at_kst: string | null;
+    latest_shipped_date_kst: string | null;
+    note: string;
+  };
+}
+
+export interface RocketPipelineRows {
+  stage: string;
+  total_count: number;
+  rows: RocketPipelineRow[];
+  /** true면 목록이 잘렸다 — 조용한 절단 금지(화면이 말해야 한다). */
+  truncated: boolean;
+  last_collection_date_kst: string | null;
+}
+
+export interface RocketRiInvoice {
+  invoice_seq: number;
+  issue_date: string | null;
+  payment_date: string | null;
+  tax_invoice_confirmed_date: string | null;
+  /** true=전송성공 표기 / false=**미표기**(실패 아님) / null=판별 불가. */
+  tax_invoice_transmitted: boolean | null;
+  payment_amount: string;
+}
+
+export interface RocketRiRow extends Omit<RocketPipelineRow, "stage_amount"> {
+  invoices: RocketRiInvoice[];
+  /** 번호는 있는데 정산행 미수집 = 「미발행」이 아니라 「모름」. */
+  invoice_rows_missing: number[];
+}
+
+export interface RocketRiQueue {
+  rows: RocketRiRow[];
+  live_count: number;
+  live_amount: string;
+  stale_count: number;
+  stale_amount: string;
+  last_collection_date_kst: string | null;
+  note: string;
+}
+
+export function fetchRocketPipeline(params: {
+  shipFrom?: string | null; shipTo?: string | null;
+} = {}): Promise<RocketPipeline> {
+  const q = new URLSearchParams();
+  if (params.shipFrom) q.set("ship_from", params.shipFrom);
+  if (params.shipTo) q.set("ship_to", params.shipTo);
+  const qs = q.toString();
+  return fetchApi<RocketPipeline>(`/api/overview/rocket-pipeline${qs ? `?${qs}` : ""}`);
+}
+
+export function fetchRocketPipelineStage(
+  stage: string,
+  params: { shipFrom?: string | null; shipTo?: string | null } = {},
+): Promise<RocketPipelineRows> {
+  const q = new URLSearchParams();
+  if (params.shipFrom) q.set("ship_from", params.shipFrom);
+  if (params.shipTo) q.set("ship_to", params.shipTo);
+  const qs = q.toString();
+  return fetchApi<RocketPipelineRows>(
+    `/api/overview/rocket-pipeline/stage/${encodeURIComponent(stage)}${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function fetchRocketRiQueue(): Promise<RocketRiQueue> {
+  return fetchApi<RocketRiQueue>("/api/overview/rocket-ri-queue");
+}
+
 // ── 로켓1P 공용: 창 신선도 (2026-08-06 적대 리뷰 P1) ──
 // ★판매분석은 당일·전일치를 주지 않는다 → "최근 7일"을 열면 늘 5일치만 들어온다.
 //   그걸 모르고 주간 비교를 하면 이번 주가 **항상** 20% 낮게 나온다. days_no_data가 0이 아닌 것

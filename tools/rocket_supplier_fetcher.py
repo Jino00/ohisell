@@ -100,6 +100,8 @@ PO_INGEST_PATH = "/api/coupang/ops/rocket/po/ingest"
 SETTLEMENT_INGEST_PATH = "/api/coupang/ops/rocket/settlement/ingest"
 PO_DETAIL_INGEST_PATH = "/api/coupang/ops/rocket/po-detail/ingest"
 SHIPMENT_INGEST_PATH = "/api/coupang/ops/rocket/shipment/ingest"
+# 굳은 미종결(비-CI) 발주의 발주일 목록 — 어느 날짜를 다시 훑을지는 백엔드가 정한다.
+STALE_OPEN_PO_DATES_PATH = "/api/coupang/ops/rocket/stale-open-po-dates"
 SALES_INGEST_PATH = "/api/coupang/ops/rocket/sales/ingest"            # 트랙 coupang-promo-pnl Phase 1
 PROMOTION_INGEST_PATH = "/api/coupang/ops/rocket/promotion/ingest"    # 〃
 
@@ -906,16 +908,24 @@ def _recover_session(page, cfg: dict) -> str:
 # ════════════════════════════════════════════════════════════════════
 # 세션 판정 — PO list가 정상 JSON(success/body.body)을 주면 로그인 상태
 # ════════════════════════════════════════════════════════════════════
-def _po_query(cfg: dict, page_no: int, *, days: int | None = None) -> str:
-    """발주 list 쿼리스트링. searchDateType=PURCHASE_ORDER_DATE(발주일=매출기준, D-3)."""
-    n = int(days if days is not None else cfg.get("po_days", 90))
-    today = datetime.now(KST).date()
-    start = today - timedelta(days=n)
+def _po_query(cfg: dict, page_no: int, *, days: int | None = None,
+              start_date: str | None = None, end_date: str | None = None) -> str:
+    """발주 list 쿼리스트링. searchDateType=PURCHASE_ORDER_DATE(발주일=매출기준, D-3).
+
+    start_date/end_date를 주면 그 **정확한 발주일 범위**를 쓴다(days 무시). 굳은 미종결 발주를
+      좁게 다시 훑을 때 쓴다 — 검증된 필터가 발주일 범위뿐이라 그 축으로만 좁힌다.
+    """
+    if start_date is not None and end_date is not None:
+        start_s, end_s = start_date, end_date
+    else:
+        n = int(days if days is not None else cfg.get("po_days", 90))
+        today = datetime.now(KST).date()
+        start_s, end_s = (today - timedelta(days=n)).isoformat(), today.isoformat()
     return urlencode({
         "page": page_no,
         "searchDateType": "PURCHASE_ORDER_DATE",
-        "searchStartDate": start.isoformat(),
-        "searchEndDate": today.isoformat(),
+        "searchStartDate": start_s,
+        "searchEndDate": end_s,
         "centerCode": "",
         "purchaseOrderIdArray": "",
         "vendorPaymentInfoSeq": "",
@@ -927,9 +937,10 @@ def _po_query(cfg: dict, page_no: int, *, days: int | None = None) -> str:
     })
 
 
-def _fetch_po_page(page, cfg: dict, page_no: int, *, days: int | None = None):
+def _fetch_po_page(page, cfg: dict, page_no: int, *, days: int | None = None,
+                   start_date: str | None = None, end_date: str | None = None):
     """발주 list 한 페이지 fetch. 반환 (payload_dict | None, status). None=비JSON(로그인 등)."""
-    path = f"{PO_LIST_PATH}?{_po_query(cfg, page_no, days=days)}"
+    path = f"{PO_LIST_PATH}?{_po_query(cfg, page_no, days=days, start_date=start_date, end_date=end_date)}"
     res = _eval_retry(page, _FETCH_TEXT_JS, [path])
     status = (res or {}).get("status")
     body = (res or {}).get("body") or ""
@@ -989,6 +1000,73 @@ def _collect_po_pages(page, cfg: dict) -> list[dict]:
             break
         page_no += 1
     log.info("발주 list 수집: %d페이지", len(pages))
+    return pages
+
+
+def _collect_stale_open_po_pages(page, cfg: dict) -> list[dict]:
+    """굳은 **미종결(비-CI) 발주**의 발주일만 좁게 다시 훑는다.
+
+    ★왜 필요한가: 평소 수집 창은 발주일 기준 최근 N일이라, 그보다 오래된 미종결 발주는 **영구히
+      다시 안 읽힌다.** 그러면 화면의 상태가 마지막으로 본 시점에 굳고, 실제로는 이미 닫힌 건이
+      「거래명세서 확인 요청」으로 남는다(2026-08-27 실측: RI 8건이 이미 지급까지 끝났는데
+      2026-08-05 상태로 굳어 있었다 — 그대로 목록에 내면 사람이 죽은 줄을 누른다).
+
+    ★어느 날짜를 볼지는 **백엔드가 정한다**(`/rocket/stale-open-po-dates`). 페처가 스스로 정하면
+      「무엇이 굳었나」의 판정이 두 곳에 생겨 갈라진다.
+
+    ★발주일 범위로만 좁힌다. 발주번호 배열·상태 필터는 값 형식이 라이브로 확인된 적이 없어,
+      틀린 형식이면 **조용히 빈 결과**가 오고 그건 「굳은 게 없다」로 읽힌다(원칙22).
+
+    실패는 삼키되(이 패스가 죽어도 평소 수집은 계속돼야 한다) **반드시 로그로 신고**한다.
+    """
+    try:
+        r = requests.get(
+            cfg["prod_base_url"].rstrip("/") + STALE_OPEN_PO_DATES_PATH,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
+            timeout=30,
+        )
+        r.raise_for_status()
+        info = r.json()
+    except (requests.RequestException, ValueError) as e:
+        log.error("굳은 미종결 발주 날짜 조회 실패 — 이번엔 재훑기를 건너뛴다: %s", e)
+        return []
+
+    dates = list(info.get("dates") or [])
+    if info.get("truncated_before"):
+        # 조용한 절단 금지 — 못 본 것이 있으면 말한다.
+        log.warning(
+            "굳은 미종결 발주 %s개 날짜(발주 %s건)가 limit_days 밖이라 이번 재훑기에서 빠졌다(< %s)",
+            info.get("truncated_date_count"), info.get("truncated_po_count"),
+            info.get("truncated_before"),
+        )
+    if not dates:
+        log.info("굳은 미종결 발주 없음 — 재훑기 건너뜀")
+        return []
+
+    max_dates = int(cfg.get("stale_po_max_dates", 40))
+    if len(dates) > max_dates:
+        log.warning("굳은 발주일 %d개 중 최신 %d개만 훑는다(상한)", len(dates), max_dates)
+        dates = dates[-max_dates:]
+
+    max_pages = int(cfg.get("po_max_pages", 100))
+    pages: list[dict] = []
+    for d in dates:
+        page_no = 1
+        while page_no <= max_pages:
+            payload, status = _fetch_po_page(page, cfg, page_no, start_date=d, end_date=d)
+            if payload is None:
+                # 세션 만료면 이후 날짜도 다 실패한다 — 조용히 반쪽을 남기지 않고 끊는다.
+                log.error("굳은 발주 재훑기 %s page=%d 비정상(status=%s) — 중단", d, page_no, status)
+                return pages
+            pages.append(payload)
+            meta = _page_meta(payload)
+            last = meta["last_page_number"]
+            if last <= 0 or page_no >= last:
+                break
+            page_no += 1
+    log.info("굳은 미종결 발주 재훑기: 날짜 %d개 → %d페이지 (발주 %s건 대상)",
+             len(dates), len(pages), info.get("po_count"))
     return pages
 
 
@@ -2323,6 +2401,12 @@ def _do_run(cfg: dict) -> int:
                         owner.keep_open = True
                         return 1
                     pages = _collect_po_pages(page, cfg)
+                    # ★평소 창(발주일 최근 N일) 밖으로 밀려나 상태가 굳은 미종결 발주를
+                    #   같은 push에 얹는다. 실패해도 평소 수집을 막지 않는다(로그만).
+                    try:
+                        pages.extend(_collect_stale_open_po_pages(page, cfg))
+                    except Exception as e:  # noqa: BLE001 — 재훑기 실패는 본 수집을 막지 않는다
+                        log.error("굳은 미종결 발주 재훑기 실패(본 수집은 계속): %s", e)
                     try:
                         settle_rows = _collect_settlement_rows(page, cfg)
                     except Exception as e:  # noqa: BLE001 — 정산 실패는 발주 push를 막지 않음
