@@ -26,6 +26,7 @@ import {
   LedgerMaterialLines,
   MaterialList,
   MaterialPriceHistory,
+  RecipeImportPanel,
   StandardBreakdown,
   ValuationBadge,
   excelLabelText,
@@ -39,6 +40,7 @@ import {
 } from "./CostPage";
 import type {
   CostLedgerCheck,
+  CostImportResult,
   CostLedgerMaterialLine,
   CostMaterial,
   CostSetting,
@@ -81,6 +83,7 @@ const KIT: CostMaterial = {
   stale_count: 0,
   latest_price_ex_vat: "190.82",
   latest_price_inc_vat: "209.90",
+  latest_price_inc_derived: false,
   latest_price_source: "ledger",
   price_rule: "latest",
   lot_price_min: "178.78",
@@ -163,6 +166,7 @@ const EMPTY_KIT: CostMaterial = {
   stale_count: 0,
   latest_price_ex_vat: null,
   latest_price_inc_vat: null,
+  latest_price_inc_derived: false,
   latest_price_source: null,
   prices: [],
 };
@@ -177,6 +181,7 @@ function staleKit(check: Partial<CostLedgerCheck>): CostMaterial {
     stale_count: 1,
     latest_price_ex_vat: null,
     latest_price_inc_vat: null,
+    latest_price_inc_derived: false,
     latest_price_source: null,
     prices: [{ ...KIT.prices[0], ledger_check: c }],
   };
@@ -364,6 +369,107 @@ describe("부자재 목록 — 미확인 상태와 최신 단가가 보인다", 
     expect(within(row).queryByText(/0원/)).toBeNull();
     // ★회색 「—」로 되돌아가면 이 줄이 깨진다 — 「없다」를 «말하는» 것이 이 항목의 요점이다.
     expect(screen.getByTestId("material-1-latest").textContent).not.toBe("—");
+  });
+
+  // ── D-CPP-62 S1 — 손으로 넣은 단가가 「단가 없음」으로 보이던 자리 ──────────────
+  //
+  // ★prod 실증(2026-08-27): 17종이 `ex`만 있고 `inc`는 NULL이었다. 계산은 ×1.1로 만들어
+  //   정상으로 썼는데(레시피 34 breakdown에 188.10) **목록만 「단가 없음」**이라 말했다.
+  //   Jino가 방금 넣은 값이 안 들어간 것처럼 보이는 화면이었다.
+  //
+  // 이 두 항목이 죽이는 변이:
+  //   FE-8 「현재 단가」가 다시 `inc` 칸만 읽게 하면 → 첫 항목이 「단가 없음」이 되어 죽는다
+  //   FE-9 `×1.1 파생` 배지 `<span>`을 지우면 → 둘째 항목이 죽는다
+  //        (백엔드 테스트는 payload의 `latest_price_inc_derived`까지만 본다 — 배지는 여기서만 죽는다)
+  it("★부가세 «제외»로만 넣은 단가도 값으로 보인다 — 「단가 없음」이 아니다", () => {
+    const EX_ONLY: CostMaterial = {
+      ...KIT,
+      id: 8,
+      name: "패키지 (flip)",
+      // prod 그대로: 사람이 부가세 제외 171을 넣었고 포함 칸은 비었다 → 백엔드가 188.10을 만든다
+      latest_price_ex_vat: "171.00",
+      latest_price_inc_vat: "188.10",
+      latest_price_inc_derived: true,
+      latest_price_source: "manual",
+      lot_count: 0,
+      price_count: 1,
+      prices: [],
+    };
+    render(
+      <MaterialList materials={[EX_ONLY]} selectedId={8} onSelect={() => {}} importedIds={new Set()} />,
+    );
+    expect(screen.getByTestId("material-8-latest").textContent).toBe("188.1원");
+    expect(screen.getByTestId("material-8-latest").textContent).not.toBe("단가 없음");
+  });
+
+  // ★★적대 리뷰 변이 MF3이 **살아남아서** 고친 항목이다. 초판은 `...KIT`을 퍼뜨려
+  //   `latest_price_source: "ledger"`인 픽스처 하나로만 쟀는데, **prod의 파생 종 18개는
+  //   100% `manual`**이다. 그래서 배지 조건에 `&& source === "ledger"`를 붙이는 변이가
+  //   **실사용 전건에서 배지를 지우는데도 624건이 침묵**했다. 픽스처가 prod와 다르면
+  //   그 테스트는 지키는 «척»만 한다 — 이 저장소가 반복해 밟은 자리다.
+  //   ⇒ 이제 **출처와 무관하게** 파생 여부만으로 배지가 정해지는 것을 못 박는다.
+  it("★그 값이 «우리가 만든 값»이면 화면이 그렇게 말한다 — 출처와 무관하다 (×1.1 파생)", () => {
+    const DERIVED_MANUAL: CostMaterial = {
+      ...KIT,
+      id: 8,
+      latest_price_inc_vat: "188.10",
+      latest_price_inc_derived: true,
+      // prod 실측: 파생 종 18개가 전부 `manual`이다 — 여기가 실사용 경로다.
+      latest_price_source: "manual",
+      prices: [],
+    };
+    const DERIVED_LEDGER: CostMaterial = { ...DERIVED_MANUAL, id: 10, latest_price_source: "ledger" };
+    const STORED: CostMaterial = { ...DERIVED_MANUAL, id: 9, latest_price_inc_derived: false };
+
+    render(
+      <MaterialList
+        materials={[DERIVED_MANUAL, DERIVED_LEDGER, STORED]}
+        selectedId={8}
+        onSelect={() => {}}
+        importedIds={new Set()}
+      />,
+    );
+    // 실사용 경로(manual)에서 배지가 뜬다 — MF3 변이가 여기서 죽는다.
+    expect(screen.getByTestId("material-8-inc-derived").textContent).toBe("×1.1 파생");
+    // 출처가 달라도 «파생이면» 뜬다 — 조건을 출처로 좁히는 변이 전반이 여기서 죽는다.
+    expect(screen.getByTestId("material-10-inc-derived").textContent).toBe("×1.1 파생");
+    // ★배지가 «항상 켜지는 장식»이 되면 이 줄이 깨진다 — 저장된 값엔 안 붙어야 한다.
+    expect(screen.queryByTestId("material-9-inc-derived")).toBeNull();
+  });
+});
+
+// ── 적대 리뷰 변이 MF2가 살아남은 자리 ────────────────────────────────────────
+//
+// ★업로드 결과의 「원가표 이상 N건」 블록을 통째로 지워도 **44파일 624건이 전부 초록**이었다.
+//   그런데 그 블록이 지금 **파일의 모순(같은 부자재가 두 값)이 사람에게 보이는 유일한 표면**이다
+//   — `material_refs` 리포트는 아직 화면에 안 닿기 때문이다(계약 §4 S4 몫으로 이월).
+//   보호막이 없는 문장은 문장이 아니다.
+describe("업로드 결과 — 원가표 이상이 사람에게 보인다", () => {
+  it("★`cost_table_anomalies`가 화면에 그려진다 (MF2 변이가 여기서 죽는다)", () => {
+    const result = {
+      recipes_created: 0,
+      recipes_updated: 12,
+      skipped_approved: 20,
+      skipped_pinned: 10,
+      unmatched: 0,
+      materials_seen: 139,
+      cost_table_recipes: 60,
+      cost_table_anomalies: ["price_conflict:패키지 (fold)=171.00|320.00"],
+      cost_table_items: 60,
+      pins: { relinked: 10, lost: 0, ambiguous: 0 },
+      mapping_options: 0,
+      mapping_anomalies: [],
+      groups: 0,
+      report: [],
+    } as unknown as CostImportResult;
+
+    render(<RecipeImportPanel busy={false} onImport={() => {}} result={result} />);
+
+    expect(screen.getByText("원가표 이상 1건")).toBeTruthy();
+    // ★건수만 세는 게 아니라 **내용이 그려지는지** 본다 — 목록을 지우는 변이도 죽어야 한다.
+    expect(
+      screen.getByText("price_conflict:패키지 (fold)=171.00|320.00"),
+    ).toBeTruthy();
   });
 });
 

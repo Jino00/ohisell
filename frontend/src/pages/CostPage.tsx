@@ -679,6 +679,18 @@ export function MaterialList({
                 {priceSourceLabel(m.latest_price_source)}
               </span>
             ) : null}
+            {/* ★D-CPP-62 S1 — 「이 값은 우리가 만든 값」을 말한다. 이 표시가 없으면 실제로
+                낸 부가세와 ×1.1 규약 환산값이 화면에서 구별되지 않는다. 그리고 이 배지가
+                뜨는 자리가 곧 **구판이 「단가 없음」이라 거짓말하던 자리**다(17건). */}
+            {m.latest_price_inc_derived ? (
+              <span
+                className="text-[11px] text-gray-500 border border-gray-300 rounded px-1"
+                title="부가세 제외 값만 입력돼 있어 ×1.1로 만든 값이다 — 실제로 낸 세액이 아니다"
+                data-testid={`material-${m.id}-inc-derived`}
+              >
+                ×1.1 파생
+              </span>
+            ) : null}
           </div>
           <div
             className={`text-xs mt-0.5 ${

@@ -5724,6 +5724,8 @@ export interface CostMaterial {
   stale_count: number;
   latest_price_ex_vat: string | null;
   latest_price_inc_vat: string | null;
+  /** 이 «부가세 포함» 값이 저장된 값이 아니라 `ex × 1.1`로 만든 값인가 (D-CPP-62 S1). */
+  latest_price_inc_derived: boolean;
   latest_price_source: "ledger" | "manual" | null;
   /** 적용된 채택 규칙 — 지금은 항상 `"latest"`(최신 로트). **FIFO가 아니다**(D-CPP-60). */
   price_rule: string;

@@ -315,7 +315,10 @@ def import_drafts(
         else {}
     )
 
-    materials = _upsert_materials(db, cost) if cost is not None else {}
+    if cost is not None:
+        materials, material_refs = _upsert_materials(db, cost)
+    else:
+        materials, material_refs = {}, _empty_ref_report()
     db.flush()
 
     # ── 개정 4 (D-CPP-59) — 원가표 항목을 «남긴다» ────────────────────────────
@@ -339,6 +342,9 @@ def import_drafts(
         out.update(
             {
                 "materials_seen": len(materials),
+                # ★참고값 갱신·모순 보류 리포트 (D-CPP-62 S1) —
+                #   조용히 바뀌는 참고값은 조용히 얼어 있던 참고값과 같은 병이다.
+                "material_refs": material_refs,
                 "cost_table_recipes": cost.recipe_count,
                 "cost_table_anomalies": cost.anomalies,
                 "cost_table_items": cost_table_items,
@@ -523,6 +529,8 @@ def import_drafts(
         "skipped_pinned": skipped_pinned,
         "unmatched": unmatched,
         "materials_seen": len(materials),
+        # ★참고값 갱신·모순 보류 리포트 (D-CPP-62 S1).
+        "material_refs": material_refs,
         "cost_table_recipes": cost.recipe_count if cost is not None else 0,
         "cost_table_anomalies": cost.anomalies if cost is not None else [],
         "cost_table_items": cost_table_items,
@@ -669,14 +677,44 @@ def _reimport_composition_only(
     }
 
 
-def _upsert_materials(db: Session, cost: ParseResult) -> dict[str, CostMaterial]:
-    """부자재 종을 이름으로 upsert. **기존 종의 값을 덮지 않는다.**
+def _upsert_materials(
+    db: Session, cost: ParseResult
+) -> tuple[dict[str, CostMaterial], dict]:
+    """부자재 종을 이름으로 upsert. **단가는 절대 안 건드린다.**
 
-    ★`excel_ref_price`는 비어 있을 때만 채운다 — Jino가 고쳐 둔 값을 재수입이 되돌리면
-    사람의 결정이 파일에 지는 것이고, 그건 이 계약이 세우려는 방향의 반대다.
+    돌려주는 것: `(이름→종, 참고값 리포트)`. 리포트는 «무엇이 갱신됐고 무엇이 모순이라
+    보류됐는가»이고, 업로드 응답에 실려 **화면이 그 사실을 말할 수 있게** 한다 —
+    조용히 바뀌는 참고값은 조용히 얼어 있던 참고값과 같은 병이다.
+
+    ## `excel_ref_price`는 매 업로드마다 «파일이 말하는 값»으로 갱신한다 (D-CPP-62 S1)
+
+    ★구판은 **비어 있을 때만** 채웠고, 그 이유를 *"Jino가 고쳐 둔 값을 재수입이 되돌리면
+    사람의 결정이 파일에 진다"*고 적어 두었다. **그 전제가 거짓이었다** — 저장소 전수 확인
+    (2026-08-27): `excel_ref_price`에 쓰는 자리는 이 함수의 두 줄뿐이고, 수정 API **0건**,
+    프론트는 **읽기만** 한다. 즉 Jino가 이 칸을 고칠 경로가 없다. Jino가 고치는 것은
+    **단가**(`cost_material_price`)이고 그건 다른 테이블이며 이 함수가 안 건드린다.
+
+    ⇒ 「비어 있을 때만」은 보호하는 것이 없었고, 대신 **참고값이 파일에 대해 거짓말하게**
+    만들었다. prod 실증: 10종이 첫 업로드 값에 얼어 있었다(`패키지` 4종 98인데 파일은 171 ·
+    `지문방지 내부 필름` 5종 650인데 파일은 600 · `부착 지그` 100인데 파일은 130).
+    그리고 **「채택」이 그 낡은 값을 단가로 굳혔다** — 그게 이 결함이 돈에 닿는 경로다.
+
+    ★**단가는 여전히 사람이 확정한다.** 이 함수는 참고값(=파일의 미러)만 만지고,
+    이미 단가가 있는 종은 「채택」이 건너뛴다(`adopt_excel_prices`). 계약 금지선
+    「확인 없이 DB에 쓰지 않는다」가 겨눈 것은 **단가**이지 파일 미러가 아니다.
+
+    ## 파일이 한 종에 두 값을 말하면 «갱신하지 않고 자백한다»
+
+    ★같은 이름의 부자재가 파일 안에서 서로 다른 참고값으로 나오면 **어느 쪽도 쓰지 않고**
+    옛 값을 그대로 둔 채 리포트에 싣는다. 구판은 `setdefault`라 **먼저 나온 블록이 조용히
+    이겼다** — 2026-08-27 태블릿 사고가 정확히 그 모양이다(중복 블록 둘 중 앞선 것이 이겨,
+    같은 규칙에서 하드보드지는 맞고 필름 단가는 틀렸다. 맞은 쪽은 판단이 아니라 우연이었다).
+    고르는 것은 사람이고(계약 §4 S4의 「모순」 묶음), 그 화면이 서기 전까지 여기서는
+    **아무것도 안 고르는 것**이 유일하게 안전한 기본값이다.
     """
 
-    wanted: dict[str, Optional[Decimal]] = {}
+    # ★`setdefault`가 아니라 **전부 모은다** — 「먼저 나온 것이 이긴다」가 곧 조용한 선택이다.
+    seen: dict[str, set[Decimal]] = {}
     meta: dict[str, tuple[Optional[str], Optional[str], bool]] = {}
     for draft in cost.recipes:
         for line in draft.lines:
@@ -690,20 +728,51 @@ def _upsert_materials(db: Session, cost: ParseResult) -> dict[str, CostMaterial]
             #   있는 화면에서 그 나란함은 «권유»로 읽힌다.
             if name == CLEANING_KIT_NAME:
                 ref = None
-            wanted.setdefault(name, ref)
+            bucket = seen.setdefault(name, set())
+            # ★빈 칸(None)은 «말 안 함»이지 «다른 값»이 아니다 — 모순으로 세지 않는다.
+            #   실증: 08-27 이전 파일의 태블릿 두 블록에서 `하드보드지`는 한쪽만 228이고
+            #   다른 쪽은 빈 칸이었다(모순 아님 — 한쪽이 누락). 진짜 모순은 `지문방지 필름`의
+            #   1,750 ↔ 1,500처럼 **둘 다 값을 말하는데 다른** 경우다.
+            if ref is not None:
+                bucket.add(ref)
             meta.setdefault(name, (line.key.form_factor, line.key.part, line.is_film))
 
-    if not wanted:
-        return {}
+    if not seen:
+        return {}, _empty_ref_report()
 
     existing = {
         m.name: m
-        for m in db.query(CostMaterial).filter(CostMaterial.name.in_(list(wanted))).all()
+        for m in db.query(CostMaterial).filter(CostMaterial.name.in_(list(seen))).all()
     }
     out: dict[str, CostMaterial] = dict(existing)
-    for name, ref_price in wanted.items():
+    refreshed: list[dict] = []
+    conflicted: list[dict] = []
+
+    def _money(v: Optional[Decimal]) -> Optional[str]:
+        """리포트에 싣는 숫자는 **저장되는 자릿수와 같게** 쓴다.
+
+        ★파서가 준 `Decimal("171.0")`을 그대로 str하면 화면엔 `171.0`인데 DB에서 읽으면
+        `171.00`이다 — 같은 값이 두 모양으로 보이면 사람이 「뭐가 바뀌었나」를 못 읽는다.
+        """
+        return None if v is None else str(SC.round_money(v))
+
+    for name, values in seen.items():
         form_factor, part, is_film = meta[name]
         m = existing.get(name)
+
+        # ── 파일이 한 종에 두 값을 말한다 → 아무것도 안 고른다 (계약 §3 「추측 금지」)
+        if len(values) > 1:
+            conflicted.append(
+                {
+                    "name": name,
+                    "values": sorted(_money(v) for v in values),
+                    "kept": _money(m.excel_ref_price) if m is not None else None,
+                }
+            )
+            ref_price = None  # 새 종이면 참고값 없이 만든다 — 지어내지 않는다
+        else:
+            ref_price = next(iter(values), None)
+
         if m is None:
             m = CostMaterial(
                 name=name,
@@ -718,9 +787,32 @@ def _upsert_materials(db: Session, cost: ParseResult) -> dict[str, CostMaterial]
             )
             db.add(m)
             out[name] = m
-        elif m.excel_ref_price is None and ref_price is not None:
-            m.excel_ref_price = ref_price
-    return out
+            continue
+
+        # ★값이 없으면 **지우지 않는다** — 「파일에서 사라짐」은 계약 §4 S4의 확인 화면 몫이고,
+        #   여기서 조용히 None으로 되돌리면 화면이 「참고값 없음」이라 거짓말한다.
+        if ref_price is None or m.excel_ref_price == ref_price:
+            continue
+
+        refreshed.append(
+            {
+                "name": name,
+                "old": _money(m.excel_ref_price),
+                "new": _money(ref_price),
+            }
+        )
+        m.excel_ref_price = ref_price
+
+    return out, {
+        "refreshed": refreshed,
+        "refreshed_count": len(refreshed),
+        "conflicted": conflicted,
+        "conflicted_count": len(conflicted),
+    }
+
+
+def _empty_ref_report() -> dict:
+    return {"refreshed": [], "refreshed_count": 0, "conflicted": [], "conflicted_count": 0}
 
 
 def _pin_skip_reason(recipe: CostRecipe) -> str:
