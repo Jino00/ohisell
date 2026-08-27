@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -191,3 +191,86 @@ def test_SPECS_인구조사_현재_5종(db):
         "cooldown_hours", "max_daily_auto_bid_downs", "max_auto_up_multiple",
         "pl_min_click", "pl_window_days",
     }
+
+
+# ══ #14 창 재료 커버리지 — 「창을 끝까지 늘렸을 때 그만큼의 재료가 있나」 ══
+# 계약 #14의 전제(「원본 보존 16일」)는 2026-08-27 실측으로 정정됐다: 그 16일은 **네이버 리포트
+# 보관 기한**(ref 21)이지 우리 DB 보존이 아니고, 우리 쪽엔 purge가 없어 이미 상한을 넘겨 갖고
+# 있다(봉투 상한 90일 창 결손 0일). ⇒ 남은 실질은 「늘리기」가 아니라 **「늘려도 되는지 상시
+# 보이게 하기」** — 그 관측이 실제로 결손을 세는지를 여기서 못 박는다.
+from app.routers.naver_ad import guardrail_params_window_coverage  # noqa: E402
+
+
+def _cov(db, key):
+    for r in guardrail_params_window_coverage(db):
+        if r["param_key"] == key:
+            return r
+    raise AssertionError(f"{key} 행이 없다")
+
+
+def test_원본이_봉투_상한을_다_덮으면_covered(db):
+    _base(db)
+    latest = date(2026, 7, 22)
+    for i in range(guardrail_params.SPECS["pl_window_days"].hi):  # 90일 연속
+        _term(db, term=f"t{i}", clk=1, ad_date=latest - timedelta(days=i))
+    row = _cov(db, "pl_window_days")
+    assert row["ceiling_days"] == 90
+    assert row["missing_days"] == 0
+    assert row["covered"] is True
+
+
+def test_중간에_결손이_있으면_세어진다(db):
+    """★수집이 며칠 죽으면 값은 90인데 실제로 보는 건 87일이다 — 그게 보여야 한다."""
+    _base(db)
+    latest = date(2026, 7, 22)
+    for i in range(90):
+        if i in (10, 11, 12):  # 사흘 결손(2026-08-26 크론 결손 전례의 축소판)
+            continue
+        _term(db, term=f"t{i}", clk=1, ad_date=latest - timedelta(days=i))
+    row = _cov(db, "pl_window_days")
+    assert row["missing_days"] == 3, row
+    assert row["covered"] is False
+
+
+def test_원본이_아예_없으면_창을_못_세운다고_말한다(db):
+    _base(db)
+    row = _cov(db, "pl_window_days")
+    assert row["covered"] is False
+    assert row["latest"] is None
+    assert "0행" in row["note"]
+
+
+def test_승격_보류분도_같이_관측된다_봉투가_없다는_사실과_함께(db):
+    """SS 창은 SPECS에 없다(분산 보류). 그래도 재료는 재서, 승격되는 날 이미 있는지 보이게 한다.
+
+    ★두 source «다 데이터가 있는» 상태로 잰다 — 빈 DB로만 재면 `latest is None` 분기만 밟혀
+    데이터 분기의 `promoted`를 아무도 안 지킨다(변이 M9가 그 구멍으로 살아남았다).
+    """
+    _base(db)
+    _term(db, term="pl", clk=1, ad_date=date(2026, 7, 22))
+    db.add(NaverSearchTermDaily(
+        ad_date=date(2026, 7, 22), campaign_id="cmp1", adgroup_id="grp-web",
+        search_term="ss", source="shopping", imp=10, clk=1, cost=100, rank_sum=0,
+        conv_purchase_cnt=0, conv_direct_cnt=0, conv_purchase_amt=0, cart_cnt=0, cart_amt=0,
+    ))
+    db.commit()
+    rows = guardrail_params_window_coverage(db)
+    assert all(r["latest"] is not None for r in rows), "두 분기 중 데이터 분기를 밟아야 한다"
+    ss = [r for r in rows if r["source"] == "shopping"]
+    assert len(ss) == 1
+    assert ss[0]["param_key"] is None
+    assert ss[0]["promoted"] is False, "봉투 없음이 «재료 없음»에 덮이면 안 된다"
+    # 승격분은 같은 응답에서 promoted=True — 두 사실이 한 필드를 다투지 않는다
+    assert _cov(db, "pl_window_days")["promoted"] is True
+
+
+def test_GET_응답에_실제로_실린다(db):
+    """★표면 — 계산만 되고 응답에 안 실리면 Jino는 못 본다(교훈 #362)."""
+    from app.routers.naver_ad import guardrail_params_get
+    body = guardrail_params_get(db=db)
+    assert "window_coverage" in body
+    assert {r["source"] for r in body["window_coverage"]} == {"expkeyword", "shopping"}
+    # 승격 2건이 봉투와 함께 같은 응답에 뜬다 = 계약 §4-C S4-a가 요구한 그 화면
+    keys = {r["key"]: r for r in body["params"]}
+    assert keys["pl_min_click"]["min"] == 5 and keys["pl_min_click"]["max"] == 10
+    assert keys["pl_window_days"]["min"] == 14 and keys["pl_window_days"]["max"] == 90
