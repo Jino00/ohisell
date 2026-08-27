@@ -364,6 +364,7 @@ const MATERIAL_MIN: CostMaterial = {
   stale_count: 0,
   latest_price_ex_vat: null,
   latest_price_inc_vat: null,
+  latest_price_inc_derived: false,
   latest_price_source: null,
   price_rule: "latest",
   lot_price_min: null,

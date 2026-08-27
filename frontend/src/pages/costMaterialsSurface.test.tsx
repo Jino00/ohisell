@@ -81,6 +81,7 @@ const KIT: CostMaterial = {
   stale_count: 0,
   latest_price_ex_vat: "190.82",
   latest_price_inc_vat: "209.90",
+  latest_price_inc_derived: false,
   latest_price_source: "ledger",
   price_rule: "latest",
   lot_price_min: "178.78",
@@ -163,6 +164,7 @@ const EMPTY_KIT: CostMaterial = {
   stale_count: 0,
   latest_price_ex_vat: null,
   latest_price_inc_vat: null,
+  latest_price_inc_derived: false,
   latest_price_source: null,
   prices: [],
 };
@@ -177,6 +179,7 @@ function staleKit(check: Partial<CostLedgerCheck>): CostMaterial {
     stale_count: 1,
     latest_price_ex_vat: null,
     latest_price_inc_vat: null,
+    latest_price_inc_derived: false,
     latest_price_source: null,
     prices: [{ ...KIT.prices[0], ledger_check: c }],
   };
@@ -364,6 +367,60 @@ describe("부자재 목록 — 미확인 상태와 최신 단가가 보인다", 
     expect(within(row).queryByText(/0원/)).toBeNull();
     // ★회색 「—」로 되돌아가면 이 줄이 깨진다 — 「없다」를 «말하는» 것이 이 항목의 요점이다.
     expect(screen.getByTestId("material-1-latest").textContent).not.toBe("—");
+  });
+
+  // ── D-CPP-62 S1 — 손으로 넣은 단가가 「단가 없음」으로 보이던 자리 ──────────────
+  //
+  // ★prod 실증(2026-08-27): 17종이 `ex`만 있고 `inc`는 NULL이었다. 계산은 ×1.1로 만들어
+  //   정상으로 썼는데(레시피 34 breakdown에 188.10) **목록만 「단가 없음」**이라 말했다.
+  //   Jino가 방금 넣은 값이 안 들어간 것처럼 보이는 화면이었다.
+  //
+  // 이 두 항목이 죽이는 변이:
+  //   FE-8 「현재 단가」가 다시 `inc` 칸만 읽게 하면 → 첫 항목이 「단가 없음」이 되어 죽는다
+  //   FE-9 `×1.1 파생` 배지 `<span>`을 지우면 → 둘째 항목이 죽는다
+  //        (백엔드 테스트는 payload의 `latest_price_inc_derived`까지만 본다 — 배지는 여기서만 죽는다)
+  it("★부가세 «제외»로만 넣은 단가도 값으로 보인다 — 「단가 없음」이 아니다", () => {
+    const EX_ONLY: CostMaterial = {
+      ...KIT,
+      id: 8,
+      name: "패키지 (flip)",
+      // prod 그대로: 사람이 부가세 제외 171을 넣었고 포함 칸은 비었다 → 백엔드가 188.10을 만든다
+      latest_price_ex_vat: "171.00",
+      latest_price_inc_vat: "188.10",
+      latest_price_inc_derived: true,
+      latest_price_source: "manual",
+      lot_count: 0,
+      price_count: 1,
+      prices: [],
+    };
+    render(
+      <MaterialList materials={[EX_ONLY]} selectedId={8} onSelect={() => {}} importedIds={new Set()} />,
+    );
+    expect(screen.getByTestId("material-8-latest").textContent).toBe("188.1원");
+    expect(screen.getByTestId("material-8-latest").textContent).not.toBe("단가 없음");
+  });
+
+  it("★그 값이 «우리가 만든 값»이면 화면이 그렇게 말한다 (×1.1 파생)", () => {
+    const DERIVED: CostMaterial = {
+      ...KIT,
+      id: 8,
+      latest_price_inc_vat: "188.10",
+      latest_price_inc_derived: true,
+      prices: [],
+    };
+    const STORED: CostMaterial = { ...DERIVED, id: 9, latest_price_inc_derived: false };
+
+    render(
+      <MaterialList
+        materials={[DERIVED, STORED]}
+        selectedId={8}
+        onSelect={() => {}}
+        importedIds={new Set()}
+      />,
+    );
+    expect(screen.getByTestId("material-8-inc-derived").textContent).toBe("×1.1 파생");
+    // ★배지가 «항상 켜지는 장식»이 되면 이 줄이 깨진다 — 저장된 값엔 안 붙어야 한다.
+    expect(screen.queryByTestId("material-9-inc-derived")).toBeNull();
   });
 });
 
