@@ -536,10 +536,31 @@ def _pl_protect_tokens(
     return tokens
 
 
-def _pl_reason(clk: int, cost: int, min_cost: Decimal, window_from: date, window_to: date) -> str:
+def _pl_params(db: Session) -> tuple[int, int]:
+    """파워링크 게이트의 **유효** (최소클릭, 창일수). SPECS 승격분이라 DB가 코드 상수를 이긴다.
+
+    ★D-NAO-262(S4). 반환 순서·타입을 튜플로 고정한 이유는 호출부가 하나뿐이고, 두 값이 **같은
+    회차에서 같은 출처로** 결정돼야 하기 때문이다 — 창은 DB값, 클릭은 코드 상수 같은 섞임이
+    생기면 사유 문장이 설명하는 게이트와 실제 게이트가 갈린다.
+
+    ★import를 함수 안에서 하는 이유: `guardrail_params`가 **기본값 참조**(복사 금지 규칙)로 이
+    모듈을 module-level import 한다. 여기서 되받으면 순환이므로 지연 import로 끊는다 — 두
+    모듈이 모두 로드된 뒤에 돌아 안전하다.
+    """
+    from app.services.naver_ad import guardrail_params
+
+    params = guardrail_params.get_params(db)
+    return int(params["pl_min_click"]), int(params["pl_window_days"])
+
+
+def _pl_reason(clk: int, cost: int, min_cost: Decimal, window_from: date, window_to: date,
+               min_click: int) -> str:
+    """★`min_click`을 인자로 받는다 — 상수를 직접 박으면 **게이트는 DB값으로 도는데 사람이 읽는
+    사유는 옛 숫자를 말한다.** 값이 만들어지는 층과 사람에게 닿는 층은 다른 층이고, 합격기준이
+    지목한 건 늘 닿는 층이다(교훈 #362). 이 문자열은 제외 제안 카드에 그대로 실린다."""
     return (
         f"[검색어제외] 파워링크 낭비 검색어(전환귀속 불가·비용 기반) — rolling {window_from}~{window_to}: "
-        f"clk={clk}(≥{_PL_MIN_CLICK}), cost={cost}원(≥{int(min_cost)}원), 그룹 순손실(BEP 미달)·"
+        f"clk={clk}(≥{min_click}), cost={cost}원(≥{int(min_cost)}원), 그룹 순손실(BEP 미달)·"
         f"제품형 토큰 미포함 = 낭비비용 회수(PLAN §1). 자동 제외 후 in-out 재심사 루프가 자가 교정."
     )
 
@@ -549,9 +570,14 @@ def _judge_powerlink(db: Session, *, now: datetime, as_of: date) -> dict:
 
     스코프(⓪ auto_operate=1) 안 후보는 자동 발사 대상(powerlink), 밖(대행사)은 고비용 브리핑
     후보(agency_powerlink)로 가른다 — 대행사 캠페인엔 절대 실쓰기 없음(§0 3). 게이트 순서(전부
-    fail-closed): ①창 30일 ②clk≥5 ③cost≥margin(폴백 10,000) ④그룹 순손실 프록시 ⑤제품형
-    토큰 화이트리스트(디바이스 토큰 제외). 전환 보호(§1-1)는 파워링크에서 구조적 0이나 게이트 유지."""
-    window_from = as_of - timedelta(days=_PL_WINDOW_DAYS - 1)
+    fail-closed): ①창 ②clk 하한 ③cost≥margin(폴백 10,000) ④그룹 순손실 프록시 ⑤제품형
+    토큰 화이트리스트(디바이스 토큰 제외). 전환 보호(§1-1)는 파워링크에서 구조적 0이나 게이트 유지.
+
+    ★①②의 숫자를 docstring에 안 적는다(D-NAO-262) — SPECS 승격분이라 **DB가 이길 수 있고**,
+    코드 기본값은 30일·5클릭이지만 그게 「지금 도는 값」이라는 보장이 없다. 지금 값은 승인 카드
+    (`GET /naver-ad/settings/guardrail-params`)가 출처(`source`)와 함께 보여 준다."""
+    min_click, window_days = _pl_params(db)
+    window_from = as_of - timedelta(days=window_days - 1)
     rows = (
         db.query(
             NaverSearchTermDaily.campaign_id,
@@ -615,8 +641,8 @@ def _judge_powerlink(db: Session, *, now: datetime, as_of: date) -> dict:
         # 스코프 안(auto_operate=1) — §1 게이트 전부 fail-closed
         if pconv >= 1:
             continue  # §1-1 전환 보호(파워링크는 구조적 0이지만 게이트 유지 — 데이터 생기면 자동 보호)
-        if clk < _PL_MIN_CLICK:
-            continue  # ② 최소 클릭
+        if clk < min_click:
+            continue  # ② 최소 클릭(SPECS `pl_min_click` — DB가 이긴다)
         min_cost = _pl_min_cost(db, adgroup_id, margin_cache)  # ③ margin(폴백 10,000)
         if cost < min_cost:
             continue
@@ -631,7 +657,7 @@ def _judge_powerlink(db: Session, *, now: datetime, as_of: date) -> dict:
             "source": _POWERLINK_SOURCE, "clk": clk, "cost": cost,
             "conv_purchase_cnt": pconv, "min_cost": int(min_cost),
             "window_from": window_from.isoformat(), "window_to": as_of.isoformat(),
-            "reason": _pl_reason(clk, cost, min_cost, window_from, as_of),
+            "reason": _pl_reason(clk, cost, min_cost, window_from, as_of, min_click),
         })
 
     def _sort(xs: list[dict]) -> list[dict]:

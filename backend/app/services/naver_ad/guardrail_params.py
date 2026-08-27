@@ -33,7 +33,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import NaverAccountSettings, NaverChangeLog
-from app.services.naver_ad import guardrail_gate
+from app.services.naver_ad import guardrail_gate, search_term_judge
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -113,6 +113,41 @@ SPECS: dict[str, ParamSpec] = {
         "브레이크를 무력화하는 결함이었다. BEP 하한은 부모 그룹 30일 집계라 개별 소재를 "
         "못 막으므로 **대체 브레이크가 없다.**",
         "tighten_down",
+    ),
+    # ══ D-NAO-262 (S4) — 파워링크 제외 게이트 2종 승격 ══
+    # 계약 `CONTRACT_ignition_readiness.md` §4-B⑤ 봉투 표 그대로. 끝값은 전부 기존 숫자의
+    # 재사용이고 이 세션이 발명한 수는 없다.
+    #
+    # ★같은 표의 SS 게이트 2종(`_SS_MIN_CLICK`·`_SS_WINDOW_DAYS`)은 **승격하지 않았다** —
+    #   §4-B⑤ 「승격 전 검사」가 분산을 잡았다(위 `max_change_pct`와 같은 이유, 다른 모양):
+    #   · `_SS_WINDOW_DAYS` — `naver_execution_harness.py:1245`가
+    #     `search_term_judge._SS_WINDOW_DAYS`를 **직접 읽는다**(GATE ⑥ 실행 재검증). 그 재사용은
+    #     주석이 밝히듯 «판정↔실행 신선도 갭»을 메우려고 **일부러** 한 것이라, DB로 값이 갈리는
+    #     순간 그 목적이 정확히 깨진다(판정은 7일 창, 실행 재검증은 14일 창).
+    #   · `_SS_MIN_CLICK` — 심볼은 판정기 단독이나 `search_term_exclusion_list.py:48`에
+    #     **복제 리터럴 `MIN_CLICK = 10`**이 있고, 그 위 주석이 «SS 게이트와 같은 값»이라고
+    #     단언한다. 카드에서 내려도 하류 게이트는 안 따라온다 ⇒ **승인 카드가 거짓말을 한다.**
+    #   되살리려면 그 두 자리를 먼저 배선하고(S2·S3가 쓴 «자리를 하나로 묶고 인구조사 테스트»
+    #   모양), 정합 테스트를 판정기 하나가 아니라 소비처 전수로 확장할 것.
+    #   ★가드: `tests/test_pl_gate_specs_promotion.py::test_분산이_남은_SS_게이트_2종은_아직_SPECS에_없다`
+    "pl_min_click": ParamSpec(
+        "pl_min_click", search_term_judge._PL_MIN_CLICK, "int", 5, 10,
+        "파워링크 제외 최소 클릭",
+        "5클릭(§1 2 — 쇼핑 10과 분리). 하한 5는 현행 유지가 근거다: 대행사 컷 재판정에서 "
+        "D구간(1–9클릭) 264건/579,991원이 «표본 미달이라 판정 근거가 없다»의 실증이었다. "
+        "상한 10은 쇼핑 게이트값 재사용. ★**작아지면 조인다** — 더 적은 클릭으로도 제외 "
+        "후보가 되어 브레이크가 세진다.",
+        "tighten_down",
+    ),
+    "pl_window_days": ParamSpec(
+        "pl_window_days", search_term_judge._PL_WINDOW_DAYS, "int", 14, 90,
+        "파워링크 제외 판정 창",
+        "30일(§1 1 — 실측: 14일 창에선 최대 clk=5라 표본이 안 서서 30일로 넓힌 값). "
+        "하한 14는 쇼핑 창, 상한 90은 재심사 백오프 상한 재사용. 원본이 창을 막지 않는다 "
+        "(2026-08-27 실측: expkeyword 2,618,269행·373일 보존). ★**커지면 조인다** — 창이 "
+        "길수록 클릭·비용이 누적돼 게이트를 더 잘 넘는다. 다만 순손실 프록시(④)도 같은 창으로 "
+        "다시 재므로 방향이 단조롭다고 단정하지 않는다.",
+        "tighten_up",
     ),
 }
 
