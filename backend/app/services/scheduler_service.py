@@ -1391,6 +1391,66 @@ def sync_naver_product_meta_job():
         db.close()
 
 
+def sync_naver_ad_creative_text_job():
+    """파워링크(WEB_SITE) 문안 전건 폴링 — S5 적재 (11:32 KST, D-NAO-263 · 계약 §4-A S5).
+
+    `naver_entity`의 WEB_SITE 광고그룹(삭제분 제외)마다 `GET /ncc/ads` 1콜로 텍스트 소재를 읽어
+    소재 grain 현재 단면을 upsert하고 변경분만 원장에 append한다. **네이버에 쓰지 않는다**
+    (계약 §3 「광고계정 쓰기 API 호출 0」 — 이 경로는 `naver_sa_writer`를 import조차 하지 않는다).
+
+    ★왜 지금 여는가: `/ncc/ads`는 현재값만 주고 변경 피드가 없어 **소급이 원리적으로 불가능**하다
+    — 개통일이 곧 관측 창의 시작일이고, 하루 미룰 때마다 창이 하루 짧아진다(C10·검색량 기준선과
+    같은 성질). 계약 §5: *"제목·태그는 콘솔에서 누가 만지는 순간 원복 좌표가 사라진다."*
+
+    ★콜 예산: 착수 실측(2026-08-27 prod) WEB_SITE 광고그룹 **526개**(on 464 · off 62) × 1콜 =
+    약 526콜/일. 계약 §5가 건 게이트(A5/A6 스윕 **1,013콜/일**보다 크면 착수 전 표면화하고 멈춤)의
+    절반 남짓이라 통과했다. 데드라인 10분.
+
+    ★11:32인 이유(전례가 만든 검사를 그대로 밟았다 — 교훈 #326: 크론 슬롯은 배포 «전»에만
+    무료로 고칠 수 있다). 매시 발화 잡이 쓰는 분은 **0·5·7·15(짝수시)·20·45·47·57**과
+    `*/30`(:00·:30)이고, 11시대엔 일 1회 잡이 **하나도 없다**(전수 grep — 10시대의 10:37이 가장
+    가깝다). 분 **32**는 이 파일의 어떤 크론 표현식에도 없고, `:30` cafe24 토큰 갱신(짧다)과
+    `:45` 주문 동기화 사이의 **15분 창** 한가운데다 — 그룹마다 commit하는 이 스윕이 SQLite
+    라이터를 잡아도 겹칠 상대가 없다.
+    ★상류 의존: 대상 목록이 `naver_entity`라 `sync_naver_entity`(07:35)보다 **뒤**여야 한다 — 11:32는
+    네 시간 뒤다.
+    ★★한 번 seed되면 정본이 prod DB로 넘어간다(`_ensure_default_states`는 기존 행의 cron을 안 고친다).
+
+    ★_CATCHUP_ORDER 제외 — 관측 전용이고 매일 전량을 다시 읽어 현재 단면을 통째로 갱신하므로
+    하루 유실이 «현재»에 구멍을 남기지 않는다. (다만 그날 일어났다가 되돌아간 문안 변경은 변경
+    원장에서 영구히 안 보인다 — 소급 불가 자료의 대가다. C10·타겟팅 스윕과 같은 성질.)
+
+    ★**fail-open이 아니다 — 예외를 삼키지 않는다.** 미완주면 여기서 raise 해야 `last_status='error'`가
+    남는다. 삼키면 잡이 `None`을 돌려주고 `_apply_job_event`가 `ok`를 써서, 수집기가 애써 만든
+    «미완주» 판정이 **어떤 지속 표면에도 못 닿는다** — 교훈 #319·#321과 C10(D-NAO-212 1R P1-1)의
+    **네 번째 재현**이 될 자리다. `_CATCHUP_ORDER` 밖이라 fail-open의 명분(하류 비블록)도 없다.
+
+    ★**결과 dict를 반환한다** — 수동 트리거 라우터가 반환 dict를 응답에 싣는다.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad import naver_ad_creative_text_ingest
+
+        result = naver_ad_creative_text_ingest.sync_ad_creative_text(db)
+        line = ("[스케줄러] 파워링크 문안 수집: groups=%s/%s failed=%s ads=%s "
+                "new=%s changed=%s unchanged=%s dup_in_run=%s complete=%s")
+        args = (result["groups_done"], result["groups_target"], result["groups_failed"],
+                result["ads"], result["new"], result["changed"], result["unchanged"],
+                result["dup_in_run"], result["complete"])
+        if not result["complete"]:
+            log.error(line + " reason=%s", *args, result["incomplete_reason"])
+            # ★여기서 던져야 `last_status='error'`가 남는다. 삼키면 미완주가 «성공»으로 굳는다.
+            raise RuntimeError(
+                f"파워링크 문안 수집 미완주: {result['incomplete_reason']} "
+                f"(groups={result['groups_done']}/{result['groups_target']} "
+                f"failed={result['groups_failed']} ads={result['ads']})"
+            )
+        log.info(line, *args)
+        return result
+    finally:
+        db.close()
+
+
 def verify_search_term_exclusions_job():
     """조치 생존 감시 — 우리가 건 검색어 제외가 라이브에 아직 걸려 있나 (08:25 KST, D-NAO-173 P1-①).
 
@@ -2184,6 +2244,14 @@ def _ensure_default_states(db):
         # ★★한 번 seed되면 정본이 prod DB로 넘어간다(`_ensure_default_states`는 기존 행의
         #   cron을 안 고친다) — 배포 «전»에만 무료로 고칠 수 있다(교훈 #326).
         ("sync_naver_product_meta", "55 9 * * *"),
+        # D-NAO-263(S5): 파워링크 문안 전건 폴링(WEB_SITE 그룹 526개 × 1콜 = 약 526콜/일).
+        # ★분 슬롯 = **32**. 매시 발화 잡이 쓰는 분은 0·5·7·15(짝수시)·20·45·47·57과 */30
+        #   (:00·:30)이고, 11시대엔 일 1회 잡이 **하나도 없다**(전수 grep — 10:37이 가장 가깝다).
+        #   32는 이 파일의 어떤 크론 표현식에도 없고 :30~:45의 15분 창 한가운데다.
+        # ★상류 의존 — 대상 목록이 `naver_entity`라 sync_naver_entity(07:35)보다 뒤여야 한다.
+        # ★★한 번 seed되면 정본이 prod DB로 넘어간다(교훈 #326 — 배포 «전»에만 무료로 고친다).
+        # ★_CATCHUP_ORDER 제외 — 매일 전량 재읽기라 하루 유실이 «현재»에 구멍을 안 남긴다.
+        ("sync_naver_ad_creative_text", "32 11 * * *"),
         # M2-a(D-NAO-214): [9] 계층 EB 풀링 산출 기록. 슬롯 근거는 잡 docstring 참조.
         ("write_naver_pooled_estimates", "30 9 * * *"),
         # M2-b(D-NAO-216): criterion 설정 GET 스윕(bidWeight 판독). 시각 08:12 확정
@@ -2698,6 +2766,7 @@ def job_func_for(job_name: str):
         "sync_naver_adgroup_targets": sync_naver_adgroup_targets_job,
         "sync_naver_criterion": sync_naver_criterion_job,  # D-NAO-203 (10:37)
         "sync_naver_product_meta": sync_naver_product_meta_job,  # D-NAO-212 (09:55)
+        "sync_naver_ad_creative_text": sync_naver_ad_creative_text_job,  # D-NAO-263 S5 (11:32)
         "write_naver_pooled_estimates": write_naver_pooled_estimates_job,  # D-NAO-214 M2-a (09:30)
         # D-NAO-216 M2-b. 크론 시각 08:12 확정(D-NAO-217) — `_ADGROUP_CRITERION_CRON` 참조.
         "sweep_naver_adgroup_criterion": sweep_naver_adgroup_criterion_job,
