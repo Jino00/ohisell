@@ -295,12 +295,20 @@ def test_every_param_actually_wins_over_code_constant(db):
     """★M-H: 「DB 값이 이긴다」가 **키마다** 성립하는가.
 
     종전엔 `cooldown_hours` 하나로만 단언해서, 나머지 셋을 코드 상수로 되돌려도 초록이었다.
+
+    ★2026-08-27(D-NAO-262·S4): SPECS가 3 → 5로 늘며 이 테스트가 **먼저 빨개졌다.** 그게 이
+    인구조사의 값어치다 — 새 키를 등재만 하고 「DB가 이긴다」를 증명 안 하면 통과할 수 없다.
+    시드 리터럴은 SPECS와 함께 자라야 하는 목록이라 키가 늘 때마다 여기도 는다.
+    새 값은 각자 봉투 안이어야 한다(pl_min_click [5,10] · pl_window_days [14,90]).
     """
-    _kv(db, '{"cooldown_hours": 5, "max_daily_auto_bid_downs": 6, "max_auto_up_multiple": "2.5"}')
+    _kv(db, '{"cooldown_hours": 5, "max_daily_auto_bid_downs": 6, "max_auto_up_multiple": "2.5",'
+            ' "pl_min_click": 7, "pl_window_days": 21}')
     p = guardrail_params.get_params(db)
     assert p["cooldown_hours"] == 5
     assert p["max_daily_auto_bid_downs"] == 6
     assert p["max_auto_up_multiple"] == Decimal("2.5")
+    assert p["pl_min_click"] == 7
+    assert p["pl_window_days"] == 21
     assert {r["key"]: r["source"] for r in guardrail_params.describe(db)} == {
         k: "db" for k in guardrail_params.SPECS
     }

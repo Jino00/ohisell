@@ -99,6 +99,7 @@ from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
 from app.services.naver_ad import pao_scope_roster
 from app.services.naver_ad import guardrail_params
+from app.services.naver_ad import search_term_judge
 from app.services.naver_ad import change_actor
 from app.services.naver_ad import creative_scorecard
 from app.services.naver_ad import wisdom_scorecard
@@ -1151,6 +1152,8 @@ def guardrail_params_get(db: Session = Depends(get_db)):
             "그 항목은 코드 상수로 복귀) DB의 naver_account_settings.guardrail_params 행을 삭제한다."
         ),
         "retro_freshness": guardrail_params_retro_freshness(db),
+        # ★D-NAO-262(#14) — 창을 끝까지 늘렸을 때 그만큼의 재료가 있나. 값 옆에 같이 보여야 한다.
+        "window_coverage": guardrail_params_window_coverage(db),
     }
 
 
@@ -1171,6 +1174,76 @@ def guardrail_params_retro_freshness(db: Session) -> dict:
         "stale": latest is None or latest < expected,
         "lag_days": (expected - latest).days if latest else None,
     }
+
+
+# 창 파라미터 ↔ 그 창이 먹는 원본 source. 창을 늘려도 재료가 없으면 값만 늘고 판정은 안 늘어난다.
+_WINDOW_MATERIAL = (
+    ("pl_window_days", "expkeyword", "파워링크 제외 판정"),
+    # `_SS_WINDOW_DAYS`는 분산 탓 SPECS 승격 보류 상태(D-NAO-262)라 봉투가 없다 — 판정기
+    # 상수 14를 그대로 상한으로 재서, 승격되는 날 재료가 이미 있는지 미리 보이게 한다.
+    (None, "shopping", "쇼핑 제외 판정"),
+)
+
+
+def guardrail_params_window_coverage(db: Session) -> list[dict]:
+    """창 파라미터의 **재료**가 봉투 상한을 덮는가 (D-NAO-262 · 계약 #14).
+
+    ★왜 봉투 화면에 붙나 — `retro_freshness`와 같은 이유의 다른 축이다. 저건 「판단의 입력이
+    낡았나」를 재고, 이건 「판단의 창을 **끝까지 늘렸을 때** 그만큼의 재료가 실제로 있나」를 잰다.
+    `pl_window_days`의 봉투 상한은 90일인데, 그 창이 서려면 `naver_search_term_daily`에 90일치가
+    결손 없이 있어야 한다. 계약 #14 *"검색어 원본 보존 16일→창 상한 이상으로"*가 이 조건이다.
+
+    ★2026-08-27 실측이 계약의 전제를 정정했다(§4-B④ⓑ — 목표 유지, 구현만 사실에 맞춤):
+      · 「보존 16일」은 **우리 DB 보존이 아니라 네이버 리포트 보관 기한**이다(ref 21 §10 —
+        자동 생성 리포트 16일 보관). 우리 쪽엔 purge 자체가 없다.
+      · 그래서 prod는 이미 shopping 53일·expkeyword 373일을 갖고 있고, **봉투 상한 90일 창의
+        결손은 0일**이었다 ⇒ 「연장」은 할 것이 없다.
+      · 다만 그 충족은 **purge가 «없어서» 생긴 우연**이고 아무도 안 재고 있었다. 수집이 며칠
+        죽거나(2026-08-26 크론 결손 전례) 누가 purge를 넣으면 **값은 90인데 실제로 보는 건
+        60일**이 된다 — 게이트는 조용히 느슨해지고 로그엔 아무것도 안 남는다.
+      ⇒ #14의 실질은 「늘리기」가 아니라 **「늘려도 되는지 상시 보이게 하기」**다.
+
+    read-only. 결손이 있어도 아무것도 막지 않는다 — 관측이지 게이트가 아니다.
+    """
+    out: list[dict] = []
+    for key, source, label in _WINDOW_MATERIAL:
+        ceiling = (
+            int(guardrail_params.SPECS[key].hi) if key
+            else int(search_term_judge._SS_WINDOW_DAYS)
+        )
+        latest = db.query(func.max(NaverSearchTermDaily.ad_date)).filter(
+            NaverSearchTermDaily.source == source).scalar()
+        if latest is None:
+            out.append({
+                "param_key": key, "source": source, "label": label,
+                "promoted": key is not None,
+                "ceiling_days": ceiling, "latest": None,
+                "missing_days": None, "covered": False,
+                "note": "원본 0행 — 창을 못 세운다",
+            })
+            continue
+        need_from = latest - timedelta(days=ceiling - 1)
+        have = {
+            d for (d,) in db.query(NaverSearchTermDaily.ad_date).filter(
+                NaverSearchTermDaily.source == source,
+                NaverSearchTermDaily.ad_date >= need_from,
+                NaverSearchTermDaily.ad_date <= latest,
+            ).distinct().all()
+        }
+        missing = ceiling - len(have)
+        out.append({
+            "param_key": key, "source": source, "label": label,
+            # ★`promoted`와 `note`를 가른다 — 「봉투가 없다(승격 보류)」와 「재료가 없다」는
+            #   직교하는 사실이고, 한 문자열에 담으면 하나가 다른 하나를 덮는다(테스트가 잡았다).
+            "promoted": key is not None,
+            "ceiling_days": ceiling,
+            "latest": latest.isoformat(),
+            "window_from": need_from.isoformat(),
+            "missing_days": missing,
+            "covered": missing == 0,
+            "note": None,
+        })
+    return out
 
 
 @router.put("/settings/guardrail-params")

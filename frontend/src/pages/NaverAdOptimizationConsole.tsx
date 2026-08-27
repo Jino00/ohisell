@@ -1062,6 +1062,47 @@ export default function NaverAdOptimizationConsole() {
           </div>
         )}
 
+        {/* 창 재료 커버리지(D-NAO-262 #14) — 창 파라미터를 봉투 상한까지 끝까지 늘렸을 때
+            그만큼의 원본 데이터가 실제로 있는가. covered:false는 게이트가 조용히 느슨해지고
+            있다는 뜻이라 눈에 띄게 그린다. promoted:false(승격 보류)는 note와 별개 사실이라
+            따로 배지로 뗀다 — 하나로 뭉치면 다른 하나가 가려진다. */}
+        {guardrail && guardrail.window_coverage && guardrail.window_coverage.length > 0 && (
+          <div className="flex flex-col gap-1.5 mb-3">
+            {guardrail.window_coverage.map((wc) => {
+              const uncovered = wc.latest === null || !wc.covered;
+              return (
+                <div
+                  key={`${wc.source}-${wc.param_key ?? "unpromoted"}`}
+                  className={`text-xs rounded-lg p-3 border ${
+                    uncovered
+                      ? "bg-amber-50 border-amber-200 text-amber-700"
+                      : "bg-green-50 border-green-100 text-green-700"
+                  }`}
+                >
+                  <span className="font-medium">{wc.label}</span>
+                  {wc.promoted === false && (
+                    <span className="ml-1.5 px-1.5 py-0.5 text-[11px] rounded font-medium bg-gray-100 text-gray-500">
+                      승격 보류(봉투 없음)
+                    </span>
+                  )}
+                  {" — 상한 "}
+                  {wc.ceiling_days}일 기준{" "}
+                  {wc.latest === null ? (
+                    <>· {wc.note ?? "원본 0행 — 창을 못 세운다"}</>
+                  ) : wc.covered ? (
+                    <>· 재료 충족(최신 {wc.latest})</>
+                  ) : (
+                    <>
+                      · <span className="font-semibold">결손 {wc.missing_days}일</span>(최신{" "}
+                      {wc.latest}, 창 시작 {wc.window_from ?? "?"})
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {guardrailLoading ? (
           <div className="text-sm text-gray-400 py-4 text-center">불러오는 중...</div>
         ) : !guardrail ? (

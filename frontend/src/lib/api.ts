@@ -4084,6 +4084,21 @@ export interface NaverGuardrailRetroFreshness {
   stale: boolean;
   lag_days: number | null;
 }
+// ★D-NAO-262(#14) — 창 파라미터를 봉투 상한까지 늘렸을 때 그만큼의 원본 데이터가 실제로
+// 있는가. `promoted`(봉투 승격 여부)와 `note`(원본 0행 등 재료 부재 사유)는 직교하는
+// 사실이라 따로 둔다 — 한쪽이 다른 쪽을 덮으면 「봉투가 없다」와 「재료가 없다」가 뭉개진다.
+export interface NaverGuardrailWindowCoverage {
+  param_key: string | null;
+  promoted: boolean;
+  source: "expkeyword" | "shopping";
+  label: string;
+  ceiling_days: number;
+  latest: string | null;
+  window_from?: string;
+  missing_days: number | null;
+  covered: boolean;
+  note: string | null;
+}
 export interface NaverGuardrailParamsResponse {
   params: NaverGuardrailParam[];
   from_db_enabled: boolean;
@@ -4091,6 +4106,7 @@ export interface NaverGuardrailParamsResponse {
   // 문장으로 실어 화면이 자기 설명을 하게 한다. ★프론트에서 문구를 새로 짓지 않는다.
   from_db_help: string;
   retro_freshness: NaverGuardrailRetroFreshness;
+  window_coverage: NaverGuardrailWindowCoverage[];
 }
 
 export function getNaverGuardrailParams(): Promise<NaverGuardrailParamsResponse> {
