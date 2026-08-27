@@ -221,9 +221,29 @@ def score_probation_window(
         )
         return base
 
-    roas = base["conv_scope"]["conv_amt"] / shop_cost
+    conv_amt = base["conv_scope"]["conv_amt"]
+    roas = conv_amt / shop_cost
+    # ★적대 리뷰 2R P2-A — 위 `outside > shop_cost` 규칙은 오차를 **유계**로 만들었을 뿐
+    # 없애지는 못했다(리뷰어 재현: shopping 10,000/20,000 + expkeyword 10,000 ⇒ profitable인데
+    # 총 RoAS 1.0 < BEP). 이 슬라이스의 목적이 «부호 뒤집힘 제거»이므로 남은 구간도 닫는다.
+    #
+    # `roas_lower_bound` = shopping 매출 ÷ **창 전체 비용**. 이것은 «RoAS 값»이 아니라 **하한**이다 —
+    # 귀속 불가 source의 전환을 0으로 가정한 것이라 실제보다 낮을 수만 있다. 그래서 화면에도
+    # 판정에도 «값»으로 쓰지 않고, **부호가 갈리는지 보는 데만** 쓴다.
+    # ★금지선 5(두 source의 전환·RoAS 합산 금지)는 지켜진다: 더하는 것은 **비용뿐**이고,
+    #   expkeyword의 전환을 있다고도 없다고도 주장하지 않는다.
+    # cost_total ≥ shop_cost > 0이므로 lower_bound ≤ roas — 부호가 갈리는 방향은 하나뿐이다.
+    roas_lower_bound = conv_amt / cost_total
     base["roas"] = round(roas, 4)
     base["bep_roas"] = round(bep, 4)
+    if roas >= bep > roas_lower_bound:
+        base["status"] = STATUS_UNVERIFIED
+        base["unverified_reason"] = (
+            f"판정 분모(shopping {shop_cost:,}원)로는 BEP 초과(RoAS {roas:.3f})지만, 창 전체 비용"
+            f"({cost_total:,}원) 기준 하한은 {roas_lower_bound:.3f}으로 BEP({bep:.4f}) 미만이다 — "
+            "귀속 불가 지출을 어떻게 세느냐에 따라 총이익 부호가 갈려 단언할 수 없다"
+        )
+        return base
     base["status"] = STATUS_PROFITABLE if roas >= bep else STATUS_UNPROFITABLE
     return base
 

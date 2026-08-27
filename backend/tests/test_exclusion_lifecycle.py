@@ -696,6 +696,98 @@ def test_재제외_갈래도_recorder를_지난다(db, monkeypatch):
     assert _diaries(db, action=exclusion_lifecycle.RETURN_SETTLED_ACTION) == []
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 적대 리뷰 2R P2 상환 (2R 판정은 PASS — 아래는 라운드를 늘리지 않는 트리아지 채택분)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_부호가_갈리는_구간은_판정하지_않는다(db, bep):
+    """★P2-A 상환. 1R 수정(`outside > shop_cost`)은 오차를 **유계로** 만들었을 뿐 없애지
+    못했다 — 리뷰어 재현: shopping 10,000/매출 20,000 + expkeyword 10,000이면 `outside ==
+    shop_cost`라 보류 규칙에 안 걸리는데, 판정은 `profitable`(roas 2.0)이고 **창 전체 비용
+    기준 총 RoAS는 1.0 < BEP**다. 이 슬라이스의 목적이 «부호 뒤집힘 제거»라 남은 구간도 닫는다."""
+    open_date = TODAY - timedelta(days=30)
+    entry = _return_entry(db, open_date=open_date)
+    day = open_date + timedelta(days=2)
+    _st_daily(db, day, imp=100, clk=10, cost=10_000, rev=20_000)
+    _st_daily(db, day, source="expkeyword", imp=50, clk=5, cost=10_000)
+
+    got = _score(db, entry, open_date)
+    assert got["status"] == exclusion_return_score.STATUS_UNVERIFIED, (
+        f"총 RoAS 1.0 < BEP인 창을 {got['status']!r}로 판정했다 — 부호가 뒤집힌 채 사슬에 들어간다"
+    )
+    assert "하한" in got["unverified_reason"]
+
+
+def test_부호가_안_갈리면_경계에서도_판정한다(db, bep):
+    """★P2-B 상환 — 생존 변이 MN-3(`outside > shop_cost` → `>=`)를 잡는다. 그리고 보류가
+    「모든 것을 보류」로 번지지 않는지도 같이 지킨다(자가 죽으면 그것도 실패다).
+    여기선 `outside == shop_cost`인데 총 RoAS 2.0 ≥ BEP라 부호가 안 갈린다 ⇒ 판정해야 한다."""
+    open_date = TODAY - timedelta(days=30)
+    entry = _return_entry(db, open_date=open_date)
+    day = open_date + timedelta(days=2)
+    _st_daily(db, day, imp=100, clk=10, cost=10_000, rev=40_000)
+    _st_daily(db, day, source="expkeyword", imp=50, clk=5, cost=10_000)
+
+    got = _score(db, entry, open_date)
+    assert got["status"] == exclusion_return_score.STATUS_PROFITABLE
+    assert got["roas"] == 4.0
+
+
+def test_일기_실패해도_레인이_죽지_않는다(db):
+    """★P2-C 상환 — 생존 변이 MN-9. 초판은 except 절에서 `row.adgroup_id`를 **다시 읽었다**.
+    실패 원인이 바로 그 row의 refresh 실패(경합 삭제·쓰기락)면 except 안에서 예외가 재발해
+    밖으로 새고, 호출부엔 try가 없어 레인이 죽는다 — fail-open이 fail-loud가 된다."""
+    real_row = _excluded_row(db, status="probation")
+    state = {"boom": False}
+
+    def _raise(*a, **k):
+        state["boom"] = True
+        raise RuntimeError("diary 세션 실패")
+
+    class _Proxy:
+        """일기 호출이 터진 «뒤»에 row를 다시 읽으면 폭발한다(ObjectDeletedError 모사)."""
+
+        def __getattr__(self, name):
+            if state["boom"] and name in ("adgroup_id", "search_term", "cycle"):
+                raise RuntimeError("except가 row를 다시 읽었다 — fail-open이 깨졌다")
+            return getattr(real_row, name)
+
+    import app.services.naver_ad.diary as diary_mod
+
+    orig = diary_mod.write_diary_entry
+    try:
+        diary_mod.write_diary_entry = _raise
+        exclusion_lifecycle.record_return_settled(  # 예외가 새면 이 줄에서 테스트가 죽는다
+            db, _Proxy(), verdict=exclusion_lifecycle.VERDICT_RESTORED, now=NOW,
+        )
+    finally:
+        diary_mod.write_diary_entry = orig
+    assert state["boom"] is True  # 실제로 실패 경로를 밟았는지 확인(가짜 통과 방지)
+
+
+def test_반성_프롬프트가_복귀_어휘를_설명한다():
+    """★P2-D 상환 — 생존 변이 MN-12. 사슬 「일기→소급채점→**반성**→지혜」의 세 번째 고리가
+    새 키를 모르면, 반성이 복귀 행을 제외 어휘로 서술한다. 이 repo엔 선례가 있다 —
+    `test_naver_wisdom.py`가 `wisdom_judge._SYSTEM` 문구를 같은 방식으로 못 박는다."""
+    from app.services.naver_ad import diary_reflection
+
+    s = diary_reflection._SYSTEM
+    assert "probation" in s
+    assert "silent" in s and "정보를 못 낸 것" in s  # 성공으로 서술하지 말 것
+    assert "profitable" in s and "unprofitable" in s
+
+
+def test_관측일수가_함께_실린다(db, bep):
+    """★P2-E 상환 — 생존 변이 MN-13. `present`는 창 14일 중 **하루만** 보고서가 있어도 True다.
+    관측일수를 안 실으면 1/14일짜리 부분 합계를 완결값처럼 읽는다."""
+    open_date = TODAY - timedelta(days=30)
+    entry = _return_entry(db, open_date=open_date)
+    _st_daily(db, open_date + timedelta(days=2), imp=100, clk=10, cost=10_000, rev=30_000)
+
+    shop = _score(db, entry, open_date)["by_source"]["shopping"]
+    assert shop["observed_days"] == 1 and shop["window_days"] == 14
+
+
 def test_silent_건수가_따로_세어진다(db, bep):
     """「열었는데 아무 일도 안 일어났다」가 몇 건인지가 곧 «복귀 실험이 정보를 내고 있는가»의
     지표다 — 0건 성적표를 초록으로 착각하지 않기 위한 카운터(S1의 「결손 0도 기록」과 같은 규율)."""
