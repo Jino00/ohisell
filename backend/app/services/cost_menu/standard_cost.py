@@ -96,6 +96,51 @@ def _round(value: Decimal) -> Decimal:
     return value.quantize(_CENT, rounding=ROUND_HALF_UP)
 
 
+#: 표시용 반올림 — **모듈 밖에서 부르는 이름**. `_round`는 계산 내부용이고, 화면 payload가
+#: 그걸 직접 부르면 「사설 함수를 밖에서 쓴다」가 되어 규칙의 주인이 흐려진다.
+#: ★계산 쪽은 여전히 **마지막에** 반올림한다(`resolve_inc_vat` docstring) — 이 함수는
+#: 「사람에게 보일 때」만 쓴다.
+round_money = _round
+
+
+def resolve_inc_vat(
+    ex: Optional[Decimal], inc: Optional[Decimal]
+) -> tuple[Optional[Decimal], bool]:
+    """한 단가 행의 «부가세 포함 값»과 그게 파생인지를 함께 돌려준다.
+
+    돌려주는 것: `(부가세 포함 값 또는 None, 파생 여부)`.
+    저장된 `inc`가 있으면 그대로 쓰고(파생 아님), 없으면 `ex × 1.1`을 만든다(파생).
+    둘 다 없으면 `(None, False)` — **없는 값을 0으로 만들지 않는다**(계약 §2-7).
+
+    ★**이 함수가 있는 이유** (계약 D-CPP-62 §0-B ②): 이 규칙이 두 곳에 갈려 있었다.
+    표준원가는 `ex`를 읽고 없으면 ×1.1을 만들어 쓰는데(`_resolve_line`), **부자재 목록의
+    「현재 단가」는 `inc` 칸만 읽었다.** 수동 입력은 사람이 준 칸만 채우므로(`add_manual_price`
+    — 어느 기준으로 넣었는지 추측하지 않으려는 의도된 설계), Jino가 「부가세 제외」로 넣은
+    단가 **17건이 목록에서 「단가 없음」으로** 떴다. 값은 원가에 정상으로 들어가 있는데
+    화면만 없다고 말한 것이다 — prod 실증: `패키지 (flip)` `ex=171 · inc=NULL`인데
+    레시피 34의 breakdown엔 **188.10**으로 실려 있다.
+
+    ★그래서 «화면에도 파생을 쓰게» 고치되, **파생 규칙을 payload 쪽에 새로 쓰지 않는다.**
+    그게 D-CPP-60이 고친 사고(단가 규칙 두 곳 복제)의 재발이기 때문이다. 규칙은 여기 한 벌이고
+    `standard_cost`와 `materials.material_payload`가 **같은 함수를 부른다.**
+
+    ★파생 여부를 **함께** 돌려주는 것이 핵심이다 — 화면이 「이 값은 우리가 만든 값」이라고
+    말할 수 있어야 한다. 안 그러면 실제로 낸 부가세와 규약 환산값이 화면에서 구별되지 않는다.
+
+    ★★**반올림하지 않고 돌려준다 — 반올림은 부르는 쪽이 «마지막에» 한다.** 여기서 먼저
+    반올림하면 `_round(inc × 수량)`이 이중 반올림이 되어 **계산 결과가 실제로 바뀐다**:
+    `ex=166.35 · 수량 3`이면 기존 `_round(182.985 × 3) = 548.96`인데 먼저 반올림하면
+    `_round(182.99 × 3) = 548.97`이다. 이 함수는 규칙을 한 곳으로 모으려는 것이지
+    **행위를 바꾸려는 게 아니다** — 이 줄이 그 불변을 지킨다.
+    """
+
+    if inc is not None:
+        return inc, False
+    if ex is None:
+        return None, False
+    return ex * VAT_MULTIPLIER, True
+
+
 # ──────────────────────────────────────────────
 # 값 객체
 # ──────────────────────────────────────────────
@@ -209,8 +254,8 @@ def _resolve_line(line: RecipeLineInput) -> StandardCostLine:
 
     ex = line.unit_price_ex_vat
     assert ex is not None  # 위 분기가 보장한다
-    inc_derived = line.unit_price_inc_vat is None
-    inc = ex * VAT_MULTIPLIER if inc_derived else line.unit_price_inc_vat
+    # ★규칙은 `resolve_inc_vat` 한 벌이다 — 화면(`material_payload`)이 같은 함수를 부른다.
+    inc, inc_derived = resolve_inc_vat(ex, line.unit_price_inc_vat)
     assert inc is not None
 
     return StandardCostLine(

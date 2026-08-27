@@ -46,6 +46,7 @@ from app.models import (
 )
 from app.services.cost_menu import ledger_check as LC
 from app.services.cost_menu import price_rule as PR
+from app.services.cost_menu import standard_cost as SC
 from app.services.cost_menu.matcher import LedgerItem, MaterialRule, Suggestion, suggest
 
 MATERIAL_STATUSES = ("unconfirmed", "approved")
@@ -211,6 +212,10 @@ def material_payload(
     checks = {p.id: ledger_check(p) for p in ordered}
     choice = PR.choose_price(list(prices), rule)
     latest = choice.price
+    _latest_inc, _latest_inc_derived = SC.resolve_inc_vat(
+        latest.unit_price_ex_vat if latest else None,
+        latest.unit_price_inc_vat if latest else None,
+    )
     return {
         "id": m.id,
         "name": m.name,
@@ -236,7 +241,19 @@ def material_payload(
         # ★어긋난 연결 수. 0이 아니면 화면이 「최신 단가에서 왜 빠졌나」를 말해야 한다.
         "stale_count": choice.stale_count,
         "latest_price_ex_vat": _d(latest.unit_price_ex_vat) if latest else None,
-        "latest_price_inc_vat": _d(latest.unit_price_inc_vat) if latest else None,
+        # ★`inc` 칸만 읽지 않는다 — 계산과 **같은 함수**(`SC.resolve_inc_vat`)를 부른다
+        #   (계약 D-CPP-62 §0-B ②). 구판은 저장된 `inc`만 봐서, Jino가 「부가세 제외」로
+        #   넣은 단가 17건을 화면이 「단가 없음」이라 불렀다 — 값은 원가에 정상으로 들어가
+        #   있는데도. 규칙을 여기 다시 쓰지 않는 것이 D-CPP-60(규칙 두 곳 복제) 재발 방지다.
+        #   ★표시용이므로 여기서 반올림한다(계산 쪽은 마지막에 반올림한다 — 함수 docstring).
+        #   안 하면 파생값이 `188.100`처럼 세 자리로 화면에 뜬다 — DB 값은 두 자리인데
+        #   우리가 만든 값만 자릿수가 달라 보이면 그 자체가 「다른 종류의 숫자」로 읽힌다.
+        "latest_price_inc_vat": (
+            _d(SC.round_money(_latest_inc)) if _latest_inc is not None else None
+        ),
+        # ★「이 값은 우리가 만든 값」을 화면이 말할 수 있게 한다. 안 그러면 실제로 낸
+        #   부가세와 ×1.1 규약 환산값이 화면에서 구별되지 않는다.
+        "latest_price_inc_derived": _latest_inc_derived,
         "latest_price_source": latest.source if latest else None,
         # ★적용된 규칙을 **값과 함께** 낸다 — 「이 숫자가 어느 규칙의 산물인가」를 화면이
         #   말할 수 있어야 설정 변경이 화면에서 보인다(합격 ⑧).
