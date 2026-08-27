@@ -98,6 +98,13 @@ export function PipelineTab() {
       + `입고액을 발송의 하한으로 썼습니다`,
     );
   }
+  if (data.unknown_status.po_count > 0) {
+    clampLines.push(
+      `모르는 상태 코드(${data.unknown_status.codes.join(", ")})인 발주 ${data.unknown_status.po_count}건 · `
+      + `확정액 ${won(data.unknown_status.confirmed_amount)} — 어느 칸에도 넣지 않았습니다`
+      + `(「발송 대기」가 아니라 판정 불가입니다)`,
+    );
+  }
   if (data.unpriced_shipped_qty > 0) {
     clampLines.push(
       `단가를 못 붙인 발송수량 ${cnt(data.unpriced_shipped_qty)}개 — 금액에서 빠져 있습니다(0원으로 세지 않았습니다)`,
@@ -370,9 +377,20 @@ function StageRow({ r }: { r: RocketPipelineRow }) {
       <Td right>{won(r.confirmed_amount)}</Td>
       <Td right>
         {/* ★발송 기록이 없는데 입고된 건은 0원이 「안 보냄」이 아니다 — 그 자리에 사유를 쓴다 */}
-        {r.asn_missing
-          ? <span className="text-amber-700" title="입고는 잡혔는데 발송(ASN) 라인이 0건입니다. 안 보낸 것이 아니라 발송 기록이 없는 것입니다.">기록 없음</span>
-          : won(r.shipped_amount)}
+        {/* ★발송 기록이 없는데 입고된 건은 0원이 「안 보냄」이 아니다 — 계산에 실제로 쓰인
+            하한(입고액)을 **화면에도 같이** 낸다. 이 값이 화면에 없으면 「기록 없음」만 보고
+            사람이 「0원어치 보냈다」로 읽는다(적대 리뷰 1R P2-1: 계산만 하고 아무도 안 보던 값). */}
+        {r.asn_missing ? (
+          <span
+            className="text-amber-700"
+            title="입고는 잡혔는데 발송(ASN) 라인이 0건입니다. 안 보낸 것이 아니라 발송 기록이 없는 것입니다. 「안 보낸 양」은 입고액을 하한으로 써서 계산했습니다."
+          >
+            기록 없음
+            <div className="text-xs text-gray-400">입고 기준 {won(r.effective_shipped_amount)}</div>
+          </span>
+        ) : (
+          won(r.shipped_amount)
+        )}
       </Td>
       <Td right>{won(r.received_amount)}</Td>
       <Td right><b>{won(r.stage_amount)}</b></Td>

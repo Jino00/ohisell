@@ -1692,6 +1692,8 @@ export interface RocketPipeline {
     over_received: { po_count: number; amount: string };
     asn_missing: { po_count: number; received_amount: string };
   };
+  /** ★실측 4종(RP/PA/RI/CI) 밖의 상태 코드 — 어느 칸에도 안 들어간 «모르는 돈». */
+  unknown_status: { po_count: number; confirmed_amount: string; codes: string[] };
   unpriced_shipped_qty: number;
   last_collection_date_kst: string | null;
   freshness: {

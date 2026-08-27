@@ -56,6 +56,7 @@ function pipelineFixture(over: Record<string, unknown> = {}) {
       over_received: { po_count: 2, amount: "170640" },
       asn_missing: { po_count: 2, received_amount: "170640" },
     },
+    unknown_status: { po_count: 0, confirmed_amount: "0", codes: [] },
     unpriced_shipped_qty: 0,
     last_collection_date_kst: "2026-08-27",
     freshness: {
@@ -171,6 +172,31 @@ describe("열린 파이프라인 탭", () => {
     render(<PipelineTab />);
     fireEvent.click(await screen.findByText("③ 입고 대기"));
     expect(await screen.findByText("기록 없음")).toBeTruthy();
+  });
+
+  it("발송 기록이 없는 행은 계산에 쓰인 «입고 기준» 하한을 함께 낸다", async () => {
+    // ★적대 리뷰 1R P2-1 — 초판은 이 값을 계산만 하고 화면 어디서도 안 썼다(변이 M2 생존).
+    //   「기록 없음」만 보이면 사람이 「0원어치 보냈다」로 읽는다.
+    h.stageRows = {
+      stage: "closed_unshipped", total_count: 1,
+      rows: [row({ asn_missing: true, shipped_amount: "0", shipped_qty: 0,
+                   received_amount: "161100", effective_shipped_amount: "161100", stage_amount: "0" })],
+      truncated: false, last_collection_date_kst: "2026-08-27",
+    };
+    render(<PipelineTab />);
+    fireEvent.click(await screen.findByText("③ 입고 대기"));
+    expect(await screen.findByText("기록 없음")).toBeTruthy();
+    expect(await screen.findByText(/입고 기준 161,100원/)).toBeTruthy();
+  });
+
+  it("모르는 상태 코드가 있으면 «판정 불가»로 자백한다", async () => {
+    // ★적대 리뷰 1R P2-2 — 모르는 상태를 미종결로 접으면 그 돈이 ②③에 조용히 섞인다.
+    h.pipeline = pipelineFixture({
+      unknown_status: { po_count: 2, confirmed_amount: "123456", codes: ["XX", "YY"] },
+    });
+    render(<PipelineTab />);
+    expect(await screen.findByText(/모르는 상태 코드\(XX, YY\)인 발주 2건/)).toBeTruthy();
+    expect(await screen.findByText(/판정 불가입니다/)).toBeTruthy();
   });
 
   it("목록이 잘리면 잘렸다고 화면이 말한다", async () => {

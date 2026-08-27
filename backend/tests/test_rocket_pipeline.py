@@ -440,3 +440,51 @@ def test_limit_days_밖은_잘렸다고_말한다(db):
     assert out["dates"] == ["2026-08-01"]
     assert out["truncated_before"] == "2026-07-28"
     assert out["truncated_date_count"] == 1 and out["truncated_po_count"] == 1
+
+
+# ══════════════════════════════════════════════════════════════
+# ⑨ 적대 리뷰 1R P2 채택분
+# ══════════════════════════════════════════════════════════════
+def test_발송하한은_한_곳에서만_정의된다(db):
+    """★변이 M2가 살아남은 자리 — 초판은 하한을 두 곳(필드 / unshipped_raw)에서 각각 계산했다.
+
+    같은 규칙이 두 곳에 살면 한쪽만 고쳐지는 날이 온다. 이 테스트는 **필드 자체**를 단언해
+    `max`를 `min`으로 바꾸면 즉시 빨개지게 한다.
+    """
+    from app.services.coupang.rocket_pipeline import _pipeline_rows
+
+    # 발송 기록 0 · 입고 161,100 → 하한은 161,100이어야 한다(min이면 0)
+    _po(db, 1, "CI", conf=161100, recv=161100, conf_qty=15, recv_qty=15)
+    _line(db, 1, "P1", 15, 10740)
+    db.commit()
+    r = _pipeline_rows(db, VID)[0]
+    assert r["effective_shipped_amount"] == Decimal("161100")
+    # 그리고 「안 보낸 양」이 그 값에서 파생된다 — 두 값이 따로 놀지 않는다
+    assert r["unshipped_raw"] == r["confirmed_amount"] - r["effective_shipped_amount"]
+
+
+def test_모르는_상태_코드는_어느_칸에도_안_들어간다(db):
+    """★실측된 상태는 4종(RP/PA/RI/CI)뿐이다. 다섯 번째를 «미종결»로 접으면 모르는 돈이
+    ②③에 조용히 섞인다 — 그건 「발송 대기」가 아니라 «판정 불가»다(적대 리뷰 1R P2-2)."""
+    _po(db, 1, "PA", conf=50000, conf_qty=5)
+    _line(db, 1, "P1", 5, 10000)
+    db.commit()
+    # 실측 밖 코드를 직접 밀어 넣는다(파서가 새 코드를 만나는 상황)
+    db.query(CoupangRocketPurchaseOrder).filter_by(purchase_order_seq=1).update(
+        {"purchase_order_status": "XX", "purchase_order_status_description": "알수없음"}
+    )
+    db.commit()
+    r = compute_rocket_pipeline(db, VID, TODAY)
+    assert r["pre_invoice_subtotal"]["amount"] == Decimal("0"), "모르는 상태가 칸에 섞였다"
+    assert r["unknown_status"]["po_count"] == 1
+    assert r["unknown_status"]["confirmed_amount"] == Decimal("50000")
+    assert r["unknown_status"]["codes"] == ["XX"]
+
+
+def test_아는_상태만_있으면_unknown은_0이다(db):
+    """0건일 때 화면이 «모르는 게 있다»고 거짓말하지 않게."""
+    _po(db, 1, "PA", conf=50000, conf_qty=5)
+    _line(db, 1, "P1", 5, 10000)
+    db.commit()
+    u = compute_rocket_pipeline(db, VID, TODAY)["unknown_status"]
+    assert u["po_count"] == 0 and u["codes"] == []

@@ -79,6 +79,11 @@ STAGE_AWAIT_PAYMENT = "await_payment"   # ④ 계산서 나감, 지급일 미도
 # ①②③만 소계에 든다. ④는 계산서 그레인이라 PO 소계와 축이 다르다.
 PRE_INVOICE_STAGES = (STAGE_AWAIT_CONFIRM, STAGE_AWAIT_SHIP, STAGE_AWAIT_RECEIVE)
 
+# 실측된 상태 전집합(2026-08-27 prod 전수 2,698건: CI 2,579 · PA 77 · RP 30 · RI 12).
+#   ★여기 없는 코드는 «판정 불가»다 — 미종결로 접으면 모르는 돈이 ②③에 조용히 섞인다
+#   (적대 리뷰 1R P2-2). 새 코드가 관측되면 실측 후 여기 추가한다. 추정으로 넣지 않는다.
+KNOWN_STATUSES = frozenset({"RP", "PA"}) | SETTLED_STAGE_STATUSES
+
 
 def _f(v) -> Decimal:
     """None/숫자 → Decimal. 집계(func.sum)가 None(행 없음)이면 0."""
@@ -257,6 +262,10 @@ def _pipeline_rows(
         conf = _f(r.sum_of_vendor_confirmed_amount)
         recv = _f(r.sum_of_receiving_amount)
         ship = _f(r.ship_gross)
+        # ★「안 보낸 양」의 자 — 입고는 발송의 하한이다(쿠팡이 받았으면 우리는 분명히 보냈다).
+        #   ASN 수집 결손으로 ship이 0인데 입고가 있는 PO가 실재하므로 shipped를 그대로 쓰면
+        #   전량 입고된 PO가 「영영 못 보낸 분」이 된다. 이 한 줄이 그 자의 **유일한 정의**다.
+        effective_ship = max(ship, recv)
         ship_qty = int(r.ship_qty or 0)
         seqs = r.vendor_payment_seqs or []
         rows.append(
@@ -288,10 +297,14 @@ def _pipeline_rows(
                 #   9,540원 — 둘 다 전량 입고 완료인데 ASN 라인이 0건). 그 0을 그대로 쓰면
                 #   **전량 입고된 PO가 「영영 못 보낸 분」으로 계상된다**(원칙22 위반).
                 #   ⇒ 「안 보낸 양」의 자는 shipped가 아니라 max(shipped, received)다.
-                "effective_shipped_amount": max(ship, recv),
+                #   ★값은 여기서 **한 번만** 만든다. 적대 리뷰 1R P2-1이 지적한 자리다 —
+                #     초판은 `unshipped_raw`가 `max(ship, recv)`를 **다시 인라인으로** 계산해서
+                #     이 필드를 `min`으로 바꿔도 전 테스트가 통과했다(변이 M2 SURVIVED).
+                #     같은 규칙이 두 곳에 살면 한쪽만 고쳐지는 날이 온다.
+                "effective_shipped_amount": effective_ship,
                 "asn_missing": ship == _Z and recv > _Z,
                 # 부호를 살린 원값 — clamp 전. 화면·검산이 둘 다 볼 수 있게 남긴다.
-                "unshipped_raw": conf - max(ship, recv),
+                "unshipped_raw": conf - effective_ship,
                 "unreceived_raw": ship - recv,
             }
         )
@@ -311,6 +324,11 @@ def _stage_of(row: dict) -> list[tuple[str, Decimal]]:
     """
     st = row["status"]
     out: list[tuple[str, Decimal]] = []
+    if st not in KNOWN_STATUSES:
+        # ★모르는 상태를 «미종결»로 태우면 그 돈이 ②③에 조용히 섞인다. 실측된 상태는 4종뿐이고
+        #   (RP/PA/RI/CI) 다섯 번째가 나오면 그건 «판정 불가»이지 «발송 대기»가 아니다.
+        #   어느 칸에도 안 넣고 `unknown_status`로 세어 화면이 「모르는 게 있다」고 말하게 한다.
+        return out
     if st == "RP":
         # 아직 우리가 납품가능수량을 확정하지 않은 단계. 확정하며 깎으면 줄어든다(화면이 자백).
         out.append((STAGE_AWAIT_CONFIRM, row["confirmed_amount"]))
@@ -361,6 +379,24 @@ def _extra_buckets(rows: list[dict]) -> dict:
             ),
         },
     }
+
+
+def _unknown_status(rows: list[dict]) -> dict:
+    """실측 4종(RP/PA/RI/CI) 밖의 상태 코드 — 어느 칸에도 안 들어간 돈을 «모름»으로 센다.
+
+    0으로 접으면 그 돈이 화면에서 통째로 사라지고, 미종결로 접으면 ②③이 부푼다. 둘 다 거짓이라
+      «세어서 말한다»가 유일하게 정직한 처리다(원칙22).
+    """
+    n = 0
+    amt = _Z
+    codes: set[str] = set()
+    for r in rows:
+        if r["status"] not in KNOWN_STATUSES:
+            n += 1
+            amt += r["confirmed_amount"]
+            if r["status"]:
+                codes.add(r["status"])
+    return {"po_count": n, "confirmed_amount": amt, "codes": sorted(codes)}
 
 
 def _clamp_report(rows: list[dict]) -> dict:
@@ -525,6 +561,7 @@ def compute_rocket_pipeline(
         },
         **_extra_buckets(all_rows),
         "clamp": _clamp_report(all_rows),
+        "unknown_status": _unknown_status(all_rows),
         "unpriced_shipped_qty": unpriced,
         "last_collection_date_kst": last_day,
         "freshness": _freshness(db, vendor_id),
