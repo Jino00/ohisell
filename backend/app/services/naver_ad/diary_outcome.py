@@ -21,6 +21,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverRetroSignal, NaverSearchTermDaily, OpsDiaryEntry
+from app.services.naver_ad import exclusion_lifecycle
 from app.services.naver_ad.bid_step_types import direction_of
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.diagnosis import correction_factor
@@ -202,6 +203,19 @@ def _st_window(db: Session, entry: OpsDiaryEntry, d1_day: date, age: int) -> dic
     return base
 
 
+# ── 검색어 grain 집계 프리미티브의 공개 별칭 (계약 §4-A S3-b) ────────────────────
+# `exclusion_return_score`가 **같은 원료·같은 매칭 규칙**으로 복귀 관찰창을 집계한다. 복제하지
+# 않고 여기 한 벌을 되읽게 한다 — D-NAO-259가 재심사 백오프 세 벌을 한 벌로 모은 것과 같은 이유:
+# 같은 규칙이 여러 곳에 복제되면 그중 하나만 고쳐지는 날이 온다(이스케이프·절단 매칭은 이미 한 번
+# 적대 리뷰 P1을 맞은 자리다 — `_escape_like` 주석 참조).
+# ★별칭일 뿐 동작·시그니처는 그대로다.
+st_scope = _st_scope
+st_term_clause = _st_term_clause
+st_source_view = _st_source_view
+ST_SOURCES = _ST_SOURCES
+ST_TRUNC_LEN = _ST_TRUNC_LEN
+
+
 def _window_agg(
     db: Session, grain: str, target_id: str | None, campaign_id: str, date_from: date, date_to: date,
 ) -> tuple[int, int, int]:
@@ -281,7 +295,8 @@ def _backfill_row(db: Session, entry: OpsDiaryEntry, today: date, cf: float) -> 
     action_date = _kst_date(entry.created_at)
     age = (today - action_date).days
     outcome: dict = json.loads(entry.outcome_json) if entry.outcome_json else {}
-    counts = {"d1": 0, "d7": 0, "retro": 0, "d1_st": 0, "d1_st_no_data": 0}
+    counts = {"d1": 0, "d7": 0, "retro": 0, "d1_st": 0, "d1_st_no_data": 0,
+              "probation": 0, "probation_silent": 0}
     d1_day = action_date + timedelta(days=1)
 
     # 사후 D+1(완결 다음날) 단일일. 문턱은 원료 정정 창이 닫히는 age 4(_OUTCOME_MIN_AGE_DAYS).
@@ -289,9 +304,12 @@ def _backfill_row(db: Session, entry: OpsDiaryEntry, today: date, cf: float) -> 
         outcome["d1"] = _window_metrics(db, entry, d1_day, d1_day, cf)
         counts["d1"] = 1
     # 검색어 grain D+1 — d1과 공존하는 additive 키. d1은 한 글자도 건드리지 않는다.
+    # ★복귀(재개방·복귀확정) 행은 **제외 성적표의 자를 쓰면 안 된다**(부호가 반대 — 근거는
+    #   exclusion_lifecycle.RETURN_ACTIONS 주석). 그 행들은 아래 probation 키가 자기 자로 잰다.
     if (
         entry.target_type == "search_term"
         and entry.target_id
+        and entry.action not in exclusion_lifecycle.RETURN_ACTIONS
         and age >= _OUTCOME_MIN_AGE_DAYS
         and "d1_st" not in outcome
     ):
@@ -300,6 +318,16 @@ def _backfill_row(db: Session, entry: OpsDiaryEntry, today: date, cf: float) -> 
             outcome["d1_st"] = st
             counts["d1_st"] = 1
             counts["d1_st_no_data"] = 1 if st["status"] == "no_data" else 0
+    # 복귀 관찰창 성적(계약 §4-A S3-b) — d1/d7/d1_st와 공존하는 additive 키.
+    # 지연 import: exclusion_return_score가 이 모듈의 집계 프리미티브를 되읽어 순환이 된다.
+    from app.services.naver_ad import exclusion_return_score as _ers  # noqa: PLC0415
+
+    if _ers.PROBATION_KEY not in outcome and _ers.is_return_open_entry(entry):
+        prob = _ers.score_probation_window(db, entry, today, action_date)
+        if prob is not None:
+            outcome[_ers.PROBATION_KEY] = prob
+            counts["probation"] = 1
+            counts["probation_silent"] = 1 if prob["status"] == _ers.STATUS_SILENT else 0
     if age >= 8 and "d7" not in outcome:  # 사후 7일 = action_date+1..action_date+7
         outcome["d7"] = _window_metrics(
             db, entry, action_date + timedelta(days=1), action_date + timedelta(days=7), cf
@@ -338,7 +366,11 @@ def backfill_outcomes(db: Session, *, now: datetime | None = None) -> dict:
     ).all()
 
     totals = {"d1_filled": 0, "d7_filled": 0, "retro_linked": 0,
-              "d1_st_filled": 0, "d1_st_no_data": 0, "errors": 0}
+              "d1_st_filled": 0, "d1_st_no_data": 0,
+              # 복귀 관찰창 성적(S3-b). silent를 따로 세는 이유: 「열었는데 아무 일도 안 일어났다」가
+              # 몇 건인지가 곧 «복귀 실험이 정보를 내고 있는가»의 지표다(0건 성적표를 초록으로
+              # 착각하지 않기 위한 카운터 — S1이 catch-up에서 「결손 0도 기록」한 것과 같은 규율).
+              "probation_filled": 0, "probation_silent": 0, "errors": 0}
     for entry in rows:
         try:
             c = _backfill_row(db, entry, today, cf)
@@ -349,6 +381,8 @@ def backfill_outcomes(db: Session, *, now: datetime | None = None) -> dict:
             totals["retro_linked"] += c["retro"]
             totals["d1_st_filled"] += c["d1_st"]
             totals["d1_st_no_data"] += c["d1_st_no_data"]
+            totals["probation_filled"] += c["probation"]
+            totals["probation_silent"] += c["probation_silent"]
         except Exception as e:  # noqa: BLE001 — 한 행 실패가 스윕을 못 죽인다
             db.rollback()
             totals["errors"] += 1

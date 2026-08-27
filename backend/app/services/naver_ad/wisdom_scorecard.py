@@ -35,6 +35,7 @@ from app.models import (
     OpsWisdomCandidate,
     OpsWisdomEntry,
 )
+from app.services.naver_ad import exclusion_lifecycle
 from app.services.naver_ad import guardrail_params
 from app.services.naver_ad import reflection_health
 from app.services.naver_ad import wisdom_apply
@@ -501,9 +502,20 @@ def _search_term_material(db: Session) -> dict:
     )
     by_status: dict[str, int] = {
         k: 0
-        for k in ("stopped", "leaking", "ambiguous", "no_data", "absent", "unknown", "not_harvestable")
+        for k in ("stopped", "leaking", "ambiguous", "no_data", "absent", "unknown",
+                  "not_harvestable", "return_experiment")
     }
     for entry in rows:
+        # ⓪ 복귀(재개방·복귀확정) 행 — `d1_st`가 **원리적으로 영원히 안 채워진다.** 제외
+        #   성적표의 자(cost=0 → stopped=성공)를 복귀에 쓰면 부호가 뒤집히므로 diary_outcome이
+        #   의도적으로 배제하고, 대신 `probation` 키가 총이익 축으로 잰다.
+        #   ★이 행을 `absent`로 세면 **바로 위 docstring이 경계한 그 거짓**이 된다 —
+        #   "absent"는 「아직 안 왔을 뿐 언젠가 올 것」인데 이건 영영 안 온다. `not_harvestable`을
+        #   따로 가른 것과 **같은 이유·같은 모양**으로 자기 버킷을 준다(적대 리뷰 P1-2).
+        #   규모: 일일 복귀 캡 10 × harvest 창 90일 ⇒ 점화 후 정상상태에서 최대 ~860행.
+        if entry.action in exclusion_lifecycle.RETURN_ACTIONS:
+            by_status["return_experiment"] += 1
+            continue
         # ① harvest_candidates()의 자체 필터에 애초에 안 걸리는 행 — d1_st 값과 무관하게
         #   harvest는 이 행을 절대 소비하지 않는다.
         if entry.event_type not in HARVEST_EVENT_TYPES or not entry.outcome_json:
@@ -521,11 +533,12 @@ def _search_term_material(db: Session) -> dict:
             status_key = status if status in _D1_ST_KNOWN_STATUSES else "unknown"
         by_status[status_key] += 1
     total = len(rows)
-    harvestable = total - by_status["not_harvestable"]
+    harvestable = total - by_status["not_harvestable"] - by_status["return_experiment"]
     skip_count = harvestable - by_status["stopped"] - by_status["leaking"]
     label = (
         f"재료 {total}건 — 수확 대상 {harvestable}건(good {by_status['stopped']}·"
         f"bad {by_status['leaking']}·skip {skip_count}) / 수확 대상 밖 {by_status['not_harvestable']}건"
+        f" / 복귀 실험 {by_status['return_experiment']}건(제외 성적표 밖 — probation 축에서 잰다)"
         " — 검색어 «지혜가 났다»는 뜻이 아니다(점화 후 몫, D-NAO-247)."
     )
     return {"total": total, "by_status": by_status, "label": label}

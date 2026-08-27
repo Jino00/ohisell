@@ -670,6 +670,33 @@ describe("지혜 성적표 — param_gate · search_term_material(D-NAO-249 F3/F
     expect(screen.getByText(/stopped 3건/)).toBeTruthy();
     expect(screen.getByText(/재료 라벨 문구/)).toBeTruthy();
   });
+
+  // ★적대 리뷰 2R P2-F 상환 — 백엔드가 버킷을 늘렸는데 `statusOrder`를 안 늘리면 헤더의
+  //   총계와 칩 합계가 **말없이 어긋난다.** 2026-08-25 not_harvestable 때는 타입·statusOrder·
+  //   label 셋 다 고쳤는데 S3 return_experiment 때는 label만 고쳐 같은 병이 재발했다.
+  //   그래서 「칩 하나가 빠졌다」가 아니라 **「합이 안 맞는다」**를 못 박는다 — 다음 버킷이
+  //   생겨도 이 테스트가 빨개진다.
+  it("★칩 합계가 헤더 총계와 일치한다(버킷이 늘어도 화면이 조용히 어긋나지 않는다)", async () => {
+    const byStatus = {
+      stopped: 3, leaking: 2, ambiguous: 1, no_data: 4, absent: 1, unknown: 1,
+      not_harvestable: 2, return_experiment: 5,
+    };
+    const total = Object.values(byStatus).reduce((a, b) => a + b, 0); // 19
+    h.wisdom = card(ROW_BASE, REFLECTION_HEALTH, {
+      ...CANDIDATE_STATUS_EMPTY,
+      search_term_material: { total, by_status: byStatus, label: "재료 라벨 문구" },
+    });
+    renderPage();
+    expect(await screen.findByText(new RegExp(`검색어 재료 · ${total}건`))).toBeTruthy();
+
+    let chipSum = 0;
+    for (const [key, n] of Object.entries(byStatus)) {
+      const chip = screen.queryByText(new RegExp(`${key} ${n}건`));
+      expect(chip, `칩 '${key}'가 화면에 없다 — statusOrder에 키를 안 넣었다`).toBeTruthy();
+      chipSum += n;
+    }
+    expect(chipSum).toBe(total);
+  });
 });
 
 // ── ★B5 대칭·탐색 관측(D-NAO-247 점화 계약) ─────────────────────────────────────

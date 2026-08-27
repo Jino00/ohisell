@@ -3851,6 +3851,11 @@ export interface NaverSearchTermMaterialStatus {
     // outcome_json IS NOT NULL) 밖에 있는 행(예: voided). d1_st가 채워지든 말든 harvest가
     // 원리적으로 안 본다 — absent(「채워지면 처리될 행」으로 읽힘)와 섞으면 부정직하다.
     not_harvestable: number;
+    // ★S3 신설 — 복귀(재개방·복귀확정) 실험 행. d1_st가 **원리적으로 영원히** 안 채워진다
+    // (제외 성적표의 자는 「비용 정지 = 성공」이라 복귀에 쓰면 부호가 뒤집힌다 — 복귀는
+    // `probation` 축에서 총이익 기준으로 잰다). absent로 세면 「곧 올 것」이라는 그 이름의
+    // 뜻이 거짓이 되므로 not_harvestable과 같은 이유로 따로 센다.
+    return_experiment: number;
   };
   label: string;
 }

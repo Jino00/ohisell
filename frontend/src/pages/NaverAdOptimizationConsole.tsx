@@ -1631,9 +1631,13 @@ export default function NaverAdOptimizationConsole() {
                   그리지 않는다(옵셔널 방어 렌더, D-NAO-249 F4). */}
               {cs.search_term_material && (() => {
                 const stm = cs.search_term_material!;
+                // ★이 목록은 «칩으로 그릴 키»의 전수다 — 백엔드가 버킷을 늘렸는데 여기를
+                // 안 늘리면 헤더의 `{stm.total}건`과 칩 합계가 **말없이 어긋난다**(적대 리뷰
+                // 2R P2-F가 잡은 자리). 2026-08-25 not_harvestable 때는 셋 다 고쳤는데
+                // S3 return_experiment 때는 label만 고쳐서 같은 병이 재발했다.
                 const statusOrder: (keyof typeof stm.by_status)[] = [
                   "stopped", "leaking", "ambiguous", "no_data", "absent", "unknown",
-                  "not_harvestable",
+                  "not_harvestable", "return_experiment",
                 ];
                 return (
                   <div className="mt-3 pt-2 border-t border-gray-100">

@@ -30,7 +30,13 @@ from app.models import (
     NaverProposal,
     NaverSearchTermExclusion,
 )
-from app.services.naver_ad import diary, exclusion_grade, naver_sa_writer, search_term_judge
+from app.services.naver_ad import (
+    diary,
+    exclusion_grade,
+    exclusion_lifecycle,
+    naver_sa_writer,
+    search_term_judge,
+)
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now
 
@@ -50,7 +56,10 @@ _PL_GROUP_SLOT_CAP = 60
 
 # 재심사 개방(복귀) 실쓰기 change_log action·마커(PX3) — 제외(exclude_search_term)와 별도 액션으로
 # 분리해 일일 복귀 캡·감사를 독립 카운트한다(제외 캡과 상호 오염 방지).
-_RESTORE_ACTION = "restore_search_term"
+# ★정의 자리는 `exclusion_lifecycle`이다(값 불변 — 여기선 되읽기만). 이 토큰은 이제 change_log
+#   action이면서 동시에 **일기 action**이고, 소급 채점이 「제외의 자」와 「복귀의 자」를 가르는
+#   기준이기도 하다(diary_outcome._backfill_row). 한 값이 세 곳의 판정을 좌우하므로 복제하지 않는다.
+_RESTORE_ACTION = exclusion_lifecycle.RETURN_OPEN_ACTION
 _RETURN_MARKER = "[검색어제외 복귀]"
 # probation 관찰창(§2) — 개방 후 재노출 관찰 기간(일).
 _PROBATION_DAYS = 14
@@ -426,6 +435,11 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
     )
     db.add(entry)
     db.commit()
+    # ★S3-a(계약 §4-C) — 학습 사슬 진입. 이 경로는 harness를 안 타서(제안 없이 상태기계가 스스로
+    # 여는 전이) 그동안 일기가 **0건**이었다: 우리가 한 복귀는 change_log에만 남고 일기→소급채점→
+    # 반성→지혜 사슬엔 원리적으로 안 탔다. harness가 executor 커밋 직후에 일기를 남기는 것과 같은
+    # 자리(실쓰기 확정 후)에서 기록한다. fail-open은 recorder가 진다.
+    exclusion_lifecycle.record_return_opened(db, row, entry, now)
     log.info("search_term_ss_lane: 재심사 개방 성공 adgroup=%s term=%r", row.adgroup_id, row.search_term)
     return True
 
@@ -645,6 +659,13 @@ def _run_reexamination(db: Session, powerlink: list[dict], now: datetime) -> dic
         if cand is not None:
             # 여전히 §1 후보 → 재제외(자동 발사, _upsert_exclusion이 cycle 승계·백오프 30→60→90).
             if _autofire_exclude(db, cand, now) is not None:
+                # ★S3-a: 실험의 «종료» 전이를 한 자리로 통과시킨다. 이 갈래의 일기는 harness가
+                # 이미 남기므로 recorder는 no-op이다 — 그래도 통과시키는 이유는 인구조사 테스트가
+                # 「종료 전이는 예외 없이 이 모듈을 지난다」를 셀 수 있어야 하기 때문이다(다음에
+                # 세 번째 갈래가 생겨도 조용히 빠지지 않는다).
+                exclusion_lifecycle.record_return_settled(
+                    db, row, verdict=exclusion_lifecycle.VERDICT_REEXCLUDED, now=now,
+                )
                 reexcluded += 1
             # 실패(일일캡 소진 등)면 probation 유지 — 다음 레인 재시도(카운트 미증가, 정직).
         else:
@@ -652,6 +673,11 @@ def _run_reexamination(db: Session, powerlink: list[dict], now: datetime) -> dic
             row.status = "restored"
             row.last_transition_at = now
             db.commit()
+            # ★S3-a: 복귀 확정도 «우리가 한 조치»다 — 네이버 무접촉이라 change_log가 없어서
+            # 그동안 어디에도 안 남았다(실험의 시작도 끝도 사슬 밖). 여기가 그 종결 기록이다.
+            exclusion_lifecycle.record_return_settled(
+                db, row, verdict=exclusion_lifecycle.VERDICT_RESTORED, now=now,
+            )
             restored += 1
 
     return {
