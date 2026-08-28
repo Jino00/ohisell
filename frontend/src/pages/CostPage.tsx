@@ -1827,7 +1827,12 @@ export function RecipeList({
             onClick={() => onSelect(r.id)}
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="truncate">{r.product_name}</span>
+              {/* ★`title` — 여기도 보드 표와 같은 결함이었다(2026-08-28): `truncate`만 있고
+                  전문을 볼 길이 없었다. 이쪽은 좌우 2단 목록이라 캡을 걷으면 폼팩터 라벨이
+                  밀리므로 **잘림은 남기고 툴팁만 준다** — 보드 표와 처방이 갈리는 이유다. */}
+              <span className="truncate" title={r.product_name}>
+                {r.product_name}
+              </span>
               <span className="text-xs text-gray-500 shrink-0">
                 {formFactorLabel(r.form_factor)}
               </span>
@@ -2517,24 +2522,46 @@ export function StandardCostBoard({
           <table className="w-full text-xs">
             <thead className="text-gray-500">
               <tr className="text-left border-b">
-                <th className="py-1 pr-2">SKU</th>
-                <th className="py-1 pr-2">상품</th>
-                <th className="py-1 pr-2">폼팩터</th>
-                <th className="py-1 pr-2 text-right">표준원가(VAT 포함)</th>
+                {/* ★머리는 전부 `whitespace-nowrap` — auto layout에서 열 폭을 잡아 주는 것은
+                    머리이고, 「표준원가(VAT 포함)」가 접히면 그 열이 좁아진 채로 굳는다.
+                    상품 열의 캡을 걷은(아래 참조) 대가를 여기서 치른다. */}
+                <th className="py-1 pr-2 whitespace-nowrap">SKU</th>
+                <th className="py-1 pr-2 whitespace-nowrap">상품</th>
+                <th className="py-1 pr-2 whitespace-nowrap">폼팩터</th>
+                <th className="py-1 pr-2 text-right whitespace-nowrap">표준원가(VAT 포함)</th>
                 {/* ★합격 6의 「세 값 나란히」 — 원장 파생(표준원가) · 엑셀 표준 · 그 격차.
                     엑셀 값은 대조값이라 계산에 유입되지 않는다(계약 A′ §3). */}
-                <th className="py-1 pr-2 text-right">엑셀 표준(참고)</th>
-                <th className="py-1 pr-2 text-right">엑셀 대비</th>
-                <th className="py-1 pr-2 text-right">현 cost_price</th>
-                <th className="py-1 pr-2 text-right">격차</th>
-                <th className="py-1">비고</th>
+                <th className="py-1 pr-2 text-right whitespace-nowrap">엑셀 표준(참고)</th>
+                <th className="py-1 pr-2 text-right whitespace-nowrap">엑셀 대비</th>
+                <th className="py-1 pr-2 text-right whitespace-nowrap">현 cost_price</th>
+                <th className="py-1 pr-2 text-right whitespace-nowrap">격차</th>
+                <th className="py-1 whitespace-nowrap">비고</th>
               </tr>
             </thead>
             <tbody>
               {items.map((row) => (
                 <tr key={`${row.recipe_id}-${row.internal_sku}`} className="border-b last:border-0">
-                  <td className="py-1 pr-2 font-mono">{row.internal_sku}</td>
-                  <td className="py-1 pr-2 truncate max-w-[22rem]">
+                  <td className="py-1 pr-2 font-mono whitespace-nowrap">{row.internal_sku}</td>
+                  {/* ★2026-08-28 (Jino «sellC에서 글자가 이렇게 잘리네») — 초판은
+                      `truncate max-w-[22rem]`(352px)로 상품명을 말줄임했는데 이 셀엔
+                      `title`조차 없어 **전문을 볼 길이 화면에 하나도 없었다**. 홈 탭 왕복 표는
+                      같은 자리에 `title`을 갖고 있으니(`costHome.tsx:413`) 한 화면 안에서
+                      규격이 갈라져 있던 셈이다.
+                      ⇒ 캡을 걷고 넘칠 때만 줄바꿈시킨다. 이 표는 `w-full`·auto layout이고 마지막
+                      「비고」열이 대개 비어 있어 남는 폭이 이 열로 온다 — 대부분의 행은 한 줄에
+                      다 들어가고, 정말 긴 이름만 두 줄이 된다(잘리지는 않는다).
+                      `title`은 그래도 남긴다 — 창이 좁아 줄바꿈이 나도 원문 한 줄은 보장된다.
+                      ★대가를 같이 치른다: 캡을 걷으면 남는 폭 경쟁이 열려 이번엔 **숫자 열이**
+                      접힐 수 있다 — `2,649.7원`이 두 줄로 갈라지면 행 높이가 들쭉날쭉해진다
+                      (같은 병을 왕복 표에서 이미 겪었다: `costHome.tsx:435` 주석, Jino
+                      2026-08-28 11:09 «날짜가 2줄이 되지 않도록»). 그래서 머리 9열과 값 쪽
+                      숫자·SKU·폼팩터 칸에 `whitespace-nowrap`을 둘러 **줄바꿈을 상품명과
+                      비고에만 허용**한다. 접혀도 되는 것은 문장이지 값이 아니다. */}
+                  <td
+                    className="py-1 pr-2 break-words"
+                    title={row.product_name ?? row.recipe_product_name}
+                    data-testid={`board-name-${row.internal_sku}`}
+                  >
                     {row.product_name ?? row.recipe_product_name}
                     {row.recipe_kind === "imported_goods" ? (
                       <span
@@ -2545,7 +2572,7 @@ export function StandardCostBoard({
                       </span>
                     ) : null}
                   </td>
-                  <td className="py-1 pr-2">
+                  <td className="py-1 pr-2 whitespace-nowrap">
                     {formFactorLabel(row.form_factor)}
                     {/* ★「모른다」를 「bar다」로 바꾼 자리를 화면이 자백한다(계약 D-CPP-61 §4-Q2).
                         값 자체는 바뀌지 않는다 — 바뀌는 것은 침묵뿐이다. */}
@@ -2559,25 +2586,28 @@ export function StandardCostBoard({
                       </span>
                     ) : null}
                   </td>
-                  <td className="py-1 pr-2 text-right font-medium">
+                  <td className="py-1 pr-2 text-right font-medium whitespace-nowrap">
                     {formatCostWon(row.std_cost_inc_vat)}
                   </td>
                   {/* ★엑셀 표준은 «대조값»이다 — 회색으로 두어 원장 파생 값과 서열을 두지 않되
                       출처가 다르다는 것을 색으로 말한다(D-CPP-56 규율 계승). */}
                   <td
-                    className="py-1 pr-2 text-right text-gray-600"
+                    className="py-1 pr-2 text-right text-gray-600 whitespace-nowrap"
                     data-testid="board-excel-standard"
                   >
                     {formatCostWon(row.excel_total_inc_vat)}
                   </td>
-                  <td className="py-1 pr-2 text-right" data-testid="board-excel-gap">
+                  <td
+                    className="py-1 pr-2 text-right whitespace-nowrap"
+                    data-testid="board-excel-gap"
+                  >
                     {gapText(row.excel_gap_pct)}
                   </td>
                   {/* ★읽기 전용 대조값이다 — 이 화면은 이 칸에 쓰지 않는다(계약 §3 금지선). */}
-                  <td className="py-1 pr-2 text-right text-gray-600">
+                  <td className="py-1 pr-2 text-right text-gray-600 whitespace-nowrap">
                     {formatCostWon(row.current_cost_price)}
                   </td>
-                  <td className="py-1 pr-2 text-right">{gapText(row.gap_pct)}</td>
+                  <td className="py-1 pr-2 text-right whitespace-nowrap">{gapText(row.gap_pct)}</td>
                   <td className="py-1 text-amber-700">{uncomputedReason(row) ?? ""}</td>
                 </tr>
               ))}
@@ -3120,9 +3150,14 @@ export default function CostPage() {
        + 11:19 «이 화면과 같이 공간 활용을 잘 해봐» — 참조 화면 `Rocket1PFunnel.tsx:105`는
        상한이 아예 없다). `max-w-[96rem]`=1536px인데 실제 창은 사이드바를 빼도 그보다 넓어
        오른쪽이 통째로 비는 반면, 홈의 왕복 표는 **12열 × 139행**이라 그 폭이 다 필요하다.
-       나머지 3탭은 폼·목록 위주라 상한이 가독성을 돕는다 — 그래서 **탭별로 가른다**.
-       한 값을 전역으로 바꾸면 안 보이는 세 화면의 줄바꿈이 같이 흔들린다. */
-    <div className={tab === "home" ? "p-6" : "p-6 max-w-[96rem]"}>
+       나머지 탭은 폼·목록 위주라 상한이 가독성을 돕는다 — 그래서 **탭별로 가른다**.
+       한 값을 전역으로 바꾸면 안 보이는 화면들의 줄바꿈이 같이 흔들린다.
+       ★2026-08-28 «글자가 이렇게 잘리네» — **보드 탭도 상한을 푼다.** 위 규칙의 가르는 축은
+       「홈이냐」가 아니라 「넓은 표냐 폼·목록이냐」인데, 보드는 **9열 × 924 SKU의 넓은 표**라
+       홈과 같은 쪽에 선다(초판이 홈만 푼 것은 그때 홈만 봤기 때문이다). 1536px 상한이
+       오른쪽을 통째로 비워 둔 채 상품명을 잘라 내고 있었다 — 잘림의 절반은 열 캡이었고
+       나머지 절반이 이 상한이다. `materials`·`recipes`는 그대로 둔다. */
+    <div className={tab === "home" || tab === "board" ? "p-6" : "p-6 max-w-[96rem]"}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">💰 원가</h1>
         <div className="flex items-center gap-2 flex-wrap">
