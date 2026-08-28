@@ -13,18 +13,24 @@
 //
 // ★그래서 여기서는 **클래스 문자열과 `title` 속성을 직접 검사한다.** jsdom에서 실제 폭을
 //   잴 수 없으니 이게 이 결함을 잡을 수 있는 유일한 자리다 — 우아하지 않다는 것을 알고
-//   쓴다. 이 파일이 사살하는 변이는 셋이다:
+//   쓴다. 이 파일이 사살하는 변이:
 //     M1  보드 상품명 칸에 `truncate`를 되돌린다
 //     M2  보드 상품명 칸의 `title`을 지운다
 //     M3  숫자 칸의 `whitespace-nowrap`을 지운다 (상품명 캡을 걷은 대가로 이번엔 값이
 //         접힌다 — `2,649.7원`이 두 줄로 갈라지던 그 병. Jino 2026-08-28 11:09
 //         «날짜가 2줄이 되지 않도록»)
+//     M4  머리 `<th>`의 nowrap을 지운다 · M5 `RecipeList`의 `title`을 지운다
+//     M6  보드 탭의 페이지 폭 상한 해제를 되돌린다 ★적대 리뷰에서 **살아남았던** 변이
+//     M7  상품명 텍스트 렌더 자체를 지운다(`title`만 남긴다) — 「닿는 층」 변이
 // ══════════════════════════════════════════════════════════════════════════════
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 
-import { RecipeList, StandardCostBoard } from "./CostPage";
+import { RecipeList, StandardCostBoard, costPageWidthClass } from "./CostPage";
 import type { CostBoard, CostBoardRow, CostRecipe } from "../lib/api";
+
+/** 보드 상품명 칸의 testid — `recipe_id`까지 넣는 이유는 아래 「중복 SKU」 테스트가 말한다. */
+const BOARD_NAME_TESTID = "board-name-45-OHI-0442";
 
 // ★자동 정리가 없다(전역 setup 파일이 없는 설정) — 안 지우면 앞 테스트의 표가 DOM에 남아
 //   `getByTestId`가 「여러 개 찾음」으로 죽고, 머리 9개를 세는 검사가 45개를 센다.
@@ -70,7 +76,7 @@ function board(items: CostBoardRow[]): CostBoard {
 describe("★보드 표 — 상품명이 잘리지 않는다 (Jino «글자가 이렇게 잘리네», 2026-08-28)", () => {
   it("M1 — 상품명 칸에 `truncate`도 `max-w` 캡도 없다", () => {
     render(<StandardCostBoard board={board([boardRow()])} />);
-    const cell = screen.getByTestId("board-name-OHI-0442");
+    const cell = screen.getByTestId(BOARD_NAME_TESTID);
     const cls = cell.className;
     // `truncate` = overflow-hidden + text-ellipsis + whitespace-nowrap. 하나라도 살아 있으면
     // 이름이 다시 잘린다 — 개별 유틸리티로 되돌리는 우회까지 함께 막는다.
@@ -86,7 +92,7 @@ describe("★보드 표 — 상품명이 잘리지 않는다 (Jino «글자가 �
 
   it("M2 — 상품명 칸이 전문을 `title`로 들고 있다 (줄바꿈이 나도 원문 한 줄은 남는다)", () => {
     render(<StandardCostBoard board={board([boardRow()])} />);
-    const cell = screen.getByTestId("board-name-OHI-0442");
+    const cell = screen.getByTestId(BOARD_NAME_TESTID);
     expect(cell.getAttribute("title")).toBe(LONG_NAME);
     // 화면 텍스트 자체도 잘린 형태가 아니다 — 말줄임표가 본문에 섞여 들어오면 안 된다.
     expect(cell.textContent).toContain(LONG_NAME);
@@ -95,7 +101,7 @@ describe("★보드 표 — 상품명이 잘리지 않는다 (Jino «글자가 �
 
   it("★product_name이 null이면 recipe_product_name으로 폴백하고 title도 그 값이다", () => {
     render(<StandardCostBoard board={board([boardRow({ product_name: null })])} />);
-    const cell = screen.getByTestId("board-name-OHI-0442");
+    const cell = screen.getByTestId(BOARD_NAME_TESTID);
     expect(cell.getAttribute("title")).toBe(LONG_NAME);
     expect(cell.textContent).toContain(LONG_NAME);
   });
@@ -125,6 +131,43 @@ describe("★보드 표 — 상품명이 잘리지 않는다 (Jino «글자가 �
     for (const th of headers) {
       expect(th.className).toMatch(/\bwhitespace-nowrap\b/);
     }
+  });
+
+  // ★적대 리뷰 P2-1 — 같은 `internal_sku`가 **두 레시피**에 링크될 수 있다
+  //   (`CostRecipeLink`에 (sku, recipe) 유니크 제약이 없다. `<tr key>`가 이미
+  //   `${recipe_id}-${internal_sku}` 조합을 쓰는 것이 그 자백이다). testid를 SKU만으로
+  //   두면 그때 `getByTestId`가 「여러 개 찾음」으로 죽는다 — **화면은 멀쩡한데 테스트만
+  //   조용히 못 쓰게 되는** 자리다. 이런 결함은 결함이 났을 때가 아니라 결함을 잡으러
+  //   갔을 때 드러나므로 여기서 미리 고정한다.
+  it("★같은 SKU가 두 레시피에 서도 상품명 칸을 각각 유일하게 짚을 수 있다", () => {
+    render(
+      <StandardCostBoard
+        board={board([
+          boardRow({ recipe_id: 45 }),
+          boardRow({ recipe_id: 97, product_name: `${LONG_NAME} (두 번째 레시피)` }),
+        ])}
+      />,
+    );
+    expect(screen.getByTestId("board-name-45-OHI-0442").getAttribute("title")).toBe(LONG_NAME);
+    expect(screen.getByTestId("board-name-97-OHI-0442").getAttribute("title")).toBe(
+      `${LONG_NAME} (두 번째 레시피)`,
+    );
+  });
+});
+
+// ── 페이지 폭 상한 — 잘림의 «나머지 절반» ──────────────────────────────────────
+// ★적대 리뷰 변이 M6이 **살아남은** 자리다: 보드 탭의 `max-w-[96rem]` 해제를 되돌려도
+//   프론트 1,173건이 전건 초록이었다. 최상위 wrapper의 className은 `<CostPage>`를 통째로
+//   렌더해야 닿아서 어느 테스트도 보지 않았기 때문이다. 판정을 순수 함수로 뽑아 잡는다.
+describe("★페이지 폭 상한 — 넓은 표(home·board)만 상한을 푼다", () => {
+  it("board·home은 폭 상한이 없다 (오른쪽을 비워 둔 채 이름을 자르던 자리)", () => {
+    expect(costPageWidthClass("board")).not.toMatch(/\bmax-w-/);
+    expect(costPageWidthClass("home")).not.toMatch(/\bmax-w-/);
+  });
+
+  it("materials·recipes는 상한을 유지한다 — 폼·목록이라 상한이 가독성을 돕는다", () => {
+    expect(costPageWidthClass("materials")).toMatch(/\bmax-w-\[96rem\]/);
+    expect(costPageWidthClass("recipes")).toMatch(/\bmax-w-\[96rem\]/);
   });
 });
 

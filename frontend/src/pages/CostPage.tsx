@@ -94,6 +94,21 @@ import {
  *  기존 탭의 대체가 아니고, 인박스·왕복 표가 결국 그 탭들의 기존 패널로 «데려간다». */
 export type CostTab = "home" | "materials" | "recipes" | "board";
 
+/**
+ * 페이지 폭 상한 — 가르는 축은 「홈이냐」가 아니라 **「넓은 표냐 폼·목록이냐」**다.
+ * `home`(왕복 표 12열 × 139행)·`board`(9열 × 924 SKU)는 폭이 다 필요하고,
+ * `materials`·`recipes`는 폼·목록이라 `max-w-[96rem]`(1536px) 상한이 가독성을 돕는다.
+ *
+ * ★함수로 뽑은 이유는 순전히 **테스트가 잡을 수 있게** 하려는 것이다(적대 리뷰 P2-2).
+ *   인라인 삼항으로 두었을 때 「보드 탭 상한 해제」를 되돌리는 변이(M6)가 프론트 1,173건
+ *   전건 초록 속에서 **살아남았다** — 잘림의 절반이 이 상한이었는데 그 절반을 아무도
+ *   안 지키고 있었다는 뜻이다. 최상위 wrapper의 className은 `<CostPage>`를 통째로
+ *   렌더해야 닿는 자리라 어느 테스트도 보지 않았다.
+ */
+export function costPageWidthClass(tab: CostTab): string {
+  return tab === "home" || tab === "board" ? "p-6" : "p-6 max-w-[96rem]";
+}
+
 // ══════════════════════════════════════════════════════════════════
 // 순수 표시 규칙 (테스트가 이 함수들을 직접 잡는다)
 // ══════════════════════════════════════════════════════════════════
@@ -2556,11 +2571,16 @@ export function StandardCostBoard({
                       (같은 병을 왕복 표에서 이미 겪었다: `costHome.tsx:435` 주석, Jino
                       2026-08-28 11:09 «날짜가 2줄이 되지 않도록»). 그래서 머리 9열과 값 쪽
                       숫자·SKU·폼팩터 칸에 `whitespace-nowrap`을 둘러 **줄바꿈을 상품명과
-                      비고에만 허용**한다. 접혀도 되는 것은 문장이지 값이 아니다. */}
+                      비고에만 허용**한다. 접혀도 되는 것은 문장이지 값이 아니다.
+                      ★testid의 키는 `<tr>`과 **같은 조합**이어야 한다(적대 리뷰 P2-1):
+                      `internal_sku` 하나로는 유일하지 않다 — `CostRecipeLink`에
+                      (sku, recipe) 유니크 제약이 없어 한 SKU가 두 레시피에 링크되면 보드에
+                      두 행이 서고, 그러면 `getByTestId`가 「여러 개 찾음」으로 죽는다.
+                      화면은 멀쩡한데 **테스트만 조용히 못 쓰게 되는** 자리다. */}
                   <td
                     className="py-1 pr-2 break-words"
                     title={row.product_name ?? row.recipe_product_name}
-                    data-testid={`board-name-${row.internal_sku}`}
+                    data-testid={`board-name-${row.recipe_id}-${row.internal_sku}`}
                   >
                     {row.product_name ?? row.recipe_product_name}
                     {row.recipe_kind === "imported_goods" ? (
@@ -3152,12 +3172,11 @@ export default function CostPage() {
        오른쪽이 통째로 비는 반면, 홈의 왕복 표는 **12열 × 139행**이라 그 폭이 다 필요하다.
        나머지 탭은 폼·목록 위주라 상한이 가독성을 돕는다 — 그래서 **탭별로 가른다**.
        한 값을 전역으로 바꾸면 안 보이는 화면들의 줄바꿈이 같이 흔들린다.
-       ★2026-08-28 «글자가 이렇게 잘리네» — **보드 탭도 상한을 푼다.** 위 규칙의 가르는 축은
-       「홈이냐」가 아니라 「넓은 표냐 폼·목록이냐」인데, 보드는 **9열 × 924 SKU의 넓은 표**라
-       홈과 같은 쪽에 선다(초판이 홈만 푼 것은 그때 홈만 봤기 때문이다). 1536px 상한이
+       ★2026-08-28 «글자가 이렇게 잘리네» — **보드 탭도 상한을 푼다.** 1536px 상한이
        오른쪽을 통째로 비워 둔 채 상품명을 잘라 내고 있었다 — 잘림의 절반은 열 캡이었고
-       나머지 절반이 이 상한이다. `materials`·`recipes`는 그대로 둔다. */
-    <div className={tab === "home" || tab === "board" ? "p-6" : "p-6 max-w-[96rem]"}>
+       나머지 절반이 이 상한이다. 판정은 `costPageWidthClass`(위쪽 정의)로 옮겼다:
+       인라인 삼항이면 이 결정을 잡는 테스트가 원리적으로 없기 때문이다(적대 리뷰 P2-2). */
+    <div className={costPageWidthClass(tab)}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">💰 원가</h1>
         <div className="flex items-center gap-2 flex-wrap">
