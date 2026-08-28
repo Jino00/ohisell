@@ -1314,9 +1314,17 @@ def retro_scorecard(
     by_board: dict[str, list[NaverRetroSignal]] = {}
     for row in signal_rows:
         by_board.setdefault(row.board, []).append(row)
+    # D-NAO-267 (계약 §4-A T1 = ref 65 S2-ⓐ): 보드별 rollup에 **평시/주말/공휴일 분리 열**을
+    # 나란히 싣는다. 기존 d3/d7 키는 **그대로 둔다** — 이 응답의 소비처(커맨드 센터·타임라인)가
+    # 그 shape을 읽고 있어서, 갈아치우면 분리를 얻고 기존 표면을 잃는다(additive only).
+    # ★`weekend_holiday`가 계약 §4-C S2-① 원문이 지목한 열 이름 그대로다.
     boards = {
         board: {"d3": retro_rollup.board_rollup(rows, 3),
-                "d7": retro_rollup.board_rollup(rows, 7)}
+                "d7": retro_rollup.board_rollup(rows, 7),
+                "weekend_holiday": {
+                    "d3": retro_rollup.day_class_rollup(rows, 3),
+                    "d7": retro_rollup.day_class_rollup(rows, 7),
+                }}
         for board, rows in by_board.items()
     }
 

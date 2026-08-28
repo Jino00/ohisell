@@ -25,10 +25,29 @@ import type { PaoScopeRoster } from "../lib/api";
 //   생존했던 이유가 정확히 이것 — 읽기 표면만 재고 쓰기 표면은 아무도 안 봤다.
 import { putPaoScopeAdgroup } from "../lib/api";
 
+// ★로스터를 테스트마다 갈아끼운다 (D-NAO-267). vi.mock 팩토리는 호이스팅돼서 바깥 변수를
+//   그냥 참조하면 초기화 전 접근이 된다 — vi.hoisted가 그 순서 문제의 공식 해법이다.
+//   램프업 그룹을 공용 ROSTER에 «더하면» 기존 SUR-3·쓰기 표면 테스트의 findByTitle 단수
+//   조회가 중복 매치로 깨진다(토글 버튼이 하나 더 생긴다). 그래서 더하지 않고 갈아끼운다.
+const hoisted = vi.hoisted(() => ({ roster: null as unknown }));
+
 const ROSTER: PaoScopeRoster = {
   window: { date_from: "2026-08-03", date_to: "2026-08-23", days: 21 },
   correction_factor: { low: 0.827, high: 1.3016, source: "actual_revenue_ratio" },
-  totals: {},
+  totals: { cost: 100_000, imp: 1000, clk: 50, conv_amt: 120_000 },
+  weekend_holiday: {
+    weekday: { days: 15, cost: 80_000, imp: 800, clk: 40, conv_amt: 110_000, roas: 1.375 },
+    weekend: { days: 5, cost: 18_000, imp: 180, clk: 9, conv_amt: 9_000, roas: 0.5 },
+    holiday: { days: 1, cost: 2_000, imp: 20, clk: 1, conv_amt: 1_000, roas: 0.5 },
+    identity: {
+      total: { cost: 100_000, imp: 1000, clk: 50, conv_amt: 120_000 },
+      sum_of_parts: { cost: 100_000, imp: 1000, clk: 50, conv_amt: 120_000 },
+      ok: true,
+      note: "평시+주말+공휴일 = 전체 (ref 63 §1-2 검산과 같은 방식·같은 grain)",
+    },
+    basis: "ad_date (성과 발생일) — ref 63 §1-2와 같은 grain",
+    reference: "ref 63 §4-1 확정치: 주말 Σexcess −8,020,470원 · 공휴일 −915,912원.",
+  },
   campaigns: [
     {
       campaign_id: "cmp-tpu",
@@ -39,6 +58,7 @@ const ROSTER: PaoScopeRoster = {
       has_scope: true,
       scoped_count: 1,
       adgroup_count: 2,
+      ramp_up_count: 0,
       cost: 100_000,
       imp: 1000,
       clk: 50,
@@ -61,6 +81,7 @@ const ROSTER: PaoScopeRoster = {
           conv_amt: 30_000,
           roas: 3.0,
           bep_roas: 1.711,
+          baseline_days: 14,
           gross_profit: 7_534,
           gross_profit_low: 1_200,
           gross_profit_high: 15_000,
@@ -79,6 +100,7 @@ const ROSTER: PaoScopeRoster = {
           conv_amt: 90_000,
           roas: 1.0,
           bep_roas: null,
+          baseline_days: 14,
           gross_profit: null, // ★모름 — 0원이 아니다
           gross_profit_low: null,
           gross_profit_high: null,
@@ -93,7 +115,7 @@ vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
   return {
     ...actual,
-    fetchPaoScopeRoster: vi.fn(async () => ROSTER),
+    fetchPaoScopeRoster: vi.fn(async () => hoisted.roster),
     putPaoScopeAdgroup: vi.fn(async () => ({
       campaign_id: "cmp-tpu", adgroup_id: "grp-s25fe", role: "accel" as const,
       enabled: true, memo: null,
@@ -108,6 +130,7 @@ vi.mock("../lib/api", async () => {
 });
 
 beforeEach(() => {
+  hoisted.roster = ROSTER; // 테스트마다 기본값으로 되돌린다 — 갈아끼운 게 새지 않게
   window.history.pushState({}, "", "/naver-ad/scope");
 });
 
@@ -224,5 +247,106 @@ describe("★쓰기 표면 — 토글·역할 선택이 실제로 서버를 부�
     expect(putPaoScopeAdgroup).toHaveBeenCalledWith(
       expect.objectContaining({ adgroup_id: "grp-s25fe", role: "brake" }),
     );
+  });
+});
+
+// ── ★D-NAO-267 — 교란축 X9「램프업」이 화면 픽셀이 되는가 (M2 계약 §4-C S2-④·공통) ──
+//
+// 죽여야 할 표면 변이:
+//   SUR-7 ProfitCell이 ramp_up을 그냥 「모름」으로 그림 — 신규 그룹의 초기 잡음이
+//         「상품 원가 미연결」과 한 칸에 뭉개진다(둘은 사람이 할 일이 다르다)
+//   SUR-8 캠페인 행의 `ramp_up_count` 배지 제거 — 총이익이 «덜 센» 값인데 그냥
+//         「그만큼인 값」으로 읽힌다
+//
+// ★백엔드 테스트가 「응답까지 간다」를 지키고, 이 파일이 「응답이 픽셀이 된다」를 지킨다.
+//   둘 중 하나만 있으면 그 사이 한 칸에서 조용히 끊긴다 — 이 저장소가 반복해 밟은 자리다.
+const RAMP_ROSTER: PaoScopeRoster = {
+  ...ROSTER,
+  campaigns: [
+    {
+      ...ROSTER.campaigns[0],
+      ramp_up_count: 1,
+      adgroups: [
+        ROSTER.campaigns[0].adgroups[0], // 평범한 그룹 — 대조군
+        {
+          ...ROSTER.campaigns[0].adgroups[1],
+          adgroup_id: "grp-newly-created",
+          name: "신규 그룹",
+          baseline_days: 0,          // ★평시 관측 0일 = ref 63 §10 「baseline 부재」
+          bep_roas: 1.711,           // BEP는 해석됐다 — 그래야 램프업이 이긴다
+          gross_profit: null,
+          gross_profit_low: null,
+          gross_profit_high: null,
+          profit_status: "ramp_up",
+        },
+      ],
+    },
+  ],
+};
+
+describe("★교란축 X9 — 「램프업」이 사람에게 닿는다", () => {
+  it("SUR-7: ramp_up은 「램프업」으로 그린다 — 「모름」과 뭉개지 않는다", async () => {
+    hoisted.roster = RAMP_ROSTER;
+    await renderApp();
+    expect(await screen.findByText("램프업")).toBeTruthy();
+  });
+
+  it("SUR-7b: 램프업 셀은 «왜»를 말한다 — 평시 관측 0일이라는 사유가 붙는다", async () => {
+    hoisted.roster = RAMP_ROSTER;
+    await renderApp();
+    // 라벨만 있고 사유가 없으면 보는 사람은 코드를 열어야 안다
+    expect(await screen.findByTitle(/평시.*관측이 0일/)).toBeTruthy();
+  });
+
+  it("SUR-8: 캠페인 행이 「몇 개가 빠졌는지」 말한다 — 총이익이 덜 센 값이기 때문", async () => {
+    hoisted.roster = RAMP_ROSTER;
+    await renderApp();
+    expect(await screen.findByText(/램프업 1 제외/)).toBeTruthy();
+  });
+
+  it("램프업이 없으면 그 배지도 없다 — 항상 뜨면 아무 정보가 아니다", async () => {
+    await renderApp(); // 기본 ROSTER(ramp_up_count: 0)
+    await screen.findByRole("heading", { name: /PAO 스코프/ });
+    expect(screen.queryByText(/램프업/)).toBeNull();
+  });
+});
+
+// ── ★D-NAO-267 — 평시/주말/공휴일 분리가 화면 픽셀이 되는가 (적대 리뷰 1R P1-1 상환) ──
+//
+// 죽여야 할 표면 변이:
+//   SUR-9  DayClassStrip 호출부 제거 — 백엔드가 세 칸을 실어 보내도 화면이 안 그린다
+//   SUR-10 항등식 불일치 경고 렌더 제거 — 「합이 안 맞는데 맞는 것처럼」 보인다
+describe("★평시·주말·공휴일 분리가 사람에게 닿는다", () => {
+  it("SUR-9: 세 칸이 화면에 그려진다 — 섞인 값만 보이면 평시가 과소평가된다", async () => {
+    await renderApp();
+    expect(await screen.findByText("평시")).toBeTruthy();
+    expect(await screen.findByText("주말")).toBeTruthy();
+    expect(await screen.findByText("공휴일")).toBeTruthy();
+  });
+
+  it("칸별 광고비·ROAS가 실제 값으로 뜬다 — 직렬화가 끊기면 빈 칸이 된다", async () => {
+    await renderApp();
+    expect(await screen.findByText("80,000원")).toBeTruthy();  // 평시
+    expect(await screen.findByText("18,000원")).toBeTruthy();  // 주말
+    // 주말 ROAS 0.50은 BEP(1.711) 한참 아래 — 사람이 그 대비를 읽을 수 있어야 한다
+    expect((await screen.findAllByText(/0\.50/)).length).toBeGreaterThan(0);
+  });
+
+  it("SUR-10: 항등식이 깨지면 화면이 말한다 — 조용히 넘어가면 검산이 아니다", async () => {
+    hoisted.roster = {
+      ...RAMP_ROSTER,
+      weekend_holiday: {
+        ...ROSTER.weekend_holiday,
+        identity: { ...ROSTER.weekend_holiday.identity, ok: false },
+      },
+    };
+    await renderApp();
+    expect(await screen.findByText(/항등식 불일치/)).toBeTruthy();
+  });
+
+  it("항등식이 맞으면 경고를 띄우지 않는다 — 항상 뜨면 아무 정보가 아니다", async () => {
+    await renderApp();
+    await screen.findByText("평시");
+    expect(screen.queryByText(/항등식 불일치/)).toBeNull();
   });
 });
