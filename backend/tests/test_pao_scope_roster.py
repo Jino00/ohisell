@@ -10,6 +10,7 @@
 #   모른다 — 이 트랙이 네 번 밟은 병이 정확히 그것이다(LESSONS_LEARNED #346 계열).
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -29,13 +30,32 @@ from app.models import (
     NaverCampaignSettings,
     NaverEntity,
 )
-from app.services.naver_ad import pao_scope_roster
+from app.services.naver_ad import pao_scope_roster, probe_cell_aggregate
 from app.utils.kst import kst_today
 
 CAMPAIGN = "cmp-tpu"
 G_IN = "grp-s25fe"
 G_OUT = "grp-z8wide"
-YESTERDAY = kst_today() - timedelta(days=1)
+
+
+def _recent_weekday(*, before: date | None = None) -> date:
+    """창 안의 «평시»(평일 ∧ 공휴일 아님) 날짜 하나 — 어제부터 거슬러 올라가며 찾는다.
+
+    ★왜 「어제」를 그대로 안 쓰나 (D-NAO-267): 램프업 판정(교란축 X9)이 붙은 뒤로 이 픽스처는
+      **요일에 의존**하게 됐다. 하루치만 심는데 그 하루가 토·일·공휴일이면 그룹의 평시 관측이
+      0일이 되어 `profit_status='ramp_up'`이 되고, 총이익을 단언하는 기존 테스트가 **주말에만
+      빨개진다.** 이런 건 CI가 평일에 도는 한 안 보이다가 어느 일요일에 터진다.
+
+      그래서 픽스처가 요일을 «고른다». 이 함수가 램프업 판정 자체를 우회하는 게 아니다 —
+      램프업은 아래 전용 테스트가 평시 0일 그룹을 따로 심어서 검증한다.
+    """
+    d = (before or kst_today()) - timedelta(days=1)
+    while probe_cell_aggregate.env_cell_of_date(d) != "weekday":
+        d -= timedelta(days=1)
+    return d
+
+
+YESTERDAY = _recent_weekday()
 
 
 @pytest.fixture
@@ -438,3 +458,181 @@ def test_scope_write_does_not_turn_the_engine_on(client_and_session):
     ).one()
     db.refresh(s)
     assert s.auto_operate is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ★교란축 X9 — 「신규 그룹 램프업」 (D-NAO-267 · M2 계약 §4-C S2-④ / ref 63 §10)
+#
+# 계약 원문: *"신규 그룹(X9) 라벨이 붙은 그룹은 밴드 확정값 «대신» 「램프업」 표기"*.
+# 판정은 발명하지 않았다 — ref 63 §10의 「baseline 부재」(평시 표본 0일)를 그대로 옮겼다.
+# ──────────────────────────────────────────────────────────────────────────
+
+G_RAMP = "grp-newly-created"
+_TEST_BEP = Decimal("1.711")  # 계정 BEP 실측치 — 새 상수가 아니라 기존 값
+
+
+def _recent_weekend(*, before: date | None = None) -> date:
+    """창 안의 «비평시»(주말 또는 공휴일) 날짜 — 램프업 그룹을 심을 자리."""
+    d = (before or kst_today()) - timedelta(days=1)
+    while probe_cell_aggregate.env_cell_of_date(d) == "weekday":
+        d -= timedelta(days=1)
+    return d
+
+
+@contextmanager
+def _bep_resolved(value: Decimal = _TEST_BEP):
+    """BEP 사다리의 계정 tier를 채워 `profit_status='ok'`가 나오게 한다.
+
+    ★램프업 테스트엔 이게 **필수**다 — BEP가 없으면 bep_unknown이 이겨서(더 깊은 막힘이
+      먼저다) 램프업 라벨 자체가 안 나온다. 그 우선순위는 아래 전용 테스트가 따로 지킨다.
+    """
+    from app.services.naver_ad import campaign_target_resolver
+    with patch.object(campaign_target_resolver, "account_default_bep_roas", return_value=value):
+        yield
+
+
+def _seed_ramp_up_group(db) -> date:
+    """평시 관측이 **0일**인 그룹 — 비평시 날짜에만 집행이 있다(신규 그룹의 모양).
+
+    ref 63 §10이 실제로 발견한 사례(TPU3)와 같은 구조다: *"TPU3는 평시(baseline) 관측이
+    0건이다. 즉 이 그룹들의 적자는 「평시 대비 악화」가 아니라 「평시가 존재한 적 없는 신규
+    그룹의 초기 구간」"*.
+    """
+    weekend = _recent_weekend()
+    db.add(NaverEntity(entity_type="adgroup", entity_id=G_RAMP,
+                       campaign_id=CAMPAIGN, parent_id=CAMPAIGN, name="신규 그룹"))
+    db.add(NaverAdDaily(
+        ad_date=weekend, campaign_id=CAMPAIGN, campaign_type="SHOPPING",
+        adgroup_id=G_RAMP, keyword_id="", imp=500, clk=50, cost=70_000,
+        conv_direct_cnt=1, conv_indirect_cnt=0,
+        conv_direct_amt=200_000, conv_indirect_amt=0,
+    ))
+    db.commit()
+    return weekend
+
+
+def _roster(client):
+    return client.get(f"/api/naver/ad/scope/roster?campaign_id={CAMPAIGN}").json()
+
+
+def test_ramp_up_replaces_the_band_value_not_annotates_it(client_and_session):
+    """★핵심 — 램프업이면 확정 밴드값이 «지워진다».
+
+    라벨만 붙이고 숫자를 남겨 두면 화면이 숫자를 집어 들고 라벨은 장식이 된다. 계약이
+    「밴드 확정값 **대신**」이라고 쓴 이유가 그것이다. gross_profit 3종이 전부 null이어야 한다.
+    """
+    client, db = client_and_session
+    _seed(db)
+    _seed_ramp_up_group(db)
+
+    with _bep_resolved():
+        g = _group(_roster(client), G_RAMP)
+
+    assert g["profit_status"] == "ramp_up"
+    assert g["baseline_days"] == 0
+    assert g["gross_profit"] is None, "확정값이 남아 있으면 라벨이 장식이 된다"
+    assert g["gross_profit_low"] is None
+    assert g["gross_profit_high"] is None
+    # 비용·전환 같은 «관측값»은 그대로 있어야 한다 — 못 재는 건 밴드 판정이지 집행 사실이 아니다
+    assert g["cost"] == 70_000
+    assert g["conv_amt"] == 200_000
+
+
+def test_group_with_weekday_baseline_is_not_ramp_up(client_and_session):
+    """대조군 — 평시 관측이 있으면 램프업이 아니다(라벨이 전건에 붙는 버그 방어)."""
+    client, db = client_and_session
+    _seed(db)
+
+    with _bep_resolved():
+        g = _group(_roster(client), G_OUT)
+
+    assert g["baseline_days"] >= 1
+    assert g["profit_status"] == "ok"
+    assert g["gross_profit"] is not None
+
+
+def test_bep_unknown_beats_ramp_up(client_and_session):
+    """★사유 우선순위 — 둘 다 해당하면 **bep_unknown**이 이긴다.
+
+    bep_unknown은 「애초에 못 잰다」(원가 미연결 — 사람이 고쳐야 풀림)이고 ramp_up은
+    「재도 의미 없다」(시간이 풀어 줌)다. 램프업을 위에 씌우면 평일이 지나 라벨이 풀린
+    **뒤에야** 원가 미연결을 알게 된다 — 같은 그룹에서 두 번 놀란다.
+    """
+    client, db = client_and_session
+    _seed(db)
+    _seed_ramp_up_group(db)  # BEP 패치 없음 = 사다리 전 tier 미해석
+
+    g = _group(_roster(client), G_RAMP)
+    assert g["baseline_days"] == 0          # 램프업 조건은 성립하는데
+    assert g["profit_status"] == "bep_unknown"  # 더 깊은 막힘을 먼저 말한다
+
+
+def test_surface_ramp_up_reaches_the_api_response(client_and_session):
+    """★★표면 절단 변이 대상 (계약 §4-C 공통).
+
+    하니스가 램프업을 잘 «판정»해도 응답 키가 없으면 화면은 그 그룹을 평범한 「모름」으로
+    그린다 — 그러면 신규 그룹의 초기 잡음이 「상품 원가 미연결」과 한 칸에 뭉개진다.
+    `profit_status`·`baseline_days`를 **HTTP 응답 본문에서** 확인한다(교훈 #321: 서비스층
+    확인은 `response_model`이 키를 지우는 경우를 못 잡는다).
+    """
+    client, db = client_and_session
+    _seed(db)
+    _seed_ramp_up_group(db)
+
+    with _bep_resolved():
+        r = client.get(f"/api/naver/ad/scope/roster?campaign_id={CAMPAIGN}")
+    assert r.status_code == 200
+    g = _group(r.json(), G_RAMP)
+    for key in ("profit_status", "baseline_days"):
+        assert key in g, f"응답에 {key}가 없다 — 화면이 램프업을 말할 수 없다"
+    assert g["profit_status"] == "ramp_up"
+
+
+def test_campaign_says_how_many_groups_ramp_up_removed(client_and_session):
+    """★캠페인 총이익에서 «빠진» 그룹 수가 응답에 있다.
+
+    램프업 그룹은 총이익 합산에서 빠지는데, 그 사실을 말하지 않으면 캠페인 총이익이 그냥
+    「그만큼인 값」으로 읽힌다. 「모름」이 「0원」으로 읽히는 자리를 카운터로 가른다.
+    """
+    client, db = client_and_session
+    _seed(db)
+    _seed_ramp_up_group(db)
+
+    with _bep_resolved():
+        c = _campaign(_roster(client))
+
+    assert c["ramp_up_count"] == 1
+    known = [g for g in c["adgroups"] if g["gross_profit"] is not None]
+    assert known, "대조군이 없으면 이 테스트가 아무것도 안 지킨다"
+    assert c["gross_profit"] == sum(g["gross_profit"] for g in known)
+    # 램프업 그룹의 광고비 7만원은 «집행 사실»이라 캠페인 합에 그대로 남아야 한다 —
+    # 빠지는 건 이익 판정뿐이다
+    assert c["cost"] == 10_000 + 90_000 + 70_000
+
+
+def test_campaign_ramp_up_count_is_zero_when_none(client_and_session):
+    """램프업이 없으면 0 — 키가 조건부로 사라지면 화면이 분기를 못 그린다."""
+    client, db = client_and_session
+    _seed(db)
+
+    with _bep_resolved():
+        c = _campaign(_roster(client))
+    assert c["ramp_up_count"] == 0
+
+
+def test_scope_only_group_is_bep_unknown_not_ramp_up(client_and_session):
+    """창 안 집행이 아예 없는 스코프 그룹은 «관측 없음»이지 램프업이 아니다.
+
+    둘 다 baseline_days=0이지만 사유가 다르다 — 섞으면 「아직 안 돌린 그룹」과 「막 만든
+    그룹」이 같은 라벨을 받는다.
+    """
+    client, db = client_and_session
+    _seed(db, scope=True)
+    db.add(NaverAdgroupScope(campaign_id=CAMPAIGN, adgroup_id="grp-never-run",
+                             role="brake", enabled=True))
+    db.commit()
+
+    with _bep_resolved():
+        g = _group(_roster(client), "grp-never-run")
+    assert g["profit_status"] == "bep_unknown"
+    assert g["baseline_days"] == 0

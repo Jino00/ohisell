@@ -154,3 +154,91 @@ def test_pacing_avg_final_ratio_is_none_when_all_null(client):
 def test_pacing_final_ratio_absent_when_no_rows(client):
     body = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()
     assert body["pacing_final_ratio"] == {}
+
+
+# ── D-NAO-267 (M2 계약 §4-A T1 = ref 65 S2-ⓐ): 평시/주말/공휴일 분리 열 ──
+
+def _weekday_within(days: int) -> date:
+    """창 안의 평시(평일 ∧ 비공휴일) 날짜 — 요일 의존 테스트를 결정적으로 만든다."""
+    from app.services.naver_ad import probe_cell_aggregate
+    d = kst_today() - timedelta(days=1)
+    while probe_cell_aggregate.env_cell_of_date(d) != "weekday":
+        d -= timedelta(days=1)
+    assert (kst_today() - d).days < days
+    return d
+
+
+def test_surface_weekend_holiday_column_reaches_the_http_body(client):
+    """★★표면 절단 변이 대상 (M2 계약 §4-C 공통).
+
+    ref 63 §4-1이 확정한 주말 −8,020,470원·공휴일 −915,912원(둘 다 홀드아웃 통과·부호
+    안정)을 판정면에 «분리»해 싣는 게 T1의 산출물이다. 그런데 하니스가 아무리 잘 갈라도
+    **HTTP 응답 본문에 안 실리면 Jino는 여전히 섞인 숫자를 본다.**
+
+    그래서 서비스층이 아니라 **응답 본문**에서 확인한다 — 교훈 #321: `response_model`이
+    키를 조용히 지우는 전례가 이 저장소에 있다. 라우터에서 `weekend_holiday` 키를 빼는
+    변이는 여기서 죽어야 한다.
+    """
+    asof = _weekday_within(28)
+    _seed(client, signals=[
+        NaverRetroSignal(
+            created_at=kst_now(), asof_date=asof,
+            board="bleeding_keywords", direction="down", grain="keyword",
+            target_id="nkw-1", campaign_id="cmp1",
+            cf_asof=1.0, bep_asof=2.0, target_asof=4.0, cost_asof=1000,
+            verdict_d3="correct", bleed_post3=500,
+        ),
+    ])
+    body = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()
+    board = body["boards"]["bleeding_keywords"]
+
+    assert "weekend_holiday" in board, "분리 열이 응답에 없다 — 화면은 여전히 섞인 값만 본다"
+    split = board["weekend_holiday"]["d3"]
+    for bucket in ("weekday", "weekend", "holiday"):
+        assert bucket in split, f"{bucket} 칸이 없다"
+    assert split["weekday"]["correct"] == 1
+    assert split["weekend"]["n"] == 0
+    assert split["holiday"]["n"] == 0
+
+
+def test_surface_identity_check_reaches_the_http_body(client):
+    """항등식 검산 결과도 응답까지 간다 — 「분리해 놨는데 합이 안 맞는」 결함은 화면을
+    봐선 안 보인다. 계약 §4-C S2-①이 요구하는 검산이 그 자리에서 읽혀야 한다."""
+    asof = _weekday_within(28)
+    _seed(client, signals=[
+        NaverRetroSignal(
+            created_at=kst_now(), asof_date=asof,
+            board="bleeding_keywords", direction="down", grain="keyword",
+            target_id="nkw-1", campaign_id="cmp1",
+            cf_asof=1.0, bep_asof=2.0, target_asof=4.0, cost_asof=1000,
+            verdict_d3="correct", bleed_post3=500,
+        ),
+    ])
+    split = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()[
+        "boards"]["bleeding_keywords"]["weekend_holiday"]["d3"]
+
+    assert split["identity"]["ok"] is True
+    assert split["identity"]["sum_of_parts"]["n"] == split["identity"]["total"]["n"]
+
+
+def test_existing_d3_d7_keys_are_untouched(client):
+    """★기존 shape을 안 깼다 — `weekend_holiday`는 **덧붙인** 키다.
+
+    이 응답의 소비처(커맨드 센터·성과뷰 타임라인)가 d3/d7을 읽고 있어서, 갈아치우면
+    분리를 얻고 기존 표면을 잃는다.
+    """
+    asof = _weekday_within(28)
+    _seed(client, signals=[
+        NaverRetroSignal(
+            created_at=kst_now(), asof_date=asof,
+            board="bleeding_keywords", direction="down", grain="keyword",
+            target_id="nkw-1", campaign_id="cmp1",
+            cf_asof=1.0, bep_asof=2.0, target_asof=4.0, cost_asof=1000,
+            verdict_d3="correct", bleed_post3=500,
+        ),
+    ])
+    board = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()[
+        "boards"]["bleeding_keywords"]
+    assert board["d3"]["correct"] == 1
+    assert board["d3"]["bleed_sum"] == 500
+    assert board["d7"]["n"] == 0

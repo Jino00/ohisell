@@ -28,8 +28,11 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverCampaignSettings, NaverEntity
-from app.services.naver_ad import adgroup_scope, exploration, metrics_aggregator
+from app.models import NaverAdDaily, NaverCampaignSettings, NaverEntity
+from app.services.naver_ad import (
+    adgroup_scope, exploration, metrics_aggregator, probe_cell_aggregate,
+)
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.diagnosis import correction_factor
 from app.utils.kst import kst_today
 
@@ -39,6 +42,9 @@ MAX_WINDOW_DAYS = 180
 # BEP를 해석 못 한 행의 사유 — 화면이 «0원»으로 그리지 않게 하는 라벨
 PROFIT_STATUS_OK = "ok"
 PROFIT_STATUS_BEP_UNKNOWN = "bep_unknown"
+# ★D-NAO-267 (계약 §4-A T1 = ref 65 S2-④ · 교란축 X9): 창 안에 «평시» 관측이 하나도 없는
+#   그룹. 확정 밴드값 대신 이 라벨을 낸다 — 아래 _baseline_days_by_adgroup 참조.
+PROFIT_STATUS_RAMP_UP = "ramp_up"
 
 
 def _round_won(value: Decimal) -> int:
@@ -60,6 +66,59 @@ def _profit(conv_amt: int, cost: int, *, factor: Decimal, bep_roas: Decimal | No
         return None, PROFIT_STATUS_BEP_UNKNOWN
     corrected = Decimal(conv_amt) * factor
     return _round_won(corrected / bep_roas - Decimal(cost)), PROFIT_STATUS_OK
+
+
+def _baseline_days_by_adgroup(
+    db: Session, date_from: date, date_to: date, campaign_id: str | None,
+) -> dict[str, int]:
+    """★그룹별 «평시» 관측일 수 — 교란축 X9(신규 그룹 램프업) 판정의 원료.
+
+    ## 판정을 발명하지 않았다 (계약 §4-B⑤ 「없으면 ref 63 §10의 「baseline 부재」 판정을
+    재사용하고 그 사실을 기록한다. 발명 금지」)
+
+    ref 63 §10 원문의 기제: *"baseline 잔차법(§1-2)은 「그룹의 평시 체질」이 존재한다는 전제
+    위에 서 있다. 신규 그룹은 ⓐ평시 표본이 0이라 b_g 자체가 정의되지 않고 ⓑ초기 구간엔
+    품질지수 미성숙·소재 학습·입찰 탐색이 겹쳐 **어떤 그룹이든 체질과 무관하게 나쁠 수
+    있다**."* → 그래서 「평시 관측 0일」이 곧 「밴드 확정값을 낼 수 없음」이다.
+
+    코드·문서 어디에도 X9 판정 로직은 없었다(착수 실측: backend 전체 grep 0건). 그래서 위
+    판정을 그대로 옮긴다 — `reg_tm` 기준 그룹 나이 축은 ref 63 §10이 *"다음 라운드 후보"*로
+    적은 **미확정** 설계라 판정에 쓰지 않는다(§3 미확정은 층 승격 금지).
+
+    ## ★좁게 잡았다 — 그 사실을 여기 적어 둔다
+
+    ref 63 §1-2의 «평시»는 `평일 ∧ 단독공휴일 아님 ∧ 명절연휴 아님 ∧ 휴가창 밖 ∧
+    launch_phase=none ∧ data_gap 아님 ∧ mature`다. 이 함수는 그중 **확정 축만** 쓴다
+    (평일 ∧ 공휴일 아님 = env_cell_of_date == "weekday"). 휴가창·출시창은 계약 §3이
+    「미확정 환경은 층 승격 금지」로 막았기 때문이다.
+
+    대가를 정직하게 적는다: ref 63이 X9를 발견한 실제 사례(TPU3)는 **휴가창(7/20~8/15)이
+    평시를 통째로 먹어서** 평시 0건이 된 경우다. 휴가창 축을 안 쓰는 이 판정은 그 사례를
+    **재현하지 못한다** — 즉 우리 라벨은 ref 63보다 **적게** 붙는다. 놓치는 쪽이지 없는 걸
+    지어내는 쪽은 아니다. 계약 §4-C S2-④가 *"판정 시점 X9 그룹 0개면 «해당 없음(라이브
+    사례 0)»으로 적고 달성 주장하지 않는다"*로 이 결과를 미리 허용해 뒀다.
+    """
+    q = (
+        db.query(NaverAdDaily.adgroup_id, NaverAdDaily.ad_date)
+        .filter(
+            NaverAdDaily.ad_date >= date_from,
+            NaverAdDaily.ad_date <= date_to,
+            NaverAdDaily.adgroup_id.isnot(None),
+            # 집계 정본 규칙 — sentinel 행을 섞으면 같은 날이 두 번 세어진다
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .distinct()
+    )
+    if campaign_id:
+        q = q.filter(NaverAdDaily.campaign_id == campaign_id)
+
+    out: dict[str, int] = {}
+    for gid, ad_date in q.all():
+        if ad_date is None:
+            continue
+        if probe_cell_aggregate.env_cell_of_date(ad_date) == "weekday":
+            out[gid] = out.get(gid, 0) + 1
+    return out
 
 
 def _profit_band(conv_amt: int, cost: int, *, bep_roas: Decimal | None,
@@ -134,6 +193,10 @@ def build_roster(
     )
     rows = [r for r in agg["rows"] if r.get("adgroup_id")]
 
+    # D-NAO-267: X9(램프업) 판정 원료. 창·필터를 집계와 «똑같이» 맞춘다 — 어긋나면
+    # 「집계엔 있는데 baseline은 0」인 유령 램프업이 생긴다.
+    baseline_days_map = _baseline_days_by_adgroup(db, date_from, date_to, campaign_id)
+
     campaign_ids = sorted({r["campaign_id"] for r in rows})
     if campaign_id and campaign_id not in campaign_ids:
         campaign_ids.append(campaign_id)  # 창 안 집행이 없어도 스코프는 보여야 한다
@@ -175,6 +238,7 @@ def build_roster(
         c_cost = c_clk = c_imp = c_conv_amt = 0
         c_profit_sum = c_profit_low_sum = c_profit_high_sum = 0
         c_profit_known = False
+        c_ramp_up = 0
         for r in by_campaign.get(cid, []):
             gid = r["adgroup_id"]
             cost = int(r.get("cost") or 0)
@@ -182,6 +246,26 @@ def build_roster(
             bep = exploration.resolve_exploration_bep_roas(db, cid, gid, cache=bep_cache)
             band = _profit_band(conv_amt, cost, bep_roas=bep,
                                 factor_low=factor_low, factor_high=factor_high)
+            # ★X9 램프업 — 계약 §4-C S2-④ 원문: *"신규 그룹(X9) 라벨이 붙은 그룹은 밴드
+            #   확정값 «대신» 「램프업」 표기"*. 그래서 값을 **덮어써서 지운다**(옆에 붙이는
+            #   게 아니다) — 확정값을 남겨 두면 화면이 그걸 집어 들고, 라벨은 장식이 된다.
+            #   평시 체질이 없는 그룹의 밴드값은 «체질»이 아니라 초기 구간 잡음이다(ref 63 §10).
+            #
+            # ★★사유 우선순위 — bep_unknown이 ramp_up을 «이긴다».
+            #   둘 다 「확정값 없음」이지만 성격이 다르다: bep_unknown은 **애초에 못 재는**
+            #   것(상품 원가 미연결 — 사람이 고쳐야 풀린다)이고 ramp_up은 **재도 의미가
+            #   없는** 것(시간이 지나면 저절로 풀린다). 램프업을 위에 씌우면 평일이 지나
+            #   라벨이 풀린 «뒤에야» 원가 미연결을 알게 된다 — 두 번 놀란다. 그래서 더 깊은
+            #   막힘을 먼저 말한다.
+            baseline_days = baseline_days_map.get(gid, 0)
+            if baseline_days == 0 and band["profit_status"] == PROFIT_STATUS_OK:
+                band = {
+                    "gross_profit": None,
+                    "gross_profit_low": None,
+                    "gross_profit_high": None,
+                    "profit_status": PROFIT_STATUS_RAMP_UP,
+                }
+                c_ramp_up += 1
             sr = scope_by_group.get(gid)
             e = entities.get(("adgroup", gid))
             adgroups.append({
@@ -198,6 +282,9 @@ def build_roster(
                 "conv_amt": conv_amt,
                 "roas": r.get("roas_naver"),
                 "bep_roas": float(bep) if bep is not None else None,
+                # ★램프업 판정의 «근거 숫자»를 라벨과 함께 낸다 — 0이면 왜 확정값이 없는지가
+                #   그 자리에서 읽힌다. 라벨만 있으면 「왜?」가 코드를 열어야 나온다.
+                "baseline_days": baseline_days,
                 **band,
             })
             c_cost += cost
@@ -224,6 +311,9 @@ def build_roster(
                 "scope_enabled": sr["enabled"],
                 "cost": 0, "imp": 0, "clk": 0, "conv_amt": 0, "roas": None,
                 "bep_roas": None,
+                # 창 안 집행이 아예 없는 스코프 그룹 — 램프업이 아니라 «관측 자체가 없음»이다.
+                # baseline_days=0이지만 profit_status는 bep_unknown 그대로 둔다(둘은 다른 사유다).
+                "baseline_days": 0,
                 "gross_profit": None, "gross_profit_low": None, "gross_profit_high": None,
                 "profit_status": PROFIT_STATUS_BEP_UNKNOWN,
             })
@@ -241,6 +331,9 @@ def build_roster(
             "has_scope": bool(scope_rows),
             "scoped_count": sum(1 for sr in scope_rows if sr["enabled"]),
             "adgroup_count": len(adgroups),
+            # ★D-NAO-267: 램프업으로 «빠진» 그룹 수. 이게 없으면 캠페인 총이익이 조용히
+            #   줄어든 것처럼 보인다 — 「모름」이 「0원」으로 읽히는 그 자리다(n=62 실증).
+            "ramp_up_count": c_ramp_up,
             "cost": c_cost, "imp": c_imp, "clk": c_clk, "conv_amt": c_conv_amt,
             "roas": (round(c_conv_amt / c_cost, 2) if c_cost else None),
             "gross_profit": (c_profit_sum if c_profit_known else None),

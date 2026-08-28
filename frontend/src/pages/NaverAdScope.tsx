@@ -48,6 +48,19 @@ function ProfitCell({
   value, low, high, status,
 }: { value: number | null; low?: number | null; high?: number | null; status: string }) {
   if (value === null) {
+    // ★D-NAO-267 (계약 §4-C S2-④): 램프업은 «모름»과 다른 사유다. 둘 다 값이 없지만
+    //   bep_unknown은 「우리가 못 잰다」이고 ramp_up은 「이 그룹엔 아직 잴 체질이 없다」다.
+    //   같은 「모름」으로 그리면 신규 그룹의 초기 잡음이 상품 원가 미연결과 한 칸에 뭉개진다.
+    if (status === "ramp_up") {
+      return (
+        <span
+          className="text-sky-600"
+          title="램프업 — 창 안에 평시(평일·비공휴일) 관측이 0일입니다. 평시 체질이 없어 밴드 확정값을 내지 않습니다(ref 63 §10 교란축 X9)."
+        >
+          램프업
+        </span>
+      );
+    }
     return (
       <span className="text-gray-400" title={status === "bep_unknown" ? "BEP를 해석하지 못했습니다(상품 원가 미연결)" : status}>
         모름
@@ -178,6 +191,11 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
         <Badge tone={c.auto_operate && c.optimizer === "ours" ? "good" : "neutral"}>
           {c.optimizer === "ours" ? (c.auto_operate ? "가동" : "우리·정지") : c.optimizer === "mop" ? "MOP" : "수동"}
         </Badge>
+        {/* ★D-NAO-267: 램프업 그룹은 총이익 합산에서 빠진다 — 몇 개가 빠졌는지 «여기서»
+            말하지 않으면 옆의 총이익이 「그냥 그만큼인 값」으로 읽힌다. */}
+        {c.ramp_up_count > 0 && (
+          <Badge tone="neutral">램프업 {c.ramp_up_count} 제외</Badge>
+        )}
         <span className="text-xs text-gray-500 tabular-nums w-24 text-right">{num(c.cost)}원</span>
         <span className="text-xs tabular-nums w-24 text-right">
           <ProfitCell value={c.gross_profit} low={c.gross_profit_low} high={c.gross_profit_high} status="ok" />

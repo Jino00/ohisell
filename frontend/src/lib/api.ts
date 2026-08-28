@@ -6554,7 +6554,18 @@ export interface PaoScopeAdgroup {
   /** 보정계수 구간 양끝을 적용한 값 — «얼마나 모르는지»를 화면이 같이 보이게 한다 */
   gross_profit_low: number | null;
   gross_profit_high: number | null;
-  profit_status: "ok" | "bep_unknown";
+  /**
+   * 창 안 «평시»(평일 ∧ 공휴일 아님) 관측일 수 — 0이면 램프업(D-NAO-267 · 교란축 X9).
+   * ref 63 §10: 평시 표본이 0인 신규 그룹은 baseline(평시 체질)이 정의되지 않아
+   * 밴드 확정값이 «체질»이 아니라 초기 구간 잡음이다.
+   */
+  baseline_days: number;
+  /**
+   * ok = 확정값 · bep_unknown = BEP 미해석 · **ramp_up = 평시 관측 0일**.
+   * ★ramp_up이면 gross_profit* 3종이 모두 null이다 — 확정값을 «대신»한 라벨이라
+   *   화면은 숫자가 아니라 「램프업」을 그려야 한다(계약 §4-C S2-④).
+   */
+  profit_status: "ok" | "bep_unknown" | "ramp_up";
 }
 
 export interface PaoScopeCampaign {
@@ -6567,6 +6578,11 @@ export interface PaoScopeCampaign {
   has_scope: boolean;
   scoped_count: number;
   adgroup_count: number;
+  /**
+   * 램프업으로 총이익 합산에서 «빠진» 그룹 수(D-NAO-267). 이 값이 0보다 크면 캠페인
+   * gross_profit은 그만큼 «덜 센» 값이다 — 안 보이면 총이익이 조용히 줄어든 것처럼 읽힌다.
+   */
+  ramp_up_count: number;
   cost: number;
   imp: number;
   clk: number;
