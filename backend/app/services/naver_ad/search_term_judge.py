@@ -137,24 +137,40 @@ def _min_cost_for_adgroup(db: Session, adgroup_id: str, cache: dict[str, Decimal
     return margin
 
 
-def _reason(clk: int, cost: int, min_cost: Decimal, window_from: date, window_to: date) -> str:
+def _reason(clk: int, cost: int, min_cost: Decimal, window_from: date, window_to: date,
+            min_click: int) -> str:
+    """★`min_click`을 인자로 받는다(D-NAO-265) — `_pl_reason`과 같은 이유다: 상수를 직접 박으면
+    **게이트는 DB값으로 도는데 사람이 읽는 사유는 옛 숫자를 말한다.** 값이 만들어지는 층과 사람에게
+    닿는 층은 다른 층이고, 합격기준이 지목한 건 늘 닿는 층이다(교훈 #362). 이 문자열은 제외 제안
+    카드에 그대로 실린다."""
     return (
         f"[검색어제외] 손실 검색어(전환0·낭비비용 회수) — rolling {window_from}~{window_to}: "
-        f"clk={clk}(≥{_SS_MIN_CLICK}), cost={cost}원(≥공헌이익 {int(min_cost)}원), "
+        f"clk={clk}(≥{min_click}), cost={cost}원(≥공헌이익 {int(min_cost)}원), "
         f"purchase 전환=0. target ROAS 미달·매출 미증 = 클릭당 확정 손해(PLAN §1 2)."
     )
 
 
 def judge_search_terms(
-    db: Session, *, now: datetime | None = None, window_days: int = _SS_WINDOW_DAYS,
+    db: Session, *, now: datetime | None = None, window_days: int | None = None,
+    min_click: int | None = None,
 ) -> dict:
     """검색어 grain rolling 누적 집계 → 봉투 §1 게이트 → 제외/승격 후보 산출(순수·read-only).
 
     게이트 순서(§1, fail-closed):
       ① 전환 보호(§1 1): conv_purchase_cnt(직+간 합)≥1 검색어는 제외 후보 진입 불가(살아있는 증거).
-      ② 표본 게이트(§1 2): clk≥_SS_MIN_CLICK ∧ conv_purchase_cnt==0 ∧ cost≥공헌이익. 공헌이익
+      ② 표본 게이트(§1 2): clk≥최소클릭 ∧ conv_purchase_cnt==0 ∧ cost≥공헌이익. 공헌이익
          부재(원가 미확인 그룹)면 후보 제외(fail-closed — 표본 비용 하한을 못 세우면 자르지 않는다).
       ③ 화이트리스트(§1 3): 상품 핵심 토큰 포함 검색어는 보호(오컷 방지).
+
+    ★②의 숫자를 docstring에 안 적는다(D-NAO-265 — `_judge_powerlink`와 같은 규율) — SPECS
+    승격분이라 **DB가 이길 수 있고**, 코드 기본값은 14일·10클릭이지만 그게 「지금 도는 값」이라는
+    보장이 없다. 지금 값은 승인 카드(`GET /naver-ad/settings/guardrail-params`)가 출처(`source`)와
+    함께 보여 준다.
+
+    ★`window_days`·`min_click`의 기본값이 **모듈 상수가 아니라 `None`**인 이유: 기본 인자는
+    import 시점에 한 번 평가되므로 상수를 기본값으로 두면 DB가 영원히 못 이긴다. 명시 인자는
+    그대로 존중한다(테스트·what-if 경로) — 단 **둘 중 하나만 넘기면 나머지는 DB값**이라 섞이므로,
+    호출부는 둘 다 넘기거나 둘 다 생략한다.
 
     산출:
       exclude_candidates.shopping   — source='shopping'(SS3-B 브리핑용, API 제외 불가 §실측-0).
@@ -169,6 +185,9 @@ def judge_search_terms(
     (cost 내림차순, 동률 search_term 오름차순)."""
     now = now or kst_now()
     as_of = now.date()
+    _ss_min_click, _ss_window = _ss_params(db)
+    min_click = _ss_min_click if min_click is None else min_click
+    window_days = _ss_window if window_days is None else window_days
     window_from = as_of - timedelta(days=window_days - 1)
 
     rows = (
@@ -223,7 +242,7 @@ def judge_search_terms(
         if _is_whitelisted(term, whitelist):
             continue
         # ② 표본 게이트(§1 2) — clk·cost 하한. 공헌이익 부재면 fail-closed(자르지 않음).
-        if clk < _SS_MIN_CLICK:
+        if clk < min_click:
             continue
         min_cost = _min_cost_for_adgroup(db, adgroup_id, min_cost_cache)
         if min_cost is None or min_cost <= 0:
@@ -236,7 +255,7 @@ def judge_search_terms(
             "source": source, "clk": clk, "cost": cost, "imp": imp,
             "conv_purchase_cnt": pconv, "min_cost": int(min_cost),
             "window_from": window_from.isoformat(), "window_to": as_of.isoformat(),
-            "reason": _reason(clk, cost, min_cost, window_from, as_of),
+            "reason": _reason(clk, cost, min_cost, window_from, as_of, min_click),
         }
         # PX1: 파워링크(source='expkeyword') 제외 판정은 이 14일 루프에서 분리한다 —
         # _judge_powerlink(30일 전용 게이트, §1)가 스코프(auto_operate)·그룹 순손실·디바이스
@@ -253,7 +272,7 @@ def judge_search_terms(
 
     # M2-c ⓒ-3: 의미 단위 판정은 **병렬 산출**이다 — 위 개별 grain 판정을 대체하지 않는다(기존
     # 4개 키는 이 줄 이전 로직과 byte-동일 유지). 같은 now·window_days로 같은 rolling 창을 재사용.
-    semantic = judge_semantic_units(db, now=now, window_days=window_days)
+    semantic = judge_semantic_units(db, now=now, window_days=window_days, min_click=min_click)
 
     return {
         "window": {"from": window_from.isoformat(), "to": as_of.isoformat(), "days": window_days},
@@ -271,7 +290,10 @@ def judge_search_terms(
 def _semantic_reason(
     kind: str, key: str, clk: int, cost: int, min_cost: Decimal,
     member_terms: int, members_passing: int, window_from: date, window_to: date,
+    min_click: int,
 ) -> str:
+    """★`min_click`을 인자로 받는다(D-NAO-265) — `_reason`·`_pl_reason`과 같은 이유.
+    이 문자열은 의미단위 제외 제안 카드에 그대로 실린다(사람에게 닿는 층)."""
     unlocked = members_passing == 0
     unlocked_txt = (
         "개별 grain에선 표본 게이트를 통과하는 멤버가 0건 — 풀링으로 신규 확보(unlocked_by_pooling)"
@@ -280,14 +302,15 @@ def _semantic_reason(
     )
     return (
         f"[검색어제외 의미단위·{kind}] 「{key}」 — rolling {window_from}~{window_to}: "
-        f"clk={clk}(≥{_SS_MIN_CLICK}), cost={cost}원(≥공헌이익 {int(min_cost)}원), "
+        f"clk={clk}(≥{min_click}), cost={cost}원(≥공헌이익 {int(min_cost)}원), "
         f"묶인 검색어={member_terms}건. {unlocked_txt}. target ROAS 미달·매출 미증 = 클릭당 확정 "
         "손해(PLAN §1 2, 의미단위 풀링 적용 — D-NAO-191·219)."
     )
 
 
 def judge_semantic_units(
-    db: Session, *, now: datetime | None = None, window_days: int = _SS_WINDOW_DAYS,
+    db: Session, *, now: datetime | None = None, window_days: int | None = None,
+    min_click: int | None = None,
 ) -> dict:
     """쇼핑 검색어를 의미 단위(사전 최장일치, semantic_units.py)로 풀링해 개별 grain 클릭
     희소성을 우회한다(M2-c ⓒ, D-NAO-191 실측 이식 — NGRAM_GRAIN_MEASUREMENT_20260818.md). 개별
@@ -315,16 +338,20 @@ def judge_semantic_units(
     부분문자열로도 포함할 수 없다 — 적용해도 항상 no-op이라 적용하지 않는다(이 불변식은 vocab이
     화이트리스트를 진부분집합으로 포함하는 한 성립 — semantic_units.build_vocab이 그 조건을
     깨면 재검토 필요).
-    ② clk≥_SS_MIN_CLICK 且 cost≥_min_cost_for_adgroup(그룹 공헌이익). min_cost가 None/<=0이면
+    ② clk≥최소클릭(SPECS `ss_min_click` — DB가 코드 상수를 이긴다) 且 cost≥_min_cost_for_adgroup
+    (그룹 공헌이익). min_cost가 None/<=0이면
     제외(원가 미확인 그룹은 자르지 않는다).
 
     각 생존 항목: adgroup_id·campaign_id·kind(unit/pair/residual)·key(내부 집계 키)·phrase(등록
     표현용 텍스트 — 쌍은 공백 조인)·clk·cost·min_cost·window_from/to·member_terms(묶인 검색어
-    수)·members_passing_individual_gate(그중 개별 grain에서 clk≥_SS_MIN_CLICK을 통과하는 멤버
+    수)·members_passing_individual_gate(그중 개별 grain에서 clk≥최소클릭을 통과하는 멤버
     수)·unlocked_by_pooling(members_passing_individual_gate==0 — 개별 grain에선 판정 불가였는데
     풀링으로 새로 확보된 후보라는 뜻)·member_sample(예시 검색어 최대 8개, 정렬)·reason."""
     now = now or kst_now()
     as_of = now.date()
+    _ss_min_click, _ss_window = _ss_params(db)
+    min_click = _ss_min_click if min_click is None else min_click
+    window_days = _ss_window if window_days is None else window_days
     window_from = as_of - timedelta(days=window_days - 1)
 
     rows = (
@@ -381,7 +408,7 @@ def judge_semantic_units(
         if not norm:
             continue
         units, resid = semantic_units.segment_indexed(norm, index)
-        individual_pass = clk >= _SS_MIN_CLICK  # 이 행 자체가 개별 grain 값(같은 창·같은 표)
+        individual_pass = clk >= min_click  # 이 행 자체가 개별 grain 값(같은 창·같은 표)
 
         for u in set(units):
             _bump("unit", adgroup_id, campaign_id, u, term, clk, cost, individual_pass)
@@ -402,7 +429,7 @@ def judge_semantic_units(
             # ① 화이트리스트(§1 3) — unit/pair만. 잔여는 구조적으로 걸릴 수 없다(위 docstring 참조).
             if kind in ("unit", "pair") and _is_whitelisted(phrase, whitelist):
                 continue
-            if clk < _SS_MIN_CLICK:
+            if clk < min_click:
                 continue
             min_cost = _min_cost_for_adgroup(db, adgroup_id, min_cost_cache)
             if min_cost is None or min_cost <= 0:
@@ -421,7 +448,8 @@ def judge_semantic_units(
                 "unlocked_by_pooling": members_passing == 0,
                 "member_sample": sorted(v["member_terms"])[:8],
                 "reason": _semantic_reason(
-                    kind, key, clk, cost, min_cost, member_terms, members_passing, window_from, as_of,
+                    kind, key, clk, cost, min_cost, member_terms, members_passing, window_from,
+                    as_of, min_click,
                 ),
             })
         return sorted(out, key=lambda c: (-c["cost"], c["key"]))
@@ -551,6 +579,24 @@ def _pl_params(db: Session) -> tuple[int, int]:
 
     params = guardrail_params.get_params(db)
     return int(params["pl_min_click"]), int(params["pl_window_days"])
+
+
+def _ss_params(db: Session) -> tuple[int, int]:
+    """쇼핑 게이트의 **유효** (최소클릭, 창일수). SPECS 승격분이라 DB가 코드 상수를 이긴다.
+
+    ★D-NAO-265(S4-a 잔여). `_pl_params`와 **같은 모양**인 것이 요점이다 — 두 값을 한 번에,
+    같은 회차에서 같은 출처로 결정한다. 창은 DB값·클릭은 코드 상수 같은 섞임이 생기면 사유
+    문장이 설명하는 게이트와 실제 게이트가 갈린다(D-NAO-262가 파워링크에서 세운 규율).
+
+    ★이 함수가 생기기 전까지 SS 2종은 SPECS 승격이 **보류**였다(D-NAO-262). 이유는 값이
+    나빠서가 아니라 **소비처가 분산**돼 있어서였다 — `naver_execution_harness`가 모듈 상수를
+    직접 읽고, `search_term_exclusion_list`에 복제 리터럴이 있었다. 그 둘을 이 함수로
+    모은 뒤에야 승격이 «승인 카드가 거짓말하지 않는» 상태가 된다.
+    """
+    from app.services.naver_ad import guardrail_params
+
+    params = guardrail_params.get_params(db)
+    return int(params["ss_min_click"]), int(params["ss_window_days"])
 
 
 def _pl_reason(clk: int, cost: int, min_cost: Decimal, window_from: date, window_to: date,

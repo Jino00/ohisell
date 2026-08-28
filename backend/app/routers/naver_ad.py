@@ -1205,9 +1205,9 @@ def guardrail_params_retro_freshness(db: Session) -> dict:
 # 창 파라미터 ↔ 그 창이 먹는 원본 source. 창을 늘려도 재료가 없으면 값만 늘고 판정은 안 늘어난다.
 _WINDOW_MATERIAL = (
     ("pl_window_days", "expkeyword", "파워링크 제외 판정"),
-    # `_SS_WINDOW_DAYS`는 분산 탓 SPECS 승격 보류 상태(D-NAO-262)라 봉투가 없다 — 판정기
-    # 상수 14를 그대로 상한으로 재서, 승격되는 날 재료가 이미 있는지 미리 보이게 한다.
-    (None, "shopping", "쇼핑 제외 판정"),
+    # ★D-NAO-265 — 승격 완료. 보류 시절엔 판정기 상수 14를 상한으로 «미리» 재고 있었고(그
+    #   자리표시자가 `None`이었다), 이제 봉투 상한(16)을 실제로 잰다.
+    ("ss_window_days", "shopping", "쇼핑 제외 판정"),
 )
 
 
@@ -1233,10 +1233,9 @@ def guardrail_params_window_coverage(db: Session) -> list[dict]:
     """
     out: list[dict] = []
     for key, source, label in _WINDOW_MATERIAL:
-        ceiling = (
-            int(guardrail_params.SPECS[key].hi) if key
-            else int(search_term_judge._SS_WINDOW_DAYS)
-        )
+        # ★D-NAO-265 — 두 창 파라미터가 «둘 다» 승격돼 폴백 분기가 죽었다. 죽은 분기를 남기면
+        #   다음 사람이 「아직 승격 안 된 축이 있나」로 읽는다.
+        ceiling = int(guardrail_params.SPECS[key].hi)
         latest = db.query(func.max(NaverSearchTermDaily.ad_date)).filter(
             NaverSearchTermDaily.source == source).scalar()
         if latest is None:
@@ -2258,7 +2257,10 @@ def get_search_term_exclusion_list(
     days: int = Query(search_term_exclusion_list.WINDOW_DAYS, ge=7, le=90),
     campaign_id: str | None = Query(None),
     round_cap: int = Query(search_term_exclusion_list.DEFAULT_ROUND_CAP, ge=1, le=500),
-    min_click: int = Query(search_term_exclusion_list.MIN_CLICK, ge=0, le=100),
+    # ★기본값 None = 「안 넘기면 DB(SPECS `ss_min_click`)가 이긴다」(D-NAO-265). 옛 코드는
+    #   `Query(MIN_CLICK)`이라 **import 시점 상수 10이 항상 실려** 승인 카드에서 값을 내려도
+    #   이 API만 옛 값으로 돌았다. 명시 조회는 그대로 존중(what-if). 유효값은 응답 `gates`에.
+    min_click: int | None = Query(None, ge=0, le=100),
     db: Session = Depends(get_db),
 ) -> dict:
     """연속 ROAS × 상품별 BEP로 뽑은 제외 후보 리스트(읽기 전용, PLAN §4 P1-②).
