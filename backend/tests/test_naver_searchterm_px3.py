@@ -41,10 +41,10 @@ def db():
         s.close()
 
 
-def _scope(db, campaign_id="cmp1", adgroup_id="grp-web", auto_operate=True):
+def _scope(db, campaign_id="cmp1", adgroup_id="grp-web", auto_operate=True, campaign_type="WEB_SITE"):
     db.add(NaverCampaignSettings(campaign_id=campaign_id, optimizer="ours", auto_operate=auto_operate))
     db.add(NaverEntity(entity_type="adgroup", entity_id=adgroup_id, parent_id=campaign_id,
-                       campaign_id=campaign_id, campaign_type="WEB_SITE", name="grp", status="on"))
+                       campaign_id=campaign_id, campaign_type=campaign_type, name="grp", status="on"))
     db.commit()
 
 
@@ -77,7 +77,8 @@ def _add_result(term, kwd_id="rkw-new"):
 def test_open_due_exclusion_to_probation(db):
     _scope(db)
     row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
                       return_value=_del_result()) as mock_del:
         res = lane._run_reexamination(db, [], _NOW)
     mock_del.assert_called_once_with("grp-web", ["rkw-1"])
@@ -162,7 +163,8 @@ def test_open_exclusion_in_scope_adgroup_proceeds(db):
     db.add(NaverAdgroupScope(campaign_id="cmp1", adgroup_id="grp-web", enabled=True))
     db.commit()
     row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
                       return_value=_del_result()) as mock_del:
         assert lane._open_exclusion(db, row, _NOW) is True
     mock_del.assert_called_once_with("grp-web", ["rkw-1"])
@@ -172,7 +174,8 @@ def test_open_exclusion_unaffected_when_no_scope_rows(db):
     """★행이 0개면 기존 동작 그대로 — 「소급 0」이 이 레인에도 적용된다."""
     _scope(db)
     row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
                       return_value=_del_result()) as mock_del:
         assert lane._open_exclusion(db, row, _NOW) is True
     mock_del.assert_called_once()
@@ -224,7 +227,8 @@ def test_open_exclusion_claim_rollback_on_delete_failure(db):
     """delete 실패 시 클레임(probation) 롤백 → status='excluded' 복원(다음 레인 재시도)."""
     _scope(db)
     row = _excl(db, term="개방실패", next_review_at=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
                       side_effect=RuntimeError("API 500")):
         assert lane._open_exclusion(db, row, _NOW) is False
     db.refresh(row)
@@ -288,10 +292,147 @@ def test_open_exclusion_recount_backstop_allows_below_cap(db):
     _scope(db)
     row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
     _restore_log(db, lane._SS_DAILY_RETURN_CAP - 1)  # 캡 미만(1칸 여유)
-    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
                       return_value=_del_result()) as mock_del:
         assert lane._open_exclusion(db, row, _NOW) is True
     mock_del.assert_called_once()  # 백스톱이 정상 개방은 막지 않음
+
+
+# ── D-NAO-271: 유형별 라우팅(delete_restricted_keywords 직접호출 → rollback_exclusions 경유) ──
+#
+# ★2차 수정(코디네이터, 위임문 원문 참조): _open_exclusion이 클레임 **전**에
+#   naver_sa_writer.get_adgroup_type(adgroup_id)로 광고그룹 축을 먼저 해결하고, 그 값을
+#   rollback_exclusions(..., adgroup_type=adgroup_type)로 명시 전달한다 — rollback_exclusions
+#   자신은 더 이상 라이브를 재조회하지 않는다(왕복 1회 유지, 클레임 전 fail-closed로 순서도
+#   개선). get_adgroup_type은 내부적으로 _get_adgroup을 호출하므로 두 지점 중 하나만 mock해도
+#   되지만, 여기서는 위임문이 지목한 get_adgroup_type을 직접 mock한다.
+def test_open_exclusion_powerlink_routes_through_rollback_exclusions(db):
+    """파워링크 회귀: campaign_type=WEB_SITE + restrict_kwd_id 있음 → get_adgroup_type이
+    클레임 전에 유형을 해결하고, rollback_exclusions가 adgroup_type=WEB_SITE로 호출되며,
+    그 안에서 delete_restricted_keywords(adgroup_id, [restrict_kwd_id])가 종전과 같은
+    인자로 불린다(인자는 불변, 유형 해결 지점만 한 겹 늘었다)."""
+    _scope(db, campaign_type="WEB_SITE")
+    row = _excl(db, term="복귀후보", restrict_kwd_id="rkw-1", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type",
+                       return_value="WEB_SITE") as mock_type, \
+         patch.object(lane.naver_sa_writer, "rollback_exclusions",
+                       wraps=lane.naver_sa_writer.rollback_exclusions) as mock_rollback, \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+                       return_value=_del_result()) as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is True
+    mock_type.assert_called_once_with("grp-web")
+    mock_rollback.assert_called_once_with(
+        "grp-web", ["복귀후보"], ["rkw-1"], adgroup_type="WEB_SITE",
+    )
+    mock_del.assert_called_once_with("grp-web", ["rkw-1"])  # 종전과 100% 같은 인자
+
+
+def test_open_exclusion_shopping_removes_by_keyword(db):
+    """쇼핑 개방: campaign_type=SHOPPING + restrict_kwd_id=None → 초기 가드에 안 걸리고
+    remove_shopping_exclusions(adgroup_id, [search_term])가 불린다 — 개방이 원리적으로
+    0건이던 결함(D-NAO-271)의 수리 지점."""
+    _scope(db, adgroup_id="grp-shop", campaign_type="SHOPPING")
+    row = _excl(db, term="복귀후보", adgroup_id="grp-shop", restrict_kwd_id=None,
+                next_review_at=date(2026, 7, 22))
+    shop_result = naver_sa_writer.WriteResult(
+        action="remove_shopping_exclusions", before=[], response=None, after=[], created_ids=[],
+    )
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type",
+                       return_value="SHOPPING"), \
+         patch.object(lane.naver_sa_writer, "remove_shopping_exclusions",
+                       return_value=shop_result) as mock_remove, \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is True
+    mock_remove.assert_called_once_with("grp-shop", ["복귀후보"])
+    mock_del.assert_not_called()  # 파워링크 경로는 안 탐
+    db.refresh(row)
+    assert row.status == "probation"
+
+
+def test_open_exclusion_powerlink_without_id_still_blocks(db):
+    """파워링크 + id 없음 → 종전대로 거부(False, 쓰기 0회) — 초기 가드가 여전히 막는다.
+    (회귀 커버는 이미 test_open_without_restrict_kwd_id_skips가 _run_reexamination 경유로
+    지키고 있다 — 이 테스트는 _open_exclusion을 직접 불러 같은 경계를 못 박는다.)"""
+    _scope(db, campaign_type="WEB_SITE")
+    row = _excl(db, term="아이디없음", restrict_kwd_id=None, next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type") as mock_get, \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del, \
+         patch.object(lane.naver_sa_writer, "remove_shopping_exclusions") as mock_remove:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_get.assert_not_called()  # 초기 가드에서 이미 차단 — 라이브 조회조차 안 감
+    mock_del.assert_not_called()
+    mock_remove.assert_not_called()
+    db.refresh(row)
+    assert row.status == "excluded"
+
+
+def test_open_exclusion_unknown_type_without_id_blocks_not_optimistic_shopping(db):
+    """유형 모름(None: naver_entity에 그 광고그룹 행 자체가 없음) + id 없음 → 거부.
+    ★모름을 쇼핑으로 낙관하지 않는다 — _campaign_type_of_adgroup이 None을 돌리면 초기 가드의
+    `!= SHOPPING_ADGROUP_TYPE` 비교가 True가 되어(None != "SHOPPING") 그대로 막힌다."""
+    _scope(db, campaign_type="WEB_SITE")  # grp-web만 등록 — grp-미동기화는 인벤토리에 없음
+    row = _excl(db, term="유형모름", adgroup_id="grp-미동기화", restrict_kwd_id=None,
+                next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type") as mock_get, \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del, \
+         patch.object(lane.naver_sa_writer, "remove_shopping_exclusions") as mock_remove:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_get.assert_not_called()
+    mock_del.assert_not_called()
+    mock_remove.assert_not_called()
+    db.refresh(row)
+    assert row.status == "excluded"
+
+
+# ── D-NAO-271 2차 수정: 클레임 «전» 광고그룹 축 게이트(코디네이터 위임문 5·6) ──
+#
+# ★요점은 **클레임이 아예 일어나지 않았는가**다. 유형을 클레임 뒤에 알았다면(1차 수정 방식)
+#   여기서 막혀도 상태는 이미 probation으로 넘어갔다가 롤백되는 왕복을 거친다 — 그 경우
+#   change_log에 「쓰다 실패」가 남는데, 실제로는 «시도조차 못 한 것»이라 사실과 다르다.
+#   그래서 이 두 테스트는 반드시 status=="excluded"(클레임이 없었다는 증거)를 단언한다.
+def test_open_exclusion_axis_mismatch_blocks_before_claim(db):
+    """축 불일치 — 캠페인 축(_campaign_type_of_adgroup)은 SHOPPING인데 광고그룹 축
+    (get_adgroup_type, 권위 있는 판정)은 WEB_SITE고 restrict_kwd_id가 None → 초기 가드
+    (캠페인 축, 쇼핑이라 안 막힘)는 통과하지만 광고그룹 축 게이트가 클레임 전에 막는다."""
+    _scope(db, campaign_type="SHOPPING")  # 캠페인 축: 쇼핑으로 등록 — 초기 가드 통과
+    row = _excl(db, term="축불일치", restrict_kwd_id=None, next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type",
+                       return_value="WEB_SITE") as mock_type, \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del, \
+         patch.object(lane.naver_sa_writer, "remove_shopping_exclusions") as mock_remove:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_type.assert_called_once_with("grp-web")  # 광고그룹 축은 실제로 조회됨(권위 있는 판정)
+    mock_del.assert_not_called()
+    mock_remove.assert_not_called()
+    db.refresh(row)
+    assert row.status == "excluded"  # ★클레임이 안 일어났다 — probation을 거치지 않았다
+    assert db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == lane._RESTORE_ACTION).count() == 0  # 시도 자체가 없었다
+
+
+def test_open_exclusion_type_unknown_blocks_before_claim(db):
+    """유형 모름 — get_adgroup_type(광고그룹 축, 라이브 조회 실패 등)이 None → 클레임 전에
+    거부(모름을 아무 유형으로도 낙관하지 않는다). restrict_kwd_id는 있어서 초기(캠페인 축)
+    가드는 통과한 뒤, 광고그룹 축 게이트에서 막히는 경로를 고정한다."""
+    _scope(db, campaign_type="WEB_SITE")
+    row = _excl(db, term="광고그룹유형모름", restrict_kwd_id="rkw-1", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type",
+                       return_value=None) as mock_type, \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del, \
+         patch.object(lane.naver_sa_writer, "remove_shopping_exclusions") as mock_remove:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_type.assert_called_once_with("grp-web")
+    mock_del.assert_not_called()
+    mock_remove.assert_not_called()
+    db.refresh(row)
+    assert row.status == "excluded"  # ★클레임이 안 일어났다
+    # ★M3(가드 제거) 대비 강화: 가드가 없으면 클레임 후 try 블록에서 실패해도 return
+    # False·status=excluded는 «우연히 같게» 관측된다(둘 다 network 403이 except를 태움) —
+    # 그 경우와 갈라내는 유일한 신호는 «시도 자체를 안 해 change_log가 0건」이다. 가드 제거
+    # 시나리오는 실패 change_log(outcome=failed)를 반드시 남기므로 이 단언이 그 변이를 잡는다.
+    assert db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == lane._RESTORE_ACTION).count() == 0
 
 
 # ── 일일 복귀 캡 ──
@@ -299,7 +440,8 @@ def test_daily_return_cap(db):
     _scope(db)
     for i in range(lane._SS_DAILY_RETURN_CAP + 3):  # 13건 due
         _excl(db, term=f"복귀{i}", restrict_kwd_id=f"rkw-{i}", next_review_at=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords", return_value=_del_result()):
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords", return_value=_del_result()):
         res = lane._run_reexamination(db, [], _NOW)
     assert res["opened"] == lane._SS_DAILY_RETURN_CAP  # 10만 개방
     assert db.query(NaverSearchTermExclusion).filter(

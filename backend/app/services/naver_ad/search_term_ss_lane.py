@@ -234,6 +234,35 @@ def _adgroup_belongs_to_campaign(db: Session, adgroup_id: str, campaign_id: str)
     return row is not None and row[0] == campaign_id
 
 
+def _campaign_type_of_adgroup(db: Session, adgroup_id: str) -> str | None:
+    """이 광고그룹이 속한 캠페인 유형(WEB_SITE/SHOPPING/…) — 모르면 None (D-NAO-271).
+
+    ★**조기 판별 전용이다 — 경로 선택에 쓰지 않는다.** `campaign_type`(캠페인 축)과
+    `adgroupType`(광고그룹 축)은 **다른 축**이고, 그 둘을 섞은 게이트가 D-NAO-179에서 제외
+    723건 중 711건을 시야 밖에 뒀다. 그래서 여기서는 「id 부재를 회수 실패로 읽어도 되는가」만
+    싸게 가른다(DB만 읽는 필터 — 스코프·킬스위치에 걸릴 행에 API를 안 쏘려는 것). **경로 결정은
+    `_open_exclusion`이 클레임 직전에 `naver_sa_writer.get_adgroup_type()`으로 «광고그룹 축»을
+    따로 읽어서 한다** — 그쪽이 권위 있는 판정이고, 이 함수는 그 앞의 싼 필터다(이중 방벽).
+
+    조회 실패·행 부재는 None이다. 호출부는 None을 «모름»으로 처분해야 하고, 그건 이 레인에서
+    **종전 동작 유지**(id 없으면 개방 불가)를 뜻한다 — 모름을 쇼핑으로 낙관하면 파워링크의
+    회수 실패 잔존이 조용히 개방 시도로 바뀐다.
+
+    `_adgroup_belongs_to_campaign`과 같은 **엔진 레벨 독립 커넥션**을 쓴다(스테일 스냅샷 회피)."""
+    try:
+        with db.get_bind().connect() as conn:
+            row = conn.execute(
+                select(NaverEntity.campaign_type).where(
+                    NaverEntity.entity_type == "adgroup",
+                    NaverEntity.entity_id == adgroup_id,
+                )
+            ).first()
+    except Exception as e:  # noqa: BLE001 — 조회 실패는 «모름»(None)이지 «쇼핑»이 아니다
+        log.warning("search_term_ss_lane: 캠페인 유형 조회 실패 adgroup=%s: %s", adgroup_id, e)
+        return None
+    return row[0] if row is not None else None
+
+
 def _autofire_exclude(db: Session, cand: dict, now: datetime) -> NaverChangeLog | None:
     """파워링크 제외 후보 1건 자동 발사(exploration BX2 관례 복제): status='approved' +
     approval_source=APPROVAL_SOURCE_SS_EXCLUDE 제안 생성 → naver_execution_harness.execute()로
@@ -315,13 +344,29 @@ def _count_returns_today(db: Session, now: datetime) -> int:
 
 
 def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -> bool:
-    """재심사 개방 1건(§3) — delete_restricted_keywords로 제외키워드를 삭제하고 change_log 전건
-    기록([검색어제외 복귀]). 성공 시 True. restrict_kwd_id 부재(회수 실패 잔존)면 개방 불가(사람
-    조사 대상, 무한 재시도 방지 위해 False 반환·상태 유지). delete 실패는 fail-closed로 정직히
-    실패 기록 후 False(상태 유지 — 다음 레인 재시도)."""
-    if not row.restrict_kwd_id:
+    """재심사 개방 1건(§3) — 유형별 경로로 제외키워드를 삭제하고 change_log 전건 기록
+    ([검색어제외 복귀]). 성공 시 True. delete 실패는 fail-closed로 정직히 실패 기록 후
+    False(상태 유지 — 다음 레인 재시도).
+
+    ★D-NAO-271: 삭제 손을 `delete_restricted_keywords` **직접 호출**에서
+    `rollback_exclusions` **라우팅**으로 바꾼다. 그 전엔 이 레인이 파워링크 전용 함수를 직접
+    불러서 **쇼핑 광고그룹의 재개방이 원리적으로 0건**이었다 — 제외를 「사형」에서 「임대」로
+    바꾼 D-NAO-259의 상태기계·등급·백오프·probation·채점기가 전부 완성돼 있는데 **마지막 한
+    줄에서 쇼핑만 빠져 있었다.** 그 결과 §7이 경고한 「브레이크만 자동이고 액셀은 반쪽」이
+    쇼핑 계열 전체에서 성립했다(계정 실측: `restrict_kwd_id` NULL 3,884 / 있음 106).
+
+    ★유형별로 **되돌리는 열쇠가 다르다**(`rollback_exclusions` 주석): 파워링크는 쓰기 응답에서
+    회수한 id, 쇼핑은 **키워드 본문**이다(그 리소스엔 키워드 단위 id가 없다). 그래서
+    `restrict_kwd_id` 부재는 파워링크에선 «회수 실패»지만 쇼핑에선 **정상**이다."""
+    # ★조기 판별은 «캠페인» 유형으로 싸게 한다(무의미한 API 왕복 차단) — 실제 경로 선택은 아래
+    #   rollback_exclusions가 **라이브 adgroupType**으로 한다(이중 방벽). 유형을 모르면(None)
+    #   **종전 동작을 유지**한다: 모름을 쇼핑으로 낙관하면 파워링크의 회수 실패 잔존이 조용히
+    #   개방 시도로 바뀐다.
+    if not row.restrict_kwd_id and (
+        _campaign_type_of_adgroup(db, row.adgroup_id) != naver_sa_writer.SHOPPING_ADGROUP_TYPE
+    ):
         log.warning(
-            "search_term_ss_lane: 재심사 개방 불가(restrict_kwd_id 부재) adgroup=%s term=%r "
+            "search_term_ss_lane: 재심사 개방 불가(restrict_kwd_id 부재·비쇼핑) adgroup=%s term=%r "
             "— 사람 조사 대상(상태 유지)", row.adgroup_id, row.search_term,
         )
         return False
@@ -378,6 +423,34 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
             "term=%r — fail-closed(상태 유지)", row.adgroup_id, row.campaign_id, row.search_term,
         )
         return False
+    # ★D-NAO-271: 쓰기 경로용 **광고그룹 유형**을 클레임 «전»에 해결한다.
+    #
+    # ①축이 다르다: 위 조기 판별은 `campaign_type`(캠페인 축)이고 경로 결정은 `adgroupType`
+    #   (광고그룹 축)이어야 한다 — 그 둘을 섞은 게이트가 D-NAO-179에서 제외 723건 중 711건을
+    #   시야 밖에 뒀다. 그래서 여기서 **광고그룹 축을 따로 읽는다.**
+    # ②순서가 중요하다: `rollback_exclusions`에 `adgroup_type=None`을 넘기면 그 함수가 라이브를
+    #   읽는데, 그 시점은 **이미 클레임(excluded→probation)을 커밋한 뒤**다. 유형을 모르면 거기서
+    #   예외가 나고 클레임 롤백 경로를 타 `failed` change_log가 남는다 — 「쓰기를 시도조차 못 한
+    #   것」이 「쓰다 실패한 것」으로 기록된다. 클레임 전에 해결하면 상태를 안 건드리고 조용히
+    #   물러난다(다음 레인 재시도).
+    # ③API 왕복은 늘지 않는다 — `rollback_exclusions`가 어차피 하던 조회를 앞으로 당긴 것이다.
+    adgroup_type = naver_sa_writer.get_adgroup_type(row.adgroup_id)
+    if adgroup_type is None:
+        log.warning(
+            "search_term_ss_lane: 재심사 개방 보류(광고그룹 유형 «모름») adgroup=%s term=%r "
+            "— fail-closed(상태 유지·다음 레인 재시도)", row.adgroup_id, row.search_term,
+        )
+        return False
+    # ★권위 있는 검사는 여기다(위 조기 판별은 캠페인 축이라 «싼 필터»일 뿐이다). 두 축이 어긋나면
+    #   — 캠페인은 SHOPPING인데 광고그룹은 WEB_SITE — id 없이 파워링크 경로로 내려간다.
+    #   `delete_restricted_keywords`가 빈 목록을 fail-closed로 거부하므로 실쓰기 사고는 안 나지만,
+    #   그 거부는 **클레임 뒤**라 「쓰다 실패」로 기록된다. 시도조차 못 할 일은 시도 전에 막는다.
+    if adgroup_type == naver_sa_writer.WEB_SITE_ADGROUP_TYPE and not row.restrict_kwd_id:
+        log.warning(
+            "search_term_ss_lane: 재심사 개방 불가(파워링크인데 restrict_kwd_id 부재 — 축 불일치) "
+            "adgroup=%s term=%r — 사람 조사 대상(상태 유지)", row.adgroup_id, row.search_term,
+        )
+        return False
     # C2(codex 1R[P1-2] 부분 수용): delete 직전 낙관적 클레임(excluded→probation, status 게이트).
     # 동시 실행(크론+catch-up 데몬)에서 두 러너가 같은 행을 각자 delete하면 두 번째가 404·복귀
     # 이중 카운트를 낳는다. `UPDATE ... WHERE id ∧ status='excluded'`를 커밋해 rowcount==1인
@@ -399,7 +472,16 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
         )
         return False
     try:
-        result = naver_sa_writer.delete_restricted_keywords(row.adgroup_id, [row.restrict_kwd_id])
+        # ★D-NAO-271: 유형별 라우팅(파워링크→id 기반 delete / 쇼핑→키워드 기반 교체 PUT).
+        #   유형은 클레임 전에 **광고그룹 축**으로 해결해 뒀다(위 주석) — 여기서 명시로 넘겨
+        #   `rollback_exclusions`가 라이브를 다시 읽지 않게 한다(왕복 1회 유지).
+        #   파워링크 인자·동작은 종전과 동일하다: `delete_restricted_keywords(adgroup_id, [id])`.
+        result = naver_sa_writer.rollback_exclusions(
+            row.adgroup_id,
+            [row.search_term],
+            [row.restrict_kwd_id] if row.restrict_kwd_id else [],
+            adgroup_type=adgroup_type,
+        )
     except Exception as exc:  # noqa: BLE001 — 삭제 실패도 fail-open 금지, 사실대로 기록
         # C2 롤백: 이 러너가 delete 못 했으니 클레임(probation) 되돌림(excluded 복원) — 다음
         # 레인이 재시도한다. fail change_log는 after_value 없음 → _count_returns_today 미카운트.
@@ -414,8 +496,10 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
         )
         db.add(fail)
         db.commit()
-        log.warning("search_term_ss_lane: 재심사 개방 실패 adgroup=%s id=%s: %s",
-                    row.adgroup_id, row.restrict_kwd_id, exc)
+        # ★D-NAO-271: 쇼핑은 restrict_kwd_id가 정상적으로 None이라 그것만 찍으면 사람이 어느 건인지
+        #   못 찾는다 — 검색어를 같이 찍는다(값이 도는 층과 사람이 읽는 층을 같이 지킨다).
+        log.warning("search_term_ss_lane: 재심사 개방 실패 adgroup=%s term=%r id=%s: %s",
+                    row.adgroup_id, row.search_term, row.restrict_kwd_id, exc)
         return False
 
     entry = NaverChangeLog(

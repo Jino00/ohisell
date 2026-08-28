@@ -216,6 +216,7 @@ def test_재개방이_execute_일기를_남긴다(db, monkeypatch):
         calls.append((adgroup_id, tuple(ids)))
         return type("R", (), {"before": [{"k": TERM}], "after": []})()
 
+    monkeypatch.setattr(lane.naver_sa_writer, "get_adgroup_type", lambda adgroup_id: "WEB_SITE")
     monkeypatch.setattr(lane.naver_sa_writer, "delete_restricted_keywords", _fake_delete)
 
     assert lane._open_exclusion(db, row, NOW) is True
@@ -536,6 +537,7 @@ def test_복귀_개방이_0건이면_성적표가_없다고_말한다(db):
 def test_복귀_일기가_생기면_화면_카운트가_따라_움직인다(db, monkeypatch):
     """표면 변이 대비: 레인의 recorder 호출을 지우면 이 테스트가 죽는다(카운트가 안 움직인다)."""
     row = _excluded_row(db)
+    monkeypatch.setattr(lane.naver_sa_writer, "get_adgroup_type", lambda adgroup_id: "WEB_SITE")
     monkeypatch.setattr(
         lane.naver_sa_writer, "delete_restricted_keywords",
         lambda a, i: type("R", (), {"before": [], "after": []})(),
