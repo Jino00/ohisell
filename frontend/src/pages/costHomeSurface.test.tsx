@@ -354,6 +354,51 @@ describe("H4: 인박스 항목을 누르면 실제로 부자재 드릴다운(기
   });
 });
 
+describe("H4b: 인박스 항목(레시피 타겟) 클릭 → 실제로 레시피 상세로 간다 (변이 방어 M1)", () => {
+  // ★PR #523 적대 리뷰가 죽이지 못한 변이: handleInboxTarget의 recipe 분기(goToRecipeDetail
+  //   호출) 제거. 「모순」 묶음의 레시피 45(=R1) 행을 눌러 **화면이 실제로 그 레시피
+  //   상세로 바뀌는지**를 잰다 — 호출 스파이만 재면 M1의 사촌이 다시 생긴다.
+  it("「모순」 묶음의 레시피 45 항목을 누르면 레시피 탭으로 이동하고 그 레시피 상세가 뜬다", async () => {
+    await renderApp();
+    const group = screen.getByTestId("inbox-group-conflict");
+    fireEvent.click(within(group).getByText(/펼쳐 보기/));
+    fireEvent.click(within(group).getByTestId(`inbox-row-conflict-${R1.id}`));
+    // ★드릴다운이 홈의 껍데기가 아니라 **레시피 상세 그 자체**로 갔다는 증거 — 패널
+    //   안에 R1(레시피 45)의 product_name이 실제로 뜬다.
+    const panel = await screen.findByTestId("recipe-detail-panel");
+    expect(within(panel).getByRole("heading", { name: R1.product_name })).toBeTruthy();
+  });
+});
+
+describe("H4c: 묶음 머리 ▸ — 「단가 없음」은 왕복 표를 좁히고, 레시피 계열은 레시피 탭으로 (변이 방어 M2)", () => {
+  // ★PR #523 적대 리뷰가 죽이지 못한 변이: handleInboxGroup 본문 전체 no-op화. 이 함수는
+  //   두 갈래(단가없음 필터 / 레시피 탭 이동)를 가지므로 **둘 다** 재야 한다.
+  it("「단가 없음」 묶음의 ▸를 누르면 홈에 머문 채 왕복 표가 단가 없음만으로 좁혀진다", async () => {
+    await renderApp();
+    // 좁히기 전 — 단가 있는 M1이 표에 있다(대조군).
+    expect(screen.getByTestId(`roundtrip-row-${M1.id}`)).toBeTruthy();
+    fireEvent.click(
+      within(screen.getByTestId("inbox-group-no-price")).getByTestId("inbox-goto-no-price"),
+    );
+    // 홈 탭에 그대로 있다 — 레시피 탭으로 안 튄다.
+    expect(screen.getByTestId("cost-home-roundtrip")).toBeTruthy();
+    expect(
+      (screen.getByTestId("roundtrip-filter-no-price") as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(screen.queryByTestId(`roundtrip-row-${M1.id}`)).toBeNull();
+    expect(screen.getByTestId(`roundtrip-row-${M2.id}`)).toBeTruthy();
+    expect(screen.getByTestId(`roundtrip-row-${M4.id}`)).toBeTruthy();
+  });
+
+  it("「모순」 묶음의 ▸를 누르면 레시피 탭으로 실제 이동한다", async () => {
+    await renderApp();
+    fireEvent.click(
+      within(screen.getByTestId("inbox-group-conflict")).getByTestId("inbox-goto-conflict"),
+    );
+    expect(await screen.findByTestId("recipe-list-scroll")).toBeTruthy();
+  });
+});
+
 describe("H5: 왕복 표 — 빈 칸은 0원이 아니고, [다운로드]는 S3까지 비활성이다", () => {
   it("단가 없는 행(M2)의 단가 칸은 「—」다 — 「0원」이 아니다", async () => {
     await renderApp();
@@ -394,6 +439,22 @@ describe("H5: 왕복 표 — 빈 칸은 0원이 아니고, [다운로드]는 S3�
     await renderApp();
     fireEvent.click(screen.getByTestId(`roundtrip-row-${M1.id}`));
     expect(await screen.findByText(`「${M1.name}」 단가 이력`)).toBeTruthy();
+  });
+
+  // ★PR #523 적대 리뷰가 죽이지 못한 변이: 열 10 「단가 발효일」 셀을 "—" 하드코딩.
+  //   값이 없는 종만 재면 살아남는다 — **값이 있는 종(M1)도 같이 재야** 하드코딩이 죽는다.
+  it("「단가 발효일」 열이 실제 값을 그린다 — 값 있는 종(M1)과 없는 종(M3)이 같은 열에서 갈린다", async () => {
+    await renderApp();
+    const row1 = screen.getByTestId(`roundtrip-row-${M1.id}`);
+    const cells1 = within(row1).getAllByRole("cell");
+    // 열 순서: id·이름·폼팩터·부품·단위·단가(제외)·단가(포함)·VAT파생·단가출처·단가발효일…
+    expect(M1.latest_price_effective_date).not.toBeNull();
+    expect(cells1[9].textContent).toBe(M1.latest_price_effective_date);
+
+    const row3 = screen.getByTestId(`roundtrip-row-${M3.id}`);
+    const cells3 = within(row3).getAllByRole("cell");
+    expect(M3.latest_price_effective_date).toBeNull();
+    expect(cells3[9].textContent).toBe("—");
   });
 });
 
