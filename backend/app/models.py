@@ -2156,6 +2156,37 @@ class CoupangRocketPoChangeLog(Base):
     prev_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class CoupangRocketPoIngestRound(Base):
+    """발주 수집 «회차» 1건의 결과 — 이벤트를 **몇 건 버렸는지**가 화면에 닿는 유일한 길.
+    계약 `docs/contracts/CONTRACT_1p_po_status_history.md` §4-8 (적대 리뷰 1R P1-1).
+
+    ★왜 필요했나: 초판은 `changes_dropped`를 **로그와 페처 응답으로만** 냈다. 조회 API가
+      원리적으로 못 읽으니, 이벤트 적재가 통째로 실패한 회차에도 화면은 「이번 수집에서는
+      달라진 발주가 없습니다」를 **적극적으로 단언**했다(적대 리뷰가 재현: RP→PA 전이가
+      실제로 있는데 화면은 「없습니다」). 침묵이 아니라 거짓말이라 더 나쁘다.
+    ★★가장 유력한 발현 경로가 하필 이 저장소의 상습 사고다 — **코드가 마이그레이션보다 먼저
+      배포되면** 매 회차 전량 drop이고 화면은 매번 「없습니다」다(`--migrate` 순서 강제의 이유).
+
+    ★이벤트 표에 sentinel 행을 넣지 않고 별도 표로 둔 이유: 그 표는 «관측된 변화»만 담는
+      read-only 파생이고(§3), 「적재가 실패했다」는 우리 파이프라인의 사실이지 발주의 사실이 아니다.
+
+    grain: `observed_at`(회차 = 한 push = 한 시각) 유니크. 시각은 KST naive(`kst_now()`).
+    """
+
+    __tablename__ = "coupang_rocket_po_ingest_round"
+    __table_args__ = (
+        UniqueConstraint("observed_at", name="uq_coupang_rocket_po_ingest_round"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # 이번 회차 PO 수
+    changes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # 적재된 이벤트
+    # ★0이 아니면 화면이 「달라진 게 없다」고 말하면 안 된다 — 그게 이 컬럼의 존재 이유다.
+    dropped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+
 class CoupangRocketInvoiceConfirm(Base):
     """1P 「거래명세서확인」(RI→CI) 실행 명령 겸 **감사 레코드** (계약 CONTRACT_1p_invoice_confirm_write).
 

@@ -26,9 +26,9 @@ import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchRocketPipeline, fetchRocketPipelineStage, fetchRocketRiQueue, isPoStage,
   previewRocketInvoiceConfirm, requestRocketInvoiceConfirm, fetchRocketConfirmHistory,
-  fetchRocketPoChanges,
+  fetchRocketPoChanges, fetchRocketPoHistory,
   type RocketPipeline, type RocketPipelineRow, type RocketRiRow,
-  type RocketConfirmPreview,
+  type RocketConfirmPreview, type RocketPoHistory,
 } from "../lib/api";
 
 const NO_DATA = "—";
@@ -65,6 +65,8 @@ const STAGE_META: Record<string, { no: string; label: string; desc: string }> = 
 // ══════════════════════════════════════════════════════════════
 export function PoChangesCard() {
   const { data, error } = useAsyncData(() => fetchRocketPoChanges(), []);
+  // ★발주번호를 누르면 그 발주의 관측 이력이 펼쳐진다(계약 §4-4).
+  const [openSeq, setOpenSeq] = useState<number | null>(null);
 
   if (error) {
     return (
@@ -79,6 +81,9 @@ export function PoChangesCard() {
   if (data === null) return <Card title="이번 수집에서 달라진 것"><Loading rows={2} /></Card>;
 
   const none = data.first_seen.count === 0 && data.changed.count === 0;
+  // ★적대 리뷰 1R P1-1: 이벤트 적재가 실패한 회차를 「달라진 게 없다」로 **단언**하면 안 된다.
+  //   버린 수가 0이 아니면 그건 «변화가 없다»가 아니라 «못 봤다»다(원칙22).
+  const dropped = data.round?.dropped ?? 0;
 
   return (
     <Card
@@ -99,8 +104,25 @@ export function PoChangesCard() {
         )}
       </div>
 
+      {dropped > 0 && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-snug text-amber-800">
+          ⚠️ 이번 회차에서 관측 <b>{cnt(dropped)}건을 기록하지 못했습니다</b> —
+          아래 목록은 <b>완전하지 않습니다</b>. 「달라진 게 없다」는 뜻이 아닙니다.
+          {data.round?.error && (
+            <div className="mt-1 font-mono text-[11px] text-amber-700">{data.round.error}</div>
+          )}
+        </div>
+      )}
+
       {none ? (
-        <EmptyState reason="이번 수집에서는 달라진 발주가 없습니다." />
+        dropped > 0 ? (
+          <EmptyState
+            reason="이번 수집의 변화를 기록하지 못했습니다."
+            hint="화면에 안 뜨는 것과 일어나지 않은 것은 다릅니다 — 위 사유를 보세요."
+          />
+        ) : (
+          <EmptyState reason="이번 수집에서는 달라진 발주가 없습니다." />
+        )
       ) : (
         <div className="divide-y divide-gray-100">
           {/* ① 처음 본 것 — «신규 발주 발생»이 아니다 */}
@@ -115,10 +137,18 @@ export function PoChangesCard() {
               <div className="mt-2 space-y-1">
                 {data.first_seen.rows.map((r) => (
                   <div key={r.purchase_order_seq} className="text-xs text-gray-600">
-                    <span className="tabular-nums font-medium">{r.purchase_order_seq}</span>
+                    <button
+                      type="button"
+                      onClick={() => setOpenSeq(openSeq === r.purchase_order_seq ? null : r.purchase_order_seq)}
+                      className="tabular-nums font-medium text-sky-700 hover:underline"
+                      title="눌러서 이 발주의 관측 이력 보기"
+                    >
+                      {r.purchase_order_seq}
+                    </button>
                     <span className="text-gray-400">
                       {" "}· {r.label}(상태 {r.status_when_first_seen ?? NO_DATA}) · {won(r.order_amount)}
                     </span>
+                    {openSeq === r.purchase_order_seq && <PoHistoryDetail seq={r.purchase_order_seq} />}
                   </div>
                 ))}
               </div>
@@ -137,9 +167,14 @@ export function PoChangesCard() {
               <div className="mt-2 space-y-1.5">
                 {data.changed.rows.map((r) => (
                   <div key={r.purchase_order_seq} className="text-xs">
-                    <span className="tabular-nums font-medium text-gray-700">
+                    <button
+                      type="button"
+                      onClick={() => setOpenSeq(openSeq === r.purchase_order_seq ? null : r.purchase_order_seq)}
+                      className="tabular-nums font-medium text-sky-700 hover:underline"
+                      title="눌러서 이 발주의 관측 이력 보기"
+                    >
                       {r.purchase_order_seq}
-                    </span>
+                    </button>
                     {r.status_from && (
                       <span className="ml-1 text-gray-800">
                         {r.status_from} → <b>{r.status_to}</b>
@@ -160,6 +195,7 @@ export function PoChangesCard() {
                         </span>
                       ))}
                     </div>
+                    {openSeq === r.purchase_order_seq && <PoHistoryDetail seq={r.purchase_order_seq} />}
                   </div>
                 ))}
               </div>
@@ -168,6 +204,66 @@ export function PoChangesCard() {
         </div>
       )}
     </Card>
+  );
+}
+
+
+/** ★발주 1건의 관측 이력 (계약 §4-4·§4-5, 적대 리뷰 1R P1-2).
+ *
+ *  ★초판은 이 UI가 **없었다** — 라우터와 `fetchRocketPoHistory`를 통째로 지워도 테스트가 전부
+ *    초록이었다(소비처 0). 계약 §2가 그 상태를 이름 붙여 금지해 뒀다:
+ *    *"DB에만 있는 이력은 이 계약에선 실패 모드다."* 만들어졌는지와 사람이 보는지는 다른 문제다.
+ *  ★이력 0건을 「변화 없음」으로 말하지 않는다 — `empty_reason`이 **왜** 비었는지 답한다
+ *    (배선 전 발주인지, 우리 원장에 아예 없는 발주인지). */
+function PoHistoryDetail({ seq }: { seq: number }) {
+  const [data, setData] = useState<RocketPoHistory | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetchRocketPoHistory(seq)
+      .then((d) => { if (alive) setData(d); })
+      .catch((e) => { if (alive) setErr(String(e)); });
+    return () => { alive = false; };
+  }, [seq]);
+
+  if (err) {
+    return (
+      <div className="mt-1 ml-3 text-xs text-amber-700">
+        이력을 불러오지 못했습니다: {err} — 조회 실패는 「변화가 없었다」와 다릅니다.
+      </div>
+    );
+  }
+  if (!data) return <div className="mt-1 ml-3 text-xs text-gray-400">이력 불러오는 중…</div>;
+
+  if (data.rows.length === 0) {
+    return <div className="mt-1 ml-3 text-xs text-gray-500">{data.empty_reason}</div>;
+  }
+  return (
+    <div className="mt-1 ml-3 space-y-0.5 border-l border-gray-200 pl-2">
+      {data.rows.map((r, i) => (
+        <div key={i} className="text-xs text-gray-600">
+          {r.event === "first_seen" ? (
+            <>
+              <b>처음 관측됨</b>(상태 {r.after ?? NO_DATA})
+              <span className="text-gray-400"> · {r.observed_to ?? NO_DATA}</span>
+            </>
+          ) : (
+            <>
+              {r.label} {r.before ?? NO_DATA}→{r.after ?? NO_DATA}
+              {r.delta != null && (
+                <b className={r.delta < 0 ? " text-amber-700" : " text-gray-700"}>
+                  {" "}({r.delta > 0 ? "+" : ""}{r.delta.toLocaleString("ko-KR")})
+                </b>
+              )}
+              <span className="text-gray-400">
+                {" "}· {r.observed_from ?? NO_DATA} ~ {r.observed_to ?? NO_DATA} 사이에 바뀜
+              </span>
+            </>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

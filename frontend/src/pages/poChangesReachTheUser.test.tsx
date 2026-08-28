@@ -14,10 +14,14 @@
 //   ④ 소급 불가 자백 문구 제거 → test 「이력 시작을 자백한다」
 //   ⑤ 금지 문구(「신규 발주」·「들어옴」·「확정됨」)를 되살리는 변이 → test 「단정하지 않는다」
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import type React from "react";
 
-const h = vi.hoisted(() => ({ changes: null as unknown }));
+const h = vi.hoisted(() => ({
+  changes: null as unknown,
+  history: null as unknown,
+  historyCalls: [] as number[],
+}));
 
 vi.mock("../lib/api", () => ({
   fetchRocketPipeline: () => new Promise<never>(() => {}),
@@ -28,6 +32,10 @@ vi.mock("../lib/api", () => ({
   requestRocketInvoiceConfirm: () => new Promise<never>(() => {}),
   isPoStage: () => true,
   fetchRocketPoChanges: () => Promise.resolve(h.changes),
+  fetchRocketPoHistory: (seq: number) => {
+    h.historyCalls.push(seq);
+    return Promise.resolve(h.history);
+  },
 }));
 
 const mod = await import("./rocketPipelineTabs");
@@ -39,8 +47,23 @@ const PoChangesCard = (mod as Record<string, unknown>).PoChangesCard as
 /** non-null 단언을 JSX 안에 쓸 수 없어 여기서 푼다. undefined면 첫 테스트가 그 사실을 드러낸다. */
 const Card = () => (PoChangesCard ? <PoChangesCard /> : <div>NOT_EXPORTED</div>);
 
+const HISTORY = {
+  purchase_order_seq: 140778881,
+  known_po: true,
+  history_start: "2026-08-28 10:14",
+  empty_reason: null,
+  rows: [
+    { event: "first_seen", field: null, label: null, before: null, after: "RP",
+      observed_from: null, observed_to: "2026-08-28 10:14", is_amount: false, delta: null },
+    { event: "field_change", field: "purchase_order_status", label: "상태",
+      before: "RP", after: "PA", observed_from: "2026-08-28 10:14",
+      observed_to: "2026-08-28 12:34", is_amount: false, delta: null },
+  ],
+};
+
 const FULL = {
   round_at: "2026-08-28 12:34",
+  round: { records: 9, changes: 2, dropped: 0, error: null },
   history_start: "2026-08-28 10:14",
   first_seen: {
     count: 1, amount: 7404840,
@@ -70,7 +93,11 @@ const FULL = {
   note: "「처음 관측됨」은 그 발주가 이번 수집에서 우리 눈에 처음 들어왔다는 뜻입니다.",
 };
 
-beforeEach(() => { h.changes = FULL; });
+beforeEach(() => {
+  h.changes = FULL;
+  h.history = HISTORY;
+  h.historyCalls = [];
+});
 afterEach(cleanup);
 
 describe("이번 수집에서 달라진 것 — 표면", () => {
@@ -78,6 +105,11 @@ describe("이번 수집에서 달라진 것 — 표면", () => {
     expect(PoChangesCard).toBeTypeOf("function");
     render(<Card />);
     expect(await screen.findByText(/이번 수집에서 달라진 것/)).toBeTruthy();
+    // ★§4-1 「마지막 수집 회차 기준」 — 회차 시각이 **제목**에 있어야 «어느 회차 얘기인지» 안다.
+    //   (같은 시각이 행의 구간 표기에도 나오므로 제목만 겨눈다.)
+    expect(
+      await screen.findByText(/이번 수집에서 달라진 것 — 2026-08-28 12:34/),
+    ).toBeTruthy();
   });
 
   it("★「처음 본 발주」와 「바뀐 발주」가 다른 줄로 갈려 보인다", async () => {
@@ -145,6 +177,58 @@ describe("이번 수집에서 달라진 것 — 표면", () => {
     expect(await screen.findByText(/조회 실패는 '달라진 게 없다'와 다릅니다/)).toBeTruthy();
   });
 
+  it("★버린 이벤트가 있으면 «달라진 게 없다»고 말하지 않는다 (적대 리뷰 1R P1-1)", async () => {
+    // 리뷰어가 재현한 결함: 적재가 통째로 실패한 회차에도 화면이 「달라진 발주가 없습니다」를
+    // **단언**했다 — 전이가 실제로 있었는데도. 침묵이 아니라 거짓말이라 더 나쁘다.
+    h.changes = {
+      ...FULL,
+      round: { records: 9, changes: 0, dropped: 2, error: "no such table: coupang_rocket_po_change_log" },
+      first_seen: { count: 0, amount: 0, rows: [] },
+      changed: { count: 0, amount: 0, rows: [] },
+    };
+    render(<Card />);
+    expect(await screen.findByText(/2건을 기록하지 못했습니다/)).toBeTruthy();
+    expect(screen.getByText(/no such table/)).toBeTruthy();
+    // ★「없습니다」로 단언하지 않는다.
+    expect(screen.queryByText(/이번 수집에서는 달라진 발주가 없습니다/)).toBeNull();
+    expect(screen.getByText(/화면에 안 뜨는 것과 일어나지 않은 것은 다릅니다/)).toBeTruthy();
+  });
+
+  it("★발주번호를 누르면 그 발주의 관측 이력이 펼쳐진다 (적대 리뷰 1R P1-2)", async () => {
+    // 초판은 이 UI가 없었다 — 라우터와 API 클라이언트를 통째로 지워도 테스트가 전부 초록이었다.
+    render(<Card />);
+    const btn = await screen.findByRole("button", { name: "140778881" });
+    fireEvent.click(btn);
+    await waitFor(() => expect(h.historyCalls).toEqual([140778881]));
+    // 펼쳐진 이력 안의 항목을 겨눈다. 문구가 <b>로 쪼개지고 카드 본문에도 같은 낱말이
+    // 있으므로 요소 조회 대신 본문 전체로 판정한다.
+    await waitFor(() => {
+      const body = document.body.textContent ?? "";
+      expect(body).toContain("처음 관측됨(상태 RP)");   // ★이력에만 나오는 모양
+      expect(body).toContain("상태 RP→PA");
+    });
+  });
+
+  it("★이력이 없는 발주는 «왜» 비었는지 화면이 말한다", async () => {
+    h.history = {
+      ...HISTORY, rows: [],
+      empty_reason: "이력은 2026-08-28부터입니다 — 그 전 변화는 기록이 없습니다.",
+    };
+    render(<Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "140778881" }));
+    expect(await screen.findByText(/그 전 변화는 기록이 없습니다/)).toBeTruthy();
+  });
+
+  it("★원장에 없는 발주는 «배선 전»과 다르게 말한다", async () => {
+    h.history = {
+      ...HISTORY, rows: [], known_po: false,
+      empty_reason: "이 발주번호를 우리 원장에서 본 적이 없습니다.",
+    };
+    render(<Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "140778881" }));
+    expect(await screen.findByText(/본 적이 없습니다/)).toBeTruthy();
+  });
+
   it("★카드가 「열린 파이프라인」 탭에 실제로 «붙어» 있다 (배선 절단 변이가 여기서 죽는다)", async () => {
     // ★자체 변이 검증에서 이 구멍이 드러났다: 컴포넌트만 따로 테스트하면 «만들어졌는가»는
     //   지키지만 «탭에 붙어 있는가»는 아무도 안 지킨다. 카드를 통째로 떼어내도 9종이 전부
@@ -154,5 +238,15 @@ describe("이번 수집에서 달라진 것 — 표면", () => {
       (m) => (m as { default: string }).default,
     );
     expect(src).toContain("<PoChangesCard />");
+  });
+
+  it("★발주 이력 «경로»가 실재한다 — 클라이언트가 진짜 엔드포인트를 부른다 (리뷰어 M1)", async () => {
+    // ★이 파일은 `../lib/api`를 통째로 모킹하므로, 실제 클라이언트가 삭제돼도 화면 테스트는
+    //   전부 초록이다(리뷰어의 M1이 그렇게 살아남았다). 그래서 «경로의 실재»는 소스로 잰다.
+    const api = await import("../lib/api?raw").then(
+      (m) => (m as { default: string }).default,
+    );
+    expect(api).toContain("/api/overview/rocket-po-changes/${seq}");
+    expect(api).toMatch(/export function fetchRocketPoHistory/);
   });
 });

@@ -26,7 +26,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import CoupangRocketPoChangeLog, CoupangRocketPurchaseOrder
+from app.models import (
+    CoupangRocketPoChangeLog,
+    CoupangRocketPoIngestRound,
+    CoupangRocketPurchaseOrder,
+)
 from app.services.coupang import rocket_po_changes as q
 from app.services.coupang import rocket_supplier_sync as sync
 
@@ -65,12 +69,14 @@ def _rec(seq, status="RP", *, order_qty=10, conf_qty=10, recv_qty=0,
 
 
 def _round(db, recs, now):
-    """한 회차 = 한 push. 적재 경로를 그대로 태운다."""
+    """한 회차 = 한 push. 적재 경로를 그대로 태운다(회차 결과 기록까지)."""
     events = []
     for r in recs:
         sync._upsert_po(db, r, events=events, now=now)
     db.commit()
-    dropped = sync._persist_po_change_events(db, events)
+    dropped, err = sync._persist_po_change_events(db, events)
+    sync._record_ingest_round(db, now, records=len(recs),
+                              changes=len(events) - dropped, dropped=dropped, error=err)
     return events, dropped
 
 
@@ -129,8 +135,9 @@ def test_same_round_replayed_adds_nothing(db):
         "purchase_order_seq": 1, "vendor_id": VID, "event": "first_seen", "field": "",
         "before_value": None, "after_value": "RP", "observed_at": T1, "prev_observed_at": None,
     }]
-    dropped = sync._persist_po_change_events(db, events)
+    dropped, err = sync._persist_po_change_events(db, events)
     assert dropped == 1                      # 중복이라 통째로 버려졌다
+    assert err is not None                   # 사유가 남는다(조용히 버리지 않는다)
     assert len(_logs(db)) == n1              # 행은 안 늘었다
 
 
@@ -198,8 +205,9 @@ def test_event_failure_does_not_break_ingest(db, monkeypatch):
         "purchase_order_seq": 1, "vendor_id": VID, "event": "first_seen", "field": "",
         "before_value": None, "after_value": "RP", "observed_at": T1, "prev_observed_at": None,
     }]
-    dropped = sync._persist_po_change_events(db, events)
+    dropped, err = sync._persist_po_change_events(db, events)
     assert dropped == 1          # 버렸다 — 그리고 «셌다»(조용히 0으로 접지 않는다)
+    assert "이벤트 표 없음" in (err or "")
 
 
 def test_ingest_reports_dropped_count(db, monkeypatch):
@@ -217,10 +225,25 @@ def test_ingest_reports_dropped_count(db, monkeypatch):
 def test_empty_history_confesses_why(db):
     """★배선 전 발주는 원리적으로 기록이 없다 — 그걸 「변화 없음」으로 읽으면 안 된다."""
     _round(db, [_rec(1, "RP")], T1)          # 다른 발주로 이력 시작만 만든다
-    out = q.po_history(db, 999999)           # 이력이 없는 발주
-    assert out["rows"] == []
+    # 원장엔 있는데 이력이 없는 발주 = «배선 전» 발주
+    db.add(CoupangRocketPurchaseOrder(purchase_order_seq=555, vendor_id=VID,
+                                      purchase_order_status="RP", synced_at=T1))
+    db.commit()
+    out = q.po_history(db, 555)
+    assert out["rows"] == [] and out["known_po"] is True
     assert "이력은 2026-08-28부터입니다" in out["empty_reason"]
     assert "그 전 변화는 기록이 없습니다" in out["empty_reason"]
+
+
+def test_unknown_po_is_not_called_history_less(db):
+    """★적대 리뷰 1R P1-2 곁가지: 「배선 전 발주」와 「그런 발주 없음」이 같은 문장으로 나왔다.
+
+    구판은 없는 발주번호에도 「이력은 …부터입니다」라고 답했다 — 모름을 아는 척한 것이다.
+    """
+    _round(db, [_rec(1, "RP")], T1)
+    out = q.po_history(db, 999999)           # 원장에도 없는 발주
+    assert out["known_po"] is False
+    assert "본 적이 없습니다" in out["empty_reason"]
 
 
 def test_history_start_is_exposed(db):
@@ -288,3 +311,62 @@ def test_tracked_fields_are_exactly_the_contract_eight(db):
     for banned in ("actor", "reason", "cause", "cancelled", "who"):
         assert banned not in cols
     assert text  # (import 사용 표시)
+
+
+# ──────────────────────────────────────────────
+# ⑨ ★버린 이벤트가 화면에 «닿는다» (적대 리뷰 1R P1-1)
+# ──────────────────────────────────────────────
+def test_dropped_events_reach_the_screen(db, monkeypatch):
+    """★적대 리뷰가 재현한 결함: 이벤트 적재가 통째로 실패한 회차에도 화면이
+    「이번 수집에서는 달라진 발주가 없습니다」를 **적극적으로 단언**했다 — 전이가 실제로
+    있었는데도. 침묵이 아니라 거짓말이라 더 나쁘다.
+
+    가장 유력한 발현 경로가 이 저장소의 상습 사고다: **코드가 마이그레이션보다 먼저 배포되면**
+    매 회차 전량 drop이고 화면은 매번 「없습니다」다.
+    """
+    _round(db, [_rec(1, "RP")], T1)                     # 1회차 정상
+
+    real = db.bulk_insert_mappings
+
+    def _boom(*a, **k):
+        raise RuntimeError("no such table: coupang_rocket_po_change_log")
+
+    monkeypatch.setattr(db, "bulk_insert_mappings", _boom)
+    _round(db, [_rec(1, "PA")], T2)                     # 2회차: RP→PA 전이가 «있는데» 적재 실패
+    monkeypatch.setattr(db, "bulk_insert_mappings", real)
+
+    out = q.latest_round_changes(db, VID)
+    assert out["round_at"] == "2026-08-28 12:34"
+    assert out["first_seen"]["count"] == 0 and out["changed"]["count"] == 0
+    # ★그러나 화면은 «달라진 게 없다»고 말하면 안 된다 — 버린 수가 응답에 실린다.
+    assert out["round"]["dropped"] == 1
+    assert "no such table" in (out["round"]["error"] or "")
+
+
+def test_quiet_round_reports_zero_dropped(db):
+    """진짜로 조용한 회차는 dropped=0이다 — 위 테스트와 갈려야 화면이 둘을 구분한다."""
+    _round(db, [_rec(1, "RP")], T1)
+    _round(db, [_rec(1, "RP")], T2)
+    out = q.latest_round_changes(db, VID)
+    assert out["changed"]["count"] == 0
+    assert out["round"]["dropped"] == 0          # 「없다」고 말해도 되는 유일한 경우
+    assert out["round"]["records"] == 1
+
+
+def test_round_result_is_persisted(db):
+    _round(db, [_rec(1, "RP"), _rec(2, "PA")], T1)
+    r = db.query(CoupangRocketPoIngestRound).one()
+    assert (r.records, r.changes, r.dropped) == (2, 2, 0)
+
+
+def test_amount_reaches_the_response(db):
+    """★적대 리뷰 1R P2-1: `_amount_of`가 항상 {}를 반환해도 아무 테스트가 안 죽었다.
+    §4-1이 「N건 · **금액**」을 명시하는데 금액을 아무도 안 재고 있었다."""
+    _round(db, [_rec(1, "RP", order_amt=7404840)], T1)
+    out = q.latest_round_changes(db, VID)
+    assert out["first_seen"]["amount"] == 7404840
+    assert out["first_seen"]["rows"][0]["order_amount"] == 7404840
+
+    _round(db, [_rec(1, "PA", order_amt=7404840)], T2)
+    out2 = q.latest_round_changes(db, VID)
+    assert out2["changed"]["amount"] == 7404840

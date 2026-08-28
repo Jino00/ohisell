@@ -22,7 +22,11 @@ import logging
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import CoupangRocketPoChangeLog, CoupangRocketPurchaseOrder
+from app.models import (
+    CoupangRocketPoChangeLog,
+    CoupangRocketPoIngestRound,
+    CoupangRocketPurchaseOrder,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,13 +51,18 @@ def _iso(dt) -> str | None:
     return dt.isoformat(sep=" ", timespec="minutes") if dt else None
 
 
-def history_start(db: Session) -> str | None:
+def history_start(db: Session, vendor_id: str | None = None) -> str | None:
     """이력이 시작된 시각(가장 오래된 관측). None이면 아직 한 회차도 안 쌓였다.
 
     ★화면이 이 값을 «자백»해야 한다 — 소급이 원리적으로 불가하므로(§7 전제 1), 이 값을 안 보이면
       「이력에 없음」이 「변화 없음」으로 읽힌다(원칙22: 미수집 ≠ 없음).
     """
-    return _iso(db.query(func.min(CoupangRocketPoChangeLog.observed_at)).scalar())
+    # ★vendor 필터를 탄다(적대 리뷰 1R P2-3): `latest_round`는 타는데 여기만 안 타면
+    #   vendor가 늘었을 때 «남의 이력 시작일»이 내 화면에 뜬다.
+    q = db.query(func.min(CoupangRocketPoChangeLog.observed_at))
+    if vendor_id is not None:
+        q = q.filter(CoupangRocketPoChangeLog.vendor_id == vendor_id)
+    return _iso(q.scalar())
 
 
 def latest_round(db: Session, vendor_id: str | None):
@@ -71,6 +80,27 @@ def latest_round(db: Session, vendor_id: str | None):
     if vendor_id is not None:
         q = q.filter(CoupangRocketPurchaseOrder.vendor_id == vendor_id)
     return q.scalar()
+
+
+def round_result(db: Session, observed_at) -> dict:
+    """그 회차의 적재 결과 — ★`dropped > 0`이면 화면이 「달라진 게 없다」고 말하면 안 된다.
+
+    ★적대 리뷰 1R P1-1: 초판은 이 값을 로그와 페처 응답으로만 냈다. 조회 API가 원리적으로
+      못 읽으니, 이벤트 적재가 통째로 실패한 회차에도 화면이 「이번 수집에서는 달라진 발주가
+      없습니다」를 **적극적으로 단언**했다(전이가 실제로 있었는데도). 침묵보다 나쁘다.
+    ★가장 유력한 발현 경로가 이 저장소의 상습 사고다 — 코드가 마이그레이션보다 먼저 배포되면
+      매 회차 전량 drop이고 화면은 매번 「없습니다」다.
+    """
+    if observed_at is None:
+        return {"records": None, "changes": None, "dropped": None, "error": None}
+    r = (
+        db.query(CoupangRocketPoIngestRound)
+        .filter(CoupangRocketPoIngestRound.observed_at == observed_at).first()
+    )
+    if r is None:
+        # 회차 기록 자체가 없다 — 배선 전 수집이거나 기록마저 실패한 회차다. 「0건」이 아니다.
+        return {"records": None, "changes": None, "dropped": None, "error": None}
+    return {"records": r.records, "changes": r.changes, "dropped": r.dropped, "error": r.error}
 
 
 def _amount_of(db: Session, seqs: list[int]) -> dict[int, int]:
@@ -92,11 +122,12 @@ def latest_round_changes(db: Session, vendor_id: str | None) -> dict:
     그 둘의 혼동이었다(신규 유입을 「확정했기 때문」으로 발화, 2026-08-28).
     """
     at = latest_round(db, vendor_id)
-    start = history_start(db)
+    start = history_start(db, vendor_id)
     if at is None or start is None:
         return {
             "round_at": _iso(at),
             "history_start": start,
+            "round": round_result(db, at),
             "first_seen": {"count": 0, "amount": 0, "rows": []},
             "changed": {"count": 0, "amount": 0, "rows": []},
             "note": "아직 관측 이력이 없습니다 — 다음 수집부터 쌓입니다.",
@@ -111,9 +142,12 @@ def latest_round_changes(db: Session, vendor_id: str | None) -> dict:
     first_seqs = [e.purchase_order_seq for e in evs if e.event == "first_seen"]
     # ★처음 본 발주는 «변화»에서 뺀다 — 같은 회차에 first_seen과 field_change가 같이 나올 수
     #   없지만(신규는 diff 대상이 없다), 방어적으로 가른다.
+    # ★루프 «밖»에서 한 번만 만든다(적대 리뷰 1R P2-2): 안에 두면 첫 회차 약 2,700건에서
+    #   2,700² ≈ 7.3M 비교가 된다.
+    first_set = set(first_seqs)
     changed_map: dict[int, list] = {}
     for e in evs:
-        if e.event != "field_change" or e.purchase_order_seq in set(first_seqs):
+        if e.event != "field_change" or e.purchase_order_seq in first_set:
             continue
         changed_map.setdefault(e.purchase_order_seq, []).append(e)
 
@@ -158,9 +192,12 @@ def latest_round_changes(db: Session, vendor_id: str | None) -> dict:
             ],
         })
 
+    rr = round_result(db, at)
     return {
         "round_at": _iso(at),
-        "history_start": history_start(db),
+        "history_start": start,
+        # ★이 회차에 이벤트를 몇 건 버렸나. 0이 아니면 화면은 「달라진 게 없다」고 말하면 안 된다.
+        "round": rr,
         "first_seen": {
             "count": len(first_rows),
             "amount": sum(r["order_amount"] for r in first_rows),
@@ -199,6 +236,13 @@ def po_history(db: Session, seq: int) -> dict:
         .order_by(C.observed_at, C.id).all()
     )
     start = history_start(db)
+    # ★「배선 전 발주」와 「그런 발주 없음」을 가른다(적대 리뷰 1R P1-2 곁가지).
+    #   구판은 없는 발주번호에도 「이력은 …부터입니다」라고 답했다 — 모름을 아는 척한 것이다.
+    known = (
+        db.query(CoupangRocketPurchaseOrder.purchase_order_seq)
+        .filter(CoupangRocketPurchaseOrder.purchase_order_seq == seq).first()
+        is not None
+    )
     rows = []
     for e in evs:
         rows.append({
@@ -217,11 +261,11 @@ def po_history(db: Session, seq: int) -> dict:
         "rows": rows,
         "history_start": start,
         # ★이력 0건을 「변화 없음」으로 읽으면 안 된다. 배선 전 발주는 원리적으로 기록이 없다.
+        "known_po": known,
         "empty_reason": (
-            None if rows else (
-                f"이력은 {start[:10]}부터입니다 — 그 전 변화는 기록이 없습니다."
-                if start else
-                "아직 관측 이력이 없습니다 — 다음 수집부터 쌓입니다."
-            )
+            None if rows else
+            "이 발주번호를 우리 원장에서 본 적이 없습니다." if not known else
+            f"이력은 {start[:10]}부터입니다 — 그 전 변화는 기록이 없습니다." if start else
+            "아직 관측 이력이 없습니다 — 다음 수집부터 쌓입니다."
         ),
     }

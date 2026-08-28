@@ -1886,9 +1886,18 @@ export interface RocketPoChangedRow {
   fields: RocketPoChangeField[];
 }
 
+/** 그 회차의 적재 결과. ★`dropped > 0`이면 화면이 「달라진 게 없다」고 말하면 안 된다. */
+export interface RocketPoRoundResult {
+  records: number | null;
+  changes: number | null;
+  dropped: number | null;
+  error: string | null;
+}
+
 export interface RocketPoChanges {
   /** 마지막 «수집» 시각. 그 회차에 변화가 0건이면 0건이라 말한다(지난 회차를 안 보여준다). */
   round_at: string | null;
+  round: RocketPoRoundResult;
   /** 이력이 시작된 시각 — 소급이 불가하므로 화면이 이걸 자백한다. */
   history_start: string | null;
   first_seen: { count: number; amount: number; rows: RocketPoFirstSeenRow[] };
@@ -1912,6 +1921,8 @@ export interface RocketPoHistory {
   purchase_order_seq: number;
   rows: RocketPoHistoryRow[];
   history_start: string | null;
+  /** 원장에 그 발주가 있나 — 「배선 전 발주」와 「그런 발주 없음」을 가른다. */
+  known_po: boolean;
   /** 이력 0건일 때 «왜 비었는지». null이 아니면 화면이 반드시 띄운다. */
   empty_reason: string | null;
 }

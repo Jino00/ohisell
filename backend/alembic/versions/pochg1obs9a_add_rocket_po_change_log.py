@@ -38,6 +38,7 @@ branch_labels = None
 depends_on = None
 
 _TABLE = "coupang_rocket_po_change_log"
+_ROUND_TABLE = "coupang_rocket_po_ingest_round"
 
 
 def _has_table(bind) -> bool:
@@ -46,8 +47,14 @@ def _has_table(bind) -> bool:
 
 def upgrade() -> None:
     bind = op.get_bind()
-    if _has_table(bind):
-        return
+    # ★표마다 따로 검사한다 — 한쪽만 있는 중간 상태에서도 나머지가 만들어져야 한다.
+    if not _has_table(bind):
+        _create_change_log()
+    if _ROUND_TABLE not in set(sa.inspect(bind).get_table_names()):
+        _create_round_table()
+
+
+def _create_change_log() -> None:
     op.create_table(
         _TABLE,
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -71,6 +78,23 @@ def upgrade() -> None:
     op.create_index("ix_coupang_rocket_po_change_log_observed_at", _TABLE, ["observed_at"])
 
 
+def _create_round_table() -> None:
+    """★회차 결과 표 (적대 리뷰 1R P1-1) — 「이벤트를 몇 건 버렸나」가 화면에 닿는 유일한 길.
+    이게 없으면 적재가 통째로 실패한 회차에도 화면이 「달라진 발주가 없습니다」를 **단언**한다."""
+    op.create_table(
+        _ROUND_TABLE,
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("observed_at", sa.DateTime(), nullable=False),
+        sa.Column("records", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("changes", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("dropped", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("error", sa.String(length=500), nullable=True),
+        sa.UniqueConstraint("observed_at", name="uq_coupang_rocket_po_ingest_round"),
+    )
+    op.create_index(
+        "ix_coupang_rocket_po_ingest_round_observed_at", _ROUND_TABLE, ["observed_at"])
+
+
 def downgrade() -> None:
     bind = op.get_bind()
     if not _has_table(bind):
@@ -78,3 +102,5 @@ def downgrade() -> None:
     # ⚠️ 이 표는 **소급 복원이 불가능하다**(원장에 직전 값이 없다). 지우면 그 구간의 관측은
     #    영구히 사라진다 — 실행 전 덤프를 뜰 것.
     op.drop_table(_TABLE)
+    if _ROUND_TABLE in set(sa.inspect(bind).get_table_names()):
+        op.drop_table(_ROUND_TABLE)

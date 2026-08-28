@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.clients.coupang import rocket_supplier as parser
 from app.models import (
     CoupangRocketPoChangeLog,
+    CoupangRocketPoIngestRound,
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
@@ -65,14 +66,17 @@ def _po_change_events(row: "CoupangRocketPurchaseOrder | None", rec: dict, now) 
             "purchase_order_seq": seq, "vendor_id": vid,
             "event": "first_seen", "field": "",
             "before_value": None,
-            "after_value": _s(rec.get("purchase_order_status")),
+            "after_value": _s(rec["purchase_order_status"]),
             "observed_at": now, "prev_observed_at": None,
         }]
 
     prev_seen = row.synced_at  # 덮어쓰기 전이라 이게 «직전 관측 시각»이다
     out: list[dict] = []
     for f in _TRACKED_FIELDS:
-        before, after = getattr(row, f, None), rec.get(f)
+        # ★`rec[f]`로 통일한다(적대 리뷰 1R P2-4): `_upsert_po`는 `rec[f]`로 읽으므로,
+        #   여기서만 `.get`을 쓰면 파서가 키를 빠뜨렸을 때 «384 → None»이라는 **없던 변화**를
+        #   먼저 기록하고 직후 KeyError로 죽는다. 같은 계약으로 읽어 그 틈을 없앤다.
+        before, after = getattr(row, f, None), rec[f]
         if _s(before) == _s(after):
             continue
         out.append({
@@ -148,7 +152,12 @@ def ingest_purchase_orders(db: Session, pages: list[dict]) -> dict:
             n += 1
     db.commit()
 
-    dropped = _persist_po_change_events(db, events)
+    dropped, err = _persist_po_change_events(db, events)
+    # ★회차 결과를 **저장**한다 — 로그·응답에만 두면 화면이 원리적으로 못 읽는다
+    #   (적대 리뷰 1R P1-1: 적재가 통째로 실패한 회차에도 화면이 「달라진 발주가 없습니다」를
+    #   단언했다. 침묵이 아니라 거짓말이라 더 나쁘다).
+    _record_ingest_round(db, now, records=n, changes=len(events) - dropped,
+                         dropped=dropped, error=err)
     log.info(
         "rocket PO ingest: pages=%d records=%d changes=%d dropped=%d",
         len(pages or []), n, len(events) - dropped, dropped,
@@ -159,26 +168,48 @@ def ingest_purchase_orders(db: Session, pages: list[dict]) -> dict:
     }
 
 
-def _persist_po_change_events(db: Session, events: list[dict]) -> int:
-    """관측 이벤트를 적재한다. 반환 = **버린 개수**(정상 0).
+def _persist_po_change_events(db: Session, events: list[dict]) -> tuple[int, "str | None"]:
+    """관측 이벤트를 적재한다. 반환 = (버린 개수, 실패 사유). 정상이면 (0, None).
 
     ★본 수집(위에서 이미 commit됨)을 절대 되돌리지 않는다 — 실패하면 rollback 후 0건으로 끝낸다.
     ★유니크 제약(seq, event, field, observed_at)은 diff-only 위의 안전망이다. 같은 회차를 두 번
       돌려도 행이 안 는다.
     """
     if not events:
-        return 0
+        return 0, None
     try:
         db.bulk_insert_mappings(CoupangRocketPoChangeLog, events)
         db.commit()
-        return 0
+        return 0, None
     except Exception as e:  # noqa: BLE001 — 이력은 부가 산출물이지 수집의 전제가 아니다
         db.rollback()
+        msg = str(e)[:200]
         log.warning(
             "[po-change] 관측 이벤트 %d건 적재 실패 — 이벤트만 버린다(수집은 유지): %s",
-            len(events), str(e)[:200],
+            len(events), msg,
         )
-        return len(events)
+        return len(events), msg
+
+
+def _record_ingest_round(db: Session, observed_at, *, records: int, changes: int,
+                         dropped: int, error: "str | None") -> None:
+    """회차 결과 1행. ★이것도 실패해도 본 수집을 막지 않는다(같은 이유).
+
+    ★`dropped > 0`인 회차를 화면이 「달라진 게 없다」로 말하지 못하게 하는 것이 이 행의 전부다.
+    """
+    try:
+        row = (
+            db.query(CoupangRocketPoIngestRound)
+            .filter(CoupangRocketPoIngestRound.observed_at == observed_at).first()
+        )
+        if row is None:
+            row = CoupangRocketPoIngestRound(observed_at=observed_at)
+            db.add(row)
+        row.records, row.changes, row.dropped, row.error = records, changes, dropped, error
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        log.warning("[po-change] 회차 결과 기록 실패(수집은 유지): %s", str(e)[:200])
 
 
 # ════════════════════════════════════════════════
