@@ -413,7 +413,9 @@ export function CostRoundTripTable({
                         이미 막고 있으므로 `truncate`는 「넘치면 지운다」만 더한 것이고, 그게
                         보드 탭에서 Jino가 «글자가 이렇게 잘리네»라고 한 바로 그 상태다.
                         ⇒ 캡은 **남기되**(11열 보호) 넘치는 글자는 **지우지 말고 접는다**.
-                        나머지 10열은 전부 `whitespace-nowrap`이라 이 열만 접힌다.
+                        나머지 열은 3~11열이 리터럴 `whitespace-nowrap`이고 12열(상태/비고)은
+                        flex + `shrink-0`로 따로 잠겨 있어(아래 참조) 접히는 것은 이 열뿐이다
+                        — 「10열 전부 nowrap」이 아니다(적대 리뷰 P2-1이 잡은 부정확).
                         캡을 16→24rem으로 올린다 — 홈 탭은 페이지 폭 상한이 이미 풀려 있어
                         그만큼 쓸 폭이 실제로 있다. `title`은 그대로 둔다. */}
                     <td className="px-2 py-1 max-w-[24rem] break-words" title={m.name}>

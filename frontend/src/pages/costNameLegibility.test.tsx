@@ -24,12 +24,13 @@
 //     M7  상품명 텍스트 렌더 자체를 지운다(`title`만 남긴다) — 「닿는 층」 변이
 // ══════════════════════════════════════════════════════════════════════════════
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import {
   LedgerMaterialLines,
   MaterialList,
   RecipeList,
+  StandardBreakdown,
   StandardCostBoard,
   materialStatusLabel,
 } from "./CostPage";
@@ -46,6 +47,8 @@ import type {
   CostLedgerMaterialLine,
   CostMaterial,
   CostRecipe,
+  CostStandard,
+  CostStandardLine,
 } from "../lib/api";
 
 /** 보드 상품명 칸의 testid — `recipe_id`까지 넣는 이유는 아래 「중복 SKU」 테스트가 말한다. */
@@ -385,5 +388,72 @@ describe("★홈 탭 왕복 표 — 이름이 «잘리지» 않는다 (캡은 �
     // ★캡은 **남긴다** — 이 표는 12열이라 이름 하나가 폭을 다 먹으면 나머지가 짜부라진다.
     //   보드(9열·비고가 대개 빈 칸)와 처방이 갈리는 자리다.
     expect(cell.className).toMatch(/\bmax-w-\[24rem\]/);
+    // ★★«닿는 층» — 이름이 **화면 본문에 실제로 그려지는가.** 적대 리뷰 변이 A가 바로 이
+    //   자리에서 살아남았다: `{m.name}` 렌더를 통째로 지우고 `title`만 남겨도 프론트
+    //   1,182건이 전건 초록이었다(위 세 줄은 className만 보고 `textContent`는 한 번도 안
+    //   봤다). 「값이 도는 층은 지키고 사람이 읽는 층은 안 지킨다」 — 이 저장소가 네 번
+    //   재발했다고 적어 둔 병이 다섯 번째로 여기 비어 있었다.
+    expect(cell.textContent).toContain(LONG_MATERIAL);
+  });
+});
+
+// ── 레시피 탭 계산 내역 — 이름과 「종 바꾸기」가 한 셀에서 경쟁한다 ──────────────
+// ★적대 리뷰 변이 H·I가 살아남은 자리다. 둘 다 이 PR이 «고쳤다»고 주장한 지점인데
+//   그것을 지키는 단언이 하나도 없었다.
+function standardLine(over: Partial<CostStandardLine> = {}): CostStandardLine {
+  return {
+    label: LONG_MATERIAL,
+    quantity: "1.000",
+    unit_price_ex_vat: "320.00",
+    unit_price_inc_vat: "352.00",
+    amount_ex_vat: "320.00",
+    amount_inc_vat: "352.00",
+    price_status: "ok",
+    inc_derived: false,
+    price_source: "manual",
+    price_note: null,
+    material_id: 7,
+    line_id: 900,
+    usable: true,
+    excel_ref_price: null,
+    ...over,
+  };
+}
+
+function standardWith(lines: CostStandardLine[]): CostStandard {
+  return {
+    computable: true,
+    std_cost_ex_vat: "320.00",
+    std_cost_inc_vat: "352.00",
+    reason: null,
+    unresolved: [],
+    partial_ex_vat: null,
+    partial_inc_vat: null,
+    line_count: lines.length,
+    lines,
+  };
+}
+
+describe("★레시피 탭 계산 내역 — 부자재 이름 칸", () => {
+  it("I — 라벨이 `break-words` + `title`을 갖고, 이름이 실제로 그려진다", () => {
+    render(<StandardBreakdown standard={standardWith([standardLine()])} />);
+    const cell = screen.getByTitle(LONG_MATERIAL);
+    expect(cell.className).toMatch(/\bbreak-words\b/);
+    // ★닿는 층 — 변이 I가 살아남은 이유가 이 단언이 없어서였다.
+    expect(cell.textContent).toContain(LONG_MATERIAL);
+  });
+
+  it("H — 「종 바꾸기」를 열면 select가 **지금 골라진 종**의 전문을 `title`로 들고 있다", () => {
+    render(
+      <StandardBreakdown
+        standard={standardWith([standardLine()])}
+        swap={{ materials: [material({ id: 7, name: LONG_MATERIAL })], onSwap: () => {} }}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-900"));
+    const select = screen.getByTestId("breakdown-swap-900");
+    // 네이티브 `<select>`는 `truncate`가 안 먹고 **말줄임표조차 안 붙는다** — 좁으면
+    // 그냥 잘린 채 끝나므로 `title`이 「지금 뭐가 골라졌나」를 볼 유일한 길이다.
+    expect(select.getAttribute("title")).toBe(LONG_MATERIAL);
   });
 });

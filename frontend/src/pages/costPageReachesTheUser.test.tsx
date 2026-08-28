@@ -1818,6 +1818,25 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       expect(grid).toBeTruthy();
       expect(grid!.className).toContain("items-start");
     });
+
+    // ★2026-08-28 (Jino «홈, 부자재, 레시피쪽도 같이 봐줘») — 레시피 목록의 상품명이
+    //   **상시** 잘리던 원인은 이 칼럼이 `320px` **고정**이라 창을 아무리 넓혀도 1px도
+    //   안 넓어지는 것이었다. 그래서 이 탭은 페이지 폭 상한을 풀어도 소용이 없다
+    //   (`costPageWidthClass`가 `recipes`만 상한에 남겨 둔 이유이기도 하다) —
+    //   **「넓히면 낫는다」가 아니라 「무엇이 폭을 안 받고 있나」의 문제였다.**
+    //
+    //   ★이 단언이 여기 있는 이유: 적대 리뷰가 `minmax(320px,28rem)`을 `320px`로 되돌리는
+    //   변이를 넣었을 때 프론트 **1,182건이 전건 초록**이었다 — 그 처방 자체를 지키는 것이
+    //   하나도 없었다. 바로 위 부자재 탭의 같은 가드(「종 칸 폭은 «고정»이 아니라 minmax다」)와
+    //   짝이다. 한쪽만 지키면 갈라진다.
+    it("★목록 칸 폭은 «고정»이 아니라 minmax다 — 고정폭이면 상품명이 영원히 잘린다", async () => {
+      await openRecipesTabS4();
+      const grid = screen.getByTestId("recipe-list-scroll").closest("div.grid");
+      expect(grid).toBeTruthy();
+      expect(grid!.className).toContain("minmax(320px,28rem)");
+      // px 고정 트랙이 돌아오면 안 된다 — 부자재 탭이 여덟 번째로 밟았던 결함의 모양이다.
+      expect(grid!.className).not.toMatch(/grid-cols-\[\d+px/);
+    });
   });
 
   describe("★S4 ㉯ — 수입 종과 비수입 종을 가른다 (합격 11·12·13)", () => {
