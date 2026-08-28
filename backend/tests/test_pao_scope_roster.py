@@ -719,7 +719,13 @@ def test_day_class_split_identity_is_computed_not_hardcoded(client_and_session):
     _seed(db)
     fake = {"rows": [], "totals": {"cost": 999, "imp": 0, "clk": 0, "conv_amt": 0}}
     out = pao_scope_roster.day_class_split(db, YESTERDAY, YESTERDAY, None, date_agg=fake)
-    assert out["identity"]["ok"] is False, "합이 어긋났는데 ok가 참이면 검산이 아니다"
+    ident = out["identity"]
+    assert ident["ok"] is False, "합이 어긋났는데 ok가 참이면 검산이 아니다"
+    # ★자기 변이 N7 상환 — 「보이는 두 숫자」도 진짜여야 한다.
+    #   `total`을 `sum_of_parts`로 바꿔치기하면 ok는 여전히 거짓이지만 화면엔 둘이 같아
+    #   보인다. 판정은 맞는데 근거가 거짓인 상태 — M5(ok 하드코딩)의 다른 얼굴이다.
+    assert ident["total"]["cost"] == 999, "total은 집계기의 값이어야 한다(칸 합이 아니라)"
+    assert ident["sum_of_parts"]["cost"] == 0, "sum_of_parts는 칸의 합이어야 한다"
 
 
 def test_day_class_split_does_not_report_profit(client_and_session):
@@ -755,3 +761,29 @@ def test_day_class_split_states_its_basis(client_and_session):
     split = _roster(client)["weekend_holiday"]
     assert "ad_date" in split["basis"]
     assert "ref 63" in split["reference"]
+
+
+def test_day_class_split_reports_real_roas_per_bucket(client_and_session):
+    """★자기 변이 N9 상환 — 칸별 ROAS가 «실제 값»이어야 한다.
+
+    전건 None으로 만들어도 아무 테스트가 안 죽었다 — 키 존재만 검사했지 값을 아무도 안 봤다.
+    이 값의 존재 이유는 BEP(1.711)와 비교해 「이 칸이 흑자 구간인가」를 사람이 읽는 것이라,
+    None이면 열은 있는데 아무 말도 안 하는 상태가 된다.
+    """
+    client, db = client_and_session
+    _seed(db)
+    _seed_across_day_classes(db)
+
+    split = _roster(client)["weekend_holiday"]
+    # 심은 값: 평시 conv 20,000+180,000+20,000 / cost 10,000+90,000+10,000
+    assert split["weekday"]["roas"] is not None
+    assert split["weekday"]["roas"] == round(
+        split["weekday"]["conv_amt"] / split["weekday"]["cost"], 4
+    )
+    # 주말도 마찬가지 — 한 칸만 지키면 나머지 칸의 회귀를 못 잡는다
+    assert split["weekend"]["roas"] == round(
+        split["weekend"]["conv_amt"] / split["weekend"]["cost"], 4
+    )
+    # 집행이 없는 칸은 0이 아니라 None — 「ROAS 0」은 「적자」라는 거짓 사실이다
+    assert split["holiday"]["cost"] == 0
+    assert split["holiday"]["roas"] is None
