@@ -366,6 +366,8 @@ const MATERIAL_MIN: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_inc_derived: false,
   latest_price_source: null,
+  // 단가가 없으면 발효일도 없다 — 채택된 단가 행이 없기 때문이다(D-CPP-62 S2).
+  latest_price_effective_date: null,
   price_rule: "latest",
   lot_price_min: null,
   lot_price_max: null,
@@ -502,7 +504,14 @@ async function renderApp(over?: { materials?: CostMaterial[] }) {
     items: over?.materials ?? [MATERIAL_MIN],
   });
   const { default: App } = await import("../App");
-  return render(<App />);
+  const result = render(<App />);
+  await screen.findByRole("heading", { name: /원가/ });
+  // ★홈이 기본 탭이다(D-CPP-62 S2, `CostPage.tsx`). 이 파일의 모든 테스트가 재는 것은
+  //   부자재 탭 내용(자동 갱신 패널·종 목록 배지)이라, 여기 한 곳에서 이동시킨다 —
+  //   각 `it()`에서 따로 클릭하게 두면 다음에 한쪽만 고치는 병이 재발한다.
+  fireEvent.click(screen.getByRole("button", { name: "부자재" }));
+  await screen.findByTestId("material-list-scroll");
+  return result;
 }
 
 describe("★D-CPP-60 표면이 `/cost`에서 실제로 닿는가 (App 통째 렌더)", () => {

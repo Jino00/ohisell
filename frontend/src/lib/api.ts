@@ -5727,6 +5727,12 @@ export interface CostMaterial {
   /** 이 «부가세 포함» 값이 저장된 값이 아니라 `ex × 1.1`로 만든 값인가 (D-CPP-62 S1). */
   latest_price_inc_derived: boolean;
   latest_price_source: "ledger" | "manual" | null;
+  /** 채택된 그 단가 행의 발효일 — 왕복 표(D-CPP-62 S2) 열 10이자 S3 파일의 한 칸.
+   *
+   * ★**백엔드가 낸다.** 화면이 `prices[]`를 스스로 정렬해 「최신」을 고르면 그건
+   * `price_rule.choose_price`의 두 번째 사본이 된다(ledger가 manual을 이긴다 · 어긋난
+   * 행은 제외). 규칙이 두 곳에 있으면 갈라진다 — 그게 D-CPP-60 §0-A의 발단이었다. */
+  latest_price_effective_date: string | null;
   /** 적용된 채택 규칙 — 지금은 항상 `"latest"`(최신 로트). **FIFO가 아니다**(D-CPP-60). */
   price_rule: string;
   /** 관측 로트 구간(ex_vat) 하한 — ledger·유효분만. 재고 원장(C1) 가동 전이라 층1은 이
@@ -6125,6 +6131,40 @@ export interface CostBoardRow {
   /** 표준원가 ↔ 엑셀 표준의 격차 %. 둘 다 VAT 포함 축이라 축이 섞이지 않는다. */
   excel_gap_pct: number | null;
   reason: string | null;
+}
+
+/** 원가표 항목 한 줄 — **전건 인구조사**(홈 탭 인박스의 넷째 묶음 분모, D-CPP-62 S2).
+ *
+ * ★`CostTableItemRow`(레시피별 픽 목록)와 **다른 질문**의 답이다: 저건 「이 레시피에 붙일 수
+ * 있는 항목」(폼팩터 버킷)이고 이건 「지금 사람 손을 기다리는 항목 전부」다. `suggested`가
+ * 없는 이유도 그것이다 — 제안은 «어느 레시피 기준인가»가 있어야 성립한다. */
+export interface CostTableCensusRow {
+  id: number;
+  section: string;
+  item_name: string;
+  form_factor: string | null;
+  recipe_kind: string;
+  total_inc_vat: string | null;
+  row_number: number | null;
+  /** ★원문 그대로다 — 「같은 사건이 두 줄에 서지 않게」 접는 규칙은 화면이 갖는다. */
+  anomalies: string | null;
+  line_count: number;
+  picked: boolean;
+  /** 이 항목을 고른 레시피. `null`이면 아직 아무 레시피도 안 골랐다는 **사실**이다. */
+  picked_by_recipe_id: number | null;
+}
+
+export interface CostTableCensus {
+  items: CostTableCensusRow[];
+  total: number;
+  picked_count: number;
+  /** 마지막 업로드 시각 — **naive UTC**다(서버 TZ=UTC). KST 환산은 `formatKstDateTime`이 한다. */
+  last_uploaded_at: string | null;
+}
+
+/** 원가표 항목 전건. **읽기 전용**이고 아무것도 쓰지 않는다. */
+export function fetchCostTableCensus(): Promise<CostTableCensus> {
+  return fetchApi("/api/cost/cost-table-items");
 }
 
 export interface CostBoard {

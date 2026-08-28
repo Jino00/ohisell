@@ -85,6 +85,9 @@ const KIT: CostMaterial = {
   latest_price_inc_vat: "209.90",
   latest_price_inc_derived: false,
   latest_price_source: "ledger",
+  // ★채택된 그 행(id=1 SETR2608170216)의 발효일 — 백엔드가 `price_rule.choose_price`가
+  //   고른 행에서 낸다(D-CPP-62 S2 왕복 표 열 10).
+  latest_price_effective_date: "2026-08-18",
   price_rule: "latest",
   lot_price_min: "178.78",
   lot_price_max: "190.82",
@@ -168,6 +171,8 @@ const EMPTY_KIT: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_inc_derived: false,
   latest_price_source: null,
+  // 단가가 없으면 발효일도 없다 — 채택된 행이 없기 때문이다(백엔드가 그렇게 낸다).
+  latest_price_effective_date: null,
   prices: [],
 };
 
@@ -183,6 +188,7 @@ function staleKit(check: Partial<CostLedgerCheck>): CostMaterial {
     latest_price_inc_vat: null,
     latest_price_inc_derived: false,
     latest_price_source: null,
+    latest_price_effective_date: null,
     prices: [{ ...KIT.prices[0], ledger_check: c }],
   };
 }

@@ -63,6 +63,8 @@ function importedMaterial(over: Partial<CostMaterial> = {}): CostMaterial {
     latest_price_inc_vat: null,
     latest_price_inc_derived: false,
     latest_price_source: null,
+    // 단가가 없으면 발효일도 없다 — 채택된 단가 행이 없기 때문이다(D-CPP-62 S2).
+    latest_price_effective_date: null,
     price_rule: "latest",
     lot_price_min: null,
     lot_price_max: null,

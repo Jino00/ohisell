@@ -101,6 +101,8 @@ const KIT: CostMaterial = {
   latest_price_inc_vat: "209.90",
   latest_price_inc_derived: false,
   latest_price_source: "ledger",
+  // ★채택된 그 행(id=1 SETR2608170216)의 발효일 — 왕복 표(D-CPP-62 S2) 열 10의 원천.
+  latest_price_effective_date: "2026-08-18",
   price_rule: "latest",
   lot_price_min: "178.78",
   lot_price_max: "190.82",
@@ -215,6 +217,8 @@ const FILM_WITH_REF: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_inc_derived: false,
   latest_price_source: null,
+  // 단가가 없으면 발효일도 없다 — 채택된 단가 행이 없기 때문이다(D-CPP-62 S2).
+  latest_price_effective_date: null,
   price_rule: "latest",
   lot_price_min: null,
   lot_price_max: null,
@@ -247,6 +251,8 @@ const JIG_NO_PART: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_inc_derived: false,
   latest_price_source: null,
+  // 단가가 없으면 발효일도 없다 — 채택된 단가 행이 없기 때문이다(D-CPP-62 S2).
+  latest_price_effective_date: null,
   price_rule: "latest",
   lot_price_min: null,
   lot_price_max: null,
@@ -283,6 +289,8 @@ function createdMaterialFixture(name: string): CostMaterial {
     latest_price_inc_vat: null,
     latest_price_inc_derived: false,
     latest_price_source: null,
+    // 단가가 없으면 발효일도 없다 — 채택된 단가 행이 없기 때문이다(D-CPP-62 S2).
+    latest_price_effective_date: null,
     price_rule: "latest",
     lot_price_min: null,
     lot_price_max: null,
@@ -675,6 +683,8 @@ const IMPORTED_GOODS_MATERIAL: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_inc_derived: false,
   latest_price_source: null,
+  // 단가가 없으면 발효일도 없다 — 채택된 단가 행이 없기 때문이다(D-CPP-62 S2).
+  latest_price_effective_date: null,
   price_rule: "latest",
   lot_price_min: null,
   lot_price_max: null,
@@ -828,7 +838,8 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
   });
 
   it("SUR-1: 단가 이력 **호출부**가 있어야 로트 2건이 화면에 그려진다", async () => {
-    await renderApp();
+    // ★홈이 기본 탭이다(D-CPP-62 S2) — 단가 이력은 부자재 탭 안에 있다.
+    await openMaterialsTab();
     const aug = await screen.findByTestId("price-row-11");
     expect(within(aug).getByText("209.9원")).toBeTruthy();
     expect(within(aug).getByText("SETR2608170216")).toBeTruthy();
@@ -839,7 +850,8 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
   });
 
   it("SUR-2: 원장 라인 **호출부**가 있어야 「연결」 경로가 화면에 존재한다", async () => {
-    await renderApp();
+    // ★홈이 기본 탭이다(D-CPP-62 S2) — 원장 부자재 라인은 부자재 탭 안에 있다.
+    await openMaterialsTab();
     const row = await screen.findByTestId("ledger-line-15");
     expect(within(row).getByText("cleaning kits")).toBeTruthy();
     expect(within(row).getByRole("button", { name: /연결/ })).toBeTruthy();
@@ -1721,7 +1733,9 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
   async function openMaterialsTab() {
     await renderApp();
     await screen.findByRole("heading", { name: /원가/ });
-    // 부자재가 기본 탭이다 — 목록이 실제로 들어찬 뒤에 잰다.
+    // ★홈이 기본 탭이다(D-CPP-62 S2) — 부자재 탭으로 사람처럼 눌러 이동한 뒤,
+    //   목록이 실제로 들어찬 뒤에 잰다. 이 파일의 36곳이 이 헬퍼 하나를 공유한다.
+    fireEvent.click(screen.getByRole("button", { name: "부자재" }));
     await screen.findByTestId(`material-${KIT.id}`);
   }
 
@@ -1783,6 +1797,8 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     it("★두 탭이 «같은» 규율을 쓴다 — 한쪽만 고치는 것이 원리적으로 불가능해야 한다", async () => {
       await renderApp();
       await screen.findByRole("heading", { name: /원가/ });
+      // ★홈이 기본 탭이다(D-CPP-62 S2) — 부자재 칸의 클래스를 먼저 잡아야 비교가 된다.
+      fireEvent.click(screen.getByRole("button", { name: "부자재" }));
       const materialBox = await screen.findByTestId("material-list-scroll");
       fireEvent.click(screen.getByRole("button", { name: "레시피" }));
       const recipeBox = await screen.findByTestId("recipe-list-scroll");

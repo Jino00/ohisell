@@ -467,6 +467,19 @@ def confirm_cost_table_absent(
     return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
 
 
+@router.get("/cost-table-items")
+def cost_table_census(db: Session = Depends(get_db)):
+    """원가표 항목 **전건** — 홈 탭 「할 일 인박스」의 넷째 묶음 분모 (D-CPP-62 S2).
+
+    ★`/recipes/{id}/cost-table-items`와 **다른 질문**이다: 저건 「이 레시피에 붙일 수 있는
+    항목」(폼팩터 버킷)이고, 이건 「지금 사람 손을 기다리는 항목이 전부 몇 건인가」다.
+    레시피를 하나도 안 고른 첫 화면에서 나와야 하는 숫자라 레시피별 경로로는 못 얻는다.
+
+    ★읽기 전용이다 — 이 엔드포인트는 아무것도 쓰지 않는다.
+    """
+    return R.cost_table_census(db)
+
+
 @router.get("/board")
 def standard_cost_board(db: Session = Depends(get_db)):
     """표준원가 보드 — SKU별 표준원가 · 현 `cost_price` 대조 · 격차(계약 §5-3 탭3)."""

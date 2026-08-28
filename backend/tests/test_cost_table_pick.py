@@ -529,3 +529,105 @@ def test_reimport_replaces_the_stored_cost_table_items(db_session):
         if l.item_id not in live_ids
     }
     assert orphan_ids == set()
+
+
+# ──────────────────────────────────────────────
+# D-CPP-62 S2 — 홈 탭 「할 일 인박스」의 분모 (원가표 항목 전건 인구조사)
+# ──────────────────────────────────────────────
+def test_cost_table_census_counts_every_item_and_marks_who_picked_it(client, db_session):
+    """전건 목록 + 「누가 골랐나」 + 마지막 업로드 시각.
+
+    ★레시피별 목록(`/recipes/{id}/cost-table-items`)으로는 못 얻는 숫자다 — 저건 폼팩터
+    버킷만 준다. 첫 화면은 레시피를 하나도 안 고른 상태에서 「손을 기다리는 항목이 몇 건인가」를
+    말해야 한다.
+    """
+
+    picked = _item(db_session, item_name="고른 항목", form_factor="flip")
+    _item(db_session, item_name="안 고른 항목", form_factor="fold", row_number=43)
+    _item(
+        db_session,
+        item_name="이상 있는 항목",
+        form_factor=None,
+        row_number=44,
+        anomalies="price_conflict:패키지:320.0≠171.0",
+    )
+    recipe = _recipe(db_session)
+    db_session.commit()
+    client.post(
+        f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": picked.id}
+    )
+
+    out = client.get("/api/cost/cost-table-items")
+    assert out.status_code == 200
+    body = out.json()
+    assert body["total"] == 3
+    assert body["picked_count"] == 1
+    by_name = {r["item_name"]: r for r in body["items"]}
+    assert by_name["고른 항목"]["picked"] is True
+    assert by_name["고른 항목"]["picked_by_recipe_id"] == recipe.id
+    assert by_name["안 고른 항목"]["picked"] is False
+    assert by_name["안 고른 항목"]["picked_by_recipe_id"] is None
+    # ★`anomalies`는 **원문 그대로** 실린다 — 「같은 사건이 두 줄에 서지 않게」 접는 규칙은
+    #   화면의 규칙이고, 백엔드가 미리 접으면 규칙이 두 벌이 된다.
+    assert by_name["이상 있는 항목"]["anomalies"] == "price_conflict:패키지:320.0≠171.0"
+    # ★폼팩터 없는 항목(수입 완제품·매입품)도 «전건»에 들어간다 — 버킷으로 못 얻는 자리다.
+    assert by_name["이상 있는 항목"]["form_factor"] is None
+    assert body["last_uploaded_at"] is not None
+
+
+def test_cost_table_census_is_empty_not_missing_when_nothing_uploaded(client):
+    """0건은 «사실»이다 — 「안 올렸다」와 「엔드포인트가 없다」가 같은 화면이 되면 안 된다."""
+
+    body = client.get("/api/cost/cost-table-items").json()
+    assert body["items"] == []
+    assert body["total"] == 0
+    assert body["picked_count"] == 0
+    assert body["last_uploaded_at"] is None
+
+
+def test_cost_table_census_is_read_only(client, db_session):
+    """★홈 탭 인박스가 매 렌더 이 GET을 부른다 — 그런데 «읽다가 쓰는» 코드는 렌더 한 번마다
+    상태가 바뀐다. 이 테스트는 «아무것도 안 쓴다»를 직접 증명한다: 호출 여러 번에도 행 수·픽
+    배정·이상 문구·업로드 시각이 전부 그대로여야 하고, 두 번째 호출의 응답도 첫 번째와
+    바이트 단위로 같아야 한다(응답이 매 호출 달라지면 그건 어딘가 상태가 움직였다는 뜻이다).
+    """
+
+    picked = _item(db_session, item_name="고른 항목", form_factor="flip")
+    unpicked = _item(
+        db_session,
+        item_name="이상 있는 항목",
+        form_factor=None,
+        row_number=44,
+        anomalies="price_conflict:패키지:320.0≠171.0",
+    )
+    recipe = _recipe(db_session)
+    db_session.commit()
+    client.post(
+        f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": picked.id}
+    )
+
+    before_items = db_session.query(CostTableItem).count()
+    before_lines = db_session.query(CostTableItemLine).count()
+    before_recipes = db_session.query(CostRecipe).count()
+    before_anomalies = unpicked.anomalies
+    before_uploaded_at = {it.id: it.uploaded_at for it in db_session.query(CostTableItem).all()}
+
+    first = client.get("/api/cost/cost-table-items")
+    second = client.get("/api/cost/cost-table-items")
+
+    assert first.status_code == 200
+    # ★같은 상태를 두 번 읽으면 같은 답이 나와야 한다 — 응답이 갈리면 첫 호출이 뭔가를
+    #   건드렸다는 뜻이다(읽기 전용 주장을 응답 자체로 재현 가능하게 검증한다).
+    assert first.json() == second.json()
+
+    # ★DB를 직접 다시 읽어 «쓰기가 실제로 없었다»를 확인한다 — 응답이 같아도 매번 같은
+    #   방식으로 잘못 쓰면(예: picked_item_id를 매번 같은 값으로 재대입) 응답 비교만으론
+    #   못 잡는다.
+    db_session.expire_all()
+    assert db_session.query(CostTableItem).count() == before_items
+    assert db_session.query(CostTableItemLine).count() == before_lines
+    assert db_session.query(CostRecipe).count() == before_recipes
+    refreshed = db_session.get(CostTableItem, unpicked.id)
+    assert refreshed.anomalies == before_anomalies
+    for it in db_session.query(CostTableItem).all():
+        assert it.uploaded_at == before_uploaded_at[it.id]

@@ -28,6 +28,7 @@ import {
   fetchCostRecipes,
   fetchCostSettingHistory,
   fetchCostSettings,
+  fetchCostTableCensus,
   fetchCostTableItems,
   importCostRecipes,
   linkCostLedgerPrice,
@@ -53,6 +54,7 @@ import {
   type CostSetting,
   type CostSettingHistoryRow,
   type CostStandard,
+  type CostTableCensus,
   type CostTableItemList,
 } from "../lib/api";
 import {
@@ -67,8 +69,29 @@ import {
   isImportedGoodsMaterial,
   pickableProductLines,
 } from "../lib/costImportedGoods";
+// ── D-CPP-62 S2 — 새 첫 화면(홈). 껍데기는 `costHome.tsx`, 규칙은 `lib/costHome.ts`에 산다.
+//   ★기존 3탭은 **그대로 둔다** — 익숙한 직행 경로가 죽으면 안 된다(설계 Q2).
+import {
+  CostBoardStrip,
+  CostRoundTripTable,
+  CostTodoInbox,
+} from "./costHome";
+import {
+  buildCostInbox,
+  EMPTY_IS_NOT_ZERO_NOTE,
+  filterRoundTripRows,
+  materialFormItems,
+  materialPartItems,
+  ROUND_TRIP_FILTER_NONE,
+  hasNoUnitPrice,
+  type CostInboxGroup,
+  type CostInboxTarget,
+  type RoundTripFilter,
+} from "../lib/costHome";
 
-export type CostTab = "materials" | "recipes" | "board";
+/** ★`"home"`이 **기본 탭**이다(D-CPP-62 S2). 나머지 셋은 지우지 않는다 — 홈은 새 입구지
+ *  기존 탭의 대체가 아니고, 인박스·왕복 표가 결국 그 탭들의 기존 패널로 «데려간다». */
+export type CostTab = "home" | "materials" | "recipes" | "board";
 
 // ══════════════════════════════════════════════════════════════════
 // 순수 표시 규칙 (테스트가 이 함수들을 직접 잡는다)
@@ -496,7 +519,10 @@ export function MaterialPriceHistory({
         {imported
           ? "단가 이력이 없다 — 아래 「원장 부자재 라인」에서 연결하거나 수동 단가를 입력한다."
           : "단가 이력이 없다 — 이 종을 쓰는 레시피 상세에서 「엑셀 참고값을 단가로 채택」하거나 「+ 단가 입력·수정」으로 넣는다."}
-        <span className="text-gray-400"> (빈 칸이지 0원이 아니다)</span>
+        {/* ★D-CPP-62 S2 — 문구가 **한 원천**에서 온다(`lib/costHome.ts`). 왕복 표의
+            「단가 없음」 배지 툴팁이 같은 말을 해야 하는데, 리터럴을 두 벌 두면 다음에
+            한쪽만 바뀐다. 자리는 늘고 원천은 하나다 — 이동·재사용이지 삭제가 아니다. */}
+        <span className="text-gray-400"> {EMPTY_IS_NOT_ZERO_NOTE}</span>
       </div>
     );
   }
@@ -2415,7 +2441,8 @@ export function StandardCostBoard({
 // 페이지 (데이터 로딩만 — 표시는 위 순수 컴포넌트가 한다)
 // ══════════════════════════════════════════════════════════════════
 export default function CostPage() {
-  const [tab, setTab] = useState<CostTab>("materials");
+  // ★기본 탭이 「홈」이다(D-CPP-62 S2). 부자재 탭 직행은 탭 버튼으로 그대로 산다.
+  const [tab, setTab] = useState<CostTab>("home");
   const [materials, setMaterials] = useState<CostMaterial[]>([]);
   const [ledgerLines, setLedgerLines] = useState<CostLedgerMaterialLine[]>([]);
   const [settings, setSettings] = useState<CostSetting[]>([]);
@@ -2427,6 +2454,9 @@ export default function CostPage() {
   const [recipes, setRecipes] = useState<CostRecipe[]>([]);
   const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
   const [board, setBoard] = useState<CostBoard | null>(null);
+  // ★D-CPP-62 S2 — 홈 인박스 넷째 묶음의 분모 + 「마지막 업로드 시각」. 레시피별 픽 목록
+  //   (`/recipes/{id}/cost-table-items`)으로는 못 얻는다 — 저건 폼팩터 버킷이고 이건 전건이다.
+  const [tableCensus, setTableCensus] = useState<CostTableCensus | null>(null);
   const [importResult, setImportResult] = useState<CostImportResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -2449,35 +2479,18 @@ export default function CostPage() {
     setMaterialPart(null);
   }, []);
 
-  const materialForms = useMemo<PickerItem[]>(() => {
-    const counts = new Map<string, number>();
-    for (const m of materials) {
-      const key = m.form_factor ?? "__none__";
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    return Array.from(counts, ([value, count]) => ({
-      value,
-      label: value === "__none__" ? "— (폼팩터 없음)" : value,
-      count,
-    })).sort((a, b) => a.label.localeCompare(b.label, "ko"));
-  }, [materials]);
+  // ★집계 규칙은 `lib/costHome.ts`에 **한 벌**로 산다 — 홈의 왕복 표도 같은 두 함수를 쓴다.
+  //   두 화면이 각자 세면 「부자재 탭엔 tablet 27인데 홈엔 26」 같은 어긋남이 생기고, 그때
+  //   어느 쪽이 참인지 화면이 못 말한다(D-CPP-60 §0-A의 「규칙 두 곳 복제」와 같은 결).
+  const materialForms = useMemo<PickerItem[]>(
+    () => materialFormItems(materials),
+    [materials],
+  );
 
-  const materialPartsForForm = useMemo<PickerItem[]>(() => {
-    if (!materialForm) return [];
-    const counts = new Map<string, number>();
-    for (const m of materials) {
-      if ((m.form_factor ?? "__none__") !== materialForm) continue;
-      const key = m.part && m.part.trim() ? m.part : "__none__";
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    // ★라벨에 건수를 박는다 — 이 셀렉트는 `count`를 따로 안 그리므로, 안 박으면
-    //   「부품 미지정이 절대다수」라는 사실이 화면에서 사라진다(prod 83/129).
-    return Array.from(counts, ([value, count]) => ({
-      value,
-      label: value === "__none__" ? `(부품 미지정) (${count})` : `${value} (${count})`,
-      count,
-    })).sort((a, b) => a.label.localeCompare(b.label, "ko"));
-  }, [materials, materialForm]);
+  const materialPartsForForm = useMemo<PickerItem[]>(
+    () => materialPartItems(materials, materialForm),
+    [materials, materialForm],
+  );
 
   const materialCountForSelectedForm = useMemo(() => {
     if (!materialForm) return 0;
@@ -2506,6 +2519,48 @@ export default function CostPage() {
     }
     return `${materials.length}건 중 ${filteredMaterials.length}건 표시 중 — 필터: ${parts.join(", ")}`;
   }, [materials, materialForm, materialPart, filteredMaterials]);
+
+  // ── D-CPP-62 S2: 홈 탭 — 왕복 표의 필터 (부자재 탭 필터와 **따로** 둔다) ──────
+  //
+  // ★왜 따로인가: 인박스 「단가 없음」을 누르면 왕복 표에 필터가 걸리는데, 그게 부자재 탭의
+  //   필터까지 바꾸면 사람이 부자재 탭으로 갔을 때 「목록이 왜 64건이지」가 된다. 두 화면은
+  //   같은 데이터를 보되 **자기 필터를 갖는다**(집계 함수는 한 벌을 공유한다 — 위 참조).
+  const [homeFilter, setHomeFilter] = useState<RoundTripFilter>(ROUND_TRIP_FILTER_NONE);
+
+  const homePartsForForm = useMemo<PickerItem[]>(
+    () => materialPartItems(materials, homeFilter.form),
+    [materials, homeFilter.form],
+  );
+
+  const homeCountForSelectedForm = useMemo(() => {
+    if (!homeFilter.form) return 0;
+    return materialForms.find((f) => f.value === homeFilter.form)?.count ?? 0;
+  }, [materialForms, homeFilter.form]);
+
+  const homeRows = useMemo(
+    () => filterRoundTripRows(materials, homeFilter),
+    [materials, homeFilter],
+  );
+
+  /** 보드 스트립의 「단가 있는 종」 분자. 판정은 `hasNoUnitPrice` 한 벌이 한다 —
+   *  부자재 목록이 「단가 없음」이라 부르는 종과 홈이 세는 종이 갈라지면 안 된다. */
+  const materialsWithPrice = useMemo(
+    () => materials.filter((m) => !hasNoUnitPrice(m)).length,
+    [materials],
+  );
+
+  const inboxGroups = useMemo(
+    () =>
+      buildCostInbox({
+        materials,
+        recipes,
+        // ★인구조사가 아직 안 왔으면 **빈 배열**이다 — 그러면 넷째 묶음이 「— 없음」으로 서고,
+        //   그건 「0건」이라는 «주장»이 아니라 아직 안 온 상태의 정직한 표시다(로딩 중엔
+        //   화면 전체가 그렇다). 조용히 다른 숫자를 지어내지 않는다.
+        tableItems: tableCensus?.items ?? [],
+      }),
+    [materials, recipes, tableCensus],
+  );
 
   // ── S3: 보드 탭 제품 → 옵션 필터 ──────────────────────────────────
   const [boardProduct, setBoardProduct] = useState<string | null>(null);
@@ -2615,7 +2670,7 @@ export default function CostPage() {
 
   const load = useCallback(async () => {
     try {
-      const [m, l, s, r, b, sh, ar, aq] = await Promise.all([
+      const [m, l, s, r, b, sh, ar, aq, ct] = await Promise.all([
         fetchCostMaterials(),
         fetchCostLedgerMaterialLines(),
         fetchCostSettings(),
@@ -2624,12 +2679,14 @@ export default function CostPage() {
         fetchCostSettingHistory(),
         fetchCostAutoRefreshRuns(),
         fetchCostAutoRefreshQueue(),
+        fetchCostTableCensus(),
       ]);
       setMaterials(m.items);
       setLedgerLines(l.items);
       setSettings(s.items);
       setRecipes(r.items);
       setBoard(b);
+      setTableCensus(ct);
       setSettingHistory(sh.items);
       setAutoRefreshRuns(ar.items);
       setAutoRefreshQueue(aq.items);
@@ -2854,11 +2911,48 @@ export default function CostPage() {
   // ★「연결 대기」 큐 항목 → 부자재 연결 화면(원장 부자재 라인 표)으로 이동. 필터가 그
   //   종을 가리고 있을 수 있어 필터도 함께 초기화한다 — 안 그러면 선택은 됐는데 목록
   //   필터 때문에 상세 패널이 다른 종을 보여주는(reconcileSelectedId) 자리로 샌다.
-  function handleGoToMaterialFromQueue(materialId: number) {
+  /** 「이 종을 보여 줘」 — 부자재 탭의 기존 상세 패널로 데려간다(D-CPP-62 S2 드릴다운).
+   *
+   * ★필터를 함께 푼다: 그 종이 지금 필터 밖이면 선택은 됐는데 `reconcileSelectedId`가
+   *   되돌려 «다른 종»의 상세가 뜬다(자동 갱신 큐가 이미 밟은 자리). */
+  function goToMaterialDetail(materialId: number) {
     setTab("materials");
     setMaterialForm(null);
     setMaterialPart(null);
     setSelectedId(materialId);
+  }
+
+  /** 「이 레시피를 보여 줘」 — 레시피 탭의 기존 상세(구성·픽·승인·채택)로 데려간다. */
+  function goToRecipeDetail(recipeId: number) {
+    setTab("recipes");
+    setRecipeProduct(null);
+    setRecipeFormFactor(null);
+    setSelectedRecipeId(recipeId);
+  }
+
+  /** 인박스 한 줄 → 그 일을 «하는 자리». `null`이면 갈 곳이 없다는 사실이라 아무것도 안 한다
+   *  (화면이 대신 레시피를 고르지 않는다 — 그게 「추측 금지」 금지선이다). */
+  function handleInboxTarget(target: CostInboxTarget) {
+    if (!target) return;
+    if (target.kind === "material") goToMaterialDetail(target.id);
+    else goToRecipeDetail(target.id);
+  }
+
+  /** 인박스 묶음 머리 ▸ → 그 묶음의 자리. 「단가 없음」은 **홈에 머문 채** 왕복 표를 좁힌다. */
+  function handleInboxGroup(group: CostInboxGroup) {
+    if (group.goto === "table-no-price") {
+      setHomeFilter({ ...ROUND_TRIP_FILTER_NONE, noPriceOnly: true });
+      return;
+    }
+    if (group.goto === "recipes") {
+      setTab("recipes");
+      setRecipeProduct(null);
+      setRecipeFormFactor(null);
+    }
+  }
+
+  function handleGoToMaterialFromQueue(materialId: number) {
+    goToMaterialDetail(materialId);
     if (typeof window !== "undefined" && typeof requestAnimationFrame === "function") {
       requestAnimationFrame(() => {
         const el = document.querySelector('[data-testid="material-ledger-lines"]');
@@ -2893,6 +2987,7 @@ export default function CostPage() {
       <div className="flex gap-1 mt-4 border-b">
         {(
           [
+            ["home", "홈"],
             ["materials", "부자재"],
             ["recipes", "레시피"],
             ["board", "표준원가 보드"],
@@ -2921,6 +3016,79 @@ export default function CostPage() {
         <div className="mt-3 text-sm text-green-700 bg-green-50 border border-green-200 rounded p-2">
           {msg}
         </div>
+      ) : null}
+
+      {/* ══════════════════════════════════════════════════════════════
+          홈 — 「보드 + 할 일 인박스」 + 왕복 표 (계약 §4 S2 · 설계 Q1·Q3)
+          ★조작 6가지는 전부 여기서 시작해 **기존 탭의 기존 패널**로 간다. 새로 만든 것은
+            껍데기뿐이다 — 「심플하게」의 구현은 기능 제거가 아니라 입구 수 축소다.
+          ══════════════════════════════════════════════════════════════ */}
+      {tab === "home" ? (
+        <>
+          {/* 조작 1(업로드) — 기존 `RecipeImportPanel`을 **그대로** 홈에서도 연다. 레시피
+              탭의 자리도 그대로 산다(두 입구, 한 패널). 접어 두는 이유는 업로드가 첫
+              화면의 본문이 아니라 «가끔 하는 일»이기 때문이다. */}
+          <details className="mt-4 border rounded-md" data-testid="home-import">
+            <summary className="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">
+              엑셀 업로드 — 원가 정본 · 매핑 정본
+            </summary>
+            <div className="px-3 pb-3">
+              <RecipeImportPanel
+                busy={busy}
+                result={importResult}
+                onImport={(cost, mapping) =>
+                  run(async () => {
+                    setImportResult(await importCostRecipes(cost, mapping));
+                  }, "엑셀에서 구성 초안을 만들었다 — 아직 아무것도 승인하지 않았다")
+                }
+              />
+            </div>
+          </details>
+
+          <CostBoardStrip
+            board={board}
+            materialTotal={materials.length}
+            materialWithPrice={materialsWithPrice}
+            lastUploadedAt={tableCensus?.last_uploaded_at ?? null}
+            onGoMaterials={() => setTab("materials")}
+            onGoRecipes={() => setTab("recipes")}
+            onGoBoard={() => setTab("board")}
+          />
+
+          <CostTodoInbox
+            groups={inboxGroups}
+            onGoTarget={handleInboxTarget}
+            onGoGroup={handleInboxGroup}
+          />
+
+          <CostRoundTripTable
+            rows={homeRows}
+            totalCount={materials.length}
+            filter={homeFilter}
+            onFilterChange={setHomeFilter}
+            onSelectRow={goToMaterialDetail}
+            filterBar={
+              /* ★새 피커를 만들지 않는다 — 보드·레시피·부자재 탭이 쓰는 **같은** 컴포넌트다.
+                 사본을 만들면 네 벌이 되고 네 벌은 갈라진다. */
+              <ProductOptionPicker
+                idPrefix="home"
+                productLabel="폼팩터"
+                optionLabel="부품"
+                products={materialForms}
+                options={homePartsForForm}
+                optionTotalCount={homeCountForSelectedForm}
+                productValue={homeFilter.form}
+                optionValue={homeFilter.part}
+                onProductChange={(v) =>
+                  // 폼팩터가 바뀌면 이전 폼팩터의 부품값은 더 이상 유효하지 않다.
+                  setHomeFilter((f) => ({ ...f, form: v, part: null }))
+                }
+                onOptionChange={(v) => setHomeFilter((f) => ({ ...f, part: v }))}
+                onReset={() => setHomeFilter(ROUND_TRIP_FILTER_NONE)}
+              />
+            }
+          />
+        </>
       ) : null}
 
       {tab === "materials" ? (
