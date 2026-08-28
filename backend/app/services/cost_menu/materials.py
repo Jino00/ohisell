@@ -255,6 +255,16 @@ def material_payload(
         #   부가세와 ×1.1 규약 환산값이 화면에서 구별되지 않는다.
         "latest_price_inc_derived": _latest_inc_derived,
         "latest_price_source": latest.source if latest else None,
+        # ★「이 단가는 언제부터인가」 — 왕복 표(D-CPP-62 S2) 열 10이자 S3 파일의 한 칸이다.
+        #   ★**여기서 낸다.** 화면이 `prices[]`를 스스로 정렬해 「최신」을 고르면 그건
+        #   `price_rule.choose_price`의 **두 번째 사본**이 된다(ledger가 manual을 이긴다·
+        #   어긋난 행은 제외 — 규칙이 두 곳에 있으면 갈라진다는 것이 D-CPP-60 §0-A의 발단이다).
+        #   채택된 그 행(`latest`)의 값을 그대로 싣는다.
+        "latest_price_effective_date": (
+            latest.effective_date.isoformat()
+            if latest is not None and latest.effective_date is not None
+            else None
+        ),
         # ★적용된 규칙을 **값과 함께** 낸다 — 「이 숫자가 어느 규칙의 산물인가」를 화면이
         #   말할 수 있어야 설정 변경이 화면에서 보인다(합격 ⑧).
         "price_rule": choice.rule,

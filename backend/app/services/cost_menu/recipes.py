@@ -1662,6 +1662,61 @@ def list_recipes(db: Session, *, form_factor: Optional[str] = None) -> list[dict
     return [recipe_payload(db, r) for r in rows]
 
 
+def cost_table_census(db: Session) -> dict:
+    """원가표 항목 **전건 인구조사** — 홈 탭 「할 일 인박스」 넷째 묶음의 분모
+    (계약 `CONTRACT_cost_excel_roundtrip.md` §4 S2 · `PLAN_cost_menu_s2_screen.md` Q1).
+
+    ★왜 `list_cost_table_items`(레시피별)로 못 하나: 그건 **한 레시피의 폼팩터 버킷**만
+    돌려준다. 인박스가 세는 것은 「지금 사람 손을 기다리는 원가표 항목이 몇 건인가」이고,
+    그건 레시피를 하나도 안 고른 첫 화면에서 나와야 하는 숫자다.
+
+    ★**세지 않고 «싣는다»** — `anomalies` 문자열을 여기서 갈라 세지 않는다. 인박스는
+    「같은 사건이 두 줄에 서지 않게」 접어야 하는데(레시피 45·97의 `price_conflict`는
+    `cost_recipe.anomaly_flag`와 이 컬럼 **양쪽에** 있다), 그 접기 규칙은 화면의 규칙이라
+    프론트의 순수 함수(`lib/costHome.ts`)가 갖는다. 백엔드가 미리 접으면 규칙이 두 벌이 된다.
+
+    ★`last_uploaded_at`은 **naive UTC**다(`server_default=func.now()`, prod 서버 TZ=UTC).
+    KST 환산은 화면의 `formatKstDateTime`이 한다 — 여기서 환산하면 규칙이 두 벌이 된다.
+    """
+
+    picked_by: dict[int, int] = {}
+    for rid, item_id in (
+        db.query(CostRecipe.id, CostRecipe.picked_item_id)
+        .filter(CostRecipe.picked_item_id.isnot(None))
+        .all()
+    ):
+        picked_by.setdefault(int(item_id), int(rid))
+
+    items = (
+        db.query(CostTableItem)
+        .order_by(CostTableItem.section, CostTableItem.item_name)
+        .all()
+    )
+    rows = [
+        {
+            "id": it.id,
+            "section": it.section,
+            "item_name": it.item_name,
+            "form_factor": it.form_factor,
+            "recipe_kind": it.recipe_kind,
+            "total_inc_vat": _d(it.total_inc_vat),
+            "row_number": it.row_number,
+            "anomalies": it.anomalies,
+            "line_count": len(it.lines),
+            "picked": it.id in picked_by,
+            "picked_by_recipe_id": picked_by.get(it.id),
+        }
+        for it in items
+    ]
+    uploaded = [it.uploaded_at for it in items if it.uploaded_at is not None]
+    return {
+        "items": rows,
+        "total": len(rows),
+        "picked_count": sum(1 for r in rows if r["picked"]),
+        "last_uploaded_at": max(uploaded).isoformat() if uploaded else None,
+    }
+
+
 def board(db: Session) -> dict:
     """표준원가 보드 — **SKU별** 행(계약 §5-3 탭3).
 

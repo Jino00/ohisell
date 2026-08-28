@@ -85,6 +85,9 @@ const KIT: CostMaterial = {
   latest_price_inc_vat: "209.90",
   latest_price_inc_derived: false,
   latest_price_source: "ledger",
+  // ★채택된 그 행(id=1 SETR2608170216)의 발효일 — 백엔드가 `price_rule.choose_price`가
+  //   고른 행에서 낸다(D-CPP-62 S2 왕복 표 열 10).
+  latest_price_effective_date: "2026-08-18",
   price_rule: "latest",
   lot_price_min: "178.78",
   lot_price_max: "190.82",
@@ -168,6 +171,8 @@ const EMPTY_KIT: CostMaterial = {
   latest_price_inc_vat: null,
   latest_price_inc_derived: false,
   latest_price_source: null,
+  // 단가가 없으면 발효일도 없다 — 채택된 행이 없기 때문이다(백엔드가 그렇게 낸다).
+  latest_price_effective_date: null,
   prices: [],
 };
 
@@ -183,6 +188,7 @@ function staleKit(check: Partial<CostLedgerCheck>): CostMaterial {
     latest_price_inc_vat: null,
     latest_price_inc_derived: false,
     latest_price_source: null,
+    latest_price_effective_date: null,
     prices: [{ ...KIT.prices[0], ledger_check: c }],
   };
 }
@@ -441,8 +447,10 @@ describe("부자재 목록 — 미확인 상태와 최신 단가가 보인다", 
 // ── 적대 리뷰 변이 MF2가 살아남은 자리 ────────────────────────────────────────
 //
 // ★업로드 결과의 「원가표 이상 N건」 블록을 통째로 지워도 **44파일 624건이 전부 초록**이었다.
-//   그런데 그 블록이 지금 **파일의 모순(같은 부자재가 두 값)이 사람에게 보이는 유일한 표면**이다
-//   — `material_refs` 리포트는 아직 화면에 안 닿기 때문이다(계약 §4 S4 몫으로 이월).
+//   그때는 이 블록이 **파일의 모순(같은 부자재가 두 값)이 사람에게 보이는 유일한 표면**이었다
+//   — `material_refs` 리포트가 아직 화면에 안 닿았기 때문이다. **이제는 닿는다**(D-CPP-62 S2 —
+//   「참고값 모순 보류」 블록, 아래 `업로드 결과 — 참고값 미러 리포트` describe). 이 블록은
+//   여전히 **원가표 파싱 단계의** 이상(단위 불일치 등)을 보이는 자리라 존치한다.
 //   보호막이 없는 문장은 문장이 아니다.
 describe("업로드 결과 — 원가표 이상이 사람에게 보인다", () => {
   it("★`cost_table_anomalies`가 화면에 그려진다 (MF2 변이가 여기서 죽는다)", () => {
@@ -470,6 +478,143 @@ describe("업로드 결과 — 원가표 이상이 사람에게 보인다", () =
     expect(
       screen.getByText("price_conflict:패키지 (fold)=171.00|320.00"),
     ).toBeTruthy();
+  });
+});
+
+// ── 업로드 결과 — 참고값 미러 리포트 (D-CPP-62 S2) ────────────────────────────
+//
+// S1 적대 리뷰가 이 배선을 **승인 조건**으로 걸었다: *"P2-1을 S2에서 반드시 닫는다는 전제
+// 위에서 이 읽기를 승인한다. 닫히지 않으면 그건 미러가 아니라 그냥 조용한 쓰기다."*
+// 백엔드는 두 갈래(원가만 업로드=347줄 early return · 원가+매핑 동시 업로드=533줄 최종
+// return)에서 각각 `material_refs`를 싣는다. **한 갈래만 밟는 테스트는 MB1을 되살린다**
+// (변이가 한쪽 return에서만 `material_refs`를 지워도 안 잡힌다) — 그래서 두 갈래를 각각
+// 흉내 낸 픽스처로 따로 잰다.
+//
+// ★값(`old`·`new`·`kept`)은 문자열이거나 **null일 수 있다**(백엔드 `_money()`가 새 종엔
+//   옛값 없이 `None`을 준다) — MF3 교훈(픽스처가 prod와 달라 변이가 침묵한 전례)을 여기서
+//   반복하지 않으려면 null 케이스를 픽스처에 반드시 넣는다.
+describe("업로드 결과 — 참고값 미러 리포트가 사람에게 보인다 (D-CPP-62 S2)", () => {
+  const baseFields = {
+    recipes_created: 0,
+    recipes_updated: 5,
+    skipped_approved: 0,
+    unmatched: 0,
+    materials_seen: 20,
+    cost_table_recipes: 10,
+    cost_table_anomalies: [],
+    report: [],
+  };
+
+  it("★원가만 업로드한 응답(백엔드 347줄 갈래)에서 갱신·모순이 둘 다 그려진다", () => {
+    const result = {
+      ...baseFields,
+      cost_table_items: 10,
+      pins: { relinked: 0, lost: 0, ambiguous: 0 },
+      mapping_options: 0,
+      mapping_anomalies: [],
+      groups: 0,
+      updated_halves: ["구성"],
+      untouched: ["SKU 링크·옵션 수 — 매핑 정본을 안 올렸으므로 그대로 둔다"],
+      material_refs: {
+        refreshed: [{ name: "패키지 (fold)", old: "171.00", new: "320.00" }],
+        refreshed_count: 1,
+        conflicted: [
+          { name: "지문방지 필름", values: ["1,500.00", "1,750.00"], kept: null },
+        ],
+        conflicted_count: 1,
+      },
+    } as unknown as CostImportResult;
+
+    render(<RecipeImportPanel busy={false} onImport={() => {}} result={result} />);
+
+    expect(screen.getByTestId("import-material-refs-refreshed").textContent).toContain(
+      "참고값 갱신",
+    );
+    expect(screen.getByText(/패키지 \(fold\) · 171\.00 → 320\.00/)).toBeTruthy();
+    expect(screen.getByTestId("import-material-refs-conflicted").textContent).toContain(
+      "참고값 모순 보류",
+    );
+    expect(screen.getByText(/지문방지 필름/)).toBeTruthy();
+    // ★null(옛 값 없음)이 조용히 사라지지 않고 「(없음)」으로 보인다.
+    expect(screen.getByText(/그대로 둔 값 \(없음\)/)).toBeTruthy();
+  });
+
+  it("★원가+매핑 동시 업로드한 응답(백엔드 533줄 갈래)에서도 갱신·모순이 그려진다", () => {
+    const result = {
+      ...baseFields,
+      cost_table_items: 10,
+      skipped_pinned: 3,
+      pins: { relinked: 2, lost: 0, ambiguous: 0 },
+      mapping_options: 8,
+      mapping_anomalies: [],
+      groups: 4,
+      updated_halves: ["구성", "SKU 링크"],
+      untouched: [],
+      material_refs: {
+        refreshed: [{ name: "지문방지 내부 필름", old: null, new: "650.00" }],
+        refreshed_count: 1,
+        conflicted: [],
+        conflicted_count: 0,
+      },
+    } as unknown as CostImportResult;
+
+    render(<RecipeImportPanel busy={false} onImport={() => {}} result={result} />);
+
+    expect(screen.getByTestId("import-material-refs-refreshed").textContent).toContain(
+      "참고값 갱신",
+    );
+    // ★null(신규 종, 옛값 없음)도 「(없음)」으로 보인다 — 지어내지 않는다.
+    expect(screen.getByText(/지문방지 내부 필름 · \(없음\) → 650\.00/)).toBeTruthy();
+    expect(screen.getByTestId("import-material-refs-conflicted").textContent).toContain(
+      "참고값 모순 보류",
+    );
+    expect(screen.getByTestId("import-material-refs-conflicted").textContent).toContain("0");
+  });
+
+  it("★갱신 0건일 때도 「참고값 갱신 0건」이 보인다 — 「안 실림」과 「0건」이 갈려야 한다", () => {
+    const result = {
+      ...baseFields,
+      cost_table_items: 10,
+      pins: { relinked: 0, lost: 0, ambiguous: 0 },
+      mapping_options: 0,
+      mapping_anomalies: [],
+      groups: 0,
+      material_refs: {
+        refreshed: [],
+        refreshed_count: 0,
+        conflicted: [],
+        conflicted_count: 0,
+      },
+    } as unknown as CostImportResult;
+
+    render(<RecipeImportPanel busy={false} onImport={() => {}} result={result} />);
+
+    expect(screen.getByTestId("import-material-refs-refreshed").textContent).toBe(
+      "참고값 갱신 0건",
+    );
+    expect(screen.getByTestId("import-material-refs-conflicted").textContent).toContain(
+      "참고값 모순 보류",
+    );
+    expect(screen.queryByTestId("import-material-refs-missing")).toBeNull();
+  });
+
+  it("★`material_refs`가 응답에 없으면(구버전 백엔드) 「못 받았다」 경고가 뜬다 — 「모순 0건」으로 오독되면 안 된다", () => {
+    const result = {
+      ...baseFields,
+      cost_table_items: 10,
+      pins: { relinked: 0, lost: 0, ambiguous: 0 },
+      mapping_options: 0,
+      mapping_anomalies: [],
+      groups: 0,
+    } as unknown as CostImportResult;
+
+    render(<RecipeImportPanel busy={false} onImport={() => {}} result={result} />);
+
+    expect(screen.getByTestId("import-material-refs-missing").textContent).toContain(
+      "참고값 리포트가 응답에 없다",
+    );
+    expect(screen.queryByTestId("import-material-refs-refreshed")).toBeNull();
+    expect(screen.queryByTestId("import-material-refs-conflicted")).toBeNull();
   });
 });
 
