@@ -144,10 +144,13 @@ def _gate(
     last_day = _last_collection_day(db, vendor_id)
     synced_day = _kst_naive_date_str(po.synced_at)
     if last_day is not None and synced_day != last_day:
+        # ★이 문구는 화면에 그대로 뜬다. 「확인」을 쓰지 않는다 — 여기서 「확인」은
+        #   「거래명세서확인」(누르는 동작)이라, 조회 신선도에 같은 낱말을 쓰면
+        #   「아직 안 누른 건」으로 읽힌다(2026-08-28 Jino 지시).
         raise CoupangWriteValidationError(
-            f"발주 {seq}: 상태가 굳었습니다(마지막 확인 {synced_day or '모름'}, "
+            f"발주 {seq}: 지금 상태를 모릅니다(마지막으로 본 날 {synced_day or '모름'}, "
             f"마지막 수집 {last_day}). 「미종결 발주 재수집」을 먼저 돌리세요 — "
-            "굳은 원장은 «지금 참인 상태»가 아니라 «마지막으로 본 상태»입니다."
+            "화면의 상태는 «지금»이 아니라 마지막으로 봤을 때의 것입니다."
         )
     hist = _rows_for(db, [seq]).get(seq, [])
     open_cmd = _open_command(hist)

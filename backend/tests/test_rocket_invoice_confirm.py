@@ -129,7 +129,9 @@ def test_stale_po_rejected(db):
     _po(db, 139791428, "RI", synced=LAST_SYNC)   # 마지막 수집일을 만들어 준다
     with pytest.raises(CoupangWriteValidationError) as e:
         svc.request_confirm(db, 115340779, VID, confirm=TOKEN)
-    assert "굳" in str(e.value)
+    # ★사용자에게 나가는 문구다 — 「확인」을 쓰지 않는다(2026-08-28 Jino 지시).
+    assert "지금 상태를 모릅니다" in str(e.value)
+    assert "확인" not in str(e.value).replace("거래명세서확인", "")
     assert _cmds(db) == []
 
 
