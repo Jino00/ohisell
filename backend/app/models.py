@@ -5315,6 +5315,69 @@ class CostRoundTripSnapshot(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
 
+class CostPurchasedPrice(Base):
+    """**매입 완제품 SKU 1건의 매입가** — 계약 D-CPP-63 §0-F 결정 (a).
+
+    ★★왜 레시피가 아니라 SKU 그레인인가 (이 테이블의 존재 이유):
+    매입가는 **기종마다 다르다.** prod 실측(2026-08-28) — 레시피 84 「일미리 케이스」는
+    51 SKU가 **922원 29개 / 2,400원 22개**, 레시피 88 「카메라 렌즈 1매입」은 26 SKU가
+    **1,000 / 2,000 / 2,694** 세 값이다. 그런데 조립품 경로의 `cost_standard`는
+    `recipe_id`+`price_rule` 유니크라 **레시피당 값이 하나**다 — 그 그레인에 매입가를 넣으면
+    29개의 922원과 22개의 2,400원이 **하나의 거짓 숫자**로 뭉개진다.
+
+    ★왜 레시피 경로를 재사용하지 않았나: 매입품의 `cost_recipe_line`은 **원래 0줄**이다
+    (매입품 초안 50건 전건). 레시피·구성·표준원가는 이 물건들에게 처음부터 빈 껍데기였고,
+    빈 껍데기를 가격 수만큼 쪼개는 안(계약 §0-F 안 b)은 없는 구조를 두 배로 만드는 일이다.
+    ⇒ **저장소의 그레인을 데이터의 그레인에 맞춘다.**
+
+    ★★경로 분리가 곧 금지선의 집행이다: 조립품(필름·액정)은 우리 레시피 계산이 정본이고
+    파일 값이 닿으면 안 된다(Jino 2026-08-28 18:17 *"매입완제품만 보자. 나머지는 우리가
+    했던 작업이 최신이야"*). 이 테이블이 조립품 경로와 **한 줄도 공유하지 않으므로** 그
+    사고가 «규칙»이 아니라 «구조»로 막힌다.
+
+    ★행은 쌓인다(덮어쓰지 않는다) — `cost_material_price`와 같은 결이다. 최신 1건이 현재
+    값이고 과거 행은 근거로 남는다. 값이 왜 바뀌었는지를 나중에 되짚을 수 없으면 그것은
+    원장이 아니라 그냥 칸이다.
+    """
+
+    __tablename__ = "cost_purchased_price"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: `product_master.internal_sku`. FK를 걸지 않는다 — `product_master`는 채널 수집이
+    #: 다시 만드는 표라 FK가 걸리면 수집이 이 표를 인질로 잡는다(저장소 관례).
+    internal_sku: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    #: ★nullable이다 — 「단가를 아직 모른다」와 「0원이다」는 다른 사실이다(상속 금지선).
+    #: 파일의 `1`원 자리표시자는 **여기 오지 않는다**(계약 §3: 1원 저장 금지).
+    unit_price_inc_vat: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    #: ★부가세 포함값이 정본이다. Jino 확인(2026-08-28 18:27) *"포함 되어 있어."* —
+    #: 파일 원가에는 관세·물류 등 부대비가 **이미 들어 있다.** 여기에 부대비를 다시 얹는
+    #: 코드를 만들지 않는다(계약 §3 금지선 — 이중 계상은 조용히 틀리고 화면에서 안 보인다).
+    #: 세전 값은 저장하지 않는다: 파생 규칙이 두 벌이 되는 자리다(§3 「로직 두 벌 금지」).
+
+    #: 'file' = 원가 매핑 파일에서 왔다 / 'manual' = 사람이 화면에서 입력했다(공백 34건).
+    source: Mapped[str] = mapped_column(String(10), nullable=False)
+    #: 어느 파일·어느 판에서 왔는지. 「08-07판」처럼 **사람이 읽는 좌표**를 남긴다 —
+    #: 두 판의 열 구성이 달라 이 값이 없으면 나중에 어느 쪽을 읽었는지 못 되짚는다.
+    source_file: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    #: 파일의 상품명 원문(제품+옵션 통합). 우리가 자른 값이 아니라 **그 행이 뭐라고 적혀
+    #: 있었나**를 남긴다 — 매칭을 나중에 재현하려면 원문이 있어야 한다.
+    source_product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
+    #: 사람이 확인 클릭한 시각. NULL이면 «제안»이지 확정이 아니다 — 계산은 확정만 읽는다
+    #: (상속 금지선: 승인 없는 값을 계산에 쓰지 않는다).
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_cost_purchased_price_sku_created", "internal_sku", "created_at"),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # OTAO 발주 원장 (계약 `CONTRACT_inventory_unified.md` §4 S1 · 트랙 D-INV-1·3)
 #
