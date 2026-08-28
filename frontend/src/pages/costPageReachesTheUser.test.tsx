@@ -3186,3 +3186,53 @@ describe("화면 밀도: 재고 평가방법 카드", () => {
     expect(calls).toEqual([["2025 귀속 신고서 확인", true]]);
   });
 });
+
+// ──────────────────────────────────────────────
+// Q6 호출부 — **App 경로로** 잰다 (적대 리뷰 P2-1 채택, PR #533)
+//
+// ★리뷰어가 실증한 구멍: `CostPage.tsx`의 `<RecipeDetail>` 호출부에서
+//   `materials` / `onSwapLineMaterial` 두 줄을 지워도 **프론트 1,113건이 전부 초록**이었다.
+//   위 Q6 describe가 `StandardBreakdown`·`RecipeDetail`을 **격리 렌더**로만 검증하고
+//   `renderApp()`(App 경로)을 안 썼기 때문이다.
+// ★이 PR 자신이 주석에서 「SUR-2(만드는 층 ≠ 닿는 층)를 막는다」고 적어 놓고 정확히
+//   그 모양의 구멍을 남겼다 — 그래서 머지 전에 닫는다. 지금 코드는 배선돼 있어 «현재의
+//   버그»는 아니지만, 다음 리팩터가 그 두 줄을 지워도 아무도 안 잡는다는 사실이 결함이다.
+// ──────────────────────────────────────────────
+describe("Q6 호출부: 종 교체가 «App 경로»로 화면에 실제로 선다", () => {
+  it("레시피 상세를 열면 계산 내역에 종 교체 컨트롤이 있다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    fireEvent.click(await screen.findByTestId("recipe-row-7"));
+
+    const panel = await screen.findByTestId("recipe-detail-panel");
+    // RECIPE(id 7)의 첫 구성 줄 `line_id: 8001` — 이 컨트롤은 `RecipeDetail`이 `materials`와
+    // `onSwapLineMaterial`을 **둘 다** 받았을 때만 선다. 호출부에서 하나만 빠져도 죽는다.
+    expect(within(panel).getByTestId("breakdown-swap-open-8001")).toBeTruthy();
+    // 규칙 문구도 App 경로로 닿는다 — 「추천하지 않는다」는 계약 §2의 원문이다.
+    expect(within(panel).getByTestId("swap-rule-note").textContent).toContain(
+      "추천하지 않는다",
+    );
+  });
+
+  it("승인된 레시피면 App 경로에서도 잠기고, «왜»가 함께 온다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    fireEvent.click(await screen.findByTestId("recipe-row-7"));
+
+    const panel = await screen.findByTestId("recipe-detail-panel");
+    // RECIPE(id 7)은 `status: "approved"`다 — 잠금 사유가 호출부에서 내려오지 않으면
+    // 이 단언이 죽는다(격리 렌더로는 그 배선을 못 잰다).
+    const opener = within(panel).getByTestId(
+      "breakdown-swap-open-8001",
+    ) as HTMLButtonElement;
+    expect(opener.disabled).toBe(true);
+    expect(opener.title).toContain("먼저 승인을 해제한다");
+  });
+
+  // ★「원장 줄엔 안 선다」는 여기서 안 잰다 — RECIPE 픽스처에 `material_id: null`인 줄이
+  //   0개라 App 경로로는 **공허하게 참**이 된다(초판이 그걸 모르고 넣었다가, 공허한 통과를
+  //   막으려고 함께 넣은 가드에 스스로 걸렸다). 공유 픽스처에 원장 줄을 끼우면 `line_count`
+  //   등 다른 파일의 단언까지 흔들리므로, 그 케이스는 위 Q6 격리 테스트가 그대로 덮는다.
+});
