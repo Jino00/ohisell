@@ -1,0 +1,59 @@
+{
+  "_why": [
+    "왕복 표 열 12개의 **정본**이다 (계약 D-CPP-62 S3 / 설계 PLAN_cost_menu_s2_screen.md Q3).",
+    "★이 파일은 테스트 픽스처가 아니라 **다운로드 생성기가 런타임에 읽는 입력**이다.",
+    "  픽스처로 두면 낡아도 아무도 안 죽는다(세 번째 사본이 된다) — 런타임 입력이면",
+    "  낡는 순간 파일이 낡게 나오고 파리티 테스트가 빨개진다.",
+    "★프론트엔드 `frontend/src/lib/costHome.ts`의 `ROUND_TRIP_COLUMNS`가 화면을 그린다.",
+    "  두 벌이지만 갈라질 수 없다 — vitest가 이 파일을 `fs`로 직접 읽어 key/label/editable/",
+    "  순서를 **전건·순서 민감**으로 대조한다(`costHomeColumnParity.test.ts`).",
+    "  `note`(한국어 툴팁 장문)는 화면 전용이라 파리티 대상이 아니다.",
+    "★`file_label`은 **파일 헤더가 화면 헤더와 다를 때만** 쓴다. 다르다는 사실 자체를",
+    "  스펙이 말하게 해서 «조용히 달라지는» 경로를 없앤다."
+  ],
+  "columns": [
+    { "key": "id", "label": "ID", "editable": false },
+    { "key": "name", "label": "이름", "editable": true },
+    { "key": "form_factor", "label": "폼팩터", "editable": true },
+    { "key": "part", "label": "부품", "editable": true },
+    { "key": "unit", "label": "단위", "editable": true },
+    { "key": "price_ex", "label": "단가 (VAT 제외)", "editable": true },
+    { "key": "price_inc", "label": "단가 (VAT 포함)", "editable": false },
+    {
+      "key": "vat_derived",
+      "label": "VAT 파생",
+      "editable": false,
+      "value_labels": { "true": "×1.1" }
+    },
+    {
+      "key": "price_source",
+      "label": "단가 출처",
+      "editable": false,
+      "value_labels": { "ledger": "원장", "manual": "등록가" },
+      "_why_value_labels": [
+        "★설계 Q3는 「원장 / 수동」이라 적었지만 **라이브 화면은 「원장 / 등록가」**다",
+        "  (`CostPage.tsx:127 priceSourceLabel` · D-CPP-56, Jino 2026-08-24:",
+        "   *「지금 등록이 되어 있는 엑셀값을 공식 가격으로 쓰자」*).",
+        "  파일은 문서가 아니라 **화면**을 따라야 하므로(계약 §2) 라이브 라벨을 정본으로 싣는다.",
+        "★이 매핑을 여기 두는 이유: 안 두면 같은 규칙이 TS 함수와 Python 생성기 두 벌이 되고,",
+        "  한쪽만 고쳐지면 화면과 파일이 다른 낱말로 같은 값을 부른다. 파리티 테스트가",
+        "  **TS 함수를 실제로 호출해** 이 표와 대조한다."
+      ]
+    },
+    { "key": "effective_date", "label": "단가 발효일", "editable": true },
+    { "key": "excel_ref", "label": "엑셀 참고값", "editable": false },
+    {
+      "key": "status_note",
+      "label": "상태 / 비고",
+      "file_label": "비고 (상태는 화면에서만)",
+      "editable": true,
+      "_why_file_label": [
+        "화면의 이 칸은 «상태 라벨 + 라이브 배지 + 비고»의 합성이라 왕복이 원리적으로 불가능하다.",
+        "배지까지 파일에 쓰면 S4 diff가 파생값 변화를 «사람의 수정»으로 오독하고,",
+        "「승인 · 비고」로 합쳐 쓰면 S4가 그 문자열을 파싱해 비고만 떼내야 한다(깨지기 쉽다).",
+        "⇒ 파일 셀에는 **비고만** 싣고, 잃어버린 「상태」를 헤더가 자백한다.",
+        "  상태는 어차피 파일에서 못 고친다 — 승인은 사람이 화면에서 누른다(계약 §2)."
+      ]
+    }
+  ]
+}
