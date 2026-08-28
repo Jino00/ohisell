@@ -259,6 +259,10 @@ export function CostRoundTripTable({
   async function handleDownload() {
     setBusy(true);
     setError(null);
+    // ★직전 성공의 스냅샷 ID도 지운다(적대 리뷰 P2-2) — 안 지우면 성공 뒤 실패했을 때
+    //   「받음 · CRT-7」과 「다운로드 실패」가 **동시에** 서서, 지금 손에 있는 파일이
+    //   어느 스냅샷인지 화면이 두 가지로 말한다.
+    setResult(null);
     try {
       // ★필터를 안 넘긴다 — 넘길 인자가 아예 없다. 부분집합 파일이 나가면 재업로드에서
       //   빠진 종이 전부 S4 「사라짐」에 서고 확인 한 번에 백여 종이 비활성화된다.
