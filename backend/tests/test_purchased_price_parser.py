@@ -50,6 +50,27 @@ def test_열은_이름으로_찾는다_위치가_바뀌어도():
     assert 1 in codes and 0 not in codes  # 「채널명」은 코드가 아니다
 
 
+def test_열_이름은_정확히_일치해야_한다_비슷한_이름에_안_걸린다():
+    """★부분 일치로 바꾸면 「원가율」·「원가 매핑」 같은 열이 함께 걸려 어느 것이 단가인지
+    조용히 갈린다. 적대 리뷰(PR #551) 변이 #3이 이 자리를 뚫었다 — 부분 일치로 바꿔도
+    11건이 전부 초록이었다. 코드는 옳았으나 그 옳음을 지키는 테스트가 없었다.
+    """
+
+    # 「원가」보다 «앞»에 놓인 디코이들 — 부분 일치면 이쪽이 먼저 걸린다
+    header = ["상품명", "원가율", "원가 매핑", "원가", "채널명"]
+    name_col, price_col, codes = detect_columns(header)
+    assert (name_col, price_col) == (0, 3), "「원가」와 정확히 일치하는 열만 단가 열이다"
+    # 디코이는 버려지지 않고 «코드 열»로 남는다 — 파서가 임의로 열을 삼키지 않는다
+    assert 1 in codes and 2 in codes
+
+    # 「상품명 표기」는 「상품명」이 아니다 — 비슷한 이름은 상품명 열도 아니다
+    with pytest.raises(PriceSheetError):
+        detect_columns(["상품명 표기", "원가"])
+    # 「원가율」만 있고 「원가」가 없으면 거부한다(비슷한 이름을 단가로 쓰지 않는다)
+    with pytest.raises(PriceSheetError):
+        detect_columns(["상품명", "원가율"])
+
+
 def test_단가와_자리표시자를_가른다():
     rows = [
         HEADER_0807,
