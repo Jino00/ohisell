@@ -213,15 +213,62 @@ describe("확인요청함 — 실행 표면", () => {
   });
 
   it("실행이 실패하면 사유를 모달에 남긴다 — 조용히 닫히지 않는다", async () => {
-    h.requestFails = "API error 400: 상태가 굳었습니다";
+    h.requestFails = "API error 400: 지금 상태를 모릅니다";
     render(<RiQueueTab />);
     fireEvent.click(await screen.findByRole("button", { name: "확인" }));
     await screen.findByText(/되돌릴 수 없습니다/);
     fireEvent.click(screen.getByRole("button", { name: "실행" }));
 
-    expect(await screen.findByText(/상태가 굳었습니다/)).toBeTruthy();
+    expect(await screen.findByText(/지금 상태를 모릅니다/)).toBeTruthy();
     // 모달이 열린 채 남아 있어야 사람이 사유를 읽는다.
     expect(screen.getByRole("button", { name: "실행" })).toBeTruthy();
+  });
+});
+
+describe("확인요청함 — 신선도 문구 (2026-08-28 Jino 지시)", () => {
+  // ★Jino 원문: "표현을 굳음 말고 좀 더 명확하게 의미전달을 해줘".
+  //   두 가지를 지킨다: ①「굳음」 같은 상태 묘사 대신 **「모른다」는 사실**을 말한다
+  //   ②이 축의 문구에 **「확인」을 쓰지 않는다** — 이 화면에서 「확인」은 「거래명세서확인」
+  //   (사람이 눌러 RI→CI로 보내는 동작)이라, 조회 신선도에 같은 낱말을 쓰면 읽는 사람이
+  //   «아직 안 누른 건»으로 오해한다. 문구는 되돌리기 쉬우니 테스트가 붙잡는다.
+  const staleRow = () =>
+    riRow({
+      purchase_order_seq: 115340779,
+      is_stale: true,
+      synced_date: "2026-08-05",
+      confirm: {
+        state: null, command_id: null,
+        can_request: false, blocked_reason: "재수집 후 확인 가능",
+      },
+    });
+
+  it("섹션 제목이 «모른다»를 말한다 — 「굳」이라는 낱말을 쓰지 않는다", async () => {
+    h.queue = queueWith([staleRow()]);
+    render(<RiQueueTab />);
+    expect(await screen.findByText(/지금 상태를 모르는 건/)).toBeTruthy();
+    expect(screen.queryByText(/상태가 굳은 건/)).toBeNull();
+  });
+
+  it("배지가 「이후 다시 안 봄」이다 — 「이후 미확인」이 아니다", async () => {
+    h.queue = queueWith([staleRow()]);
+    render(<RiQueueTab />);
+    expect(await screen.findByText("2026-08-05 이후 다시 안 봄")).toBeTruthy();
+    expect(screen.queryByText(/이후 미확인/)).toBeNull();
+  });
+
+  it("표 머리글이 「마지막으로 본 날」이다 — 「마지막 확인」이 아니다", async () => {
+    h.queue = queueWith([staleRow()]);
+    render(<RiQueueTab />);
+    expect(await screen.findAllByText("마지막으로 본 날")).toBeTruthy();
+    expect(screen.queryByText("마지막 확인")).toBeNull();
+  });
+
+  it("안내문이 «남은 금액»이 아니라 «모르는 금액»이라고 못 박는다", async () => {
+    h.queue = queueWith([staleRow()]);
+    render(<RiQueueTab />);
+    expect(await screen.findByText(/모르는 금액/)).toBeTruthy();
+    // 왜 오래된 것만 걸리는지도 화면이 말해야 한다 — 안 그러면 무작위로 보인다.
+    expect(screen.getByText(/최근 발주일 기준/)).toBeTruthy();
   });
 });
 
