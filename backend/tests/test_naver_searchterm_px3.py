@@ -351,38 +351,74 @@ def test_open_exclusion_shopping_removes_by_keyword(db):
 
 
 def test_open_exclusion_powerlink_without_id_still_blocks(db):
-    """파워링크 + id 없음 → 종전대로 거부(False, 쓰기 0회) — 초기 가드가 여전히 막는다.
-    (회귀 커버는 이미 test_open_without_restrict_kwd_id_skips가 _run_reexamination 경유로
-    지키고 있다 — 이 테스트는 _open_exclusion을 직접 불러 같은 경계를 못 박는다.)"""
+    """파워링크 + id 없음 → 종전대로 거부(False, 쓰기 0회, 상태 유지).
+
+    ★적대 리뷰 1R P1-1 상환으로 **막는 «자리»가 바뀌었다**: 초판은 함수 머리의 캠페인 축 조기
+    필터가 막았고, 지금은 클레임 직전의 **광고그룹 축** 판정이 막는다. 이 테스트가 단언하는 것은
+    그 «기제»가 아니라 **결과**다 — 거부 · 쓰기 0회 · `excluded` 유지. 기제를 단언하면 리팩터가
+    결과를 안 바꿔도 테스트가 빨개지고, 그러면 다음 사람이 단언을 낮춰 통과시키게 된다.
+    (회귀 커버는 test_open_without_restrict_kwd_id_skips가 _run_reexamination 경유로도 지킨다.)"""
     _scope(db, campaign_type="WEB_SITE")
     row = _excl(db, term="아이디없음", restrict_kwd_id=None, next_review_at=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "get_adgroup_type") as mock_get, \
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
          patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del, \
          patch.object(lane.naver_sa_writer, "remove_shopping_exclusions") as mock_remove:
         assert lane._open_exclusion(db, row, _NOW) is False
-    mock_get.assert_not_called()  # 초기 가드에서 이미 차단 — 라이브 조회조차 안 감
     mock_del.assert_not_called()
     mock_remove.assert_not_called()
     db.refresh(row)
-    assert row.status == "excluded"
+    assert row.status == "excluded"  # 클레임 자체가 없었다
+    # ★「쓰다 실패」가 아니라 「시도조차 못 함」이어야 한다 — 실패 change_log가 남으면 감사가
+    #   거짓말한다(클레임 전 거부와 클레임 후 실패는 관측값 False가 같아 여기서만 갈린다).
+    assert db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == lane._RESTORE_ACTION
+    ).count() == 0
 
 
 def test_open_exclusion_unknown_type_without_id_blocks_not_optimistic_shopping(db):
-    """유형 모름(None: naver_entity에 그 광고그룹 행 자체가 없음) + id 없음 → 거부.
-    ★모름을 쇼핑으로 낙관하지 않는다 — _campaign_type_of_adgroup이 None을 돌리면 초기 가드의
-    `!= SHOPPING_ADGROUP_TYPE` 비교가 True가 되어(None != "SHOPPING") 그대로 막힌다."""
-    _scope(db, campaign_type="WEB_SITE")  # grp-web만 등록 — grp-미동기화는 인벤토리에 없음
+    """유형 모름(광고그룹 축 조회가 None) + id 없음 → 거부. ★모름을 쇼핑으로 낙관하지 않는다.
+
+    P1-1 상환 후 이 판정의 주체는 `naver_sa_writer.get_adgroup_type()`이다(캠페인 축 필터는
+    없어졌다). 라이브 조회가 실패하든 인벤토리에 행이 없든 결과는 None이고, None은 «쇼핑»이
+    아니라 «모름»이라 fail-closed로 물러난다."""
+    _scope(db, campaign_type="WEB_SITE")
     row = _excl(db, term="유형모름", adgroup_id="grp-미동기화", restrict_kwd_id=None,
                 next_review_at=date(2026, 7, 22))
-    with patch.object(lane.naver_sa_writer, "get_adgroup_type") as mock_get, \
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value=None), \
          patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del, \
          patch.object(lane.naver_sa_writer, "remove_shopping_exclusions") as mock_remove:
         assert lane._open_exclusion(db, row, _NOW) is False
-    mock_get.assert_not_called()
     mock_del.assert_not_called()
     mock_remove.assert_not_called()
     db.refresh(row)
     assert row.status == "excluded"
+    assert db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == lane._RESTORE_ACTION
+    ).count() == 0
+
+
+def test_open_exclusion_shopping_opens_even_if_campaign_axis_says_websites(db):
+    """★적대 리뷰 1R P1-1의 직접 재현 테스트 — **축 불일치의 반대 방향**.
+
+    캠페인 축(`NaverEntity.campaign_type`)은 `WEB_SITE`인데 라이브 광고그룹 축은 `SHOPPING`인
+    조합. 초판은 함수 머리의 캠페인 축 필터가 `return False`로 즉시 끝내 **권위 있는 축을 묻지도
+    못한 채 영구 차단**했다 — 이 PR이 고치려던 결함(쇼핑 재개방 0건)이 축 불일치 부분집합에서
+    그대로 재발하는 모양이고, D-NAO-179의 정확한 재현이었다. 지금은 열려야 한다."""
+    _scope(db, campaign_type="WEB_SITE")  # 캠페인 축은 비쇼핑이라고 «잘못» 말한다
+    row = _excl(db, term="축불일치복귀", restrict_kwd_id=None, next_review_at=date(2026, 7, 22))
+    axis_result = naver_sa_writer.WriteResult(
+        action="remove_shopping_exclusions", before=["축불일치복귀"], response=None,
+        after=[], created_ids=[],
+    )
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="SHOPPING"), \
+         patch.object(lane.naver_sa_writer, "remove_shopping_exclusions",
+                      return_value=axis_result) as mock_remove, \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is True
+    mock_remove.assert_called_once_with("grp-web", ["축불일치복귀"])
+    mock_del.assert_not_called()  # 파워링크 손으로 새면 안 된다
+    db.refresh(row)
+    assert row.status == "probation"
 
 
 # ── D-NAO-271 2차 수정: 클레임 «전» 광고그룹 축 게이트(코디네이터 위임문 5·6) ──

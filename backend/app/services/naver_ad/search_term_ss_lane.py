@@ -234,35 +234,6 @@ def _adgroup_belongs_to_campaign(db: Session, adgroup_id: str, campaign_id: str)
     return row is not None and row[0] == campaign_id
 
 
-def _campaign_type_of_adgroup(db: Session, adgroup_id: str) -> str | None:
-    """이 광고그룹이 속한 캠페인 유형(WEB_SITE/SHOPPING/…) — 모르면 None (D-NAO-271).
-
-    ★**조기 판별 전용이다 — 경로 선택에 쓰지 않는다.** `campaign_type`(캠페인 축)과
-    `adgroupType`(광고그룹 축)은 **다른 축**이고, 그 둘을 섞은 게이트가 D-NAO-179에서 제외
-    723건 중 711건을 시야 밖에 뒀다. 그래서 여기서는 「id 부재를 회수 실패로 읽어도 되는가」만
-    싸게 가른다(DB만 읽는 필터 — 스코프·킬스위치에 걸릴 행에 API를 안 쏘려는 것). **경로 결정은
-    `_open_exclusion`이 클레임 직전에 `naver_sa_writer.get_adgroup_type()`으로 «광고그룹 축»을
-    따로 읽어서 한다** — 그쪽이 권위 있는 판정이고, 이 함수는 그 앞의 싼 필터다(이중 방벽).
-
-    조회 실패·행 부재는 None이다. 호출부는 None을 «모름»으로 처분해야 하고, 그건 이 레인에서
-    **종전 동작 유지**(id 없으면 개방 불가)를 뜻한다 — 모름을 쇼핑으로 낙관하면 파워링크의
-    회수 실패 잔존이 조용히 개방 시도로 바뀐다.
-
-    `_adgroup_belongs_to_campaign`과 같은 **엔진 레벨 독립 커넥션**을 쓴다(스테일 스냅샷 회피)."""
-    try:
-        with db.get_bind().connect() as conn:
-            row = conn.execute(
-                select(NaverEntity.campaign_type).where(
-                    NaverEntity.entity_type == "adgroup",
-                    NaverEntity.entity_id == adgroup_id,
-                )
-            ).first()
-    except Exception as e:  # noqa: BLE001 — 조회 실패는 «모름»(None)이지 «쇼핑»이 아니다
-        log.warning("search_term_ss_lane: 캠페인 유형 조회 실패 adgroup=%s: %s", adgroup_id, e)
-        return None
-    return row[0] if row is not None else None
-
-
 def _autofire_exclude(db: Session, cand: dict, now: datetime) -> NaverChangeLog | None:
     """파워링크 제외 후보 1건 자동 발사(exploration BX2 관례 복제): status='approved' +
     approval_source=APPROVAL_SOURCE_SS_EXCLUDE 제안 생성 → naver_execution_harness.execute()로
@@ -357,19 +328,15 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
 
     ★유형별로 **되돌리는 열쇠가 다르다**(`rollback_exclusions` 주석): 파워링크는 쓰기 응답에서
     회수한 id, 쇼핑은 **키워드 본문**이다(그 리소스엔 키워드 단위 id가 없다). 그래서
-    `restrict_kwd_id` 부재는 파워링크에선 «회수 실패»지만 쇼핑에선 **정상**이다."""
-    # ★조기 판별은 «캠페인» 유형으로 싸게 한다(무의미한 API 왕복 차단) — 실제 경로 선택은 아래
-    #   rollback_exclusions가 **라이브 adgroupType**으로 한다(이중 방벽). 유형을 모르면(None)
-    #   **종전 동작을 유지**한다: 모름을 쇼핑으로 낙관하면 파워링크의 회수 실패 잔존이 조용히
-    #   개방 시도로 바뀐다.
-    if not row.restrict_kwd_id and (
-        _campaign_type_of_adgroup(db, row.adgroup_id) != naver_sa_writer.SHOPPING_ADGROUP_TYPE
-    ):
-        log.warning(
-            "search_term_ss_lane: 재심사 개방 불가(restrict_kwd_id 부재·비쇼핑) adgroup=%s term=%r "
-            "— 사람 조사 대상(상태 유지)", row.adgroup_id, row.search_term,
-        )
-        return False
+    `restrict_kwd_id` 부재는 파워링크에선 «회수 실패»지만 쇼핑에선 **정상**이다.
+
+    ★**유형 판정은 «광고그룹 축» 한 곳에서만 한다**(적대 리뷰 1R P1-1 상환). 초판은 함수 머리에
+    «캠페인 축»(`NaverEntity.campaign_type`) 조기 필터를 두어 API 왕복을 아끼려 했는데, 그 필터가
+    `return False`로 **즉시 종료**해서 「캠페인 축은 비쇼핑인데 광고그룹 축은 SHOPPING」인 조합이
+    **권위 있는 축을 묻지도 못한 채 영구 차단**됐다 — 이 함수가 고치려던 결함(쇼핑 재개방 0건)이
+    축 불일치 부분집합에서 그대로 재발하는 모양이고, D-NAO-179(두 축을 섞은 게이트가 제외 723건
+    중 711건을 시야 밖에 뒀다)의 정확한 재현이었다. **아끼려던 것은 일일 복귀 캡(10건) 안의 API
+    왕복 몇 회고, 값은 정확성이었다** — 그 거래가 틀렸으므로 필터를 걷어낸다."""
     # 복귀 캡 재카운트 백스톱(P2-1) — 제외 캡의 harness 관례(쓰기 직전 재카운트→초과 시 중단)를
     # 미러한다. _run_reexamination의 로컬 remaining_return은 소프트 카운트라, 동시 실행(크론+
     # catch-up 데몬 스레드 동시 발화) 시 각 러너가 remaining=cap을 보고 최대 2배 개방할 수 있다.
@@ -425,15 +392,20 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
         return False
     # ★D-NAO-271: 쓰기 경로용 **광고그룹 유형**을 클레임 «전»에 해결한다.
     #
-    # ①축이 다르다: 위 조기 판별은 `campaign_type`(캠페인 축)이고 경로 결정은 `adgroupType`
-    #   (광고그룹 축)이어야 한다 — 그 둘을 섞은 게이트가 D-NAO-179에서 제외 723건 중 711건을
-    #   시야 밖에 뒀다. 그래서 여기서 **광고그룹 축을 따로 읽는다.**
+    # ①**유형 판정은 여기 한 곳뿐이다.** 경로 결정의 축은 `adgroupType`(광고그룹 축)이지
+    #   `campaign_type`(캠페인 축)이 아니다 — 그 둘을 섞은 게이트가 D-NAO-179에서 제외 723건 중
+    #   711건을 시야 밖에 뒀다. 초판은 함수 머리에 캠페인 축 조기 필터를 뒀다가 적대 리뷰 1R
+    #   P1-1을 맞았다(그 필터가 `return False`로 즉시 끝내 축 불일치 행이 이 판정에 도달조차
+    #   못 했다 = 같은 병의 재발). 필터를 걷어냈으니 **이 줄이 유일한 유형 판정**이다.
     # ②순서가 중요하다: `rollback_exclusions`에 `adgroup_type=None`을 넘기면 그 함수가 라이브를
     #   읽는데, 그 시점은 **이미 클레임(excluded→probation)을 커밋한 뒤**다. 유형을 모르면 거기서
     #   예외가 나고 클레임 롤백 경로를 타 `failed` change_log가 남는다 — 「쓰기를 시도조차 못 한
     #   것」이 「쓰다 실패한 것」으로 기록된다. 클레임 전에 해결하면 상태를 안 건드리고 조용히
     #   물러난다(다음 레인 재시도).
-    # ③API 왕복은 늘지 않는다 — `rollback_exclusions`가 어차피 하던 조회를 앞으로 당긴 것이다.
+    # ③비용: 아래에서 유형을 명시로 넘기므로 `rollback_exclusions`는 라이브를 다시 안 읽는다.
+    #   다만 **변경 «전» 코드 기준으로는 재개방 1건당 GET 1회가 실제로 늘어난다**(적대 리뷰 1R
+    #   P2-1이 초판 주석의 「왕복은 늘지 않는다」를 과장으로 정확히 지적했다). 상한은 일일 복귀
+    #   캡(`_SS_DAILY_RETURN_CAP`)이고, 그 비용으로 축 정확성을 샀다.
     adgroup_type = naver_sa_writer.get_adgroup_type(row.adgroup_id)
     if adgroup_type is None:
         log.warning(
