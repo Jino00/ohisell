@@ -9,10 +9,15 @@
 //   2) **미해명은 확정 숫자가 아니다.** 발송 신고 > 쿠팡 인정 입고인 덩어리는 덜 보냄·반송·
 //      진짜 미수금이 섞여 있다. 소계와 **다른 줄, 다른 색**으로 두고 「확정 아님」을 쓴다.
 //      (2026-08-05에 이 값만 믿고 미수금을 5,763,290원 과대계상한 전례가 있다.)
-//   3) **굳은 것을 산 것처럼 보여주지 않는다.** 수집 창이 발주일 기준이라 오래된 미종결 PO는
-//      상태가 마지막 수집일에 멈춘다. 칸마다 「오늘 갱신분 / 굳은 분」을 금액으로 가르고,
-//      행에는 「YYYY-MM-DD 이후 미확인」 배지를 붙인다. RI 탭은 아예 섹션을 나눈다 —
-//      실측(2026-08-27) RI 12건 중 8건이 이미 지급까지 끝난 유령이었다.
+//   3) **모르는 것을 아는 것처럼 보여주지 않는다.** 수집 창이 발주일 기준이라 오래된 미종결 PO는
+//      상태가 마지막 수집일에 멈춘다. 칸마다 「오늘 수집분 / 지금 상태 모름」을 금액으로 가르고,
+//      행에는 「YYYY-MM-DD 이후 다시 안 봄」 배지를 붙인다. RI 탭은 아예 섹션을 나눈다 —
+//      실측(2026-08-27) RI 12건 중 8건이 마지막으로 본 지 3주 지난 상태였다.
+//      ★문구 규칙(2026-08-28, Jino "표현을 굳음 말고 좀 더 명확하게"): 이 축의 사용자 문구에
+//        **「확인」을 쓰지 않는다.** 이 화면에서 「확인」은 「거래명세서확인」 — 사람이 눌러
+//        RI→CI로 보내는 동작이다. 조회 신선도에 같은 낱말을 쓰면(옛 「이후 미확인」·「마지막 확인」)
+//        읽는 사람이 «아직 안 누른 건»으로 오해한다. 그리고 「굳음」 같은 상태 묘사 대신
+//        **「모른다」는 사실**을 쓴다 — 요점은 데이터가 오래됐다는 게 아니라 지금 참인지 모른다는 것이다.
 //   4) **보정·절단을 자백한다.** clamp(음수 절단)·ASN 미수집 보정·목록 잘림은 전부 화면에
 //      한 줄로 쓴다. 조용히 처리하면 「깨끗한 화면」이 곧 「거짓말하는 화면」이 된다.
 import { useEffect, useState } from "react";
@@ -48,10 +53,17 @@ const STAGE_META: Record<string, { no: string; label: string; desc: string }> = 
   await_payment: { no: "④", label: "지급 대기", desc: "계산서가 나갔고 지급일이 아직 오지 않았다" },
 };
 
-/** 「YYYY-MM-DD 이후 미확인」 배지. 굳은 행에만 붙는다. */
+/** 「YYYY-MM-DD 이후 다시 안 봄」 배지. 신선도가 떨어진 행에만 붙는다.
+ *
+ *  ★문구에서 「확인」을 쓰지 않는다(2026-08-28, Jino 지시 "표현을 굳음 말고 좀 더 명확하게").
+ *    이 화면에서 **「확인」은 이미 다른 뜻**이다 — 「거래명세서확인」, 즉 사람이 눌러 RI→CI로
+ *    보내는 그 동작. 같은 낱말이 「우리가 조회했나」와 「사람이 눌렀나」 두 뜻으로 돌면
+ *    배지를 읽는 사람이 «아직 안 누른 건»으로 오해한다. 그래서 「미확인」을 버렸다.
+ *  ★그리고 「굳음」이라는 상태 묘사 대신 **「모른다」는 사실**을 말한다 — 이 표시의 요점은
+ *    데이터가 오래됐다는 게 아니라 **지금 참인지 우리가 모른다**는 것이다. */
 function StaleBadge({ since }: { since: string | null }) {
   return (
-    <Badge tone="alert">{since ? `${since} 이후 미확인` : "확인 시각 미상"}</Badge>
+    <Badge tone="alert">{since ? `${since} 이후 다시 안 봄` : "마지막으로 본 날 모름"}</Badge>
   );
 }
 
@@ -148,16 +160,18 @@ export function PipelineTab() {
                     ? `발주 ${cnt(s.po_count)}건`
                     : `계산서 ${cnt(s.invoice_count)}건 · 지급 ${s.next_payment_date ?? NO_DATA}~${s.last_payment_date ?? NO_DATA}`}
                 </div>
-                {/* ★신선도 — 「지금 참인 상태」와 「마지막으로 본 상태」를 금액으로 가른다 */}
+                {/* ★신선도 — 「지금 참인 상태」와 「마지막으로 본 상태」를 금액으로 가른다.
+                    문구는 «모른다»를 말한다: 이 금액이 남아 있다는 주장이 아니라, 그 사이
+                    처리됐는지 우리가 안 봐서 모른다는 뜻이다. */}
                 {isPoStage(s) && (
                   num(s.stale_amount) > 0 ? (
                     <div className="mt-1.5 text-xs text-amber-700">
-                      최신 {won(s.fresh_amount)} · <b>굳음 {won(s.stale_amount)}</b>
+                      오늘 수집분 {won(s.fresh_amount)} · <b>지금 상태 모름 {won(s.stale_amount)}</b>
                       {" "}({cnt(s.stale_po_count)}건
-                      {s.oldest_stale_synced_date ? `, ${s.oldest_stale_synced_date} 이후 미확인` : ""})
+                      {s.oldest_stale_synced_date ? `, ${s.oldest_stale_synced_date} 이후 다시 안 봄` : ""})
                     </div>
                   ) : (
-                    <div className="mt-1.5 text-xs text-gray-400">전액 최신 수집분</div>
+                    <div className="mt-1.5 text-xs text-gray-400">전액 오늘 수집분</div>
                   )
                 )}
                 <div className="mt-1 text-[11px] leading-tight text-gray-400">{meta.desc}</div>
@@ -351,7 +365,7 @@ function StageRows({ stage, shipFrom, shipTo, onClose }: {
           <Table head={<>
             <Th>발주번호</Th><Th>발주일</Th><Th>상태</Th>
             <Th right>확정액</Th><Th right>발송액</Th><Th right>입고액</Th>
-            <Th right>이 칸 금액</Th><Th>계산서</Th><Th>마지막 확인</Th>
+            <Th right>이 칸 금액</Th><Th>계산서</Th><Th>마지막으로 본 날</Th>
           </>}>
             {data.rows.map((r) => <StageRow key={r.purchase_order_seq} r={r} />)}
           </Table>
@@ -458,13 +472,13 @@ export function RiQueueTab() {
       <Card title={`지금 확인이 필요한 건 — ${cnt(data.live_count)}건 · ${won(data.live_amount)}`}>
         {live.length === 0 ? (
           <EmptyState
-            reason="마지막 수집분에서 확인 대기 중인 발주가 없습니다."
+            reason="오늘 수집분에 아직 처리할 건이 없습니다."
             hint="0건은 문제가 아니라 지금 누를 것이 없다는 뜻입니다."
           />
         ) : (
           <Table head={<>
             <Th>발주번호</Th><Th>발주일</Th><Th>입고완료</Th>
-            <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막 확인</Th><Th>확인</Th>
+            <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막으로 본 날</Th><Th>확인</Th>
           </>}>
             {live.map((r) => (
               <RiRow key={r.purchase_order_seq} r={r} onConfirm={() => setModal(r)} />
@@ -473,24 +487,28 @@ export function RiQueueTab() {
         )}
       </Card>
 
-      {/* ★굳은 것은 섹션 자체를 나눈다 — 같은 표에 두면 색만으로는 안 갈린다.
+      {/* ★신선도가 떨어진 것은 섹션 자체를 나눈다 — 같은 표에 두면 색만으로는 안 갈린다.
           실측(2026-08-27): 이 섹션의 8건은 전부 계산서 확정·전송에 지급일까지 지난 건이었다. */}
       <Card
-        title={`⚠️ 상태가 굳은 건 — ${cnt(data.stale_count)}건 · ${won(data.stale_amount)}`}
-        right={<Badge tone="alert">지금 참인 상태가 아닐 수 있음</Badge>}
+        title={`⚠️ 지금 상태를 모르는 건 — ${cnt(data.stale_count)}건 · ${won(data.stale_amount)}`}
+        right={<Badge tone="alert">오래 안 봐서 지금도 그런지 모름</Badge>}
       >
         {stale.length === 0 ? (
-          <EmptyState reason="굳은 건이 없습니다 — 전건이 마지막 수집분입니다." />
+          <EmptyState reason="모르는 건이 없습니다 — 전건을 오늘 다시 봤습니다." />
         ) : (
           <>
             <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-snug text-amber-800">
-              아래는 수집 창(발주일 기준) 밖이라 <b>마지막으로 본 상태</b>가 그대로 남아 있는 건입니다.
-              이미 처리돼 닫혔을 수 있으니 <b>누르기 전에 「미종결 발주 재수집」을 한 번 돌리세요.</b>
-              연결 계산서의 <b>지급일이 이미 지났다면</b> 그 건은 사실상 끝난 건입니다.
+              아래는 <b>최근 수집에서 다시 보지 못한 건</b>입니다. 화면에 뜨는 상태는
+              «지금»이 아니라 <b>마지막으로 봤을 때</b>의 상태라, 그 사이 이미 처리됐을 수 있습니다.
+              <b>「미종결 발주 재수집」을 한 번 돌리면</b> 지금 상태로 갱신됩니다.
+              <div className="mt-1">
+                ※ 오래된 발주만 여기 걸립니다 — 수집이 <b>최근 발주일 기준</b>으로 돌기 때문입니다.
+                「남은 금액」이 아니라 <b>「모르는 금액」</b>입니다.
+              </div>
             </div>
             <Table head={<>
               <Th>발주번호</Th><Th>발주일</Th><Th>입고완료</Th>
-              <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막 확인</Th><Th>확인</Th>
+              <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막으로 본 날</Th><Th>확인</Th>
             </>}>
               {stale.map((r) => <RiRow key={r.purchase_order_seq} r={r} stale />)}
             </Table>
