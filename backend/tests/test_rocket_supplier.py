@@ -306,14 +306,19 @@ def db():
 
 def test_ingest_po_and_idempotent(db):
     r1 = sync.ingest_purchase_orders(db, [_PO_PAGE])
-    assert r1 == {"ingested": 2, "pages": 1}
+    # ★2026-08-28 관측 원장(CONTRACT_1p_po_status_history)이 키 2개를 더한다.
+    #   처음 보는 PO 2건이므로 first_seen 2건, 버린 것 0건.
+    assert r1 == {"ingested": 2, "pages": 1, "changes": 2, "changes_dropped": 0}
     assert db.query(CoupangRocketPurchaseOrder).count() == 2
     po = db.query(CoupangRocketPurchaseOrder).filter_by(purchase_order_seq=134433322).one()
     assert po.sum_of_order_amount == 21480
     assert po.vendor_payment_seqs == []
     # 재수신 멱등: count 불변
-    sync.ingest_purchase_orders(db, [_PO_PAGE])
+    r2 = sync.ingest_purchase_orders(db, [_PO_PAGE])
     assert db.query(CoupangRocketPurchaseOrder).count() == 2
+    # ★관측 이벤트도 안 는다 — diff가 0이라 행이 안 생긴다(계약 §2. 멱등의 대가가 이력
+    #   소실이던 것을 뒤집되, 재수신이 이력을 부풀리지도 않아야 한다).
+    assert r2["changes"] == 0 and r2["changes_dropped"] == 0
 
 def test_ingest_po_updates_on_resync(db):
     sync.ingest_purchase_orders(db, [_PO_PAGE])

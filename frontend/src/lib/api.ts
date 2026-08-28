@@ -1851,6 +1851,79 @@ export function fetchRocketRiQueue(): Promise<RocketRiQueue> {
   return fetchApi<RocketRiQueue>("/api/overview/rocket-ri-queue");
 }
 
+// ── 발주 «관측된 변화» (계약 CONTRACT_1p_po_status_history, Jino 승인 2026-08-28 13:33) ──
+// ★이 응답은 «우리가 본 것»만 말한다. 변화는 observed_from ~ observed_to **구간**에 귀속되고,
+//   first_seen은 전이가 아니라 **출현**이다 — 「PA로 처음 관측됨」 ≠ 「RP에서 PA로 바뀜을 봄」.
+//   화면 문구도 「X로 들어옴」·「신규 발주 발생」·「~에 확정됨」을 쓰지 않는다(계약 §3 금지선).
+
+export interface RocketPoChangeField {
+  field: string;
+  label: string;
+  before: string | null;
+  after: string | null;
+  is_amount: boolean;
+  /** 숫자 필드면 증감. 숫자가 아니면 null — 0으로 접지 않는다. */
+  delta: number | null;
+}
+
+export interface RocketPoFirstSeenRow {
+  purchase_order_seq: number;
+  /** 처음 봤을 때의 상태. 「그 상태로 들어왔다」는 뜻이 아니다. */
+  status_when_first_seen: string | null;
+  order_amount: number;
+  label: string;
+}
+
+export interface RocketPoChangedRow {
+  purchase_order_seq: number;
+  order_amount: number;
+  /** 상태는 그대로고 수량·금액만 변했으면 둘 다 null. */
+  status_from: string | null;
+  status_to: string | null;
+  /** ★시점이 아니라 구간이다. */
+  observed_from: string | null;
+  observed_to: string | null;
+  fields: RocketPoChangeField[];
+}
+
+export interface RocketPoChanges {
+  /** 마지막 «수집» 시각. 그 회차에 변화가 0건이면 0건이라 말한다(지난 회차를 안 보여준다). */
+  round_at: string | null;
+  /** 이력이 시작된 시각 — 소급이 불가하므로 화면이 이걸 자백한다. */
+  history_start: string | null;
+  first_seen: { count: number; amount: number; rows: RocketPoFirstSeenRow[] };
+  changed: { count: number; amount: number; rows: RocketPoChangedRow[] };
+  note: string;
+}
+
+export interface RocketPoHistoryRow {
+  event: string;
+  field: string | null;
+  label: string | null;
+  before: string | null;
+  after: string | null;
+  observed_from: string | null;
+  observed_to: string | null;
+  is_amount: boolean;
+  delta: number | null;
+}
+
+export interface RocketPoHistory {
+  purchase_order_seq: number;
+  rows: RocketPoHistoryRow[];
+  history_start: string | null;
+  /** 이력 0건일 때 «왜 비었는지». null이 아니면 화면이 반드시 띄운다. */
+  empty_reason: string | null;
+}
+
+export function fetchRocketPoChanges(): Promise<RocketPoChanges> {
+  return fetchApi<RocketPoChanges>("/api/overview/rocket-po-changes");
+}
+
+export function fetchRocketPoHistory(seq: number): Promise<RocketPoHistory> {
+  return fetchApi<RocketPoHistory>(`/api/overview/rocket-po-changes/${seq}`);
+}
+
 // ── 「거래명세서확인」(RI→CI) 실행 (계약 CONTRACT_1p_invoice_confirm_write, Jino 승인 2026-08-28) ──
 // ★되돌릴 수 없는 회계 확정이다. 미리보기(preview)와 실행(request)이 **다른 호출**인 것이
 //   설계의 전부다 — 미리보기는 명령을 만들지 않고, 실행은 토큰을 실어야만 통과한다.

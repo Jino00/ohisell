@@ -26,6 +26,7 @@ import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchRocketPipeline, fetchRocketPipelineStage, fetchRocketRiQueue, isPoStage,
   previewRocketInvoiceConfirm, requestRocketInvoiceConfirm, fetchRocketConfirmHistory,
+  fetchRocketPoChanges,
   type RocketPipeline, type RocketPipelineRow, type RocketRiRow,
   type RocketConfirmPreview,
 } from "../lib/api";
@@ -52,6 +53,123 @@ const STAGE_META: Record<string, { no: string; label: string; desc: string }> = 
   await_receive: { no: "③", label: "입고 대기", desc: "보냈는데 쿠팡이 아직 안 잡았다 = 계산서 미발행" },
   await_payment: { no: "④", label: "지급 대기", desc: "계산서가 나갔고 지급일이 아직 오지 않았다" },
 };
+
+// ══════════════════════════════════════════════════════════════
+// 「이번 수집에서 달라진 것」 — 계약 CONTRACT_1p_po_status_history (Jino 승인 2026-08-28 13:33)
+//
+// ★왜 있나: 원장이 snapshot upsert라 «현재 단면»만 갖는 탓에 「①이 왜 줄고 ②가 왜 늘었나」에
+//   아무도 답하지 못했고, 그 자리에서 **「Jino가 확정했기 때문」이라는 근거 없는 인과 주장**이
+//   나왔다(2026-08-28). 실측이 반증했다 — 그날 발주 9건 중 8건이 12:34 수집에서 **처음 관측**됐다.
+// ★★이 카드의 규율: **«처음 본 것»과 «바뀐 것»을 다른 줄로 가른다.** 그 둘의 혼동이 발단이다.
+//   그리고 시점을 단정하지 않는다 — 「~에 확정됨」이 아니라 「~ 사이에 바뀜」이다.
+// ══════════════════════════════════════════════════════════════
+export function PoChangesCard() {
+  const { data, error } = useAsyncData(() => fetchRocketPoChanges(), []);
+
+  if (error) {
+    return (
+      <Card title="이번 수집에서 달라진 것">
+        <EmptyState
+          reason={`변화 목록을 불러오지 못했습니다: ${error}`}
+          hint="조회 실패는 '달라진 게 없다'와 다릅니다."
+        />
+      </Card>
+    );
+  }
+  if (data === null) return <Card title="이번 수집에서 달라진 것"><Loading rows={2} /></Card>;
+
+  const none = data.first_seen.count === 0 && data.changed.count === 0;
+
+  return (
+    <Card
+      title={`이번 수집에서 달라진 것${data.round_at ? ` — ${data.round_at}` : ""}`}
+      right={
+        data.history_start
+          ? <span className="text-xs text-gray-400">이력 시작 {data.history_start.slice(0, 10)}</span>
+          : undefined
+      }
+    >
+      <div className="border-b border-gray-100 bg-gray-50 px-4 py-2 text-xs leading-snug text-gray-600">
+        {data.note}
+        {/* ★소급 불가 자백 — 이게 없으면 「이력에 없음」이 「변화 없음」으로 읽힌다. */}
+        {data.history_start && (
+          <div className="mt-1">
+            기록은 <b>{data.history_start.slice(0, 10)}</b>부터입니다 — 그 전 변화는 기록이 없습니다.
+          </div>
+        )}
+      </div>
+
+      {none ? (
+        <EmptyState reason="이번 수집에서는 달라진 발주가 없습니다." />
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {/* ① 처음 본 것 — «신규 발주 발생»이 아니다 */}
+          <div className="px-4 py-3">
+            <div className="text-sm font-medium text-gray-800">
+              처음 본 발주 — {cnt(data.first_seen.count)}건 · {won(data.first_seen.amount)}
+            </div>
+            <div className="mt-0.5 text-xs text-gray-500">
+              이번 수집에서 우리 눈에 <b>처음 들어온</b> 발주입니다 — 그때 발주가 생겼다는 뜻이 아닙니다.
+            </div>
+            {data.first_seen.rows.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {data.first_seen.rows.map((r) => (
+                  <div key={r.purchase_order_seq} className="text-xs text-gray-600">
+                    <span className="tabular-nums font-medium">{r.purchase_order_seq}</span>
+                    <span className="text-gray-400">
+                      {" "}· {r.label}(상태 {r.status_when_first_seen ?? NO_DATA}) · {won(r.order_amount)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ② 바뀐 것 — 구간으로 말한다 */}
+          <div className="px-4 py-3">
+            <div className="text-sm font-medium text-gray-800">
+              상태·수량이 바뀐 발주 — {cnt(data.changed.count)}건 · {won(data.changed.amount)}
+            </div>
+            <div className="mt-0.5 text-xs text-gray-500">
+              <b>두 수집 사이에</b> 달라진 것만 압니다 — 언제 바뀌었는지는 모릅니다.
+            </div>
+            {data.changed.rows.length > 0 && (
+              <div className="mt-2 space-y-1.5">
+                {data.changed.rows.map((r) => (
+                  <div key={r.purchase_order_seq} className="text-xs">
+                    <span className="tabular-nums font-medium text-gray-700">
+                      {r.purchase_order_seq}
+                    </span>
+                    {r.status_from && (
+                      <span className="ml-1 text-gray-800">
+                        {r.status_from} → <b>{r.status_to}</b>
+                      </span>
+                    )}
+                    <span className="text-gray-400">
+                      {" "}· {r.observed_from ?? NO_DATA} ~ {r.observed_to ?? NO_DATA} 사이에 바뀜
+                    </span>
+                    <div className="ml-3 text-gray-500">
+                      {r.fields.map((f) => (
+                        <span key={f.field} className="mr-2">
+                          {f.label} {f.before ?? NO_DATA}→{f.after ?? NO_DATA}
+                          {f.delta != null && (
+                            <b className={f.delta < 0 ? " text-amber-700" : " text-gray-700"}>
+                              {" "}({f.delta > 0 ? "+" : ""}{f.delta.toLocaleString("ko-KR")})
+                            </b>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 /** 「YYYY-MM-DD 이후 다시 안 봄」 배지. 신선도가 떨어진 행에만 붙는다.
  *
@@ -192,6 +310,10 @@ export function PipelineTab() {
           </div>
         </div>
       </Card>
+
+      {/* ★칸이 왜 움직였나 — 「처음 본 것」과 「바뀐 것」을 가르는 카드. 칸 바로 아래 둔다:
+          발단 질문("②가 왜 늘었나")이 위 칸에서 나왔으므로 답도 그 옆에 있어야 한다. */}
+      <PoChangesCard />
 
       {/* ★소계 밖 두 덩어리 — 색과 자리를 달리해 「합계에 넣으면 안 되는 것」임을 화면이 말한다 */}
       <Card title="소계에 넣지 않는 것">
