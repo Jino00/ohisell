@@ -27,7 +27,11 @@ import type {
   CostSetting,
   CostTableCensus,
 } from "../lib/api";
-import { EMPTY_IS_NOT_ZERO } from "../lib/costHome";
+import {
+  EMPTY_IS_NOT_ZERO,
+  ROUND_TRIP_COLUMNS,
+  ROUND_TRIP_NUMERIC,
+} from "../lib/costHome";
 
 // ══════════════════════════════════════════════════════════════════
 // 픽스처
@@ -82,9 +86,14 @@ const M1 = baseMaterial({
 });
 
 // M2 — 단가 없음, 엑셀 참고값은 있다 → 인박스 note가 그 값을 말한다.
+//   ★`note`는 **prod 모양**으로 채운다: prod 139종 중 **138종**이 이 정형문을 달고 있는데
+//   픽스처는 전건 `note: null`이었다 — 그래서 「비고가 폭을 먹는다」는 실제 문제를 테스트가
+//   원리적으로 못 봤다(n=14 MF3과 같은 자리: 픽스처가 prod와 다르면 테스트는 지키는 «척»만
+//   한다). 문구는 `recipes.py:786`이 실제로 박는 원문 그대로다.
 const M2 = baseMaterial({
   id: 2,
   name: "비닐(16*23+4)",
+  note: "원가 정본 엑셀에서 구성 파싱으로 생성 — 단가는 아직 없다",
   form_factor: "flip",
   part: "필름",
   excel_ref_price: "168",
@@ -466,6 +475,49 @@ describe("H5: 왕복 표 — 빈 칸은 0원이 아니고, [다운로드]는 S3�
     const row1 = screen.getByTestId(`roundtrip-row-${M1.id}`);
     const cells1 = within(row1).getAllByRole("cell");
     expect(cells1[9].className).toContain("whitespace-nowrap");
+  });
+
+  // ★Jino 2026-08-28 11:19 «이 화면과 같이 공간 활용을 잘 해봐»(참조 `Rocket1PFunnel.tsx`).
+  //   아래 3건은 **그 전까지 아무 테스트도 안 잡던 자리**다 — 열 머리의 「수정 가능/읽기전용」
+  //   자백을 ✎·🔒로 접었는데 기존 59건이 전부 초록이었다(표식을 통째로 지워도 안 죽었다).
+  it("열 머리 표식이 수정 가능(✎)과 읽기전용(🔒)을 가른다 — 12열 전건", async () => {
+    await renderApp();
+    for (const c of ROUND_TRIP_COLUMNS) {
+      const mark = screen.getByTestId(`roundtrip-col-${c.key}-editable`);
+      expect(mark.textContent).toBe(c.editable ? "✎" : "🔒");
+      // 낱말은 툴팁에도 살아 있어야 한다(계약 §3 — 삭제가 아니라 배지화).
+      expect(mark.getAttribute("title")).toBe(c.editable ? "수정 가능" : "읽기전용");
+    }
+  });
+
+  it("접은 표식의 낱말이 화면 범례에 남는다 — 툴팁에만 두면 숨김이지 이동이 아니다", async () => {
+    await renderApp();
+    const legend = screen.getByTestId("roundtrip-editable-legend");
+    expect(legend.textContent).toContain("수정 가능");
+    expect(legend.textContent).toContain("읽기전용");
+  });
+
+  it("숫자 열은 우측 정렬 + tabular-nums다 — 자릿수가 세로로 맞아야 크기가 비교된다", async () => {
+    await renderApp();
+    const row1 = screen.getByTestId(`roundtrip-row-${M1.id}`);
+    const cells1 = within(row1).getAllByRole("cell");
+    ROUND_TRIP_COLUMNS.forEach((c, i) => {
+      if (!ROUND_TRIP_NUMERIC.has(c.key)) return;
+      expect(cells1[i].className).toContain("text-right");
+      expect(cells1[i].className).toContain("tabular-nums");
+    });
+    // 숫자가 아닌 열까지 우측 정렬로 바꾸는 변이를 죽인다.
+    expect(cells1[1].className).not.toContain("text-right");
+  });
+
+  it("폭이 모자라면 줄어드는 쪽은 비고이고 배지는 살아남는다", async () => {
+    await renderApp();
+    const row = screen.getByTestId(`roundtrip-row-${M2.id}`);
+    const noteEl = within(row).getByTestId(`roundtrip-note-${M2.id}`);
+    expect(noteEl.className).toContain("truncate");
+    // M2는 단가가 없어 `단가없음` 배지가 선다 — 그 배지는 줄어들지 않는다.
+    const badge = within(row).getByTestId(`roundtrip-badge-${M2.id}-no-price`);
+    expect(badge.className).toContain("shrink-0");
   });
 });
 

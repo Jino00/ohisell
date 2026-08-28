@@ -217,6 +217,18 @@ export const ROUND_TRIP_COLUMNS: RoundTripColumn[] = [
   { key: "status_note", label: "상태 / 비고", editable: true, note: "상태는 못 고친다(승인은 사람이 화면에서 누른다). 비고만 고칠 수 있다." },
 ];
 
+/** 오른쪽 정렬(`tabular-nums`)로 세우는 열 — **숫자 열만**이다.
+ *
+ * ★왜 목록으로 두나: 정렬은 «보기 좋으라고»가 아니라 **자릿수를 세로로 맞춰 눈이 크기를
+ * 비교하게** 하는 장치다. 왼쪽 정렬된 숫자 기둥은 `1,600`과 `180`의 크기 차이를 안 보여 준다.
+ * 참조 화면(`Rocket1PFunnel.tsx`)이 쓰는 규격과 같다 — 두 화면이 숫자를 다르게 세우면
+ * 같은 저장소의 표가 서로 다른 관례를 말하게 된다. */
+export const ROUND_TRIP_NUMERIC: ReadonlySet<string> = new Set([
+  "price_ex",
+  "price_inc",
+  "excel_ref",
+]);
+
 /** `CostPage.tsx`의 `PickerItem`과 같은 모양(구조적으로 호환). 순환을 피하려고 여기 둔다. */
 export interface CostPickerItem {
   value: string;

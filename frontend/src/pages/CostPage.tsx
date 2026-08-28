@@ -2964,7 +2964,13 @@ export default function CostPage() {
   }
 
   return (
-    <div className="p-6 max-w-[96rem]">
+    /* ★홈 탭만 폭 상한을 푼다 (Jino 2026-08-28 11:17 «화면의 사용이 너무 비효율적인거 아니야?»
+       + 11:19 «이 화면과 같이 공간 활용을 잘 해봐» — 참조 화면 `Rocket1PFunnel.tsx:105`는
+       상한이 아예 없다). `max-w-[96rem]`=1536px인데 실제 창은 사이드바를 빼도 그보다 넓어
+       오른쪽이 통째로 비는 반면, 홈의 왕복 표는 **12열 × 139행**이라 그 폭이 다 필요하다.
+       나머지 3탭은 폼·목록 위주라 상한이 가독성을 돕는다 — 그래서 **탭별로 가른다**.
+       한 값을 전역으로 바꾸면 안 보이는 세 화면의 줄바꿈이 같이 흔들린다. */
+    <div className={tab === "home" ? "p-6" : "p-6 max-w-[96rem]"}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-semibold">💰 원가</h1>
         <div className="flex items-center gap-2 flex-wrap">
