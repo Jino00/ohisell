@@ -110,8 +110,18 @@ export function sweepSummaryText(runs: CostAutoRefreshRun[]): string {
 
 /**
  * 페이지 폭 상한 — 가르는 축은 「홈이냐」가 아니라 **「넓은 표냐 폼·목록이냐」**다.
- * `home`(왕복 표 12열 × 139행)·`board`(9열 × 924 SKU)는 폭이 다 필요하고,
- * `materials`·`recipes`는 폼·목록이라 `max-w-[96rem]`(1536px) 상한이 가독성을 돕는다.
+ * `home`(왕복 표 12열 × 139행)·`board`(9열 × 924 SKU)·`materials`(8열 표가 **최대 3벌**)는
+ * 폭이 다 필요하고, `recipes`만 `max-w-[96rem]`(1536px) 상한을 유지한다.
+ *
+ * ★2026-08-28 정정 — 이 주석은 원래 «`materials`·`recipes`는 폼·목록 위주»라고 적혀 있었고
+ *   그게 **사실이 아니었다**: 부자재 탭 오른쪽 `1fr` 칼럼에 8열 표(단가 이력·원장 라인)가
+ *   최대 3벌 동시에 뜨고, 96rem에서 왼쪽 22~28rem을 빼면 오른쪽은 ≈1,000px뿐이라 품목명이
+ *   짜부라지고 날짜가 두 줄이 됐다. ⇒ `materials`도 상한을 푼다.
+ *
+ * ★반대로 `recipes`는 **상한을 풀어도 안 낫는다** — 거기서 잘리는 것은 왼쪽 레시피 목록의
+ *   상품명인데 그 칼럼이 `320px` **고정**이었기 때문이다(페이지가 넓어져도 1px도 안 넓어진다).
+ *   그 자리는 `minmax(320px,28rem)`으로 따로 고쳤다(`CostPage.tsx`의 recipes 그리드).
+ *   **「넓히면 낫는다」가 아니라 「무엇이 폭을 안 받고 있나」를 봐야 하는 자리였다.**
  *
  * ★함수로 뽑은 이유는 순전히 **테스트가 잡을 수 있게** 하려는 것이다(2026-08-28 적대 리뷰 P2-2).
  *   인라인 삼항으로 두었을 때 「보드 탭 상한 해제」를 되돌리는 변이가 프론트 1,173건 전건 초록
@@ -128,5 +138,5 @@ export function sweepSummaryText(runs: CostAutoRefreshRun[]): string {
  * 유니온을 그대로 적는다 — 값이 갈라지면 `costPageWidthClass`를 부르는 쪽에서 타입이 걸린다.
  */
 export function costPageWidthClass(tab: "home" | "materials" | "recipes" | "board"): string {
-  return tab === "home" || tab === "board" ? "p-6" : "p-6 max-w-[96rem]";
+  return tab === "recipes" ? "p-6 max-w-[96rem]" : "p-6";
 }
