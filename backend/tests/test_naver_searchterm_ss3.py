@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
+    NaverAccountSettings,
     NaverAdgroupProduct,
     NaverCampaignSettings,
     NaverChangeLog,
@@ -25,7 +26,7 @@ from app.models import (
     NaverSearchTermDaily,
     OpsDiaryEntry,
 )
-from app.services.naver_ad import auto_operator, delegation_gate
+from app.services.naver_ad import auto_operator, delegation_gate, guardrail_params
 from app.services.naver_ad import naver_execution_harness as harness
 from app.services.naver_ad import naver_sa_writer
 from app.services.naver_ad import search_term_judge as judge
@@ -353,6 +354,60 @@ def test_stale_conversion_reverify_rejects_before_writer(db):
     row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
     assert "실행 시점 전환 발생" in row.rationale
     assert row.after_value is None
+
+
+def test_거부_사유가_DB창을_말한다_옛_상수가_아니라(db):
+    """★적대 리뷰 1R P1(D-NAO-265) — «값을 잰 층»과 «사람이 읽는 층» 사이가 비어 있었다.
+
+    D-NAO-265가 `_search_term_conversions_in_window`의 반환을 `(전환수, 창일수)` 튜플로 바꾼
+    **유일한 이유**가 「거부 사유 문장이 방금 잰 창을 말하게 하려고」였는데, 정작 그 문장을 재는
+    테스트가 없었다. 리뷰어가 사유의 `{ss_window_days}`를 하드코딩 `14`로 바꾸는 변이를 넣자
+    **174개 테스트가 전부 초록**이었다 — 반환값만 보는 테스트(`test_실행_재검증_창도_같은_DB값을_읽는다`)와
+    문자열 존재만 보는 테스트(`test_stale_conversion_reverify_rejects_before_writer`)가 있었지
+    **둘을 잇는 테스트**가 없었다.
+
+    이 로그(`NaverChangeLog.rationale`)는 사람이 「왜 안 잘렸나」를 읽는 자리다. 게이트는 DB값
+    7일로 도는데 사유가 14일이라 말하면, 읽는 사람은 실제와 다른 게이트를 머릿속에 그린다.
+    """
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    # 봉투 [7,16] 안의 값으로 창을 좁힌다 — 승인 카드가 저장하는 것과 같은 자리.
+    db.add(NaverAccountSettings(
+        key=guardrail_params.SETTINGS_KEY, value_json=json.dumps({"ss_window_days": 7}),
+    ))
+    # 좁힌 창(from=2026-07-16) «안»의 전환 — 거부는 그대로 나야 사유 문장을 볼 수 있다.
+    db.add(NaverSearchTermDaily(
+        ad_date=date(2026, 7, 22), campaign_id="cmp1", adgroup_id="grp-web",
+        search_term="전환붙은검색어", source="shopping", imp=100, clk=20, cost=6000, rank_sum=0,
+        conv_purchase_cnt=1, conv_direct_cnt=1, conv_purchase_amt=15900, cart_cnt=0, cart_amt=0,
+    ))
+    db.commit()
+    p = _proposal(db, adgroup_id="grp-web", term="전환붙은검색어")
+    with patch.object(harness.naver_sa_writer, "add_exclusions") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False, now=_NOW)
+    mock_write.assert_not_called()
+    row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert "rolling 7일" in row.rationale, f"거부 사유가 DB 창을 안 말한다: {row.rationale}"
+    assert "14일" not in row.rationale, f"거부 사유가 옛 코드 상수를 말한다: {row.rationale}"
+
+
+def test_대조군_DB창이_없으면_거부_사유가_코드_기본값_14일을_말한다(db):
+    """위 테스트가 «7이라는 숫자가 어디선가 나와서»가 아니라 «DB가 이겨서» 7인 것임을 가른다."""
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    db.add(NaverSearchTermDaily(
+        ad_date=date(2026, 7, 22), campaign_id="cmp1", adgroup_id="grp-web",
+        search_term="전환붙은검색어", source="shopping", imp=100, clk=20, cost=6000, rank_sum=0,
+        conv_purchase_cnt=1, conv_direct_cnt=1, conv_purchase_amt=15900, cart_cnt=0, cart_amt=0,
+    ))
+    db.commit()
+    p = _proposal(db, adgroup_id="grp-web", term="전환붙은검색어")
+    with patch.object(harness.naver_sa_writer, "add_exclusions"):
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False, now=_NOW)
+    row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert "rolling 14일" in row.rationale, f"{row.rationale}"
 
 
 def test_stale_conversion_reverify_allows_when_no_conversion(db):

@@ -299,16 +299,24 @@ def test_every_param_actually_wins_over_code_constant(db):
     ★2026-08-27(D-NAO-262·S4): SPECS가 3 → 5로 늘며 이 테스트가 **먼저 빨개졌다.** 그게 이
     인구조사의 값어치다 — 새 키를 등재만 하고 「DB가 이긴다」를 증명 안 하면 통과할 수 없다.
     시드 리터럴은 SPECS와 함께 자라야 하는 목록이라 키가 늘 때마다 여기도 는다.
-    새 값은 각자 봉투 안이어야 한다(pl_min_click [5,10] · pl_window_days [14,90]).
+    새 값은 각자 봉투 안이어야 한다(pl_min_click [5,10] · pl_window_days [14,90] ·
+    ss_min_click [5,21] · ss_window_days [7,16]).
+
+    ★2026-08-28(D-NAO-265·S4-a 잔여): SPECS가 5 → 7로 늘며 이 테스트가 **또 먼저 빨개졌다.**
+    두 번 연속으로 새 키를 잡았다 — 인구조사 가드가 「등재만 하고 배선은 안 한」 상태를 통과시키지
+    않는다는 뜻이고, 이 파일이 지키려던 claimed↔wired 간극이 실제로 닫혀 있다는 실증이다.
     """
     _kv(db, '{"cooldown_hours": 5, "max_daily_auto_bid_downs": 6, "max_auto_up_multiple": "2.5",'
-            ' "pl_min_click": 7, "pl_window_days": 21}')
+            ' "pl_min_click": 7, "pl_window_days": 21,'
+            ' "ss_min_click": 15, "ss_window_days": 9}')
     p = guardrail_params.get_params(db)
     assert p["cooldown_hours"] == 5
     assert p["max_daily_auto_bid_downs"] == 6
     assert p["max_auto_up_multiple"] == Decimal("2.5")
     assert p["pl_min_click"] == 7
     assert p["pl_window_days"] == 21
+    assert p["ss_min_click"] == 15
+    assert p["ss_window_days"] == 9
     assert {r["key"]: r["source"] for r in guardrail_params.describe(db)} == {
         k: "db" for k in guardrail_params.SPECS
     }

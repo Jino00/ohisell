@@ -44,9 +44,30 @@ WINDOW_DAYS = 30
 MATURITY_LAG_DAYS = 3
 
 # ── 표본 게이트 ───────────────────────────────────────────────────────
-# 클릭 하한 — SS 게이트(_SS_MIN_CLICK)와 같은 값. 근거가 같다: 클릭이 이보다 적으면 «전환이 안
-# 났다»가 그 검색어의 성질인지 표본 부족인지 못 가른다.
-MIN_CLICK = 10
+# 클릭 하한 — SS 게이트와 «같은 값»이 아니라 **같은 출처**다(D-NAO-265).
+# 근거는 그대로다: 클릭이 이보다 적으면 «전환이 안 났다»가 그 검색어의 성질인지 표본 부족인지
+# 못 가른다. 바뀐 것은 그 값을 어디서 얻느냐다.
+#
+# ★여기 `MIN_CLICK = 10`이라는 **복제 리터럴**이 있었다. 주석이 «SS 게이트와 같은 값»이라고
+#   단언했지만 그건 사람의 약속이었을 뿐이라, `ss_min_click`이 SPECS로 승격되면 승인 카드에서
+#   값을 내려도 이 하류 게이트는 안 따라온다 — **승인 카드가 거짓말을 한다.** 그래서
+#   D-NAO-262가 그 분산을 이유로 승격 자체를 보류했다. 이제 판정기와 같은 `_ss_params(db)`를
+#   읽는다.
+# ★상수는 **코드 기본값으로만** 남긴다(DB 미설정 시의 폴백이자 라우터 Query 문서값). 지금 도는
+#   값이 아니라는 뜻에서 이름에 `_DEFAULT`를 붙였다 — 옛 이름을 그대로 두면 다음 사람이 이걸
+#   «지금 값»으로 읽는다.
+MIN_CLICK_DEFAULT = 10
+
+
+def resolve_min_click(db) -> int:
+    """이 모듈이 쓰는 **유효** 클릭 하한 — SPECS 승격분이라 DB가 코드 상수를 이긴다.
+
+    지연 import: `search_term_judge`는 무겁고, 이 모듈은 라우터가 얇게 부르는 경로에도 쓰인다.
+    """
+    from app.services.naver_ad import search_term_judge
+
+    min_click, _window = search_term_judge._ss_params(db)
+    return min_click
 # 라운드 상한 — 한 번에 자를 수 있는 최대 건수(PLAN §2 4·§3). 넘친 것은 버려지지 않고
 # `capped_out`으로 세어 내보낸다(조용한 절단 금지).
 DEFAULT_ROUND_CAP = 50
@@ -123,7 +144,7 @@ def build_exclusion_list(
     window_days: int = WINDOW_DAYS,
     campaign_id: str | None = None,
     round_cap: int = DEFAULT_ROUND_CAP,
-    min_click: int = MIN_CLICK,
+    min_click: int | None = None,
 ) -> dict:
     """제외 후보 리스트 1장을 만든다(순수·read-only).
 
@@ -143,6 +164,10 @@ def build_exclusion_list(
       maturity_excluded       — 최근 MATURITY_LAG_DAYS일(전환이 아직 덜 잡힘)
     """
     now = now or kst_now()
+    # ★min_click 기본값이 상수가 아니라 None인 이유(D-NAO-265): 기본 인자는 import 시점에 한 번
+    #   평가되므로 상수를 기본값으로 두면 DB가 영원히 못 이긴다. 명시 인자는 그대로 존중한다
+    #   (라우터의 what-if 조회·테스트 경로). 유효값은 아래 `gates.min_click`으로 표면에 나간다.
+    min_click = resolve_min_click(db) if min_click is None else min_click
     as_of: date = now.date()
     window_to = as_of - timedelta(days=MATURITY_LAG_DAYS)
     window_from = window_to - timedelta(days=window_days - 1)
