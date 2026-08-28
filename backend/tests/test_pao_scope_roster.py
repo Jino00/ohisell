@@ -636,3 +636,122 @@ def test_scope_only_group_is_bep_unknown_not_ramp_up(client_and_session):
         g = _group(_roster(client), "grp-never-run")
     assert g["profit_status"] == "bep_unknown"
     assert g["baseline_days"] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ★평시/주말/공휴일 «날짜 grain» 분리 (D-NAO-267 · 적대 리뷰 1R P1-1의 처방)
+#
+# retro 쪽 분리(day_class_rollup)는 asof_date로 가르는데 성과는 사후창에서 난다 —
+# d7은 어느 발신일이든 주말 2일을 포함해 분리가 원리적으로 0이다. ref 63의 축은
+# `ad_profit_{g,d}`(당일)이라, 그 질문에 답하는 자리는 날짜 grain이 실재하는 여기다.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _seed_across_day_classes(db) -> dict[str, int]:
+    """평시·주말 각각에 집행을 심는다 → 칸이 실제로 갈리는지 볼 수 있다."""
+    weekday, weekend = YESTERDAY, _recent_weekend()
+    for d, cost in ((weekday, 10_000), (weekend, 3_000)):
+        db.add(NaverAdDaily(
+            ad_date=d, campaign_id=CAMPAIGN, campaign_type="SHOPPING",
+            adgroup_id="grp-split", keyword_id="", imp=100, clk=10, cost=cost,
+            conv_direct_cnt=1, conv_indirect_cnt=0,
+            conv_direct_amt=cost * 2, conv_indirect_amt=0,
+        ))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-split",
+                       campaign_id=CAMPAIGN, parent_id=CAMPAIGN, name="분리 대상"))
+    db.commit()
+    return {"weekday_cost": 10_000, "weekend_cost": 3_000}
+
+
+def test_surface_day_class_split_reaches_the_api_response(client_and_session):
+    """★★표면 절단 변이 대상 — 분리 열이 HTTP 응답 본문까지 간다."""
+    client, db = client_and_session
+    _seed(db)
+    _seed_across_day_classes(db)
+
+    body = _roster(client)
+    assert "weekend_holiday" in body, "분리 열이 없다 — 화면은 여전히 섞인 값만 본다"
+    split = body["weekend_holiday"]
+    for bucket in ("weekday", "weekend", "holiday"):
+        assert bucket in split
+        for key in ("days", "cost", "imp", "clk", "conv_amt", "roas"):
+            assert key in split[bucket], f"{bucket}.{key}가 없다"
+
+
+def test_day_class_split_actually_separates(client_and_session):
+    """평시와 주말이 «다른 칸»에 들어간다 — 한 칸에 뭉치면 분리가 아니다."""
+    client, db = client_and_session
+    _seed(db)
+    seeded = _seed_across_day_classes(db)
+
+    split = _roster(client)["weekend_holiday"]
+    # _seed()가 심은 평시 2건(10,000+90,000) + 분리용 평시 1건(10,000)
+    assert split["weekday"]["cost"] == 100_000 + seeded["weekday_cost"]
+    assert split["weekend"]["cost"] == seeded["weekend_cost"]
+    assert split["weekday"]["days"] >= 1
+    assert split["weekend"]["days"] == 1
+
+
+def test_day_class_split_identity_holds_against_the_same_aggregator(client_and_session):
+    """★항등식 — 세 칸의 합이 «같은 집계기»의 totals와 일치한다.
+
+    이쪽 분리는 retro와 달리 grain이 ref 63과 같아서 이 항등식이 «의미»를 갖는다:
+    한 날짜는 정확히 한 칸이고, 그 날의 성과는 그 날의 환경에 귀속된다.
+    """
+    client, db = client_and_session
+    _seed(db)
+    _seed_across_day_classes(db)
+
+    body = _roster(client)
+    ident = body["weekend_holiday"]["identity"]
+    assert ident["ok"] is True
+    for key in ("cost", "imp", "clk", "conv_amt"):
+        assert ident["sum_of_parts"][key] == ident["total"][key], key
+        assert ident["total"][key] == body["totals"][key], f"{key}: 집계기 totals와 갈라졌다"
+
+
+def test_day_class_split_identity_is_computed_not_hardcoded(client_and_session):
+    """★M5형 결함 방어 — ok가 «계산된 값»이어야 한다.
+
+    같은 병(자기 검산이 상수로 굳음)을 retro 쪽에서 이미 한 번 밟았다. 여기선 집계기의
+    totals를 어긋나게 만들어 ok가 거짓이 되는지 본다.
+    """
+    _client, db = client_and_session
+    _seed(db)
+    fake = {"rows": [], "totals": {"cost": 999, "imp": 0, "clk": 0, "conv_amt": 0}}
+    out = pao_scope_roster.day_class_split(db, YESTERDAY, YESTERDAY, None, date_agg=fake)
+    assert out["identity"]["ok"] is False, "합이 어긋났는데 ok가 참이면 검산이 아니다"
+
+
+def test_day_class_split_does_not_report_profit(client_and_session):
+    """칸별 총이익은 «안» 낸다 — BEP가 그룹마다 다르고 날짜 grain엔 그 조인이 없다.
+
+    지어내면 그 숫자가 그대로 판정에 쓰인다(§2-3 「재사용 불가면 멈추고 기록」).
+    """
+    client, db = client_and_session
+    _seed(db)
+    _seed_across_day_classes(db)
+
+    split = _roster(client)["weekend_holiday"]
+    for bucket in ("weekday", "weekend", "holiday"):
+        assert "gross_profit" not in split[bucket]
+
+
+def test_day_class_split_ratio_is_not_in_the_identity(client_and_session):
+    """ROAS는 비율이라 칸끼리 더하지 않는다 — 항등식에 섞이면 그 자체가 오류다."""
+    client, db = client_and_session
+    _seed(db)
+    _seed_across_day_classes(db)
+
+    ident = _roster(client)["weekend_holiday"]["identity"]
+    assert "roas" not in ident["total"]
+    assert "roas" not in ident["sum_of_parts"]
+
+
+def test_day_class_split_states_its_basis(client_and_session):
+    """★기준(날짜 grain)을 응답이 «스스로» 밝힌다 — retro 쪽 분리와 혼동되면 안 된다."""
+    client, db = client_and_session
+    _seed(db)
+
+    split = _roster(client)["weekend_holiday"]
+    assert "ad_date" in split["basis"]
+    assert "ref 63" in split["reference"]

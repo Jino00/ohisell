@@ -19,6 +19,7 @@ import { num } from "../lib/format";
 import {
   fetchPaoScopeRoster, putPaoScopeAdgroup, deletePaoScopeAdgroup,
   type PaoScopeCampaign, type PaoScopeAdgroup, type PaoScopeRole,
+  type PaoScopeDayClassSplit,
 } from "../lib/api";
 
 const ROLE_LABEL: Record<PaoScopeRole, string> = {
@@ -143,6 +144,7 @@ export default function NaverAdScope() {
                 {" "}({data.correction_factor.source ?? "출처 미상"})
               </span>
             </div>
+            <DayClassStrip split={data.weekend_holiday} />
             <div className="divide-y divide-gray-100">
               {data.campaigns.map((c) => (
                 <CampaignBlock key={c.campaign_id} c={c} onChanged={() => setReloadKey((k) => k + 1)} />
@@ -151,6 +153,59 @@ export default function NaverAdScope() {
           </>
         )}
       </Card>
+    </div>
+  );
+}
+
+/** ★평시/주말/공휴일 분리 표기 (D-NAO-267 · ref 65 S2-ⓐ).
+ *
+ *  ref 63 §4-1이 확정한 것: 주말 −8,020,470원 · 공휴일 −915,912원(둘 다 홀드아웃 통과).
+ *  이 날들을 평시와 섞어서 재면 **평시 성과가 확정된 음의 효과에 눌려 과소평가된다.**
+ *
+ *  ★보정이 아니라 «분리»다 — 빼거나 곱하지 않는다. 세 칸을 나눠 놓기만 하고, 얼마나
+ *    다른지는 보는 사람이 읽는다. 계수를 곱하는 순간 그 숫자는 「모형이 만든 값」이 된다.
+ *  ★칸별 총이익은 안 낸다(BEP가 그룹마다 다르고 날짜 grain엔 그 조인이 없다) — 대신
+ *    ROAS를 낸다. 지어내느니 안 낸다.
+ */
+function DayClassStrip({ split }: { split: PaoScopeDayClassSplit }) {
+  const CELLS: { key: "weekday" | "weekend" | "holiday"; label: string }[] = [
+    { key: "weekday", label: "평시" },
+    { key: "weekend", label: "주말" },
+    { key: "holiday", label: "공휴일" },
+  ];
+  return (
+    <div className="px-4 pb-3">
+      <div className="flex items-center gap-2 text-[11px] text-gray-500 mb-1">
+        <span title={split.reference}>평시·주말·공휴일 분리</span>
+        <span className="text-gray-400" title={split.basis}>({split.basis})</span>
+        {/* ★검산이 깨지면 숨기지 않고 말한다 — 한 날짜가 두 칸에 들어갔다는 뜻이다 */}
+        {!split.identity.ok && (
+          <span className="text-red-600" title={split.identity.note}>
+            ⚠️ 항등식 불일치 — 세 칸의 합이 전체와 다릅니다
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {CELLS.map(({ key, label }) => {
+          const c = split[key];
+          return (
+            <div key={key} className="border border-gray-200 rounded px-2 py-1.5">
+              <div className="text-xs text-gray-600">
+                {label} <span className="text-gray-400">{c.days}일</span>
+              </div>
+              <div className="text-xs tabular-nums text-gray-900">{num(c.cost)}원</div>
+              <div className="text-[11px] tabular-nums text-gray-500">
+                ROAS{" "}
+                {c.roas === null ? (
+                  <span className="text-gray-400" title="이 칸에 집행이 없습니다 — 0이 아니라 «없음»입니다">—</span>
+                ) : (
+                  c.roas.toFixed(2)
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

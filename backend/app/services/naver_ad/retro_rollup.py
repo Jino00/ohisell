@@ -57,7 +57,37 @@ def board_rollup(rows: list[NaverRetroSignal], horizon: int) -> dict:
 
 
 def day_class_rollup(rows: list[NaverRetroSignal], horizon: int) -> dict:
-    """★평시/주말/공휴일 **분리** 집계 (D-NAO-267 · 계약 §4-A T1 = ref 65 S2-ⓐ).
+    """★**신호 발신일**의 평시/주말/공휴일 분리 (D-NAO-267 · 계약 §4-A T1 = ref 65 S2-ⓐ).
+
+    ## ★★먼저 읽을 것 — 이 함수가 «가르지 못하는» 것 (적대 리뷰 1R P1-1)
+
+    초판은 이 분리를 「ref 63의 확정 지식을 판정면에 그대로 옮긴 것」이라고 적었다.
+    **그 주장은 거짓이었다.** 이유는 grain이다:
+
+      · ref 63의 축은 `ad_profit_{g,d}` — 날짜 d **당일**에 난 이익이다(§1-2).
+      · 이 모듈의 축은 `verdict_d{h}`·`bleed_post{h}` — `asof_date` **이후 h일**에 걸쳐
+        측정된 값이다(`retro_scorer._score_window`: post = asof+1 … asof+h).
+
+    그래서 `asof_date`로 칸을 갈라도 **사후창은 안 갈린다.** 실측(달력 산술이라 예외 없음):
+
+      | asof 요일 | 이 함수의 칸 | 사후창 d3 비평시 | 사후창 d7 비평시 |
+      |---|---|---|---|
+      | 월·화 | weekday | 0/3 | **2/7** |
+      | 목·금 | weekday | **2/3** | **2/7** |
+      | 일    | weekend | **0/3** | **2/7** |
+
+    읽는 법 두 가지 — 둘 다 나쁘다:
+      ① **d7은 분리가 원리적으로 0이다.** 7일 연속 구간은 시작 요일과 무관하게 토·일을
+         정확히 2일 포함한다. 즉 `weekday` 칸의 `bleed_sum`도 주말 효과에 그대로 오염돼
+         있다 — 계약 §1이 걷어내려던 «평시 과소평가»가 이 칸에선 하나도 안 걷힌다.
+      ② **d3은 부분적으로 «뒤집혀» 있다.** 일요일 발신 신호(weekend 칸)의 사후창이
+         비평시 0/3인데, 목·금 발신(weekday 칸)은 2/3다. 약한 게 아니라 반대를 가리킨다.
+
+    ⇒ **이 함수가 답하는 질문은 「주말 성과가 어땠나」가 아니라 「주말에 «내린 판단»이
+       어땠나」다.** 그것도 볼 값어치가 있어서 남기되, 이름·응답 필드·문서 어디서도 전자를
+       주장하지 않는다. ref 63의 질문에 답하는 것은 날짜 grain이 실재하는 표면 —
+       `pao_scope_roster.day_class_split`(같은 슬라이스, 계약 §4-A T1의 「밴드 판정 표면」) —
+       이고, 항등식이 «진짜» 성립하는 곳도 거기다.
 
     ## 왜 «분리»이고 «보정»이 아닌가
 
@@ -95,8 +125,9 @@ def day_class_rollup(rows: list[NaverRetroSignal], horizon: int) -> dict:
     """
     buckets: dict[str, list[NaverRetroSignal]] = {dc: [] for dc in DAY_CLASSES}
     for row in rows:
-        # asof_date = 신호를 뜬 날(판정 기준일). 사후창(asof+1..asof+h)이 아니라 이 날짜로
-        # 가른다 — ref 63의 라벨도 «그 날의 성과»를 그 날의 환경에 귀속시킨다.
+        # asof_date = 신호를 «뜬» 날. 사후창(asof+1..asof+h)은 이걸로 안 갈린다 —
+        # 위 docstring의 표 참조. 그래서 이 칸의 뜻은 「그 날의 성과」가 아니라
+        # 「그 날 내린 판단」이고, 아래 basis/limitation이 응답에서 그걸 밝힌다.
         buckets[env_cell_of_date(row.asof_date)].append(row)
 
     out: dict = {dc: board_rollup(buckets[dc], horizon) for dc in DAY_CLASSES}
@@ -107,6 +138,17 @@ def day_class_rollup(rows: list[NaverRetroSignal], horizon: int) -> dict:
         "total": {k: total[k] for k in _ADDITIVE_KEYS},
         "sum_of_parts": summed,
         "ok": all(summed[k] == total[k] for k in _ADDITIVE_KEYS),
-        "note": "평시+주말+공휴일 = 전체 (ref 63 §1-2 검산과 같은 방식)",
+        "note": "평시+주말+공휴일 = 전체 (칸 배타성 검산)",
     }
+    # ★한계를 «응답에» 싣는다 (적대 리뷰 1R P1-1). 문서에만 적으면 이 값을 읽는 쪽은
+    #   못 본다 — 그리고 이 값은 「주말 성과」로 오해되기 딱 좋은 모양이다.
+    out["basis"] = "asof_date (신호 발신일) — 사후창 아님"
+    out["measures"] = "그 날 내린 «판단»의 정확도. 그 날의 «성과»가 아니다."
+    out["limitation"] = (
+        f"사후창(asof+1..asof+{horizon})은 이 칸으로 분리되지 않는다. "
+        "d7은 7일 연속이라 어느 발신일이든 주말을 정확히 2일 포함하므로 분리가 원리적으로 0이고, "
+        "d3은 일요일 발신의 사후창이 목·금 발신보다 오히려 더 «평시»다. "
+        "ref 63의 주말·공휴일 효과(−8,020,470원·−915,912원)를 재려면 날짜 grain 표면을 볼 것 "
+        "— pao_scope_roster.day_class_split."
+    )
     return out

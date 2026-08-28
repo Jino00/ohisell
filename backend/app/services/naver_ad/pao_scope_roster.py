@@ -46,6 +46,15 @@ PROFIT_STATUS_BEP_UNKNOWN = "bep_unknown"
 #   그룹. 확정 밴드값 대신 이 라벨을 낸다 — 아래 _baseline_days_by_adgroup 참조.
 PROFIT_STATUS_RAMP_UP = "ramp_up"
 
+# 환경 층 2층(평시 / 주말+공휴일) — 계약 §4-B⑤ 「그 이상 쪼개기 금지(첫 라운드)」.
+# 판정은 probe_cell_aggregate.env_cell_of_date가 유일 출처다(두 벌이 되면 같은 날짜가
+# 표면마다 다른 칸에 들어간다). weekend·holiday를 따로 내는 건 ref 63이 둘을 «따로»
+# 확정했기 때문이지 3층으로 쓰라는 뜻이 아니다.
+DAY_CLASSES = ("weekday", "weekend", "holiday")
+
+# 날짜 grain 분리 집계의 가법 키 — ROAS는 «비율»이라 여기 안 들어간다(ref 63 §1-1).
+_SPLIT_KEYS = ("cost", "imp", "clk", "conv_amt")
+
 
 def _round_won(value: Decimal) -> int:
     return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
@@ -118,6 +127,72 @@ def _baseline_days_by_adgroup(
             continue
         if probe_cell_aggregate.env_cell_of_date(ad_date) == "weekday":
             out[gid] = out.get(gid, 0) + 1
+    return out
+
+
+def day_class_split(db: Session, date_from: date, date_to: date,
+                    campaign_id: str | None = None, *, date_agg: dict | None = None) -> dict:
+    """★평시/주말/공휴일 **날짜 grain** 분리 집계 (D-NAO-267 · 계약 §4-A T1의 「밴드 판정 표면」).
+
+    ## 왜 여기인가 (적대 리뷰 1R P1-1의 처방)
+
+    초판은 이 분리를 retro 성적표에만 넣었다. 그런데 retro의 축은 `asof_date` 기준
+    `verdict_d{h}`이고 성과는 **사후창(asof+1..asof+h)**에서 난다 — 7일 연속 구간은 어느
+    발신일이든 주말을 2일 포함하므로 **d7은 분리가 원리적으로 0**이고 d3은 부분적으로
+    뒤집힌다(`retro_rollup.day_class_rollup` docstring의 표).
+
+    ref 63의 축은 `ad_profit_{g,d}` — **날짜 d 당일**이다(§1-2). 그 질문에 답하려면 날짜
+    grain이 실재하는 곳에서 갈라야 하고, 이 로스터가 그 자리다. 계약 §4-A T1이 산출물로
+    「성적표·retro·**밴드 판정 표면**에 분리 집계」 셋을 나열한 이유가 이것이다 — 셋 중
+    이 표면만 ref 63과 grain이 같다.
+
+    ## 무엇을 재사용했나 (계약 §2-3 — 새 집계 0)
+
+    `metrics_aggregator.aggregate(grain="date")`가 이미 날짜별 행을 준다. 그걸 day_class로
+    접기만 한다 — 새 쿼리·새 산식·새 상수 **0**. 그래서 이 분리의 합은 같은 집계기의
+    `totals`와 **정의상** 맞아야 하고, `identity.ok`가 그걸 실제로 검산한다.
+
+    ## 무엇을 «안» 하나
+
+    · **보정 아님, 분리 표기다.** 주말분을 빼거나 계수를 곱하지 않는다.
+    · **총이익을 칸별로 내지 않는다.** BEP가 그룹마다 다르고 날짜 grain엔 그 조인이 없다 —
+      지어내느니 안 낸다(§2-3 「재사용이 불가능하면 멈추고 기록한다」). 칸별 ROAS는 그
+      칸의 합에서 바로 나오므로 BEP(1.711)와 비교하면 사람이 읽을 수 있다.
+    · **연휴·휴가창·출시축은 칸이 없다**(§3 — 미확정 환경은 층 승격 금지).
+    """
+    agg = date_agg if date_agg is not None else metrics_aggregator.aggregate(
+        db, date_from, date_to, grain="date", campaign_filter=campaign_id
+    )
+
+    out: dict = {dc: {"days": 0, **{k: 0 for k in _SPLIT_KEYS}} for dc in DAY_CLASSES}
+    for row in agg["rows"]:
+        d = row["ad_date"]
+        d = date.fromisoformat(d) if isinstance(d, str) else d
+        cell = out[probe_cell_aggregate.env_cell_of_date(d)]
+        cell["days"] += 1
+        for k in _SPLIT_KEYS:
+            cell[k] += int(row.get(k) or 0)
+
+    for dc in DAY_CLASSES:
+        cell = out[dc]
+        # 칸별 ROAS — 그 칸의 합에서 «직접» 낸다. 칸끼리 더하면 안 되는 값이라
+        # identity 검산 대상이 아니다(ref 63 §1-1: 비율은 가법이 아니다).
+        cell["roas"] = round(cell["conv_amt"] / cell["cost"], 4) if cell["cost"] else None
+
+    totals = agg["totals"]
+    summed = {k: sum(out[dc][k] for dc in DAY_CLASSES) for k in _SPLIT_KEYS}
+    out["identity"] = {
+        "total": {k: int(totals.get(k) or 0) for k in _SPLIT_KEYS},
+        "sum_of_parts": summed,
+        "ok": all(summed[k] == int(totals.get(k) or 0) for k in _SPLIT_KEYS),
+        "note": "평시+주말+공휴일 = 전체 (ref 63 §1-2 검산과 같은 방식·같은 grain)",
+    }
+    out["basis"] = "ad_date (성과 발생일) — ref 63 §1-2와 같은 grain"
+    out["reference"] = (
+        "ref 63 §4-1 확정치: 주말 Σexcess −8,020,470원(30,606 group-day) · "
+        "공휴일 −915,912원(4,547 group-day). 둘 다 홀드아웃 게이트 통과·부호 안정. "
+        "여기 수치는 그 확정치가 아니라 이 창의 실측 분리다 — 보정하지 않았다."
+    )
     return out
 
 
@@ -355,5 +430,9 @@ def build_roster(
             "low": float(factor_low), "high": float(factor_high), "source": factor_source,
         },
         "totals": agg["totals"],
+        # ★D-NAO-267 (계약 §4-A T1 = ref 65 S2-ⓐ): 평시/주말/공휴일 분리 집계.
+        #   ref 63과 **같은 grain**(날짜)이라 항등식이 진짜로 성립하는 자리다 —
+        #   retro 쪽 분리는 사후창을 못 가른다(적대 리뷰 1R P1-1).
+        "weekend_holiday": day_class_split(db, date_from, date_to, campaign_id),
         "campaigns": campaigns,
     }

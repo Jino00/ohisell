@@ -242,3 +242,32 @@ def test_existing_d3_d7_keys_are_untouched(client):
     assert board["d3"]["correct"] == 1
     assert board["d3"]["bleed_sum"] == 500
     assert board["d7"]["n"] == 0
+
+
+def test_surface_states_what_this_split_cannot_separate(client):
+    """★★적대 리뷰 1R P1-1의 상환 — 한계가 «응답에» 실린다.
+
+    이 분리는 `asof_date`(신호 발신일)로 가르는데 성과는 사후창(asof+1..asof+h)에서 난다.
+    7일 연속 구간은 어느 발신일이든 주말을 정확히 2일 포함하므로 **d7 분리는 원리적으로 0**
+    이고, d3은 일요일 발신의 사후창이 목·금 발신보다 오히려 더 평시다.
+
+    한계를 docstring에만 적으면 이 값을 읽는 쪽은 못 본다 — 그리고 이 값은 「주말 성과」로
+    오해되기 딱 좋은 모양이다. 그래서 응답이 스스로 밝히게 하고, 그 문장을 테스트가 지킨다.
+    """
+    asof = _weekday_within(28)
+    _seed(client, signals=[
+        NaverRetroSignal(
+            created_at=kst_now(), asof_date=asof,
+            board="bleeding_keywords", direction="down", grain="keyword",
+            target_id="nkw-1", campaign_id="cmp1",
+            cf_asof=1.0, bep_asof=2.0, target_asof=4.0, cost_asof=1000,
+            verdict_d3="correct", bleed_post3=500,
+        ),
+    ])
+    split = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()[
+        "boards"]["bleeding_keywords"]["weekend_holiday"]["d7"]
+
+    assert "asof_date" in split["basis"], "무엇을 기준으로 갈랐는지 응답이 말해야 한다"
+    assert "판단" in split["measures"], "「성과」가 아니라 「판단」을 잰다고 밝혀야 한다"
+    assert "사후창" in split["limitation"]
+    assert "pao_scope_roster" in split["limitation"], "ref 63을 재려면 어디를 봐야 하는지 가리켜야 한다"
