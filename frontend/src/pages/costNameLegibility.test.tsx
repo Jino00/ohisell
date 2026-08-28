@@ -26,7 +26,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 
-import { RecipeList, StandardCostBoard, costPageWidthClass } from "./CostPage";
+import { RecipeList, StandardCostBoard } from "./CostPage";
+// ★`costPageWidthClass`는 `CostPage.tsx`가 아니라 `lib/costMenuSurface.ts`에 산다 —
+//   그 파일 헤더가 적어 둔 이유 그대로다: 컴포넌트도 export하는 .tsx에 순수 export를 하나
+//   더 얹으면 `react-refresh/only-export-components` 경고가 1건 늘고 CI의 warning 래칫이
+//   빨간불이 된다(2026-08-28 실측 — 96→97로 실제로 터졌고, 그래서 여기로 옮겼다).
+import { costPageWidthClass } from "../lib/costMenuSurface";
 import type { CostBoard, CostBoardRow, CostRecipe } from "../lib/api";
 
 /** 보드 상품명 칸의 testid — `recipe_id`까지 넣는 이유는 아래 「중복 SKU」 테스트가 말한다. */

@@ -59,6 +59,7 @@ import {
   type CostTableItemList,
 } from "../lib/api";
 import {
+  costPageWidthClass,
   formatKstDateTime,
   lotSpanText,
   priceConflictText,
@@ -93,21 +94,6 @@ import {
 /** ★`"home"`이 **기본 탭**이다(D-CPP-62 S2). 나머지 셋은 지우지 않는다 — 홈은 새 입구지
  *  기존 탭의 대체가 아니고, 인박스·왕복 표가 결국 그 탭들의 기존 패널로 «데려간다». */
 export type CostTab = "home" | "materials" | "recipes" | "board";
-
-/**
- * 페이지 폭 상한 — 가르는 축은 「홈이냐」가 아니라 **「넓은 표냐 폼·목록이냐」**다.
- * `home`(왕복 표 12열 × 139행)·`board`(9열 × 924 SKU)는 폭이 다 필요하고,
- * `materials`·`recipes`는 폼·목록이라 `max-w-[96rem]`(1536px) 상한이 가독성을 돕는다.
- *
- * ★함수로 뽑은 이유는 순전히 **테스트가 잡을 수 있게** 하려는 것이다(적대 리뷰 P2-2).
- *   인라인 삼항으로 두었을 때 「보드 탭 상한 해제」를 되돌리는 변이(M6)가 프론트 1,173건
- *   전건 초록 속에서 **살아남았다** — 잘림의 절반이 이 상한이었는데 그 절반을 아무도
- *   안 지키고 있었다는 뜻이다. 최상위 wrapper의 className은 `<CostPage>`를 통째로
- *   렌더해야 닿는 자리라 어느 테스트도 보지 않았다.
- */
-export function costPageWidthClass(tab: CostTab): string {
-  return tab === "home" || tab === "board" ? "p-6" : "p-6 max-w-[96rem]";
-}
 
 // ══════════════════════════════════════════════════════════════════
 // 순수 표시 규칙 (테스트가 이 함수들을 직접 잡는다)
