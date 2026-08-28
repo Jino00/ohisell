@@ -413,10 +413,11 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
             "— fail-closed(상태 유지·다음 레인 재시도)", row.adgroup_id, row.search_term,
         )
         return False
-    # ★권위 있는 검사는 여기다(위 조기 판별은 캠페인 축이라 «싼 필터»일 뿐이다). 두 축이 어긋나면
-    #   — 캠페인은 SHOPPING인데 광고그룹은 WEB_SITE — id 없이 파워링크 경로로 내려간다.
+    # ★파워링크인데 열쇠(id)가 없는 경우 — 그쪽 경로는 id 기반이라 열 수단이 없다.
     #   `delete_restricted_keywords`가 빈 목록을 fail-closed로 거부하므로 실쓰기 사고는 안 나지만,
     #   그 거부는 **클레임 뒤**라 「쓰다 실패」로 기록된다. 시도조차 못 할 일은 시도 전에 막는다.
+    #   (초판은 이 검사를 함수 머리의 «캠페인 축» 조기 필터로도 겹쳐 뒀다가 적대 리뷰 1R P1-1을
+    #    맞았다 — 그 필터가 축 불일치 행을 이 판정에 도달조차 못 하게 했다. 지금은 겹치지 않는다.)
     if adgroup_type == naver_sa_writer.WEB_SITE_ADGROUP_TYPE and not row.restrict_kwd_id:
         log.warning(
             "search_term_ss_lane: 재심사 개방 불가(파워링크인데 restrict_kwd_id 부재 — 축 불일치) "
