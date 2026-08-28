@@ -32,12 +32,33 @@ def api(path):
         "http://localhost:%s/api/naver/ad%s" % (PORT, path), timeout=25))
 
 
-c = sqlite3.connect("ohisell.db")
+# ★읽기 전용을 «관례»가 아니라 «구조»로 강제한다(적대 리뷰 P2 채택). 지금은 SELECT뿐이지만,
+#   향후 누가 쓰기를 섞으면 즉시 예외로 죽는 편이 조용히 prod를 바꾸는 것보다 낫다.
+c = sqlite3.connect("file:ohisell.db?mode=ro", uri=True)
 
 print("\n── 점화 게이트 (닫혀 있어야 정상) ──")
-r = c.execute("SELECT COUNT(*), SUM(auto_operate), COUNT(DISTINCT optimizer), MAX(updated_at) "
-              "FROM naver_campaign_settings").fetchone()
-print("  settings %s행 · auto_operate합 %s · optimizer %s종 · 최종갱신 %s" % r)
+# ★P1-1(적대 리뷰): 이 첫 블록만 try/except 밖에 있었다 — 「부품별 try/except」 약속을 자기가
+#   어긴 것이다. 여기서 죽으면 아래 6개 섹션이 **전부** 안 나온다(「하나 실패 = 전체 침묵」의
+#   정확한 재현). 실제 트리거가 있다: 이 저장소엔 4KB 미끼 DB가 있어 실행 위치가 틀리면
+#   `no such table`로 죽는다.
+try:
+    r = c.execute("SELECT COUNT(*), SUM(auto_operate), MAX(updated_at) "
+                  "FROM naver_campaign_settings").fetchone()
+    # ★P1-2(적대 리뷰): 이전엔 `COUNT(DISTINCT optimizer)`로 «1종»만 찍었다. 그러면 그 1종이
+    #   `none`(안전)인지 `ours`(엔진이 손을 댄다)인지 **구분이 안 된다** — 헤더는 "닫혀 있어야
+    #   정상"이라 못 박아 놓고 정작 닫혔는지 판정할 유일한 값을 숨긴 것이다. `optimizer='none'`은
+    #   `auto_operate`와 **독립적인** 킬스위치라(harness가 'ours'가 아니면 실행 자체를 거부)
+    #   이 필드의 «값»이 곧 안전/위험을 가른다. 그래서 값을 «그대로» 센다.
+    dist = c.execute("SELECT COALESCE(optimizer,'(NULL)'), COUNT(*) FROM naver_campaign_settings "
+                     "GROUP BY 1 ORDER BY 2 DESC").fetchall()
+    opt = " · ".join("%s×%s" % (k, v) for k, v in dist) or "(행 없음)"
+    print("  settings %s행 · auto_operate합 %s · 최종갱신 %s" % r)
+    print("  optimizer: %s" % opt)
+    unsafe = [k for k, _ in dist if k not in ("none", "(NULL)")]
+    print("  ⇒ %s" % ("★열림 — optimizer=%s 존재" % ",".join(unsafe) if unsafe
+                      else "닫힘(전건 none) · auto_operate합 %s" % r[1]))
+except Exception as e:
+    print("  조회 실패: %s" % e)
 
 print("\n── S1 탐색 stale 차단 (★점화 후에만 «값»이 참 — 지금은 키만 있으면 정상) ──")
 print("  grep -haE 'held_by_reason' /home/ubuntu/.pm2/logs/ohisell-backend-%s-error.log | tail -2" % PORT)
