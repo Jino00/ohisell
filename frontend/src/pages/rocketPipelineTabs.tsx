@@ -666,6 +666,69 @@ const CONFIRM_STATE_LABEL: Record<string, { text: string; tone: "good" | "bad" |
   unknown: { text: "결과 미상", tone: "alert" },
 };
 
+/**
+ * supplier 「발주서번호」 검색창에 그대로 붙여넣을 발주번호 줄.
+ *
+ * ★왜 이게 필요한가 (Jino 2026-08-28: *"확인이 필요한 번호를 내가 직접 누를께. 대신에
+ *   그 번호들을 모아서 볼 수 있게 해줘 … 발주번호를 모아서 , 로 구분해줘"*):
+ *   supplier 발주 목록은 발주서번호를 콤마로 받으면 그 건들만 모아 준다. 거기서 바로 누르면
+ *   **우리 화면의 확인 경로가 가진 사각을 통째로 비켜간다.**
+ *
+ * ★그 사각(2026-08-28 실측): 확인은 성공했는데 우리 원장이 당일에 안 따라온다.
+ *   17:55:27 클릭 → 17:57:14 `succeeded`(200, result=SUCCESS) → 17:58:41 재수집 677건 →
+ *   그런데 그 발주의 `synced_at`은 **12:34 그대로**였다. 이유 둘:
+ *     ① 정상 수집 창이 «발주일» 기준이라 2025-10-15 발주는 창(실측 2026-06-01~) 밖이다.
+ *     ② 굳음 판정이 `date(synced_at) != last_day` — **날짜 단위**라, 오늘 12:34에 한 번 본
+ *        건은 「오늘 본 것」으로 분류돼 좁은 재수집 대상에서도 빠진다.
+ *   확인이 밀려 있는 건은 **정의상 전부 오래된 건**이라 이 사각에 정확히 걸린다.
+ */
+export function PoSeqCopyBox({ rows, kind, hint }: {
+  rows: RocketRiRow[]; kind: "live" | "stale"; hint: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  // ★건수 0이면 렌더하지 않는다 — 빈 줄을 붙여넣게 두면 supplier가 전건을 뱉는다.
+  if (rows.length === 0) return null;
+  const joined = rows.map((r) => r.purchase_order_seq).join(", ");
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(joined);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ★막혀도 줄 자체는 화면에 남는다 — 손으로 긁어 가는 것이 유일한 대안 경로다.
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div
+      data-testid={`po-seq-copy-${kind}-box`}
+      className="border-b border-gray-200 bg-slate-50 px-4 py-2.5 text-xs"
+    >
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-gray-600">
+          쿠팡 발주 목록의 <b>발주서번호</b> 칸에 붙여넣으면 이 {cnt(rows.length)}건만 모입니다.
+        </span>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="shrink-0 rounded border border-gray-300 bg-white px-2 py-1 font-medium text-gray-700 hover:bg-gray-50"
+        >
+          {copied ? "복사됨" : "복사"}
+        </button>
+      </div>
+      <div
+        data-testid={`po-seq-copy-${kind}`}
+        className="select-all break-all rounded border border-gray-200 bg-white px-2 py-1.5 font-mono tabular-nums text-gray-800"
+      >
+        {joined}
+      </div>
+      <div className="mt-1 text-gray-500">{hint}</div>
+    </div>
+  );
+}
+
 export function RiQueueTab() {
   // ★실행 후 목록·이력을 다시 읽는다. 「눌렀는데 화면이 그대로」면 사람은 또 누른다 —
   //   그게 이 계약이 가장 피하려는 것이다(두 번 누르기).
@@ -703,14 +766,21 @@ export function RiQueueTab() {
             hint="0건은 문제가 아니라 지금 누를 것이 없다는 뜻입니다."
           />
         ) : (
-          <Table head={<>
-            <Th>발주번호</Th><Th>발주일</Th><Th>입고완료</Th>
-            <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막으로 본 날</Th><Th>확인</Th>
-          </>}>
-            {live.map((r) => (
-              <RiRow key={r.purchase_order_seq} r={r} onConfirm={() => setModal(r)} />
-            ))}
-          </Table>
+          <>
+            <PoSeqCopyBox
+              rows={live}
+              kind="live"
+              hint="쿠팡에서 직접 누르면 결과가 바로 그 화면에 보입니다. 이 화면의 「확인」 버튼으로 눌러도 되지만, 오래된 발주는 우리 원장 반영이 다음 수집(대개 다음 날)까지 걸립니다."
+            />
+            <Table head={<>
+              <Th>발주번호</Th><Th>발주일</Th><Th>입고완료</Th>
+              <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막으로 본 날</Th><Th>확인</Th>
+            </>}>
+              {live.map((r) => (
+                <RiRow key={r.purchase_order_seq} r={r} onConfirm={() => setModal(r)} />
+              ))}
+            </Table>
+          </>
         )}
       </Card>
 
@@ -733,6 +803,11 @@ export function RiQueueTab() {
                 「남은 금액」이 아니라 <b>「모르는 금액」</b>입니다.
               </div>
             </div>
+            <PoSeqCopyBox
+              rows={stale}
+              kind="stale"
+              hint="이 건들은 지금 상태를 모릅니다 — 쿠팡에서 열어 보면 이미 처리돼 있을 수 있습니다. 확인 버튼이 잠긴 것도 그래서입니다."
+            />
             <Table head={<>
               <Th>발주번호</Th><Th>발주일</Th><Th>입고완료</Th>
               <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막으로 본 날</Th><Th>확인</Th>

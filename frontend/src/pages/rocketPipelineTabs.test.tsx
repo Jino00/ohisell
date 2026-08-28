@@ -283,8 +283,14 @@ describe("확인요청함 탭", () => {
     // ★한 표에 섞으면 죽은 줄을 누른다 — 섹션 제목 둘이 이 갈림의 표면이다
     expect(await screen.findByText(/지금 확인이 필요한 건 — 1건 · 230,235원/)).toBeTruthy();
     expect(await screen.findByText(/지금 상태를 모르는 건 — 1건 · 75,430원/)).toBeTruthy();
-    expect(await screen.findByText("139791428")).toBeTruthy();
-    expect(await screen.findByText("115340779")).toBeTruthy();
+    // ★2026-08-28: 발주번호가 «표»와 «supplier 붙여넣기 줄» 두 곳에 뜬다(의도된 중복).
+    //   이 테스트가 지키는 것은 「표에 그 행이 있나」이므로 표 안으로 범위를 좁힌다 —
+    //   전역 findByText로 두면 붙여넣기 줄이 생길 때마다 이 단언이 애매해진다.
+    const inTables = (seq: string) =>
+      screen.getAllByText(seq).filter((el) => el.closest("table") !== null);
+    await screen.findAllByText("139791428");
+    expect(inTables("139791428").length).toBe(1);
+    expect(inTables("115340779").length).toBe(1);
   });
 
   it("모르는 건에는 「이후 다시 안 봄」 배지와 재수집 안내가 붙는다", async () => {
