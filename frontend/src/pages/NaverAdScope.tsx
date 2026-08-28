@@ -19,6 +19,7 @@ import { num } from "../lib/format";
 import {
   fetchPaoScopeRoster, putPaoScopeAdgroup, deletePaoScopeAdgroup,
   type PaoScopeCampaign, type PaoScopeAdgroup, type PaoScopeRole,
+  type PaoScopeDayClassSplit,
 } from "../lib/api";
 
 const ROLE_LABEL: Record<PaoScopeRole, string> = {
@@ -48,6 +49,19 @@ function ProfitCell({
   value, low, high, status,
 }: { value: number | null; low?: number | null; high?: number | null; status: string }) {
   if (value === null) {
+    // ★D-NAO-267 (계약 §4-C S2-④): 램프업은 «모름»과 다른 사유다. 둘 다 값이 없지만
+    //   bep_unknown은 「우리가 못 잰다」이고 ramp_up은 「이 그룹엔 아직 잴 체질이 없다」다.
+    //   같은 「모름」으로 그리면 신규 그룹의 초기 잡음이 상품 원가 미연결과 한 칸에 뭉개진다.
+    if (status === "ramp_up") {
+      return (
+        <span
+          className="text-sky-600"
+          title="램프업 — 창 안에 평시(평일·비공휴일) 관측이 0일입니다. 평시 체질이 없어 밴드 확정값을 내지 않습니다(ref 63 §10 교란축 X9)."
+        >
+          램프업
+        </span>
+      );
+    }
     return (
       <span className="text-gray-400" title={status === "bep_unknown" ? "BEP를 해석하지 못했습니다(상품 원가 미연결)" : status}>
         모름
@@ -130,6 +144,7 @@ export default function NaverAdScope() {
                 {" "}({data.correction_factor.source ?? "출처 미상"})
               </span>
             </div>
+            <DayClassStrip split={data.weekend_holiday} />
             <div className="divide-y divide-gray-100">
               {data.campaigns.map((c) => (
                 <CampaignBlock key={c.campaign_id} c={c} onChanged={() => setReloadKey((k) => k + 1)} />
@@ -138,6 +153,59 @@ export default function NaverAdScope() {
           </>
         )}
       </Card>
+    </div>
+  );
+}
+
+/** ★평시/주말/공휴일 분리 표기 (D-NAO-267 · ref 65 S2-ⓐ).
+ *
+ *  ref 63 §4-1이 확정한 것: 주말 −8,020,470원 · 공휴일 −915,912원(둘 다 홀드아웃 통과).
+ *  이 날들을 평시와 섞어서 재면 **평시 성과가 확정된 음의 효과에 눌려 과소평가된다.**
+ *
+ *  ★보정이 아니라 «분리»다 — 빼거나 곱하지 않는다. 세 칸을 나눠 놓기만 하고, 얼마나
+ *    다른지는 보는 사람이 읽는다. 계수를 곱하는 순간 그 숫자는 「모형이 만든 값」이 된다.
+ *  ★칸별 총이익은 안 낸다(BEP가 그룹마다 다르고 날짜 grain엔 그 조인이 없다) — 대신
+ *    ROAS를 낸다. 지어내느니 안 낸다.
+ */
+function DayClassStrip({ split }: { split: PaoScopeDayClassSplit }) {
+  const CELLS: { key: "weekday" | "weekend" | "holiday"; label: string }[] = [
+    { key: "weekday", label: "평시" },
+    { key: "weekend", label: "주말" },
+    { key: "holiday", label: "공휴일" },
+  ];
+  return (
+    <div className="px-4 pb-3">
+      <div className="flex items-center gap-2 text-[11px] text-gray-500 mb-1">
+        <span title={split.reference}>평시·주말·공휴일 분리</span>
+        <span className="text-gray-400" title={split.basis}>({split.basis})</span>
+        {/* ★검산이 깨지면 숨기지 않고 말한다 — 한 날짜가 두 칸에 들어갔다는 뜻이다 */}
+        {!split.identity.ok && (
+          <span className="text-red-600" title={split.identity.note}>
+            ⚠️ 항등식 불일치 — 세 칸의 합이 전체와 다릅니다
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {CELLS.map(({ key, label }) => {
+          const c = split[key];
+          return (
+            <div key={key} className="border border-gray-200 rounded px-2 py-1.5">
+              <div className="text-xs text-gray-600">
+                {label} <span className="text-gray-400">{c.days}일</span>
+              </div>
+              <div className="text-xs tabular-nums text-gray-900">{num(c.cost)}원</div>
+              <div className="text-[11px] tabular-nums text-gray-500">
+                ROAS{" "}
+                {c.roas === null ? (
+                  <span className="text-gray-400" title="이 칸에 집행이 없습니다 — 0이 아니라 «없음»입니다">—</span>
+                ) : (
+                  c.roas.toFixed(2)
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -178,6 +246,11 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
         <Badge tone={c.auto_operate && c.optimizer === "ours" ? "good" : "neutral"}>
           {c.optimizer === "ours" ? (c.auto_operate ? "가동" : "우리·정지") : c.optimizer === "mop" ? "MOP" : "수동"}
         </Badge>
+        {/* ★D-NAO-267: 램프업 그룹은 총이익 합산에서 빠진다 — 몇 개가 빠졌는지 «여기서»
+            말하지 않으면 옆의 총이익이 「그냥 그만큼인 값」으로 읽힌다. */}
+        {c.ramp_up_count > 0 && (
+          <Badge tone="neutral">램프업 {c.ramp_up_count} 제외</Badge>
+        )}
         <span className="text-xs text-gray-500 tabular-nums w-24 text-right">{num(c.cost)}원</span>
         <span className="text-xs tabular-nums w-24 text-right">
           <ProfitCell value={c.gross_profit} low={c.gross_profit_low} high={c.gross_profit_high} status="ok" />

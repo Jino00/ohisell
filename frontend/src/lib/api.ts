@@ -6638,7 +6638,18 @@ export interface PaoScopeAdgroup {
   /** 보정계수 구간 양끝을 적용한 값 — «얼마나 모르는지»를 화면이 같이 보이게 한다 */
   gross_profit_low: number | null;
   gross_profit_high: number | null;
-  profit_status: "ok" | "bep_unknown";
+  /**
+   * 창 안 «평시»(평일 ∧ 공휴일 아님) 관측일 수 — 0이면 램프업(D-NAO-267 · 교란축 X9).
+   * ref 63 §10: 평시 표본이 0인 신규 그룹은 baseline(평시 체질)이 정의되지 않아
+   * 밴드 확정값이 «체질»이 아니라 초기 구간 잡음이다.
+   */
+  baseline_days: number;
+  /**
+   * ok = 확정값 · bep_unknown = BEP 미해석 · **ramp_up = 평시 관측 0일**.
+   * ★ramp_up이면 gross_profit* 3종이 모두 null이다 — 확정값을 «대신»한 라벨이라
+   *   화면은 숫자가 아니라 「램프업」을 그려야 한다(계약 §4-C S2-④).
+   */
+  profit_status: "ok" | "bep_unknown" | "ramp_up";
 }
 
 export interface PaoScopeCampaign {
@@ -6651,6 +6662,11 @@ export interface PaoScopeCampaign {
   has_scope: boolean;
   scoped_count: number;
   adgroup_count: number;
+  /**
+   * 램프업으로 총이익 합산에서 «빠진» 그룹 수(D-NAO-267). 이 값이 0보다 크면 캠페인
+   * gross_profit은 그만큼 «덜 센» 값이다 — 안 보이면 총이익이 조용히 줄어든 것처럼 읽힌다.
+   */
+  ramp_up_count: number;
   cost: number;
   imp: number;
   clk: number;
@@ -6668,7 +6684,46 @@ export interface PaoScopeRoster {
    *  하한 = inflowPath 「광고>」5종 근거 · 상한 = 채널 매출 전액을 광고 공으로 돌린 «가정» */
   correction_factor: { low: number; high: number; source: string | null };
   totals: Record<string, number | null>;
+  /**
+   * ★평시/주말/공휴일 «날짜 grain» 분리 집계 (D-NAO-267 · ref 65 S2-ⓐ).
+   *
+   * ref 63 §4-1이 확정한 것: 주말 Σexcess −8,020,470원 · 공휴일 −915,912원(둘 다
+   * 홀드아웃 통과·부호 안정). 그동안 성적표는 이 날들을 평시와 **섞어서** 재 왔고,
+   * 그러면 평시 성과가 확정된 음의 효과에 눌려 과소평가된다.
+   *
+   * ★**보정이 아니라 분리 표기다** — 빼거나 곱하지 않는다. 세 칸을 나눠 놓기만 하고
+   *   «얼마나 다른지»는 보는 사람이 직접 읽는다.
+   * ★칸별 총이익은 **없다**(BEP가 그룹마다 다르고 날짜 grain엔 그 조인이 없다).
+   *   대신 칸별 ROAS를 BEP와 비교하면 된다.
+   */
+  weekend_holiday: PaoScopeDayClassSplit;
   campaigns: PaoScopeCampaign[];
+}
+
+export interface PaoScopeDayClassBucket {
+  days: number;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  /** 비율이라 칸끼리 더하면 안 된다 — 항등식 검산 대상이 아니다 */
+  roas: number | null;
+}
+
+export interface PaoScopeDayClassSplit {
+  weekday: PaoScopeDayClassBucket;
+  weekend: PaoScopeDayClassBucket;
+  holiday: PaoScopeDayClassBucket;
+  /** 「평시+주말+공휴일 = 전체」 자기 검산. ok=false면 한 날짜가 두 칸에 들어갔다는 뜻 */
+  identity: {
+    total: Record<string, number>;
+    sum_of_parts: Record<string, number>;
+    ok: boolean;
+    note: string;
+  };
+  /** 무엇을 기준으로 갈랐는가 — retro 쪽 분리(신호 발신일 기준)와 혼동하면 안 된다 */
+  basis: string;
+  reference: string;
 }
 
 export function fetchPaoScopeRoster(params: { campaignId?: string; days?: number } = {}): Promise<PaoScopeRoster> {
