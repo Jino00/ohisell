@@ -66,6 +66,14 @@ PO_LIST_PATH = "/po-web/app/purchase-order/list"               # 발주+납품 J
 SETTLEMENT_PATH = "/scm/settlement/general/purchase/account"   # 정산 SSR HTML (ref20 §4)
 PO_DETAIL_PATH = "/scm/purchase/order/get"                     # 발주상세 per-SKU SSR HTML (ref20b, S4.5a)
 
+# ── 「거래명세서확인」(RI→CI) 쓰기 — 계약 CONTRACT_1p_invoice_confirm_write (Jino 승인 2026-08-28)
+#   ★이 저장소에서 supplier **상태를 바꾸는** 유일한 경로다. 늘리려면 별도 계약이다.
+CONFIRM_INVOICE_PATH = "/scm/purchase/order/confirmInvoice"    # ?purchaseOrderSeq={seq} (ref 106 §3)
+#   ★사전 GET 게이트의 판정자. 이 마크업은 **서버측 상태 게이트**다 — RI 3/3 존재 ·
+#     CI·PA·RP 0/3(ref 106 §2). 즉 「버튼이 있다 = 지금 확인 가능」이 정본이고, 우리 원장의
+#     RI는 후보 목록일 뿐이다(원장은 수집 창 밖에서 굳는다).
+CONFIRM_BUTTON_MARKER = 'id="btnConfirmInvoice"'
+
 # ── 발송(ASN) 쉽먼트 경로 — 2026-08-05 라이브 실측 (ref 45 §1-1) ──
 #   ★목록을 브라우저 주소창으로 열면 대시보드로 리다이렉트된다. 여기선 **같은 탭에서 fetch**만
 #     하므로(네비게이션 없음) 그 리다이렉트에 안 걸린다 — 정산·발주상세와 같은 방식이다.
@@ -140,6 +148,30 @@ _FETCH_JSON_POST_JS = """async (args) => {
       method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body), signal: ctrl.signal,
+    });
+    return { status: r.status, body: await r.text() };
+  } finally { clearTimeout(t); }
+}"""
+
+# ★★FORM POST — supplier **쓰기**의 유일한 통로(계약 CONTRACT_1p_invoice_confirm_write).
+#   「거래명세서확인」(RI→CI) 하나에만 쓴다. 다른 상태 변경에 재사용하지 않는다(계약 §3 금지선).
+#   규격은 실측이다(ref 106 §3, `detail.js:215-227`): jQuery `$.post(url, callback)` — 2번째
+#   인자가 함수라 data가 생략되므로 **바디가 없고**, 기본 contentType이 form-urlencoded이며,
+#   jQuery가 same-origin 요청에 `X-Requested-With: XMLHttpRequest`를 붙인다. CSRF 토큰은 없다.
+#   ★비200도 body를 그대로 준다 — 실패 응답이 구조화돼 있지 않아(`alert(data)`) 원문이 유일한
+#     진단 재료다. 여기서 성공/실패를 «판정»하지 않는다: 판정은 백엔드가 한다(계약 §2).
+_FETCH_FORM_POST_JS = """async (args) => {
+  const [path] = args;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const r = await fetch(path, {
+      method: 'POST', credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      signal: ctrl.signal,
     });
     return { status: r.status, body: await r.text() };
   } finally { clearTimeout(t); }
@@ -2568,6 +2600,196 @@ def _prod_rocket_mark_success(cfg: dict) -> None:
     현재는 별도 엔드포인트 없으므로 ingest 성공 자체가 last_push_at 역할. 추후 확장 시 사용."""
 
 
+# ════════════════════════════════════════════════════════════════════
+# 「거래명세서확인」(RI→CI) 실행기 — 계약 CONTRACT_1p_invoice_confirm_write
+#   ★이 블록이 이 저장소의 **유일한 supplier 쓰기**다.
+#   ★★페처는 «실행기»이지 «판단자»가 아니다(계약 §2): 명령을 발명하지 않고(DB에 있는 것만
+#     임대한다), 성공/실패를 판정하지 않고(관측값만 보고한다), 재시도하지 않는다(계약 §3).
+# ════════════════════════════════════════════════════════════════════
+def _prod_confirm_pending(cfg: dict) -> dict:
+    """확인 명령 대기 여부 폴링(가벼운 GET — 창 안 뜸)."""
+    try:
+        r = requests.get(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/invoice-confirm/pending",
+            auth=_basic_auth(cfg),
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _prod_confirm_claim(cfg: dict) -> dict:
+    """확인 명령 1건 임대. ★임대는 1회뿐 — 실패해도 반납하지 않는다(반납 = 재시도)."""
+    try:
+        r = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/invoice-confirm/claim",
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _prod_confirm_report(cfg: dict, body: dict) -> bool:
+    """관측값 보고 → 백엔드가 종결 상태를 판정한다.
+
+    ★보고가 실패하면 그 명령은 TTL 뒤 **unknown으로 잠긴다** — 그게 옳다. 여기서 재시도해
+      「성공했다」를 억지로 밀어 넣으면, 정작 POST가 안 나간 경우와 구별이 사라진다.
+    ★★HTTP 200이 «받아들여졌다»는 뜻이 아니다(적대 리뷰 1R P1-2): TTL이 먼저 지나 종결된
+      명령의 지각 보고는 200에 `accepted:false`로 온다. 그걸 성공으로 세면 이 층에서는
+      사건이 **아예 관측되지 않는다** — 자백을 남긴다.
+    """
+    try:
+        r = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/invoice-confirm/report",
+            json=body,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            auth=_basic_auth(cfg),
+            timeout=15,
+        )
+        if r.status_code != 200:
+            log.error("[confirm] 보고 비200(%s) — 명령은 TTL 뒤 unknown으로 잠깁니다.", r.status_code)
+            return False
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            return True
+        if isinstance(data, dict) and data.get("accepted") is False:
+            log.error(
+                "[confirm] ⚠️보고가 거부됐다(%s) — 내 관측은 백엔드에 %s. "
+                "이 회차의 POST 결과는 지각 보고로만 남는다.",
+                data.get("reason"),
+                "원문으로 보존됨" if data.get("recorded") else "**기록되지 않았다**",
+            )
+            return False
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.error("[confirm] 보고 실패(명령은 TTL 뒤 unknown으로 잠깁니다): %s", str(e)[:120])
+        return False
+
+
+def _confirm_precheck(page, po_seq: int) -> tuple[str, int | None]:
+    """★사전 GET 게이트 — 발주상세를 GET해 확인 버튼 존재를 실측한다.
+
+    반환 (precheck, http_status):
+      button_present / button_absent / fetch_failed
+    ★이 판정이 멱등성 `[미상]`을 실험 없이 우회하는 **유일한 방벽**이다(계약 §2). 이 함수를
+      건너뛰고 POST하면 이미 CI인 건에 같은 요청이 나갈 수 있고, 그 결과는 아무도 모른다.
+    ★★비200·예외를 button_absent로 접지 않는다 — 「버튼이 없다」와 「못 봤다」는 다른 사실이고,
+      전자는 POST를 생략해 정상 종결이지만 후자는 아무것도 확인 못 한 것이다(원칙22).
+    ★★★그리고 **200이어도 «그 PO의 상세»가 아니면 판정할 자격이 없다**(적대 리뷰 1R P1-1).
+      supplier는 세션이 소프트 만료되면 오리진 URL이 멀쩡한 채 SSR 라우트만 **200으로 로그인
+      HTML**을 준다(이 페처가 하루에 세 번 겪은 상황 — `_recover_session` 주석의 09:31·10:07·11:11).
+      그걸 「버튼 없음」으로 읽으면 손도 안 댄 발주가 「이미 처리됨」으로 **거짓 종결**되고,
+      되돌릴 수 없는 쓰기의 감사 레코드에 거짓이 남는다. 이 파일의 다른 SSR 소비자(정산·발주상세·
+      쉽먼트)는 전부 `looksLogin` 가드를 갖는데 이 경로만 없었다 — 같은 조건을 여기로 옮긴다.
+    """
+    path = f"{PO_DETAIL_PATH}/{po_seq}"
+    try:
+        res = _eval_retry(page, _FETCH_TEXT_JS, [path]) or {}
+    except Exception as e:  # noqa: BLE001
+        log.error("[confirm] 사전 GET 예외 PO %s: %s", po_seq, str(e)[:120])
+        return "fetch_failed", None
+    status = res.get("status")
+    body = res.get("body") or ""
+    if status != 200 or not body:
+        log.error("[confirm] 사전 GET 비정상 PO %s status=%s len=%d", po_seq, status, len(body))
+        return "fetch_failed", status
+
+    # 로그인 페이지 판정 — `_FETCH_SETTLEMENT_JS`의 looksLogin과 **같은 조건**을 쓴다.
+    low = body.lower()
+    if ("login" in low or "signin" in low) and ("password" in low or "passport" in low):
+        log.error("[confirm] 사전 GET이 로그인 페이지를 받았다 PO %s — 「버튼 없음」이 아니다.", po_seq)
+        return "fetch_failed", status
+
+    if CONFIRM_BUTTON_MARKER in body:
+        return "button_present", status
+
+    # ★양성 확인: 버튼 «부재»를 판정하려면 받은 HTML이 그 PO의 상세여야 한다. 발주번호조차
+    #   없는 문서(에러 페이지·리다이렉트 안내·빈 셸)는 「없다」가 아니라 「못 봤다」다.
+    if str(po_seq) not in body:
+        log.error("[confirm] 사전 GET 응답에 발주번호 %s가 없다 — 상세 페이지가 아니다.", po_seq)
+        return "fetch_failed", status
+    return "button_absent", status
+
+
+def cmd_confirm_invoice(cfg: dict) -> int:
+    """확인 명령 1건 임대 → 사전 GET → (버튼 있을 때만) POST 1회 → 보고. **재시도 없음.**
+
+    rc: 0=처리함(성공/이미처리 포함, 대기 0건도 0) · 1=실패 · 2=설정 누락 · 3=로그인 필요
+    ★한 번 호출에 **한 건**만 처리한다(계약 §3 배치 금지). 여러 건은 폴이 여러 번 돈다.
+    """
+    if not _push_configured(cfg):
+        log.error("confirm엔 prod_base_url·ingest_token·vendor_id 설정 필요.")
+        return 2
+
+    claim = _prod_confirm_claim(cfg)
+    if not claim.get("claimed"):
+        return 0
+    lease = claim.get("lease")
+    po_seq = int(claim.get("purchase_order_seq"))
+    cmd_id = claim.get("command_id")
+    log.warning(
+        "[confirm] 명령 #%s 임대 — PO %s. 사전 GET 통과 시에만 POST 1회(재시도 없음).",
+        cmd_id, po_seq,
+    )
+
+    report: dict = {"lease": lease}
+    try:
+        with _owned_chrome(cfg) as owner:
+            with sync_playwright() as p:
+                with _chrome(p, cfg, owner) as page:
+                    if not _goto_origin(page):
+                        log.info("[confirm] 로그아웃 감지 — 자가 복구 시도.")
+                        if coupang_auth.OK != _recover_session(page, cfg) or not _goto_origin(page):
+                            owner.keep_open = True
+                            report.update({
+                                "precheck": "fetch_failed",
+                                "error": "supplier 세션 만료 — 이 창에서 로그인 후 다시 누르세요.",
+                            })
+                            _prod_confirm_report(cfg, report)
+                            return RC_LOGIN_REQUIRED
+
+                    precheck, pre_status = _confirm_precheck(page, po_seq)
+                    report["precheck"] = precheck
+                    report["precheck_http_status"] = pre_status
+
+                    # ★게이트. 이 분기가 없으면 계약 §2·§3이 통째로 무너진다.
+                    if precheck != "button_present":
+                        log.warning(
+                            "[confirm] PO %s — 사전 GET 판정 %s ⇒ **POST 보내지 않음**.",
+                            po_seq, precheck,
+                        )
+                        _prod_confirm_report(cfg, report)
+                        return 0
+
+                    path = f"{CONFIRM_INVOICE_PATH}?purchaseOrderSeq={po_seq}"
+                    log.warning("[confirm] ⚠️LIVE POST %s — 되돌릴 수 없는 회계 확정.", path)
+                    # ★재시도 인자 1(=단발). _eval_retry의 기본값 2를 그대로 쓰면 페이지 평가
+                    #   실패 시 **같은 POST가 두 번 나갈 수 있다** — 읽기에선 무해하지만
+                    #   쓰기에선 그게 곧 「두 번 누르기」다(계약 §3).
+                    res = _eval_retry(page, _FETCH_FORM_POST_JS, [path], retries=1) or {}
+                    report["http_status"] = res.get("status")
+                    report["response_body"] = (res.get("body") or "")[:20000]
+                    log.warning(
+                        "[confirm] PO %s POST 응답 status=%s len=%d",
+                        po_seq, res.get("status"), len(res.get("body") or ""),
+                    )
+    except Exception as e:  # noqa: BLE001
+        # ★여기서 «실패»로 단정하지 않는다 — 예외가 POST 전인지 후인지 모른다.
+        #   report에 http_status가 없으면 백엔드가 unknown으로 종결하고 잠근다.
+        log.error("[confirm] PO %s 실행 중 예외: %s", po_seq, str(e)[:200])
+        report.setdefault("error", f"실행 중 예외: {str(e)[:300]}")
+        _prod_confirm_report(cfg, report)
+        return 1
+
+    _prod_confirm_report(cfg, report)
+    return 0
+
+
 def cmd_run(cfg: dict) -> int:
     """1회 실행(락으로 동시 실행 방지). UI 갱신 요청이 있으면 claim 후 실행."""
     # UI '갱신' 버튼 요청 확인(push 설정 있을 때만 — 로컬 테스트는 claim 불필요)
@@ -2728,6 +2950,20 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
                     log.info("[poll] UI 갱신 요청 임대 → 즉시 실행")
                     needs_run = True
 
+            # ★확인 명령(RI→CI 쓰기)이 대기 중이면 «먼저» 처리한다 — 계약
+            #   CONTRACT_1p_invoice_confirm_write. 한 폴에 **한 건**만(배치 금지).
+            #   실행 후에는 수집을 한 번 돌려 원장이 CI 전이를 보게 한다: 그러지 않으면
+            #   Jino가 누른 결과가 화면에 안 돌아온다(계약 §2 「결과는 누른 그 화면에」).
+            if (_prod_confirm_pending(cfg) or {}).get("requested"):
+                rc_cf = cmd_confirm_invoice(cfg)
+                log.info("[poll] 거래명세서확인 실행 완료 rc=%d", rc_cf)
+                # ★확인 실패를 **갱신 채널**(`/rocket/fetch-error`)에 보고하지 않는다
+                #   (적대 리뷰 1R P2-3): `lease=None`이면 refresh_contract의 stale 가드를
+                #   우회하고, `kind="login_required"`는 **남이 claim한 갱신 요청을 소멸시킨다.**
+                #   확인 채널은 자기 보고 경로(`invoice-confirm/report`)를 이미 갖고 있고,
+                #   로그인 필요는 그 보고의 `precheck=fetch_failed`로 이미 남는다.
+                needs_run = True   # 결과를 원장에 반영
+
             if needs_run:
                 rc = cmd_run(cfg)
                 log.info("[poll] run 완료 rc=%d", rc)
@@ -2769,6 +3005,9 @@ def main() -> None:
         sys.exit(cmd_run(cfg))
     if arg == "poll":
         sys.exit(cmd_poll(cfg))
+    if arg == "confirm-invoice":
+        # 수동 1회 실행(디버깅·카나리용). 대기 명령이 없으면 아무것도 안 하고 0.
+        sys.exit(cmd_confirm_invoice(cfg))
     if arg == "shipment-backfill":
         days = 400
         if len(sys.argv) >= 3:
@@ -2778,7 +3017,8 @@ def main() -> None:
                 print("shipment-backfill의 일수는 정수여야 합니다.", file=sys.stderr)
                 sys.exit(2)
         sys.exit(cmd_shipment_backfill(cfg, days))
-    print("usage: rocket_supplier_fetcher.py [chrome|login|run|poll|shipment-backfill [일수]]",
+    print("usage: rocket_supplier_fetcher.py "
+          "[chrome|login|run|poll|confirm-invoice|shipment-backfill [일수]]",
           file=sys.stderr)
     sys.exit(2)
 

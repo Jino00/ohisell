@@ -15,12 +15,14 @@
 //      실측(2026-08-27) RI 12건 중 8건이 이미 지급까지 끝난 유령이었다.
 //   4) **보정·절단을 자백한다.** clamp(음수 절단)·ASN 미수집 보정·목록 잘림은 전부 화면에
 //      한 줄로 쓴다. 조용히 처리하면 「깨끗한 화면」이 곧 「거짓말하는 화면」이 된다.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card, Table, Th, Td, Loading, EmptyState, Badge } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchRocketPipeline, fetchRocketPipelineStage, fetchRocketRiQueue, isPoStage,
+  previewRocketInvoiceConfirm, requestRocketInvoiceConfirm, fetchRocketConfirmHistory,
   type RocketPipeline, type RocketPipelineRow, type RocketRiRow,
+  type RocketConfirmPreview,
 } from "../lib/api";
 
 const NO_DATA = "—";
@@ -411,8 +413,24 @@ function StageRow({ r }: { r: RocketPipelineRow }) {
 // ══════════════════════════════════════════════════════════════
 // 탭 ②  「확인요청함」 (RI)
 // ══════════════════════════════════════════════════════════════
+/** 확인 명령 상태 → 화면 문구. ★unknown을 「실패」로 부르지 않는다 — 다른 사실이다. */
+const CONFIRM_STATE_LABEL: Record<string, { text: string; tone: "good" | "bad" | "alert" | "muted" }> = {
+  pending: { text: "실행 대기", tone: "muted" },
+  claimed: { text: "실행 중", tone: "muted" },
+  succeeded: { text: "확인 완료", tone: "good" },
+  // ★「이미 처리됨」은 성공과 **다른 사실**이다 — 우리가 누른 게 아니라 사전 GET에 버튼이 없었다.
+  already_confirmed: { text: "이미 처리됨(버튼 없음)", tone: "good" },
+  failed: { text: "실패(반영 안 됨)", tone: "bad" },
+  // ★unknown은 실패가 아니다 — 「갔는지 모른다」다. 색을 bad로 주면 「안 됐다」로 읽힌다.
+  unknown: { text: "결과 미상", tone: "alert" },
+};
+
 export function RiQueueTab() {
-  const { data, error } = useAsyncData(() => fetchRocketRiQueue(), []);
+  // ★실행 후 목록·이력을 다시 읽는다. 「눌렀는데 화면이 그대로」면 사람은 또 누른다 —
+  //   그게 이 계약이 가장 피하려는 것이다(두 번 누르기).
+  const [reloadKey, setReloadKey] = useState(0);
+  const [modal, setModal] = useState<RocketRiRow | null>(null);
+  const { data, error } = useAsyncData(() => fetchRocketRiQueue(), [reloadKey]);
 
   if (error) {
     return (
@@ -446,9 +464,11 @@ export function RiQueueTab() {
         ) : (
           <Table head={<>
             <Th>발주번호</Th><Th>발주일</Th><Th>입고완료</Th>
-            <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막 확인</Th>
+            <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막 확인</Th><Th>확인</Th>
           </>}>
-            {live.map((r) => <RiRow key={r.purchase_order_seq} r={r} />)}
+            {live.map((r) => (
+              <RiRow key={r.purchase_order_seq} r={r} onConfirm={() => setModal(r)} />
+            ))}
           </Table>
         )}
       </Card>
@@ -470,18 +490,203 @@ export function RiQueueTab() {
             </div>
             <Table head={<>
               <Th>발주번호</Th><Th>발주일</Th><Th>입고완료</Th>
-              <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막 확인</Th>
+              <Th right>입고액</Th><Th>연결 계산서</Th><Th>마지막 확인</Th><Th>확인</Th>
             </>}>
               {stale.map((r) => <RiRow key={r.purchase_order_seq} r={r} stale />)}
             </Table>
           </>
         )}
       </Card>
+
+      <ConfirmHistoryCard reloadKey={reloadKey} />
+
+      {modal && (
+        <ConfirmModal
+          row={modal}
+          onClose={() => setModal(null)}
+          onDone={() => { setModal(null); setReloadKey((k) => k + 1); }}
+        />
+      )}
     </div>
   );
 }
 
-function RiRow({ r, stale }: { r: RocketRiRow; stale?: boolean }) {
+// ══════════════════════════════════════════════════════════════
+// 확인 실행 모달 — ★여기가 사람 손이다(계약 §1: 매 건 「실행」 클릭)
+//   열기만 해서는 **아무 일도 일어나지 않는다**: 미리보기는 dry-run이라 supplier로 나가는 것도
+//   없고 명령도 안 생긴다. 「실행」을 눌러야 명령 1건이 적재된다.
+// ══════════════════════════════════════════════════════════════
+function ConfirmModal({
+  row, onClose, onDone,
+}: { row: RocketRiRow; onClose: () => void; onDone: () => void }) {
+  const [preview, setPreview] = useState<RocketConfirmPreview | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
+  // 열자마자 dry-run 1회. 실패하면 사유를 그대로 보여주고 「실행」을 막는다.
+  // ★렌더 중이 아니라 effect에서 부른다 — StrictMode 이중 렌더에 요청이 딸려 나가지 않게.
+  //   (dry-run이라 나가도 무해하지만, 이 파일에서 «요청은 effect에서»를 규칙으로 둔다.)
+  useEffect(() => {
+    let alive = true;
+    previewRocketInvoiceConfirm(row.purchase_order_seq)
+      .then((p) => { if (alive) setPreview(p); })
+      .catch((e) => { if (alive) setErr(String(e)); });
+    return () => { alive = false; };
+  }, [row.purchase_order_seq]);
+
+  const submit = async () => {
+    setSending(true);
+    setErr(null);
+    try {
+      await requestRocketInvoiceConfirm(row.purchase_order_seq, "확인요청함 화면에서 실행");
+      onDone();
+    } catch (e) {
+      setErr(String(e));
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-lg bg-white shadow-xl">
+        <div className="border-b border-gray-200 px-5 py-3 text-sm font-semibold text-gray-800">
+          거래명세서확인 — 발주 {row.purchase_order_seq}
+        </div>
+
+        <div className="space-y-3 px-5 py-4 text-sm">
+          <div className="flex justify-between">
+            <span className="text-gray-500">입고액</span>
+            <span className="tabular-nums font-medium text-gray-800">{won(row.received_amount)}</span>
+          </div>
+
+          {/* ★되돌릴 수 없다는 사실을 «누르기 전에» 말한다. 화면에 되돌리기 경로가 없다. */}
+          <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs leading-snug text-red-800">
+            <b>supplier에 거래명세서확인을 전송합니다 — 되돌릴 수 없습니다.</b>
+            <div className="mt-1">
+              CI(거래명세서 확인)에서 RI로 되돌리는 경로가 supplier 화면에 없습니다.
+              실행 후에는 취소·수정이 불가능합니다.
+            </div>
+          </div>
+
+          {err && (
+            <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {err}
+            </div>
+          )}
+
+          {/* dry-run 미리보기 = 백엔드 응답 원문. 「무엇을 보낼 것인가」를 지어내지 않는다. */}
+          {preview ? (
+            <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-gray-700">
+              <div className="mb-1 font-sans text-xs font-medium text-gray-500">
+                보낼 요청 (dry-run 미리보기 — 아직 아무것도 안 나갔습니다)
+              </div>
+              <div>{preview.method} {preview.path}</div>
+              <div>body: {JSON.stringify(preview.payload)}</div>
+              <div className="text-gray-400">purchaseOrderSeq={preview.purchase_order_seq}</div>
+            </div>
+          ) : !err ? (
+            <div className="text-xs text-gray-400">미리보기를 불러오는 중…</div>
+          ) : null}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={sending}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            취소
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={sending || preview === null}
+            className="rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+          >
+            {sending ? "전송 중…" : "실행"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 실행 이력 — ★감사 레코드가 DB에만 있고 화면에 없으면 미달이다(계약 §4 S2)
+// ══════════════════════════════════════════════════════════════
+function ConfirmHistoryCard({ reloadKey }: { reloadKey: number }) {
+  const { data, error } = useAsyncData(() => fetchRocketConfirmHistory(50), [reloadKey]);
+
+  if (error) {
+    return (
+      <Card title="실행 이력">
+        <EmptyState
+          reason={`이력을 불러오지 못했습니다: ${error}`}
+          hint="조회 실패는 '실행한 적이 없다'와 다릅니다."
+        />
+      </Card>
+    );
+  }
+  if (data === null) return <Card title="실행 이력"><Loading rows={2} /></Card>;
+  if (data.rows.length === 0) {
+    return (
+      <Card title="실행 이력">
+        <EmptyState reason="아직 실행한 확인이 없습니다." />
+      </Card>
+    );
+  }
+
+  return (
+    <Card title={`실행 이력 — ${cnt(data.total)}건`}>
+      <Table head={<>
+        <Th>요청 시각</Th><Th>발주번호</Th><Th right>입고액</Th>
+        <Th>결과</Th><Th>사전 GET</Th><Th>응답</Th><Th>종료</Th>
+      </>}>
+        {data.rows.map((r) => {
+          const meta = CONFIRM_STATE_LABEL[r.state] ?? { text: r.state, tone: "muted" as const };
+          return (
+            <tr key={r.command_id}>
+              <Td>{r.requested_at}</Td>
+              <Td><span className="tabular-nums">{r.purchase_order_seq}</span></Td>
+              <Td right>{won(r.received_amount_at_request)}</Td>
+              <Td>
+                {meta.tone === "muted"
+                  ? <span className="text-xs text-gray-500">{meta.text}</span>
+                  : <Badge tone={meta.tone}>{meta.text}</Badge>}
+                {r.error && <div className="mt-0.5 text-xs text-gray-500">{r.error}</div>}
+              </Td>
+              <Td><span className="text-xs text-gray-500">{r.precheck ?? NO_DATA}</span></Td>
+              <Td>
+                <span className="text-xs text-gray-500">
+                  {r.http_status ?? NO_DATA}
+                  {/* ★본문 «유무»를 말한다 — 원문은 감사 레코드에 그대로 보존돼 있다. */}
+                  {r.has_response_body ? " · 본문 보존됨" : ""}
+                </span>
+                {r.response_excerpt && (
+                  <div className="max-w-[18rem] truncate font-mono text-[11px] text-gray-400"
+                       title={r.response_excerpt}>
+                    {r.response_excerpt}
+                  </div>
+                )}
+              </Td>
+              <Td><span className="text-xs text-gray-500">{r.finished_at ?? NO_DATA}</span></Td>
+            </tr>
+          );
+        })}
+      </Table>
+      <div className="border-t border-gray-100 px-4 py-2 text-xs leading-snug text-gray-500">
+        「결과 미상」은 <b>실패가 아닙니다</b> — 요청이 supplier에 갔는지 확인되지 않았다는 뜻이고,
+        그래서 재수집으로 실상태를 확인하기 전까지 그 건은 다시 실행할 수 없습니다(자동 재시도 없음).
+        실행 명령은 임대 후 {data.lease_ttl_minutes}분 안에 보고가 없으면 「결과 미상」으로 종결됩니다.
+      </div>
+    </Card>
+  );
+}
+
+function RiRow({ r, stale, onConfirm }: {
+  r: RocketRiRow; stale?: boolean; onConfirm?: () => void;
+}) {
   const today = new Date().toISOString().slice(0, 10);
   return (
     <tr className={stale ? "bg-amber-50/40" : undefined}>
@@ -528,6 +733,56 @@ function RiRow({ r, stale }: { r: RocketRiRow; stale?: boolean }) {
           ? <StaleBadge since={r.synced_date} />
           : <span className="text-xs text-gray-400">{r.synced_date ?? NO_DATA}</span>}
       </Td>
+      {/* ★확인 칸 — 버튼이 안 뜨면 «왜 안 뜨는지»를 반드시 같이 낸다.
+          버튼만 조용히 사라지면 사람은 이유를 모르고, 그건 이 화면의 정직성 규칙 4)를 어긴다. */}
+      <Td>
+        <ConfirmCell r={r} stale={stale} onConfirm={onConfirm} />
+      </Td>
     </tr>
+  );
+}
+
+function ConfirmCell({ r, stale, onConfirm }: {
+  r: RocketRiRow; stale?: boolean; onConfirm?: () => void;
+}) {
+  const c = r.confirm;
+  // 응답에 confirm이 없으면(구버전 백엔드) 버튼을 띄우지 않는다 — 모르면 안 누른다.
+  if (!c) return <span className="text-xs text-gray-400">{NO_DATA}</span>;
+
+  if (!c.can_request) {
+    const meta = c.state ? CONFIRM_STATE_LABEL[c.state] : undefined;
+    return (
+      <div className="space-y-0.5">
+        <div className="text-xs text-gray-500">{c.blocked_reason ?? NO_DATA}</div>
+        {meta && (
+          <div className="text-xs text-gray-400">
+            직전: {meta.text}{c.last_finished_at ? ` (${c.last_finished_at})` : ""}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // 굳은 섹션에는 onConfirm을 주지 않는다 — 굳은 원장은 실행 근거가 못 된다(계약 §2).
+  if (stale || !onConfirm) {
+    return <span className="text-xs text-gray-500">재수집 후 확인 가능</span>;
+  }
+
+  const done = c.state === "succeeded" || c.state === "already_confirmed";
+  return (
+    <div className="space-y-0.5">
+      <button
+        type="button"
+        onClick={onConfirm}
+        className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+      >
+        확인
+      </button>
+      {done && (
+        <div className="text-xs text-gray-400">
+          직전: {CONFIRM_STATE_LABEL[c.state as string]?.text}
+        </div>
+      )}
+    </div>
   );
 }

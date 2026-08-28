@@ -1758,10 +1758,60 @@ export interface RocketRiInvoice {
   payment_amount: string;
 }
 
+/** 이 행에 확인 버튼을 띄울 수 있는가 + 못 띄우면 그 이유 (계약 CONTRACT_1p_invoice_confirm_write).
+ *  ★버튼만 조용히 사라지면 사람은 왜 못 누르는지 모른다 — 그래서 사유가 같이 온다. */
+export interface RocketRiConfirmState {
+  /** 마지막 명령 상태. pending|claimed|succeeded|already_confirmed|failed|unknown|null */
+  state: string | null;
+  command_id: number | null;
+  can_request: boolean;
+  /** can_request=false의 사유("진행 중" / "결과 미상 — 재수집 전 재실행 불가" / "재수집 후 확인 가능"). */
+  blocked_reason: string | null;
+  last_finished_at?: string | null;
+  last_error?: string | null;
+}
+
 export interface RocketRiRow extends Omit<RocketPipelineRow, "stage_amount"> {
   invoices: RocketRiInvoice[];
   /** 번호는 있는데 정산행 미수집 = 「미발행」이 아니라 「모름」. */
   invoice_rows_missing: number[];
+  confirm: RocketRiConfirmState;
+}
+
+/** dry-run 미리보기 — **supplier로 아무것도 나가지 않고 명령도 안 생긴다.** 모달이 그대로 보여준다. */
+export interface RocketConfirmPreview {
+  dry_run: true;
+  operation: string;
+  method: string;
+  path: string;
+  payload: Record<string, unknown>;
+  note?: string;
+  purchase_order_seq: number;
+  received_amount: string;
+  po_status: string | null;
+  irreversible: boolean;
+  irreversible_note: string;
+}
+
+export interface RocketConfirmHistoryRow {
+  command_id: number;
+  purchase_order_seq: number;
+  state: string;
+  requested_at: string;
+  received_amount_at_request: number | null;
+  precheck: string | null;
+  http_status: number | null;
+  has_response_body: boolean;
+  response_excerpt: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
+export interface RocketConfirmHistory {
+  rows: RocketConfirmHistoryRow[];
+  total: number;
+  limit: number;
+  lease_ttl_minutes: number;
 }
 
 export interface RocketRiQueue {
@@ -1799,6 +1849,46 @@ export function fetchRocketPipelineStage(
 
 export function fetchRocketRiQueue(): Promise<RocketRiQueue> {
   return fetchApi<RocketRiQueue>("/api/overview/rocket-ri-queue");
+}
+
+// ── 「거래명세서확인」(RI→CI) 실행 (계약 CONTRACT_1p_invoice_confirm_write, Jino 승인 2026-08-28) ──
+// ★되돌릴 수 없는 회계 확정이다. 미리보기(preview)와 실행(request)이 **다른 호출**인 것이
+//   설계의 전부다 — 미리보기는 명령을 만들지 않고, 실행은 토큰을 실어야만 통과한다.
+
+/** 라이브 실행 이중확인 토큰(백엔드 `_write_guard.WRITE_CONFIRM_TOKEN`과 같은 값).
+ *  ★보안 장치가 아니라 **실수 방지**다 — 「실행」 클릭에서만 실린다. */
+const ROCKET_CONFIRM_TOKEN = "CONFIRM_LIVE_WRITE";
+
+/** 모달용 dry-run. supplier로 아무것도 나가지 않는다. 검증 실패는 400(사유를 그대로 보여준다). */
+export function previewRocketInvoiceConfirm(
+  purchaseOrderSeq: number,
+): Promise<RocketConfirmPreview> {
+  return fetchApi<RocketConfirmPreview>("/api/coupang/ops/rocket/invoice-confirm/preview", {
+    method: "POST",
+    body: JSON.stringify({ purchase_order_seq: purchaseOrderSeq }),
+  });
+}
+
+/** 모달 「실행」 → 확인 명령 1건 적재. **여기가 사람 손이다**(자동 호출 경로를 만들지 말 것). */
+export function requestRocketInvoiceConfirm(
+  purchaseOrderSeq: number,
+  note?: string,
+): Promise<Record<string, unknown>> {
+  return fetchApi("/api/coupang/ops/rocket/invoice-confirm", {
+    method: "POST",
+    body: JSON.stringify({
+      purchase_order_seq: purchaseOrderSeq,
+      confirm: ROCKET_CONFIRM_TOKEN,
+      note,
+    }),
+  });
+}
+
+/** 실행 이력(감사 레코드) — 감사 레코드가 DB에만 있고 화면에 없으면 미달이다(계약 §4 S2). */
+export function fetchRocketConfirmHistory(limit = 50): Promise<RocketConfirmHistory> {
+  return fetchApi<RocketConfirmHistory>(
+    `/api/coupang/ops/rocket/invoice-confirm/history?limit=${limit}`,
+  );
 }
 
 // ── 로켓1P 공용: 창 신선도 (2026-08-06 적대 리뷰 P1) ──

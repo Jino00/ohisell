@@ -2093,6 +2093,57 @@ class CoupangRocketShipmentBox(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangRocketInvoiceConfirm(Base):
+    """1P 「거래명세서확인」(RI→CI) 실행 명령 겸 **감사 레코드** (계약 CONTRACT_1p_invoice_confirm_write).
+
+    ★이 표 1행 = 사실 1개다. 한 명령 = PO 1건 = POST 최대 1회(계약 §2). 배치 없음.
+    ★★**되돌릴 수 없는 회계 확정**이라 정정 경로가 없다 — 사후 가시성·근거 보존이 그 자리를
+      대신하는 전부다(전역 §1). 그래서 요청·사전판정·응답 body **원문**·사후 상태를 한 행에 남긴다.
+      `response_body`를 버리고 success 불리언만 남기는 것은 계약 §3 금지선이다(실패 시 body가
+      유일한 진단 재료 — supplier가 구조화 에러를 안 준다: `alert(data)`).
+
+    state 전이 (재시도 없음 — 계약 §3 「자동 재시도 절대 금지」):
+      pending  → claimed → succeeded | already_confirmed | failed | unknown
+      · pending/claimed = «열린» 명령. 같은 PO에 열린 명령이 있으면 새 명령을 만들지 않는다.
+      · succeeded         = HTTP 200 ∧ 응답 JSON `success == true`
+      · already_confirmed = **사전 GET에 버튼이 없었다** → POST를 보내지 않았다(멱등성 미상 우회)
+      · failed            = 응답이 명시적으로 `success == false` — 「안 일어났다」가 확정된 경우만
+      · unknown           = 그 외 전부(Mac 미응답·TTL 만료·비200·JSON 판독 불능).
+        ★unknown은 «POST가 나갔는지 모른다»는 뜻이라 **재수집 전 재실행을 잠근다**(계약 §4 S1-7).
+          잠금 해제 판정은 이 표가 아니라 원장이 한다: 그 PO의 `synced_at > finished_at`이면
+          재수집이 실상태를 확인한 것이므로 풀린다(별도 해제 쓰기 경로를 만들지 않는다 —
+          해제를 사람·코드가 «선언»하면 그게 곧 재시도 우회로가 된다).
+
+    grain: 이력 누적이라 purchase_order_seq에 unique를 걸지 않는다(같은 PO가 실패 후 다시 시도될
+      수 있다 — 단 그 시도도 사람 클릭에서만 시작하고 사전 GET 게이트를 다시 통과한다).
+    시각은 전부 **KST naive**(`kst_now()`) — 이 저장소 로켓 계열의 `synced_at`과 같은 규약이다.
+      server_default를 쓰지 않는 이유: SQLite `now()`는 UTC라 규약이 갈린다.
+    """
+
+    __tablename__ = "coupang_rocket_invoice_confirm"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    purchase_order_seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    # 요청(사람 클릭) — 명령의 유일한 생성점
+    requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    requested_note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # 요청 시점에 화면이 보여 준 금액 — 사후에 «무엇을 보고 눌렀나»를 재구성하는 근거
+    received_amount_at_request: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 임대(1회뿐 — 만료는 재임대가 아니라 unknown 종결)
+    lease: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 사전 GET 게이트(계약 §2) — button_present | button_absent | fetch_failed
+    precheck: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    precheck_http_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # POST 결과 — body는 **원문 그대로**(자르되 넉넉히)
+    http_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    response_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+
 class RocketProductCostMap(Base):
     """쿠팡 로켓배송(1P) 원가 브리지 — 발주상세 상품번호 → product_master.internal_sku (트랙 rocket-1p, S4.5b/D-13).
 
