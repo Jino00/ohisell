@@ -6096,6 +6096,11 @@ export interface CostStandardLine {
   price_source: string | null;
   price_note: string | null;
   material_id: number | null;
+  /** ★구성 줄의 DB id — 「이 줄의 종을 바꾼다」(설계 Q6)를 부르는 열쇠다.
+   * 이게 없으면 화면은 `standard.lines[i]` ↔ 실제 구성 줄을 **인덱스로 짝지어야** 하고,
+   * 그 암묵 불변식은 계산기에 라인 필터가 하나 생기는 순간 조용히 깨져 **엉뚱한 줄의
+   * 종이 바뀐다.** */
+  line_id: number | null;
   usable: boolean;
   /** ★엑셀 참고값 — **채택 전이라 단가가 아니다.** 합계(`std_cost_*`·`partial_*`)엔
    * 절대 안 들어간다(계약 §3 금지선). 화면은 별도 열로 그리되 합계에서 뺀다. */
@@ -6384,6 +6389,24 @@ export function pickCostTableItem(
   return fetchApi(`/api/cost/recipes/${recipeId}/pick-cost-table-item`, {
     method: "POST",
     body: JSON.stringify({ item_id: itemId }),
+  });
+}
+
+/** 구성 한 줄이 가리키는 **종을 사람이 바꾼다** (설계 Q6).
+ *
+ * ★이 길이 없어서 prod 레시피 45·97(SKU 8개)이 **각 196.9원 과대**인 채로 고칠 방법이
+ * 없었다 — 구성이 바뀌는 길은 업로드 통짜 재생성과 픽뿐이었고 둘 다 「이 한 줄만」을 못 한다.
+ * ★단가를 보내지 않는다: 종을 바꾸면 그 종의 단가가 따라올 뿐이다(계약 §3 금지선).
+ * ★승인된 레시피는 서버가 409로 거부한다 — 먼저 승인을 해제한다.
+ */
+export function swapRecipeLineMaterial(
+  recipeId: number,
+  lineId: number,
+  materialId: number,
+): Promise<{ recipe: CostRecipe }> {
+  return fetchApi(`/api/cost/recipes/${recipeId}/lines/${lineId}/material`, {
+    method: "PATCH",
+    body: JSON.stringify({ material_id: materialId }),
   });
 }
 

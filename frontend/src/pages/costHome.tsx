@@ -27,6 +27,7 @@ import type { CostBoard, CostMaterial } from "../lib/api";
 import { formatKstDateTime } from "../lib/costMenuSurface";
 import {
   ROUND_TRIP_COLUMNS,
+  ROUND_TRIP_NUMERIC,
   roundTripBadges,
   roundTripCountText,
   type CostInboxGroup,
@@ -264,6 +265,14 @@ export function CostRoundTripTable({
         행」으로 오독되어, 파일에서 오타 하나 고친 종이 죽는다. 이 화면에서 표는 <b>읽기 전용</b>
         이고, 값을 고치는 자리는 행을 눌러 여는 부자재 상세다.
       </p>
+      {/* ★열 머리의 「수정 가능 / 읽기전용」을 ✎·🔒로 접은 대가로, 낱말은 여기 범례에 남긴다.
+          계약 §3은 자백 문구의 **삭제를 금지**하고 이동·묶음·배지화만 허용한다 — 툴팁에만
+          두면 마우스를 올린 사람에게만 보이므로 그건 이동이 아니라 사실상 숨김이다. */}
+      <p className="mt-1 text-[11px] text-gray-500" data-testid="roundtrip-editable-legend">
+        열 머리의 <span className="text-blue-600">✎</span> = <b>수정 가능</b>(S3 파일에서 고쳐
+        올릴 수 있는 열) · <span className="text-gray-400">🔒</span> = <b>읽기전용</b>(파일에서
+        고쳐도 반영되지 않는 열).
+      </p>
 
       <div className="mt-2">{filterBar}</div>
       <div className="mt-2 flex flex-wrap items-center gap-3">
@@ -299,21 +308,32 @@ export function CostRoundTripTable({
       ) : (
         <div className="mt-2 overflow-x-auto">
           <table className="w-full text-xs">
-            <thead className="text-gray-500">
-              <tr className="text-left border-b align-bottom">
+            <thead className="bg-gray-50 text-gray-500">
+              <tr className="text-left border-b">
                 {ROUND_TRIP_COLUMNS.map((c) => (
-                  <th key={c.key} className="py-1 pr-2 whitespace-nowrap" title={c.note}>
-                    <div>{c.label}</div>
+                  <th
+                    key={c.key}
+                    className={`px-2 py-2 font-medium whitespace-nowrap ${
+                      ROUND_TRIP_NUMERIC.has(c.key) ? "text-right" : "text-left"
+                    }`}
+                    title={c.note}
+                  >
+                    {c.label}
                     {/* ★열마다 「파일에서 고칠 수 있나」를 미리 말한다 — 안 말하면 사람이
-                        S3 파일을 받아 고쳐 올린 «뒤»에야 반영 불가를 알게 된다. */}
-                    <div
-                      className={`text-[10px] font-normal ${
-                        c.editable ? "text-blue-600" : "text-gray-400"
+                        S3 파일을 받아 고쳐 올린 «뒤»에야 반영 불가를 알게 된다.
+                        ★2026-08-28: 그 문구를 **지우지 않고 배지로 접었다**(계약 §3은 자백
+                        문구의 이동·묶음·배지화만 허용한다). 12열에 두 줄짜리 머리를 세우면
+                        머리 높이가 두 배가 되고 각 열이 「수정 가능」의 폭만큼 넓어진다 —
+                        낱말은 `title`과 아래 범례가 그대로 말한다. */}
+                    <span
+                      className={`ml-1 text-[10px] font-normal ${
+                        c.editable ? "text-blue-600" : "text-gray-300"
                       }`}
+                      title={c.editable ? "수정 가능" : "읽기전용"}
                       data-testid={`roundtrip-col-${c.key}-editable`}
                     >
-                      {c.editable ? "수정 가능" : "읽기전용"}
-                    </div>
+                      {c.editable ? "✎" : "🔒"}
+                    </span>
                   </th>
                 ))}
               </tr>
@@ -328,25 +348,30 @@ export function CostRoundTripTable({
                     className="border-b last:border-0 cursor-pointer hover:bg-gray-50"
                     onClick={() => onSelectRow(m.id)}
                   >
-                    <td className="py-1 pr-2 font-mono">{m.id}</td>
-                    <td className="py-1 pr-2 max-w-[18rem] truncate" title={m.name}>
+                    <td className="px-2 py-1 font-mono text-gray-500">{m.id}</td>
+                    {/* ★`max-w` + `truncate` — 참조 화면(`Rocket1PFunnel.tsx`)의 「옵션 / 상품」
+                        열이 쓰는 규격이다. 긴 이름 하나가 표 폭을 통째로 밀어내면 나머지 11열이
+                        그만큼 짜부라진다(그게 날짜가 접히던 경로였다). 잘린 전문은 `title`이 준다. */}
+                    <td className="px-2 py-1 max-w-[16rem] truncate" title={m.name}>
                       {m.name}
                     </td>
-                    <td className="py-1 pr-2">{formFactorLabel(m.form_factor)}</td>
-                    <td className="py-1 pr-2">{m.part && m.part.trim() ? m.part : "—"}</td>
-                    <td className="py-1 pr-2">{m.unit ?? "—"}</td>
+                    <td className="px-2 py-1 whitespace-nowrap">{formFactorLabel(m.form_factor)}</td>
+                    <td className="px-2 py-1 whitespace-nowrap">
+                      {m.part && m.part.trim() ? m.part : "—"}
+                    </td>
+                    <td className="px-2 py-1 whitespace-nowrap">{m.unit ?? "—"}</td>
                     {/* ★단가 없음 행은 **빈 칸**이지 0원이 아니다 — `formatCostWon(null)`이
                         「—」를 낸다. 그 사실을 말하는 원문은 아래 배지의 툴팁에 산다. */}
-                    <td className="py-1 pr-2 text-right font-medium">
+                    <td className="px-2 py-1 text-right tabular-nums font-medium whitespace-nowrap">
                       {formatCostWon(m.latest_price_ex_vat)}
                     </td>
-                    <td className="py-1 pr-2 text-right text-gray-600">
+                    <td className="px-2 py-1 text-right tabular-nums text-gray-600 whitespace-nowrap">
                       {formatCostWon(m.latest_price_inc_vat)}
                     </td>
-                    <td className="py-1 pr-2 text-gray-500">
+                    <td className="px-2 py-1 text-gray-500 whitespace-nowrap">
                       {m.latest_price_inc_derived ? "×1.1" : "—"}
                     </td>
-                    <td className="py-1 pr-2">
+                    <td className="px-2 py-1 whitespace-nowrap">
                       {m.latest_price_source ? priceSourceLabel(m.latest_price_source) : "—"}
                     </td>
                     {/* ★`whitespace-nowrap` — 이 표는 `w-full`이라 브라우저가 「상태 / 비고」의
@@ -354,31 +379,45 @@ export function CostRoundTripTable({
                         접혀 **한 행이 두 줄**이 되고, 139행 전체의 높이가 들쭉날쭉해진다
                         (Jino 2026-08-28 11:09 «날짜가 2줄이 되지 않도록»). 헤더 `th`는 이미
                         nowrap이라 열 폭은 헤더가 잡아 주는데, 접히던 것은 값 쪽이었다. */}
-                    <td className="py-1 pr-2 whitespace-nowrap">
+                    <td className="px-2 py-1 whitespace-nowrap">
                       {m.latest_price_effective_date ?? "—"}
                     </td>
-                    <td className="py-1 pr-2 text-right text-gray-500">
+                    <td className="px-2 py-1 text-right tabular-nums text-gray-500 whitespace-nowrap">
                       {formatCostWon(m.excel_ref_price)}
                     </td>
-                    <td className="py-1 pr-2">
-                      <span
-                        className={
-                          m.status === "approved" ? "text-green-700" : "text-amber-800"
-                        }
-                      >
-                        {materialStatusLabel(m.status)}
-                      </span>
-                      {m.note ? <span className="text-gray-500"> · {m.note}</span> : null}
-                      {badges.map((b) => (
+                    <td className="px-2 py-1 max-w-[22rem]">
+                      {/* ★배지가 비고보다 «앞»에 서고, 줄어드는 쪽은 비고다(`shrink-0` ↔
+                          `truncate`). 배지는 지금 데이터를 라이브로 세지만, 비고는 종을 만들 때
+                          한 번 박히고 갱신되지 않는 자유 텍스트다 — 폭이 모자랄 때 살아남아야
+                          하는 쪽은 계산된 사실이지 굳은 문장이 아니다. 전문은 `title`이 준다. */}
+                      <div className="flex items-center gap-1 min-w-0">
                         <span
-                          key={b.key}
-                          title={b.title}
-                          data-testid={`roundtrip-badge-${m.id}-${b.key}`}
-                          className="ml-1 text-[10px] px-1 rounded border border-gray-300 text-gray-600"
+                          className={`shrink-0 whitespace-nowrap ${
+                            m.status === "approved" ? "text-green-700" : "text-amber-800"
+                          }`}
                         >
-                          {b.label}
+                          {materialStatusLabel(m.status)}
                         </span>
-                      ))}
+                        {badges.map((b) => (
+                          <span
+                            key={b.key}
+                            title={b.title}
+                            data-testid={`roundtrip-badge-${m.id}-${b.key}`}
+                            className="shrink-0 whitespace-nowrap text-[10px] px-1 rounded border border-gray-300 text-gray-600"
+                          >
+                            {b.label}
+                          </span>
+                        ))}
+                        {m.note ? (
+                          <span
+                            className="text-gray-500 truncate min-w-0"
+                            title={m.note}
+                            data-testid={`roundtrip-note-${m.id}`}
+                          >
+                            · {m.note}
+                          </span>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 );

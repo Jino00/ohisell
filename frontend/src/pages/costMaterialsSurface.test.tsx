@@ -874,6 +874,7 @@ describe("표준원가 계산 내역 — 못 쓰는 사유가 사람 말이 된�
     lines: [
       {
         label: "cleaning kit",
+        line_id: 9001,
         quantity: "1",
         unit_price_ex_vat: "178.78",
         unit_price_inc_vat: "196.66",

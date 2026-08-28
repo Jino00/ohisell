@@ -94,6 +94,17 @@ class PickIn(BaseModel):
     item_id: int
 
 
+class LineMaterialIn(BaseModel):
+    """구성 한 줄이 가리킬 **부자재 종** (설계 Q6).
+
+    ★단가를 받지 않는다 — 종을 바꾸면 그 종의 단가가 따라올 뿐이다. 여기서 단가를 받으면
+    「이 레시피에서만 다른 값」이 생기고, 그게 계약 §0-A‴이 «축 부족»이라 진단한 병을
+    다시 만드는 길이다(같은 부자재가 다른 값 = 실은 다른 부자재).
+    """
+
+    material_id: int
+
+
 class AbsentIn(BaseModel):
     """「원가표에 없음」 확인에 남기는 사유 (계약 합격 19).
 
@@ -448,6 +459,24 @@ def pick_cost_table_item(recipe_id: int, body: PickIn, db: Session = Depends(get
 def unpick_cost_table_item(recipe_id: int, db: Session = Depends(get_db)):
     """픽을 되돌린다 — 되돌릴 길이 없으면 사람이 고르기를 주저한다."""
     recipe = _guard(R.unpick_cost_table_item, db, recipe_id)
+    db.commit()
+    return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
+
+
+@router.patch("/recipes/{recipe_id}/lines/{line_id}/material")
+def swap_line_material(
+    recipe_id: int, line_id: int, body: LineMaterialIn, db: Session = Depends(get_db)
+):
+    """구성 한 줄이 가리키는 종을 사람이 바꾼다 (설계 Q6).
+
+    ★이 엔드포인트가 없어서 prod 레시피 45·97(SKU 8개)이 **각 196.9원 과대**인 채로
+    고칠 길이 없었다 — 구성이 바뀌는 길은 업로드 통짜 재생성과 픽뿐이었고, 둘 다
+    「이 한 줄만」을 못 한다.
+
+    ★`PATCH`인 이유: 줄을 지우고 다시 만드는 게 아니라 **한 필드를 고치는 것**이다.
+    지우고 만들면 줄 id가 바뀌어 감사 흔적(`note`에 쌓이는 교체 이력)이 끊긴다.
+    """
+    recipe = _guard(R.swap_line_material, db, recipe_id, line_id, body.material_id)
     db.commit()
     return {"recipe": R.recipe_payload(db, recipe, with_links=True)}
 

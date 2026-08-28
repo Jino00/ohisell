@@ -783,7 +783,14 @@ def _upsert_materials(
                 excel_ref_price=ref_price,
                 form_factor=form_factor,
                 part=part,
-                note="원가 정본 엑셀에서 구성 파싱으로 생성 — 단가는 아직 없다",
+                # ★`note`엔 **출처만** 적는다 — 「단가는 아직 없다」 같은 «현재 상태» 주장을
+                #   넣지 않는다(Jino 2026-08-28 11:27 승인). 이 문장은 종을 만드는 이 자리에서
+                #   한 번 박히고 **아무도 갱신하지 않는다**: 나중에 단가가 들어와도 그대로
+                #   남아, prod 139종 중 **74종**이 단가를 가진 채 「단가는 아직 없다」라고
+                #   말하고 있었다. 상태는 자유 텍스트가 아니라 **계산이 답한다** —
+                #   화면의 `▢단가없음` 배지가 `latest_price_*`를 라이브로 보고 세운다.
+                #   출처는 시간이 지나도 참이라 남는다.
+                note="원가 정본 엑셀에서 구성 파싱으로 생성",
             )
             db.add(m)
             out[name] = m
@@ -951,7 +958,8 @@ def _material_for_name(
         status="unconfirmed",
         category=category,
         excel_label=name,
-        note="원가표 항목 픽(D-CPP-59)으로 생성 — 단가는 아직 없다",
+        # ★위와 같은 이유로 출처만 적는다(상태 주장 금지) — 786행 주석 참조.
+        note="원가표 항목 픽(D-CPP-59)으로 생성",
     )
     db.add(m)
     db.flush()
@@ -1125,6 +1133,73 @@ def pick_cost_table_item(db: Session, recipe_id: int, item_id: int) -> CostRecip
     return recipe
 
 
+def swap_line_material(
+    db: Session, recipe_id: int, line_id: int, material_id: int
+) -> CostRecipe:
+    """구성 한 줄이 가리키는 **종을 사람이 바꾼다** (계약 설계 Q6).
+
+    ★왜 이 함수가 필요했나 — **저장소에 구성 라인의 종을 바꾸는 길이 하나도 없었다.**
+    구성이 바뀌는 길은 ①업로드가 통째로 다시 만들거나 ②픽이 원가표 항목 라인을 붙이는
+    것뿐이었고, 둘 다 「이 한 줄만 다른 종을 가리키게」를 못 한다. 그래서 prod의 레시피
+    45·97(SKU 8개)이 **각 196.9원씩 과대**인 채로 고칠 길 없이 남아 있었다.
+
+    ★그 병의 정체는 「단가가 틀렸다」가 아니라 **「구성이 엉뚱한 종을 가리킨다」**이다
+    (Jino 2026-08-27 22:44 *"같은 부자재가 다른 값이 아니고, 다른 부자재인거지"*). 폴드
+    제품 중 **작은 것 2개**(힌지 2매·사생활 외부2매)는 작은 포장을 쓰는데 시스템은 그것을
+    `패키지 (fold)` 한 종으로 묶어 320원을 물렸다 — 파일은 171원이라 말한다. 그래서 해법이
+    「단가를 (종, 제품)으로 쪼개기」가 아니라 **「이미 있는 flip 종을 가리키게 하기」**다.
+
+    ★단가를 여기서 만들지 않는다 — 종을 바꾸면 그 종의 단가가 따라올 뿐이다. 계약 §3
+    금지선(시스템이 추측한 단가 저장 금지)에 닿지 않는 이유가 그것이다.
+
+    ★승인된 레시피는 거부한다 — `pick_cost_table_item`과 같은 규율이다. 구성이 바뀌면
+    표준원가가 바뀌는데, 승인은 「이 원가가 맞다」는 사람의 확정이다. 조용히 갈아치우면
+    Jino가 승인한 숫자가 승인 없이 달라진다.
+    """
+
+    recipe = get_recipe(db, recipe_id)
+    if recipe.status == "approved":
+        raise CostMenuConflict(
+            "승인된 레시피의 구성은 바꾸지 않는다 — 먼저 승인을 해제한다. "
+            "구성이 바뀌면 표준원가가 바뀌고, 승인은 그 원가에 대한 확정이기 때문이다."
+        )
+
+    line = next((l for l in recipe.lines if l.id == line_id), None)
+    if line is None:
+        # ★「이 레시피의 줄이 아니다」와 「그런 줄이 없다」를 같은 답으로 낸다 — 남의 레시피
+        #   줄을 이 경로로 바꾸는 길을 열지 않는다.
+        raise CostMenuError("이 레시피에 그런 구성 줄이 없다.")
+
+    if line.material_id is None:
+        raise CostMenuConflict(
+            "원장에서 단가가 오는 줄이다 — 종을 가리키지 않으므로 이 경로로 바꾸지 않는다."
+        )
+
+    material = db.query(CostMaterial).filter(CostMaterial.id == material_id).first()
+    if material is None:
+        raise CostMenuError("그런 부자재 종이 없다.")
+
+    before = line.material
+    if before is not None and before.id == material.id:
+        # 같은 종으로 바꾸는 것은 사건이 아니다 — 스탬프를 남기지 않는다(감사 흔적 오염).
+        return recipe
+
+    # ★무엇이 언제 어디서 어디로 바뀌었는지 **줄에 남긴다**. 이 교체는 표준원가를 바꾸는
+    #   행위라 근거가 없으면 나중에 「이 레시피는 왜 flip 종을 쓰지?」에 답할 수 없다
+    #   (전역 §1 자동 진행 3요소 중 «근거 보존»). `kst_now()`인 이유: prod 서버가 UTC라
+    #   `datetime.now()`는 사람이 읽는 흔적에 UTC를 찍는다.
+    stamp = (
+        f"[{kst_now():%Y-%m-%d %H:%M} KST] 종 교체: "
+        f"{before.name if before else '(없음)'} → {material.name}"
+    )
+    line.note = f"{line.note}\n{stamp}" if line.note else stamp
+    line.material_id = material.id
+    line.material = material
+
+    db.flush()
+    return recipe
+
+
 def unpick_cost_table_item(db: Session, recipe_id: int) -> CostRecipe:
     """픽을 되돌린다 — 구성 줄도 함께 지운다(픽이 만든 것이므로).
 
@@ -1267,6 +1342,7 @@ def _line_inputs(recipe: CostRecipe, rule: str) -> list[SC.RecipeLineInput]:
                     label=line.ledger_item_name or "(종 없음)",
                     quantity=line.quantity,
                     price_status=LC.STATUS_MISSING,
+                    line_id=line.id,
                     ledger_item_name=line.ledger_item_name,
                 )
             )
@@ -1295,6 +1371,7 @@ def _line_inputs(recipe: CostRecipe, rule: str) -> list[SC.RecipeLineInput]:
                         else status
                     ),
                     material_id=material.id,
+                    line_id=line.id,
                     price_source=price.source if price else None,
                     price_note=price.note if price else None,
                     # ★참고값은 «단가 자리»가 아니라 자기 칸으로 간다 — 화면이 「채택 전」이라고
@@ -1311,6 +1388,7 @@ def _line_inputs(recipe: CostRecipe, rule: str) -> list[SC.RecipeLineInput]:
                 unit_price_inc_vat=price.unit_price_inc_vat if price else None,
                 price_status=status,
                 material_id=material.id,
+                line_id=line.id,
                 price_source=price.source if price else None,
                 price_note=price.note if price else None,
                 excel_ref_price=material.excel_ref_price,
@@ -1568,6 +1646,12 @@ def standard_payload(result: SC.StandardCostResult) -> dict:
                 "price_source": ln.price_source,
                 "price_note": ln.price_note,
                 "material_id": ln.material_id,
+                # ★구성 줄의 DB id — 화면이 「이 줄의 종을 바꾼다」(설계 Q6)를 부르는 열쇠다.
+                #   ⚠️이 저장소엔 표준원가 라인 직렬화기가 **두 벌** 있다(여기와
+                #   `standard_cost.py`의 dict). API가 실제로 내보내는 것은 **여기**다 —
+                #   한쪽만 고치면 테스트는 초록인데 화면엔 안 온다. 실제로 이 필드를
+                #   추가할 때 저쪽만 고쳤다가 HTTP body 단언에서 잡혔다.
+                "line_id": ln.line_id,
                 "usable": ln.usable,
                 # ★「엑셀 참고값(채택 전)」 열의 원료 — **단가가 아니다.** `std_cost_*`·
                 #   `partial_*` 어디에도 안 더해진다(SC.StandardCostLine.usable 주석).

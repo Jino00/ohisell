@@ -29,6 +29,7 @@ import type {
   CostMaterial,
   CostRecipe,
   CostSetting,
+  CostStandardLine,
 } from "../lib/api";
 // ★P1-1(적대 리뷰)용 — 승인/승인취소 호출부가 실제로 눌리는지 재려면 그 함수들
 //   «자신»을 vi.fn()으로 잡아야 한다(아래 vi.mock 팩토리에서 오버라이드).
@@ -71,11 +72,13 @@ import {
   MaterialPriceHistory,
   recipePlaceholderText,
   reconcileSelectedId,
+  RecipeDetail,
   RecipeList,
   StandardBreakdown,
   StandardCostBoard,
   unreachableLedgerLines,
   unreachableReason,
+  ValuationBadge,
 } from "./CostPage";
 
 // ── prod 실측값(2026-08-22) — 합격 1이 화면에서 보겠다는 바로 그 두 로트 ──
@@ -384,6 +387,7 @@ const RECIPE: CostRecipe = {
     lines: [
       {
         label: "지문방지필름 TPU 3매 · 필름 (bar)",
+        line_id: 8001,
         quantity: "3",
         unit_price_ex_vat: "600.00",
         unit_price_inc_vat: "660.00",
@@ -401,6 +405,7 @@ const RECIPE: CostRecipe = {
       },
       {
         label: "패키지 (bar)",
+        line_id: 8002,
         quantity: "1",
         unit_price_ex_vat: "98.00",
         unit_price_inc_vat: "107.80",
@@ -2686,6 +2691,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
             lines: [
               {
                 label: "지문방지필름 TPU 3매 · 필름 (bar)",
+                line_id: 8003,
                 quantity: "3",
                 unit_price_ex_vat: null,
                 unit_price_inc_vat: null,
@@ -2965,3 +2971,268 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
 // ★다른 라우트에서 같은 단언을 반복하지 않는다: 메뉴는 `Layout`이 라우트와 무관하게 그리므로
 //   SUR-4가 이미 그 사실을 잰다. 대신 다른 페이지(대시보드 등)를 렌더하면 그 페이지의 목데이터
 //   요구가 이 파일에 딸려 들어와, **원가와 무관한 이유로 빨개지는 테스트**가 된다.
+
+// ──────────────────────────────────────────────
+// 설계 Q6 — 구성 줄의 «종»을 화면에서 바꾼다
+//
+// ★prod 레시피 45·97(SKU 8개)이 각 196.9원 과대인 것을 고치는 유일한 표면이다. 백엔드
+//   엔드포인트만 있고 이 표면이 없으면 그건 이 저장소가 반복해 밟은 「만드는 층 ≠ 닿는 층」이다
+//   — 그래서 아래는 «컴포넌트가 값을 그리나»가 아니라 **「사람이 고르면 그 신호가 실제로
+//   나가나」**를 잰다.
+// ──────────────────────────────────────────────
+describe("Q6: 구성 줄의 종을 바꾸는 표면", () => {
+  const FOLD: CostMaterial = { ...KIT, id: 54, name: "패키지 (fold)", form_factor: "fold" };
+  const FLIP: CostMaterial = { ...KIT, id: 24, name: "패키지 (flip)", form_factor: "flip" };
+
+  function breakdown(overrides: Partial<CostStandardLine> = {}) {
+    return {
+      computable: true,
+      std_cost_ex_vat: "320.00",
+      std_cost_inc_vat: "352.00",
+      reason: null,
+      unresolved: [],
+      partial_ex_vat: "320.00",
+      partial_inc_vat: "352.00",
+      line_count: 1,
+      lines: [
+        {
+          label: "패키지 (fold)",
+          line_id: 300,
+          quantity: "1",
+          unit_price_ex_vat: "320.00",
+          unit_price_inc_vat: "352.00",
+          amount_ex_vat: "320.00",
+          amount_inc_vat: "352.00",
+          price_status: "ok",
+          inc_derived: false,
+          price_source: "manual",
+          price_note: null,
+          material_id: 54,
+          usable: true,
+          excel_ref_price: "171.00",
+          ...overrides,
+        },
+      ],
+    };
+  }
+
+  it("고른 종이 «그 줄의 id»와 함께 나간다 — 인덱스가 아니다", () => {
+    const calls: Array<[number, number]> = [];
+    render(
+      <StandardBreakdown
+        standard={breakdown()}
+        swap={{
+          materials: [FOLD, FLIP],
+          onSwap: (lineId, materialId) => calls.push([lineId, materialId]),
+        }}
+      />,
+    );
+
+    // ★접혀 있다 — 눌러야 열린다(139종 목록이 줄마다 펼쳐지면 표가 다시 넓어진다).
+    expect(screen.queryByTestId("breakdown-swap-300")).toBeNull();
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-300"));
+
+    const select = screen.getByTestId("breakdown-swap-300") as HTMLSelectElement;
+    expect(select.value).toBe("54");
+    fireEvent.change(select, { target: { value: "24" } });
+
+    expect(calls).toEqual([[300, 24]]);
+  });
+
+  it("같은 종을 다시 고르면 아무것도 안 나간다 — 헛쓰기를 만들지 않는다", () => {
+    const calls: Array<[number, number]> = [];
+    render(
+      <StandardBreakdown
+        standard={breakdown()}
+        swap={{ materials: [FOLD, FLIP], onSwap: (a, b) => calls.push([a, b]) }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-300"));
+    fireEvent.change(screen.getByTestId("breakdown-swap-300"), { target: { value: "54" } });
+    expect(calls).toEqual([]);
+  });
+
+  it("승인된 레시피면 잠기고, «왜»가 화면에 있다", () => {
+    render(
+      <StandardBreakdown
+        standard={breakdown()}
+        swap={{
+          materials: [FOLD, FLIP],
+          onSwap: () => {},
+          disabledReason: "승인된 레시피의 구성은 바꾸지 않는다 — 먼저 승인을 해제한다",
+        }}
+      />,
+    );
+
+    // 잠기면 «열 수조차» 없다 — 열어 놓고 고른 뒤에 거절하면 헛수고를 시킨다.
+    const opener = screen.getByTestId("breakdown-swap-open-300") as HTMLButtonElement;
+    expect(opener.disabled).toBe(true);
+    expect(opener.title).toContain("먼저 승인을 해제한다");
+  });
+
+  it("원장에서 단가가 오는 줄엔 안 선다 — 종을 가리키지 않는 줄이다", () => {
+    render(
+      <StandardBreakdown
+        standard={breakdown({ material_id: null, label: "2.5D Clear Glass 2ea" })}
+        swap={{ materials: [FOLD, FLIP], onSwap: () => {} }}
+      />,
+    );
+
+    expect(screen.queryByTestId("breakdown-swap-open-300")).toBeNull();
+  });
+
+  it("swap을 안 주면 종전대로 읽기 전용이다 — 조작이 아무 데나 따라다니지 않는다", () => {
+    render(<StandardBreakdown standard={breakdown()} />);
+    expect(screen.queryByTestId("breakdown-swap-open-300")).toBeNull();
+  });
+
+  // ★★호출부 — 위 다섯이 전부 통과해도 `RecipeDetail`이 `swap`을 안 넘기면 화면엔 아무것도
+  //   없다. 이 저장소가 반복해 밟은 결함이 정확히 그 자리(SUR-2)라 «주입»까지 잰다.
+  it("RecipeDetail이 계산 내역에 종 교체를 실제로 넘긴다", () => {
+    const calls: Array<[number, number]> = [];
+    render(
+      <RecipeDetail
+        recipe={{ ...RECIPE, status: "draft", standard: breakdown() }}
+        busy={false}
+        onApprove={() => {}}
+        onUnapprove={() => {}}
+        onAdopt={() => {}}
+        materials={[FOLD, FLIP]}
+        onSwapLineMaterial={(lineId, materialId) => calls.push([lineId, materialId])}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-300"));
+    fireEvent.change(screen.getByTestId("breakdown-swap-300"), { target: { value: "24" } });
+    expect(calls).toEqual([[300, 24]]);
+    // 규칙 문구도 화면에 선다 — 「추천하지 않는다」는 계약 §4 S4의 원문이다.
+    expect(screen.getByTestId("swap-rule-note").textContent).toContain("추천하지 않는다");
+  });
+
+  it("RecipeDetail이 승인된 레시피에서 잠금 사유를 내려보낸다", () => {
+    render(
+      <RecipeDetail
+        recipe={{ ...RECIPE, status: "approved", standard: breakdown() }}
+        busy={false}
+        onApprove={() => {}}
+        onUnapprove={() => {}}
+        onAdopt={() => {}}
+        materials={[FOLD, FLIP]}
+        onSwapLineMaterial={() => {}}
+      />,
+    );
+
+    expect((screen.getByTestId("breakdown-swap-open-300") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+});
+
+// ──────────────────────────────────────────────
+// 화면 밀도 — 첫 화면이 조작으로 뒤덮이지 않는다
+//
+// ★Jino 2026-08-28 «화면의 사용이 너무 비효율적인거 아니야?». 원가 페이지 머리에 배너가
+//   다섯이고 그 중 재고 평가방법 카드가 «경로 안내 + 버튼 2개 + 이력»까지 항상 펼쳐 놓아
+//   본문이 스크롤 아래로 밀려 있었다.
+// ★접는 것은 **삭제가 아니다**(계약 §3은 자백 문구의 삭제를 금지하고 이동·묶음·배지화만
+//   허용한다). 그리고 접힌 것은 자백이 아니라 **조작**이다 — 「선입선출이 미확인이다」라는
+//   사실 자체는 접힌 줄 «위»에 그대로 서 있다.
+// ★`<details>`는 닫혀도 자식이 DOM에 남아 `getByText`가 그대로 찾는다 — 그래서 기존
+//   1,107건이 **전부 초록인 채로** 이 변경을 통과시켰다. 접힘은 이 테스트만 잰다.
+// ──────────────────────────────────────────────
+describe("화면 밀도: 재고 평가방법 카드", () => {
+  it("경고 줄은 늘 보이고, 확인 «절차»는 접혀 있다", () => {
+    render(
+      <ValuationBadge
+        settings={SETTINGS}
+        history={[]}
+        busy={false}
+        onReconfirm={() => {}}
+      />,
+    );
+
+    // ①경고 자체는 접힌 것 «밖»에 있다 — 이게 삭제도 은닉도 아님의 증거다.
+    const panel = screen.getByTestId("valuation-confirm-panel") as HTMLDetailsElement;
+    expect(screen.getByText(/재고 평가방법/).closest("details")).toBeNull();
+
+    // ②절차는 접혀 있다. `open`이 기본 true가 되는 변이는 여기서 죽는다.
+    expect(panel.tagName).toBe("DETAILS");
+    expect(panel.open).toBe(false);
+
+    // ③접었을 뿐 지우지 않았다 — 안의 문구·버튼은 그대로 있다(계약 §3).
+    expect(within(panel).getByText(/홈택스 → My홈택스/)).toBeTruthy();
+    expect(within(panel).getByText("선입선출 재확인 (기록만)")).toBeTruthy();
+  });
+
+  it("펴면 확정 버튼까지 닿는다 — 접은 것이 길을 끊지 않는다", () => {
+    const calls: Array<[string | null, boolean]> = [];
+    render(
+      <ValuationBadge
+        settings={SETTINGS}
+        history={[]}
+        busy={false}
+        onReconfirm={(note, confirmed) => calls.push([note, confirmed])}
+      />,
+    );
+
+    const panel = screen.getByTestId("valuation-confirm-panel") as HTMLDetailsElement;
+    fireEvent.click(within(panel).getByText("신고방법 확인·재확인"));
+
+    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("2025 귀속 신고서 확인");
+    fireEvent.click(screen.getByTestId("valuation-mark-confirmed"));
+    promptSpy.mockRestore();
+
+    expect(calls).toEqual([["2025 귀속 신고서 확인", true]]);
+  });
+});
+
+// ──────────────────────────────────────────────
+// Q6 호출부 — **App 경로로** 잰다 (적대 리뷰 P2-1 채택, PR #533)
+//
+// ★리뷰어가 실증한 구멍: `CostPage.tsx`의 `<RecipeDetail>` 호출부에서
+//   `materials` / `onSwapLineMaterial` 두 줄을 지워도 **프론트 1,113건이 전부 초록**이었다.
+//   위 Q6 describe가 `StandardBreakdown`·`RecipeDetail`을 **격리 렌더**로만 검증하고
+//   `renderApp()`(App 경로)을 안 썼기 때문이다.
+// ★이 PR 자신이 주석에서 「SUR-2(만드는 층 ≠ 닿는 층)를 막는다」고 적어 놓고 정확히
+//   그 모양의 구멍을 남겼다 — 그래서 머지 전에 닫는다. 지금 코드는 배선돼 있어 «현재의
+//   버그»는 아니지만, 다음 리팩터가 그 두 줄을 지워도 아무도 안 잡는다는 사실이 결함이다.
+// ──────────────────────────────────────────────
+describe("Q6 호출부: 종 교체가 «App 경로»로 화면에 실제로 선다", () => {
+  it("레시피 상세를 열면 계산 내역에 종 교체 컨트롤이 있다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    fireEvent.click(await screen.findByTestId("recipe-row-7"));
+
+    const panel = await screen.findByTestId("recipe-detail-panel");
+    // RECIPE(id 7)의 첫 구성 줄 `line_id: 8001` — 이 컨트롤은 `RecipeDetail`이 `materials`와
+    // `onSwapLineMaterial`을 **둘 다** 받았을 때만 선다. 호출부에서 하나만 빠져도 죽는다.
+    expect(within(panel).getByTestId("breakdown-swap-open-8001")).toBeTruthy();
+    // 규칙 문구도 App 경로로 닿는다 — 「추천하지 않는다」는 계약 §2의 원문이다.
+    expect(within(panel).getByTestId("swap-rule-note").textContent).toContain(
+      "추천하지 않는다",
+    );
+  });
+
+  it("승인된 레시피면 App 경로에서도 잠기고, «왜»가 함께 온다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    fireEvent.click(await screen.findByTestId("recipe-row-7"));
+
+    const panel = await screen.findByTestId("recipe-detail-panel");
+    // RECIPE(id 7)은 `status: "approved"`다 — 잠금 사유가 호출부에서 내려오지 않으면
+    // 이 단언이 죽는다(격리 렌더로는 그 배선을 못 잰다).
+    const opener = within(panel).getByTestId(
+      "breakdown-swap-open-8001",
+    ) as HTMLButtonElement;
+    expect(opener.disabled).toBe(true);
+    expect(opener.title).toContain("먼저 승인을 해제한다");
+  });
+
+  // ★「원장 줄엔 안 선다」는 여기서 안 잰다 — RECIPE 픽스처에 `material_id: null`인 줄이
+  //   0개라 App 경로로는 **공허하게 참**이 된다(초판이 그걸 모르고 넣었다가, 공허한 통과를
+  //   막으려고 함께 넣은 가드에 스스로 걸렸다). 공유 픽스처에 원장 줄을 끼우면 `line_count`
+  //   등 다른 파일의 단언까지 흔들리므로, 그 케이스는 위 Q6 격리 테스트가 그대로 덮는다.
+});
