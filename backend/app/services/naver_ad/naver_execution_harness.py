@@ -1237,12 +1237,25 @@ def _count_search_term_excludes_today(db: Session, now: datetime) -> int:
     )
 
 
-def _search_term_conversions_in_window(db: Session, adgroup_id: str, search_term: str, now: datetime) -> int:
+def _search_term_conversions_in_window(
+    db: Session, adgroup_id: str, search_term: str, now: datetime,
+) -> tuple[int, int]:
     """실행 시점 전환 재검증(GATE ⑥, PLAN §3 SS3-A) — rolling 창 내 (adgroup_id, 검색어)
-    purchase 전환수 합. SS2 판정 창(search_term_judge._SS_WINDOW_DAYS)을 그대로 재사용해
-    판정↔실행 사이의 신선도 갭을 메운다. source를 가르지 않고 그룹+검색어로 합산한다
-    (파워링크 source는 전환이 항상 0이라 합산해도 무해, 보수적으로 그룹 내 전환을 전부 본다)."""
-    window_from = now.date() - timedelta(days=search_term_judge._SS_WINDOW_DAYS - 1)
+    purchase 전환수 합. SS2 판정 창을 그대로 재사용해 판정↔실행 사이의 신선도 갭을 메운다.
+    source를 가르지 않고 그룹+검색어로 합산한다(파워링크 source는 전환이 항상 0이라 합산해도
+    무해, 보수적으로 그룹 내 전환을 전부 본다).
+
+    ★D-NAO-265 — 창을 **모듈 상수가 아니라 `_ss_params(db)`에서** 받는다. 이전엔
+    `search_term_judge._SS_WINDOW_DAYS`를 직접 읽었는데, 그 상수가 SPECS로 승격되면 판정은
+    DB값(예: 7일) 창으로 돌고 이 재검증만 코드값(14일) 창으로 돌아 **재사용의 목적이 정확히
+    깨진다** — D-NAO-262가 바로 이 분산 때문에 승격을 보류했던 자리다. 같은 출처를 보는 것이
+    「같은 창」의 유일한 보존 방법이다.
+
+    ★반환이 `(전환수, 창일수)` 튜플인 이유: 호출부의 거부 사유 문장이 창 길이를 말하는데,
+    거기서 상수를 다시 읽으면 **잰 창과 말하는 창이 갈릴 수 있다.** 방금 실제로 잰 값을 그대로
+    돌려줘 사유가 «방금 돈 게이트»를 설명하게 한다(교훈 #362 — 닿는 층)."""
+    _ss_min_click, ss_window_days = search_term_judge._ss_params(db)
+    window_from = now.date() - timedelta(days=ss_window_days - 1)
     total = (
         db.query(sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_cnt), 0))
         .filter(
@@ -1253,7 +1266,7 @@ def _search_term_conversions_in_window(db: Session, adgroup_id: str, search_term
         )
         .scalar()
     )
-    return int(total or 0)
+    return int(total or 0), ss_window_days
 
 
 def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
@@ -1341,11 +1354,13 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
     # 새 전환이 붙었을 수 있어, 쓰기 직전 최신 데이터로 §1-1 전환 보호 게이트를 다시 확인한다.
     # SS2 판정 시점엔 전환 0이라 후보가 됐어도, Confirm 시점에 purchase 전환≥1이면 "살아있는
     # 증거"이므로 제외를 거부한다(fail-closed).
-    conv_now = _search_term_conversions_in_window(db, proposal.adgroup_id, proposal.target_id, now)
+    conv_now, ss_window_days = _search_term_conversions_in_window(
+        db, proposal.adgroup_id, proposal.target_id, now,
+    )
     if conv_now >= 1:
         reason = (
             f"[검색어제외] 실행 시점 전환 발생 — 보호 게이트 재검증 거부(rolling "
-            f"{search_term_judge._SS_WINDOW_DAYS}일 purchase 전환={conv_now}건≥1, §1-1). 판정↔실행 "
+            f"{ss_window_days}일 purchase 전환={conv_now}건≥1, §1-1). 판정↔실행 "
             "사이 전환이 붙은 stale 후보 — 전환은 살아있는 증거라 제외 불가(fail-closed)"
         )
         _guard_failure(db, proposal, now, "exclude_search_term", reason)
