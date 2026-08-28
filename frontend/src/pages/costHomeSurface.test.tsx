@@ -409,7 +409,7 @@ describe("H4c: 묶음 머리 ▸ — 「단가 없음」은 왕복 표를 좁히
   });
 });
 
-describe("H5: 왕복 표 — 빈 칸은 0원이 아니고, [다운로드]는 S3까지 비활성이다", () => {
+describe("H5: 왕복 표 — 빈 칸은 0원이 아니고, [다운로드]는 파일을 실제로 손에 쥐여 준다(S3)", () => {
   it("단가 없는 행(M2)의 단가 칸은 「—」다 — 「0원」이 아니다", async () => {
     await renderApp();
     const row = screen.getByTestId(`roundtrip-row-${M2.id}`);
@@ -438,11 +438,65 @@ describe("H5: 왕복 표 — 빈 칸은 0원이 아니고, [다운로드]는 S3�
     expect(within(row).getByTestId(`roundtrip-badge-${M3.id}-ledger`)).toBeTruthy();
   });
 
-  it("[다운로드] 버튼은 비활성이고 「S3에서 만든다」가 보인다(계약 §1 — S3는 이번 범위 밖)", async () => {
-    await renderApp();
-    const btn = screen.getByTestId("roundtrip-download") as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    expect(btn.title).toContain("S3에서 만든다");
+  it("★[다운로드]를 누르면 **파일이 실제로 저장된다** (S3) — 「서버가 만들었다」에서 안 끝난다", async () => {
+    // ★이 테스트는 **App 경로**에서 돈다. 컴포넌트를 직접 렌더해 잡으면 호출부 배선이
+    //   끊겨도 초록인 구멍이 남는다 — PR #533 P2-1이 정확히 그 변이였다.
+    const api = await import("../lib/api");
+    const blob = new Blob(["xlsx"], { type: "application/octet-stream" });
+    const spy = vi
+      .spyOn(api, "downloadCostRoundTrip")
+      .mockResolvedValue({ blob, filename: "원가_왕복_CRT-7.xlsx", snapshotId: "CRT-7" });
+
+    // jsdom은 실제 저장을 못 하므로 «저장을 시작했는가»를 앵커로 잡는다.
+    const clicked: HTMLAnchorElement[] = [];
+    const origClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      clicked.push(this as HTMLAnchorElement);
+    };
+    const origCreate = URL.createObjectURL;
+    const origRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = vi.fn(() => "blob:fake");
+    URL.revokeObjectURL = vi.fn();
+
+    try {
+      await renderApp();
+      const btn = screen.getByTestId("roundtrip-download") as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
+
+      fireEvent.click(btn);
+      await screen.findByTestId("roundtrip-download-result");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      // ★필터를 넘기지 않는다 — 인자가 하나라도 붙으면 부분집합 파일이 나갈 길이 열린다.
+      expect(spy.mock.calls[0]).toEqual([]);
+      // ★사람 손에 닿는 마지막 한 걸음.
+      expect(clicked).toHaveLength(1);
+      expect(clicked[0].download).toBe("원가_왕복_CRT-7.xlsx");
+      // ★받은 스냅샷 ID가 화면에 뜬다 — 파일을 열지 않고도 무엇을 받았는지 안다.
+      expect(screen.getByTestId("roundtrip-download-result").textContent).toContain(
+        "CRT-7",
+      );
+    } finally {
+      HTMLAnchorElement.prototype.click = origClick;
+      URL.createObjectURL = origCreate;
+      URL.revokeObjectURL = origRevoke;
+      spy.mockRestore();
+    }
+  });
+
+  it("다운로드가 실패하면 **화면이 말한다** — 눌렀는데 아무 일도 안 일어나지 않는다", async () => {
+    const api = await import("../lib/api");
+    const spy = vi
+      .spyOn(api, "downloadCostRoundTrip")
+      .mockRejectedValue(new Error("API error 500: boom"));
+    try {
+      await renderApp();
+      fireEvent.click(screen.getByTestId("roundtrip-download"));
+      const err = await screen.findByTestId("roundtrip-download-error");
+      expect(err.textContent).toContain("500");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("행을 누르면 부자재 드릴다운으로 간다 — 왕복 표도 인박스와 같은 길을 쓴다", async () => {

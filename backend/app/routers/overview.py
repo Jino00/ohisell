@@ -353,6 +353,36 @@ def rocket_pipeline_stage(
     )
 
 
+@router.get("/rocket-po-changes")
+def rocket_po_changes(db: Session = Depends(get_db)):
+    """★「이번 수집에서 달라진 것」 — 처음 본 발주 vs 상태가 바뀐 발주. 조회 전용.
+    계약 `docs/contracts/CONTRACT_1p_po_status_history.md` (Jino 승인 2026-08-28 13:33).
+
+    ★이 화면이 있는 이유(2026-08-28 실사고): 원장이 snapshot upsert라 «현재 단면»만 갖는 탓에
+      「①확인 대기가 왜 줄고 ②발송 대기가 왜 늘었나」에 아무도 답하지 못했고, 그 자리에서
+      **「Jino가 확정했기 때문」이라는 근거 없는 인과 주장**이 나왔다. 실측이 그걸 반증했다 —
+      그날 발주 9건 중 8건이 12:34 수집에서 **처음 관측**됐다(10:14엔 없었다).
+
+    ★★응답은 «우리가 본 것»만 말한다: 변화는 `observed_from ~ observed_to` **구간**에 귀속되고,
+      `first_seen`은 전이가 아니라 **출현**이다(「PA로 처음 관측됨」 ≠ 「RP에서 PA로 바뀜을 봄」).
+    """
+    from app.services.coupang import rocket_po_changes as svc
+
+    return _jsonify(svc.latest_round_changes(db, _ROCKET_VENDOR_ID))
+
+
+@router.get("/rocket-po-changes/{purchase_order_seq}")
+def rocket_po_history(purchase_order_seq: int, db: Session = Depends(get_db)):
+    """발주 1건의 관측 이력 전체(시간순). 조회 전용.
+
+    이력이 0건이면 `empty_reason`이 **왜 비었는지**를 말한다 — 소급이 원리적으로 불가하므로
+    (배선일부터만 쌓인다) 빈 이력을 「변화 없음」으로 읽으면 안 된다(원칙22).
+    """
+    from app.services.coupang import rocket_po_changes as svc
+
+    return _jsonify(svc.po_history(db, purchase_order_seq))
+
+
 @router.get("/rocket-ri-queue")
 def rocket_ri_queue(db: Session = Depends(get_db)):
     """거래명세서확인요청(RI) — 우리가 눌러야 할 일 목록. 조회 전용.

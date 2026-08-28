@@ -7,6 +7,12 @@
     "module": "ESNext",
     "types": ["vite/client"],
     "skipLibCheck": true,
+    /* ★JSON import 허용 — 왕복 표 열 스펙의 파리티 테스트가 백엔드의 정본 JSON
+       (`backend/app/services/cost_menu/round_trip_columns.json`)을 **사본 없이 그대로**
+       들여오기 위해서다(계약 D-CPP-62 S3). 사본을 두면 그게 갈라질 수 있는 «세 번째 자리»가
+       된다. `node:fs`로 읽으려면 `types`에 `node`를 얹어야 하는데, 그건 앱 코드 전체에
+       Node API 타입을 열어 주는 훨씬 넓은 변경이다. */
+    "resolveJsonModule": true,
 
     /* Bundler mode */
     "moduleResolution": "bundler",

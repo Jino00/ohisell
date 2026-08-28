@@ -26,8 +26,9 @@ import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchRocketPipeline, fetchRocketPipelineStage, fetchRocketRiQueue, isPoStage,
   previewRocketInvoiceConfirm, requestRocketInvoiceConfirm, fetchRocketConfirmHistory,
+  fetchRocketPoChanges, fetchRocketPoHistory,
   type RocketPipeline, type RocketPipelineRow, type RocketRiRow,
-  type RocketConfirmPreview,
+  type RocketConfirmPreview, type RocketPoHistory,
 } from "../lib/api";
 
 const NO_DATA = "—";
@@ -52,6 +53,228 @@ const STAGE_META: Record<string, { no: string; label: string; desc: string }> = 
   await_receive: { no: "③", label: "입고 대기", desc: "보냈는데 쿠팡이 아직 안 잡았다 = 계산서 미발행" },
   await_payment: { no: "④", label: "지급 대기", desc: "계산서가 나갔고 지급일이 아직 오지 않았다" },
 };
+
+// ══════════════════════════════════════════════════════════════
+// 「이번 수집에서 달라진 것」 — 계약 CONTRACT_1p_po_status_history (Jino 승인 2026-08-28 13:33)
+//
+// ★왜 있나: 원장이 snapshot upsert라 «현재 단면»만 갖는 탓에 「①이 왜 줄고 ②가 왜 늘었나」에
+//   아무도 답하지 못했고, 그 자리에서 **「Jino가 확정했기 때문」이라는 근거 없는 인과 주장**이
+//   나왔다(2026-08-28). 실측이 반증했다 — 그날 발주 9건 중 8건이 12:34 수집에서 **처음 관측**됐다.
+// ★★이 카드의 규율: **«처음 본 것»과 «바뀐 것»을 다른 줄로 가른다.** 그 둘의 혼동이 발단이다.
+//   그리고 시점을 단정하지 않는다 — 「~에 확정됨」이 아니라 「~ 사이에 바뀜」이다.
+// ══════════════════════════════════════════════════════════════
+export function PoChangesCard() {
+  const { data, error } = useAsyncData(() => fetchRocketPoChanges(), []);
+  // ★발주번호를 누르면 그 발주의 관측 이력이 펼쳐진다(계약 §4-4).
+  const [openSeq, setOpenSeq] = useState<number | null>(null);
+
+  if (error) {
+    return (
+      <Card title="이번 수집에서 달라진 것">
+        <EmptyState
+          reason={`변화 목록을 불러오지 못했습니다: ${error}`}
+          hint="조회 실패는 '달라진 게 없다'와 다릅니다."
+        />
+      </Card>
+    );
+  }
+  if (data === null) return <Card title="이번 수집에서 달라진 것"><Loading rows={2} /></Card>;
+
+  const none = data.first_seen.count === 0 && data.changed.count === 0;
+  // ★적대 리뷰 1R P1-1: 이벤트 적재가 실패한 회차를 「달라진 게 없다」로 **단언**하면 안 된다.
+  //   버린 수가 0이 아니면 그건 «변화가 없다»가 아니라 «못 봤다»다(원칙22).
+  // ★★2R P2-A: `?? 0`으로 접지 않는다 — 백엔드가 애써 가른 「모름(null)」을 여기서 0으로
+  //   되접으면 «회차 기록 자체가 없는» 경우까지 「없습니다」로 단언하게 된다. 셋을 가른다.
+  const dropped = data.round?.dropped ?? null;      // null = 「몇 건 버렸는지 모른다」
+  const roundUnknown = data.round?.dropped == null; // 회차 기록이 없다(배선 전이거나 기록 실패)
+
+  return (
+    <Card
+      title={`이번 수집에서 달라진 것${data.round_at ? ` — ${data.round_at}` : ""}`}
+      right={
+        data.history_start
+          ? <span className="text-xs text-gray-400">이력 시작 {data.history_start.slice(0, 10)}</span>
+          : undefined
+      }
+    >
+      <div className="border-b border-gray-100 bg-gray-50 px-4 py-2 text-xs leading-snug text-gray-600">
+        {data.note}
+        {/* ★소급 불가 자백 — 이게 없으면 「이력에 없음」이 「변화 없음」으로 읽힌다. */}
+        {data.history_start && (
+          <div className="mt-1">
+            기록은 <b>{data.history_start.slice(0, 10)}</b>부터입니다 — 그 전 변화는 기록이 없습니다.
+          </div>
+        )}
+      </div>
+
+      {dropped != null && dropped > 0 && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-snug text-amber-800">
+          ⚠️ 이번 회차에서 관측 <b>{cnt(dropped)}건을 기록하지 못했습니다</b> —
+          아래 목록은 <b>완전하지 않습니다</b>. 「달라진 게 없다」는 뜻이 아닙니다.
+          {data.round?.error && (
+            <div className="mt-1 font-mono text-[11px] text-amber-700">{data.round.error}</div>
+          )}
+        </div>
+      )}
+
+      {none ? (
+        dropped != null && dropped > 0 ? (
+          <EmptyState
+            reason="이번 수집의 변화를 기록하지 못했습니다."
+            hint="화면에 안 뜨는 것과 일어나지 않은 것은 다릅니다 — 위 사유를 보세요."
+          />
+        ) : roundUnknown ? (
+          // ★이 회차의 적재 결과를 «모른다». 「없습니다」로 단언하면 안 된다(2R P2-A).
+          <EmptyState
+            reason="이 회차에 변화가 있었는지 확인할 수 없습니다."
+            hint="회차 기록이 없습니다 — 배선 전 수집이거나 기록에 실패한 회차입니다."
+          />
+        ) : (
+          <EmptyState reason="이번 수집에서는 달라진 발주가 없습니다." />
+        )
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {/* ① 처음 본 것 — «신규 발주 발생»이 아니다 */}
+          <div className="px-4 py-3">
+            <div className="text-sm font-medium text-gray-800">
+              처음 본 발주 — {cnt(data.first_seen.count)}건 · {won(data.first_seen.amount)}
+            </div>
+            <div className="mt-0.5 text-xs text-gray-500">
+              이번 수집에서 우리 눈에 <b>처음 들어온</b> 발주입니다 — 그때 발주가 생겼다는 뜻이 아닙니다.
+            </div>
+            {data.first_seen.rows.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {data.first_seen.rows.map((r) => (
+                  <div key={r.purchase_order_seq} className="text-xs text-gray-600">
+                    <button
+                      type="button"
+                      onClick={() => setOpenSeq(openSeq === r.purchase_order_seq ? null : r.purchase_order_seq)}
+                      className="tabular-nums font-medium text-sky-700 hover:underline"
+                      title="눌러서 이 발주의 관측 이력 보기"
+                    >
+                      {r.purchase_order_seq}
+                    </button>
+                    <span className="text-gray-400">
+                      {" "}· {r.label}(상태 {r.status_when_first_seen ?? NO_DATA}) · {won(r.order_amount)}
+                    </span>
+                    {openSeq === r.purchase_order_seq && <PoHistoryDetail seq={r.purchase_order_seq} />}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ② 바뀐 것 — 구간으로 말한다 */}
+          <div className="px-4 py-3">
+            <div className="text-sm font-medium text-gray-800">
+              상태·수량이 바뀐 발주 — {cnt(data.changed.count)}건 · {won(data.changed.amount)}
+            </div>
+            <div className="mt-0.5 text-xs text-gray-500">
+              <b>두 수집 사이에</b> 달라진 것만 압니다 — 언제 바뀌었는지는 모릅니다.
+            </div>
+            {data.changed.rows.length > 0 && (
+              <div className="mt-2 space-y-1.5">
+                {data.changed.rows.map((r) => (
+                  <div key={r.purchase_order_seq} className="text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setOpenSeq(openSeq === r.purchase_order_seq ? null : r.purchase_order_seq)}
+                      className="tabular-nums font-medium text-sky-700 hover:underline"
+                      title="눌러서 이 발주의 관측 이력 보기"
+                    >
+                      {r.purchase_order_seq}
+                    </button>
+                    {r.status_from && (
+                      <span className="ml-1 text-gray-800">
+                        {r.status_from} → <b>{r.status_to}</b>
+                      </span>
+                    )}
+                    <span className="text-gray-400">
+                      {" "}· {r.observed_from ?? NO_DATA} ~ {r.observed_to ?? NO_DATA} 사이에 바뀜
+                    </span>
+                    <div className="ml-3 text-gray-500">
+                      {r.fields.map((f) => (
+                        <span key={f.field} className="mr-2">
+                          {f.label} {f.before ?? NO_DATA}→{f.after ?? NO_DATA}
+                          {f.delta != null && (
+                            <b className={f.delta < 0 ? " text-amber-700" : " text-gray-700"}>
+                              {" "}({f.delta > 0 ? "+" : ""}{f.delta.toLocaleString("ko-KR")})
+                            </b>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                    {openSeq === r.purchase_order_seq && <PoHistoryDetail seq={r.purchase_order_seq} />}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
+/** ★발주 1건의 관측 이력 (계약 §4-4·§4-5, 적대 리뷰 1R P1-2).
+ *
+ *  ★초판은 이 UI가 **없었다** — 라우터와 `fetchRocketPoHistory`를 통째로 지워도 테스트가 전부
+ *    초록이었다(소비처 0). 계약 §2가 그 상태를 이름 붙여 금지해 뒀다:
+ *    *"DB에만 있는 이력은 이 계약에선 실패 모드다."* 만들어졌는지와 사람이 보는지는 다른 문제다.
+ *  ★이력 0건을 「변화 없음」으로 말하지 않는다 — `empty_reason`이 **왜** 비었는지 답한다
+ *    (배선 전 발주인지, 우리 원장에 아예 없는 발주인지). */
+function PoHistoryDetail({ seq }: { seq: number }) {
+  const [data, setData] = useState<RocketPoHistory | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetchRocketPoHistory(seq)
+      .then((d) => { if (alive) setData(d); })
+      .catch((e) => { if (alive) setErr(String(e)); });
+    return () => { alive = false; };
+  }, [seq]);
+
+  if (err) {
+    return (
+      <div className="mt-1 ml-3 text-xs text-amber-700">
+        이력을 불러오지 못했습니다: {err} — 조회 실패는 「변화가 없었다」와 다릅니다.
+      </div>
+    );
+  }
+  if (!data) return <div className="mt-1 ml-3 text-xs text-gray-400">이력 불러오는 중…</div>;
+
+  if (data.rows.length === 0) {
+    return <div className="mt-1 ml-3 text-xs text-gray-500">{data.empty_reason}</div>;
+  }
+  return (
+    <div className="mt-1 ml-3 space-y-0.5 border-l border-gray-200 pl-2">
+      {data.rows.map((r, i) => (
+        <div key={i} className="text-xs text-gray-600">
+          {r.event === "first_seen" ? (
+            <>
+              <b>처음 관측됨</b>(상태 {r.after ?? NO_DATA})
+              <span className="text-gray-400"> · {r.observed_to ?? NO_DATA}</span>
+            </>
+          ) : (
+            <>
+              {r.label} {r.before ?? NO_DATA}→{r.after ?? NO_DATA}
+              {r.delta != null && (
+                <b className={r.delta < 0 ? " text-amber-700" : " text-gray-700"}>
+                  {" "}({r.delta > 0 ? "+" : ""}{r.delta.toLocaleString("ko-KR")})
+                </b>
+              )}
+              <span className="text-gray-400">
+                {" "}· {r.observed_from ?? NO_DATA} ~ {r.observed_to ?? NO_DATA} 사이에 바뀜
+              </span>
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** 「YYYY-MM-DD 이후 다시 안 봄」 배지. 신선도가 떨어진 행에만 붙는다.
  *
@@ -192,6 +415,10 @@ export function PipelineTab() {
           </div>
         </div>
       </Card>
+
+      {/* ★칸이 왜 움직였나 — 「처음 본 것」과 「바뀐 것」을 가르는 카드. 칸 바로 아래 둔다:
+          발단 질문("②가 왜 늘었나")이 위 칸에서 나왔으므로 답도 그 옆에 있어야 한다. */}
+      <PoChangesCard />
 
       {/* ★소계 밖 두 덩어리 — 색과 자리를 달리해 「합계에 넣으면 안 되는 것」임을 화면이 말한다 */}
       <Card title="소계에 넣지 않는 것">

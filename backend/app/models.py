@@ -2093,6 +2093,100 @@ class CoupangRocketShipmentBox(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangRocketPoChangeLog(Base):
+    """1P 발주의 **관측된** 변화 1건 — 스냅샷 upsert가 버리던 «직전 값»의 기록.
+    계약 `docs/contracts/CONTRACT_1p_po_status_history.md` (Jino 승인 2026-08-28 13:33 KST).
+
+    ★발단(2026-08-28): `_upsert_po`가 snapshot upsert라 원장은 «현재 단면»만 갖는다. 그래서
+      「①확인 대기가 왜 줄고 ②발송 대기가 왜 늘었나」에 아무도 답하지 못했고, 그 자리에서
+      **「Jino가 확정했기 때문」이라는 근거 없는 인과 주장**이 나왔다. 실측은 그걸 반증했다 —
+      오늘 발주 9건 중 8건이 **12:34 수집에서 처음 관측**됐고(10:14엔 없었다), 「처음부터 PA로
+      왔는지」와 「그 사이 누가 확정했는지」를 우리 데이터는 **원리적으로 구분 못 한다.**
+
+    ★★이 표의 규율은 하나다: **«우리가 본 것»만 적고 «실제로 일어난 것»을 주장하지 않는다.**
+      · 모든 변화는 `prev_observed_at ~ observed_at` **구간**에 귀속된다. 시점을 단정하지 않는다.
+      · `first_seen`은 **전이가 아니라 출현**이다 — 「PA로 처음 관측됨」 ≠ 「RP에서 PA로 바뀌는 것을 봄」.
+        이 둘을 뭉개면 이 표가 고치려던 병을 이름만 바꿔 재생산한다.
+      · 감지 시각을 발생 시각으로 귀속했다가 07-30 변경을 08-03으로 잡은 실사고가 이 저장소에
+        이미 있다(`CoupangAdChangeLog` 주석) — 같은 실수를 스키마 층에서 막는다.
+
+    ★해석 필드가 없다(계약 §3 금지선): 주체·원인·「취소」를 담는 칸을 두지 않는다.
+      `RP→PA`는 **사실**이고 「우리가 확정했다」는 **해석**이다. 관측 코드만 적는다.
+
+    event:
+      `first_seen`   — 이 발주를 처음 봤다. `field`=''·`before_value`=NULL·`prev_observed_at`=NULL,
+                       `after_value`에 그때의 상태 코드.
+      `field_change` — 아래 8종 중 하나가 달라졌다. 필드마다 행 1개.
+
+    기록 대상 8종(계약 §1이 못 박음 — 늘리지 않는다):
+      `purchase_order_status` · 수량 3종(order_qty·receiving_qty·vendor_confirmed_qty)
+      · 금액 3종(sum_of_order_amount·sum_of_receiving_amount·sum_of_vendor_confirmed_amount)
+      수량·금액까지 넣는 이유: RP에서 납품가능수량을 깎으면 **상태는 그대로인데 ①금액이 준다** —
+      상태 전이만으로는 「①이 줄어든 이유 3종(확정/감액/수집누락)」 중 감액이 통째로 안 보인다.
+
+    ★**diff가 있을 때만 행을 만든다 — 그래서 재수신이 저절로 멱등이다.** 같은 값을 다시 받으면
+      diff가 0이라 행이 안 생긴다. 유니크 제약은 그 위의 안전망이다(같은 회차 재실행 방어).
+      prod 2,698건 중 CI 2,582건(96%)은 재관측해도 무변화라 diff-only가 볼륨의 자연 상한이다.
+
+    ★소급 불가(계약 §7 전제 1): 원장에 직전 값이 없으므로 **배선한 날부터만** 쌓인다.
+      「이력에 없음」을 「변화 없음」으로 읽으면 안 된다 — 화면이 그 시작일을 자백해야 한다.
+
+    시각은 전부 **KST naive**(`kst_now()` — `synced_at`과 같은 규약). `server_default`를 쓰지
+      않는 이유: SQLite `now()`는 UTC라 규약이 갈린다. ⚠️같은 행의 `po_created_at`은 UTC 저장이다.
+    """
+
+    __tablename__ = "coupang_rocket_po_change_log"
+    __table_args__ = (
+        # 같은 회차를 두 번 넣어도 행이 안 늘게. field는 NULL 대신 ''를 쓴다 —
+        # SQLite에서 NULL은 서로 달라 중복이 안 막힌다(CoupangAdChangeLog와 같은 이유).
+        UniqueConstraint("purchase_order_seq", "event", "field", "observed_at",
+                         name="uq_coupang_rocket_po_change_log"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    purchase_order_seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    event: Mapped[str] = mapped_column(String(16), nullable=False)          # first_seen | field_change
+    field: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # ★구간의 양 끝 — 변화는 이 «사이»에 일어났다. 한쪽만 쓰면 시점 단정이 된다.
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    # first_seen이면 NULL(직전 관측이 없다). field_change면 덮어쓰기 직전 그 행의 synced_at.
+    prev_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class CoupangRocketPoIngestRound(Base):
+    """발주 수집 «회차» 1건의 결과 — 이벤트를 **몇 건 버렸는지**가 화면에 닿는 유일한 길.
+    계약 `docs/contracts/CONTRACT_1p_po_status_history.md` §4-8 (적대 리뷰 1R P1-1).
+
+    ★왜 필요했나: 초판은 `changes_dropped`를 **로그와 페처 응답으로만** 냈다. 조회 API가
+      원리적으로 못 읽으니, 이벤트 적재가 통째로 실패한 회차에도 화면은 「이번 수집에서는
+      달라진 발주가 없습니다」를 **적극적으로 단언**했다(적대 리뷰가 재현: RP→PA 전이가
+      실제로 있는데 화면은 「없습니다」). 침묵이 아니라 거짓말이라 더 나쁘다.
+    ★★가장 유력한 발현 경로가 하필 이 저장소의 상습 사고다 — **코드가 마이그레이션보다 먼저
+      배포되면** 매 회차 전량 drop이고 화면은 매번 「없습니다」다(`--migrate` 순서 강제의 이유).
+
+    ★이벤트 표에 sentinel 행을 넣지 않고 별도 표로 둔 이유: 그 표는 «관측된 변화»만 담는
+      read-only 파생이고(§3), 「적재가 실패했다」는 우리 파이프라인의 사실이지 발주의 사실이 아니다.
+
+    grain: `observed_at`(회차 = 한 push = 한 시각) 유니크. 시각은 KST naive(`kst_now()`).
+    """
+
+    __tablename__ = "coupang_rocket_po_ingest_round"
+    __table_args__ = (
+        UniqueConstraint("observed_at", name="uq_coupang_rocket_po_ingest_round"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # 이번 회차 PO 수
+    changes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # 적재된 이벤트
+    # ★0이 아니면 화면이 「달라진 게 없다」고 말하면 안 된다 — 그게 이 컬럼의 존재 이유다.
+    dropped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+
 class CoupangRocketInvoiceConfirm(Base):
     """1P 「거래명세서확인」(RI→CI) 실행 명령 겸 **감사 레코드** (계약 CONTRACT_1p_invoice_confirm_write).
 
@@ -5179,6 +5273,46 @@ class CostAutoRefreshEntry(Base):
     #: 실패·대기 사유. **비워 두지 않는다** — 사유 없는 실패는 화면에서 침묵과 같다.
     message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CostRoundTripSnapshot(Base):
+    """왕복 파일 1장을 내려보낸 **그 순간의 표** (계약 D-CPP-62 S3).
+
+    ★**불변 증거물이지 데이터가 아니다.** S4의 3-방향 대조(스냅샷 ↔ 파일에 적혀 온 값 ↔
+    지금 현재값)에서 «내가 받았을 때 무엇이 적혀 있었나»를 대는 쪽이다. `linked_item_name`
+    (위 `cost_material_price`)이 「그때 무엇을 보고 복사했나」를 굳혀 두는 것과 같은 부류다.
+
+    ★**행을 정규화한 테이블을 만들지 않고 `rows` JSON 한 칸에 담는다.** 이유 둘:
+      ① 열 스펙이 진화하면 정규화 스키마가 따라 바뀌어야 하고, 그 순간 **구 스냅샷이
+         마이그레이션 부채**가 된다. blob은 구판을 그대로 품는다 — `column_spec`을 같이
+         담으므로 스냅샷이 **자기서술적**이다(구 파일을 업로드해도 라벨→키 매핑이 그 파일의
+         스냅샷 안에 있다).
+      ② 정규화된 스냅샷 행 테이블은 생김새가 **단가 이력의 두 번째 사본**이다. 누군가 반드시
+         그걸 조회하기 시작하고, 그 순간 정본(`cost_material_price`)과 갈라진다.
+         이 저장소가 반복해 밟은 병이 그것이다(D-CPP-60 · 직렬화기 두 벌).
+      대가: material별 스냅샷 횡단 조회가 안 된다 — 그 질문의 정당한 답은 어차피 단가 원장이다.
+
+    ★`content_hash`가 직전 스냅샷과 같으면 **새 행을 만들지 않고 같은 id를 재발급한다.**
+      다운로드가 사실상 멱등이 되고, 성장이 「상태가 실제로 바뀐 횟수」에 묶이며,
+      같은 상태를 두 번 받아도 S4에서 가짜 충돌이 안 난다.
+
+    ★`created_at`을 **앱에서 KST로 명시 세팅**한다. `server_default=func.now()`는 이
+      저장소에서 UTC다 — 파일에 찍히는 시각이 9시간 어긋나면 사람이 「어느 게 최신인가」를
+      바로 그 자리에서 다시 묻게 된다(이 계약이 없애려는 질문이다).
+    """
+
+    __tablename__ = "cost_roundtrip_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 파일에 `CRT-{id}`로 찍힌다. S4가 이 값으로 스냅샷을 되찾는다.
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    #: 그 시점 열 스펙의 사본(key/label/file_label/editable, **순서 포함**).
+    column_spec: Mapped[str] = mapped_column(Text, nullable=False)
+    #: `[{"id": 12, "name": "...", ...}]` — 열 key → 정준화된 값. 없음은 null(0 아님).
+    rows: Mapped[str] = mapped_column(Text, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: `column_spec` + `rows`의 sha256. 중복 발급 차단용.
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
