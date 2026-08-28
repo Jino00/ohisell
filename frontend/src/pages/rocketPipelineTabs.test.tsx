@@ -118,13 +118,17 @@ describe("열린 파이프라인 탭", () => {
     expect(await screen.findByText(/확정했는데 발송 없이 닫힘/)).toBeTruthy();
   });
 
-  it("칸마다 굳은 금액과 「이후 미확인」이 갈려 보인다", async () => {
+  it("칸마다 «지금 상태 모름» 금액과 「이후 다시 안 봄」이 갈려 보인다", async () => {
     render(<PipelineTab />);
-    // ①의 굳은 분 2,242,502원 + 그 판정 근거 날짜
-    expect(await screen.findByText(/굳음 2,242,502원/)).toBeTruthy();
-    expect(await screen.findByText(/2026-06-18 이후 미확인/)).toBeTruthy();
-    // 굳은 게 없는 ③은 그렇게 말한다(빈칸으로 두지 않는다)
-    expect(await screen.findByText("전액 최신 수집분")).toBeTruthy();
+    // ★문구 규칙(2026-08-28 Jino 지시): 「굳음」이 아니라 «모른다»를 말하고,
+    //   신선도 축에 「확인」을 쓰지 않는다(이 화면에서 「확인」은 사람이 누르는 동작이다).
+    expect(await screen.findByText(/지금 상태 모름 2,242,502원/)).toBeTruthy();
+    expect(await screen.findByText(/2026-06-18 이후 다시 안 봄/)).toBeTruthy();
+    // 모르는 게 없는 ③은 그렇게 말한다(빈칸으로 두지 않는다)
+    expect(await screen.findByText("전액 오늘 수집분")).toBeTruthy();
+    // 옛 문구가 되살아나면 죽는다
+    expect(screen.queryByText(/굳음/)).toBeNull();
+    expect(screen.queryByText(/이후 미확인/)).toBeNull();
   });
 
   it("보정(clamp·ASN 결손)이 자백 줄로 뜬다", async () => {
@@ -270,23 +274,26 @@ describe("확인요청함 탭", () => {
       ],
       live_count: 1, live_amount: "230235", stale_count: 1, stale_amount: "75430",
       last_collection_date_kst: "2026-08-27",
-      note: "굳은 행은 수집 창(발주일 기준) 밖이라 상태가 마지막 수집일에 멈춰 있다.",
+      note: "「지금 상태를 모르는 건」은 최근 수집에서 다시 보지 못한 발주입니다.",
     };
   });
 
-  it("살아 있는 건과 굳은 건이 «다른 섹션»으로 갈려 뜬다", async () => {
+  it("살아 있는 건과 «지금 상태를 모르는» 건이 다른 섹션으로 갈려 뜬다", async () => {
     render(<RiQueueTab />);
     // ★한 표에 섞으면 죽은 줄을 누른다 — 섹션 제목 둘이 이 갈림의 표면이다
     expect(await screen.findByText(/지금 확인이 필요한 건 — 1건 · 230,235원/)).toBeTruthy();
-    expect(await screen.findByText(/상태가 굳은 건 — 1건 · 75,430원/)).toBeTruthy();
+    expect(await screen.findByText(/지금 상태를 모르는 건 — 1건 · 75,430원/)).toBeTruthy();
     expect(await screen.findByText("139791428")).toBeTruthy();
     expect(await screen.findByText("115340779")).toBeTruthy();
   });
 
-  it("굳은 건에는 「이후 미확인」 배지와 재수집 안내가 붙는다", async () => {
+  it("모르는 건에는 「이후 다시 안 봄」 배지와 재수집 안내가 붙는다", async () => {
     render(<RiQueueTab />);
-    expect(await screen.findByText("2026-08-05 이후 미확인")).toBeTruthy();
-    expect(await screen.findByText(/미종결 발주 재수집」을 한 번 돌리세요/)).toBeTruthy();
+    expect(await screen.findByText("2026-08-05 이후 다시 안 봄")).toBeTruthy();
+    // ★고치는 법이 화면에 있어야 한다 — 「모른다」만 말하고 끝내면 사람이 할 게 없다.
+    expect(await screen.findByText(/미종결 발주 재수집」을 한 번 돌리면/)).toBeTruthy();
+    // ★그리고 «남은 금액»이 아니라 «모르는 금액»이라는 것도 화면이 말한다(Jino 오독 지점).
+    expect(await screen.findByText(/모르는 금액/)).toBeTruthy();
   });
 
   it("지급일이 지난 계산서는 «지급일 경과»로 죽은 근거를 화면이 말한다", async () => {
