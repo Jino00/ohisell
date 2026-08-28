@@ -372,3 +372,37 @@ def test_a_material_missing_from_the_file_keeps_its_reference_price(db_session):
 
     db_session.expire_all()
     assert _package(db_session).excel_ref_price == Decimal("171.00"), "지우지 않는다"
+
+
+# ──────────────────────────────────────────────
+# 4. `note`는 «출처»만 적는다 — «현재 상태»를 적지 않는다
+#    (Jino 2026-08-28 11:27 승인. 배포 전 prod 139종 중 **74종**이 단가를 가진 채
+#     「단가는 아직 없다」라고 말하고 있었다 — 만들 때 한 번 박히고 아무도 안 고치는 문장이었다.)
+# ──────────────────────────────────────────────
+
+_STATE_CLAIM = "단가는 아직 없다"
+
+
+def test_new_material_note_records_origin_not_current_state(db_session):
+    """★새 종의 `note`에 상태 주장이 들어가지 않는다.
+
+    변이 시험: `recipes.py`의 note를 「…생성 — 단가는 아직 없다」로 되돌리면 죽는다.
+    """
+
+    _reimport(db_session, _rows(171))
+    m = _package(db_session)
+
+    assert m.note is not None, "출처는 남는다 — 통째로 지우는 게 아니다"
+    assert "구성 파싱으로 생성" in m.note, "출처(시간이 지나도 참인 사실)는 남는다"
+    assert _STATE_CLAIM not in m.note, "상태 주장은 안 적는다 — 배지가 라이브로 센다"
+
+
+def test_no_material_created_by_import_claims_a_price_state(db_session):
+    """★한 종만 재면 다른 생성 경로가 살아남는다 — 이 업로드가 만든 **전건**을 잰다."""
+
+    _reimport(db_session, _rows(171))
+
+    created = db_session.query(CostMaterial).all()
+    assert created, "이 업로드가 종을 만들긴 했다(빈 목록을 통과로 읽지 않는다)"
+    offenders = [m.name for m in created if m.note and _STATE_CLAIM in m.note]
+    assert offenders == [], f"상태 주장을 단 종: {offenders}"

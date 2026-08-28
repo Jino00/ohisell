@@ -783,7 +783,14 @@ def _upsert_materials(
                 excel_ref_price=ref_price,
                 form_factor=form_factor,
                 part=part,
-                note="원가 정본 엑셀에서 구성 파싱으로 생성 — 단가는 아직 없다",
+                # ★`note`엔 **출처만** 적는다 — 「단가는 아직 없다」 같은 «현재 상태» 주장을
+                #   넣지 않는다(Jino 2026-08-28 11:27 승인). 이 문장은 종을 만드는 이 자리에서
+                #   한 번 박히고 **아무도 갱신하지 않는다**: 나중에 단가가 들어와도 그대로
+                #   남아, prod 139종 중 **74종**이 단가를 가진 채 「단가는 아직 없다」라고
+                #   말하고 있었다. 상태는 자유 텍스트가 아니라 **계산이 답한다** —
+                #   화면의 `▢단가없음` 배지가 `latest_price_*`를 라이브로 보고 세운다.
+                #   출처는 시간이 지나도 참이라 남는다.
+                note="원가 정본 엑셀에서 구성 파싱으로 생성",
             )
             db.add(m)
             out[name] = m
@@ -951,7 +958,8 @@ def _material_for_name(
         status="unconfirmed",
         category=category,
         excel_label=name,
-        note="원가표 항목 픽(D-CPP-59)으로 생성 — 단가는 아직 없다",
+        # ★위와 같은 이유로 출처만 적는다(상태 주장 금지) — 786행 주석 참조.
+        note="원가표 항목 픽(D-CPP-59)으로 생성",
     )
     db.add(m)
     db.flush()
