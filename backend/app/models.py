@@ -5181,6 +5181,46 @@ class CostAutoRefreshEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CostRoundTripSnapshot(Base):
+    """왕복 파일 1장을 내려보낸 **그 순간의 표** (계약 D-CPP-62 S3).
+
+    ★**불변 증거물이지 데이터가 아니다.** S4의 3-방향 대조(스냅샷 ↔ 파일에 적혀 온 값 ↔
+    지금 현재값)에서 «내가 받았을 때 무엇이 적혀 있었나»를 대는 쪽이다. `linked_item_name`
+    (위 `cost_material_price`)이 「그때 무엇을 보고 복사했나」를 굳혀 두는 것과 같은 부류다.
+
+    ★**행을 정규화한 테이블을 만들지 않고 `rows` JSON 한 칸에 담는다.** 이유 둘:
+      ① 열 스펙이 진화하면 정규화 스키마가 따라 바뀌어야 하고, 그 순간 **구 스냅샷이
+         마이그레이션 부채**가 된다. blob은 구판을 그대로 품는다 — `column_spec`을 같이
+         담으므로 스냅샷이 **자기서술적**이다(구 파일을 업로드해도 라벨→키 매핑이 그 파일의
+         스냅샷 안에 있다).
+      ② 정규화된 스냅샷 행 테이블은 생김새가 **단가 이력의 두 번째 사본**이다. 누군가 반드시
+         그걸 조회하기 시작하고, 그 순간 정본(`cost_material_price`)과 갈라진다.
+         이 저장소가 반복해 밟은 병이 그것이다(D-CPP-60 · 직렬화기 두 벌).
+      대가: material별 스냅샷 횡단 조회가 안 된다 — 그 질문의 정당한 답은 어차피 단가 원장이다.
+
+    ★`content_hash`가 직전 스냅샷과 같으면 **새 행을 만들지 않고 같은 id를 재발급한다.**
+      다운로드가 사실상 멱등이 되고, 성장이 「상태가 실제로 바뀐 횟수」에 묶이며,
+      같은 상태를 두 번 받아도 S4에서 가짜 충돌이 안 난다.
+
+    ★`created_at`을 **앱에서 KST로 명시 세팅**한다. `server_default=func.now()`는 이
+      저장소에서 UTC다 — 파일에 찍히는 시각이 9시간 어긋나면 사람이 「어느 게 최신인가」를
+      바로 그 자리에서 다시 묻게 된다(이 계약이 없애려는 질문이다).
+    """
+
+    __tablename__ = "cost_roundtrip_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 파일에 `CRT-{id}`로 찍힌다. S4가 이 값으로 스냅샷을 되찾는다.
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    #: 그 시점 열 스펙의 사본(key/label/file_label/editable, **순서 포함**).
+    column_spec: Mapped[str] = mapped_column(Text, nullable=False)
+    #: `[{"id": 12, "name": "...", ...}]` — 열 key → 정준화된 값. 없음은 null(0 아님).
+    rows: Mapped[str] = mapped_column(Text, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: `column_spec` + `rows`의 sha256. 중복 발급 차단용.
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # OTAO 발주 원장 (계약 `CONTRACT_inventory_unified.md` §4 S1 · 트랙 D-INV-1·3)
 #

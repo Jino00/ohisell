@@ -229,6 +229,25 @@ export const ROUND_TRIP_NUMERIC: ReadonlySet<string> = new Set([
   "excel_ref",
 ]);
 
+/** 받은 Blob을 브라우저가 **실제로 저장하게** 한다 (계약 D-CPP-62 S3).
+ *
+ * ★이 함수가 없으면 다운로드는 「서버가 파일을 만들었다」에서 끝나고 **사람 손에는 아무것도
+ * 안 남는다.** 이 저장소가 반복해 밟은 「값을 만드는 층은 맞는데 사람에게 닿는 층이 끊긴」
+ * 결함의 자리라, 인라인으로 묻지 않고 별도 함수로 세워 테스트가 이 경로를 직접 잡는다.
+ *
+ * ★`revokeObjectURL`을 반드시 부른다 — 안 부르면 받을 때마다 Blob이 탭 수명 동안 메모리에
+ * 남는다. 139행 파일이라 한 번은 작지만, **여러 번 받는 것이 이 화면의 정상 사용**이다. */
+export function saveBlobAsFile(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /** `CostPage.tsx`의 `PickerItem`과 같은 모양(구조적으로 호환). 순환을 피하려고 여기 둔다. */
 export interface CostPickerItem {
   value: string;

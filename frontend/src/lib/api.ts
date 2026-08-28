@@ -5950,6 +5950,63 @@ export function deleteCostMaterialPrice(
   });
 }
 
+/** 왕복 표 다운로드 (계약 D-CPP-62 S3).
+ *
+ * ★`fetchApi`를 안 쓴다 — 그 함수는 본문을 JSON으로 파싱한다. 여기 오는 것은 `.xlsx`
+ * 바이트라 파싱하면 통째로 깨진다.
+ *
+ * ★**필터를 인자로 받지 않는다.** 화면의 폼팩터·「단가 없음만」·「모순만」 필터를 여기로
+ * 넘겨 부분집합 파일이 나가면, 그 파일을 그대로 재업로드했을 때 빠져 있던 종이 전부 S4
+ * 「사라짐」 묶음에 서고 **확인 클릭 한 번이 백여 종을 비활성화**한다. 백엔드도 인자를
+ * 아예 갖지 않지만 **부르는 쪽에서도 넘길 수 없게** 둔다 — 두 층 다 막혀 있어야 한 층이
+ * 느슨해져도 사고가 안 난다.
+ *
+ * ★POST다 — 이 호출은 스냅샷 행을 만든다(상태를 바꾼다). 같은 내용이면 백엔드가 직전
+ * 스냅샷을 재발급하므로 실질은 멱등이다.
+ */
+export async function downloadCostRoundTrip(): Promise<{
+  blob: Blob;
+  filename: string;
+  snapshotId: string | null;
+}> {
+  const res = await fetch(`${API_BASE}/api/cost/roundtrip/download`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error(`API error ${res.status}: ${await res.text()}`);
+  }
+  const snapshotId = res.headers.get("X-Snapshot-Id");
+  return {
+    blob: await res.blob(),
+    // 서버가 준 이름을 못 읽으면 스냅샷 ID로 짓는다 — 이름 없는 파일을 만들지 않는다.
+    filename:
+      parseContentDispositionFilename(res.headers.get("Content-Disposition")) ??
+      `${snapshotId ?? "원가_왕복"}.xlsx`,
+    snapshotId,
+  };
+}
+
+/** `Content-Disposition`에서 파일명을 뽑는다.
+ *
+ * ★RFC 5987(`filename*`)을 ASCII(`filename`)보다 **먼저** 본다 — 한글 이름이 그쪽에만
+ * 실리기 때문이다. 순서를 뒤집으면 파일이 언제나 `CRT-12.xlsx`로 떨어져, 사람이 받은
+ * 파일에서 「언제 받은 것인가」를 못 읽는다. */
+export function parseContentDispositionFilename(
+  disposition: string | null,
+): string | null {
+  if (!disposition) return null;
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1]);
+    } catch {
+      // 깨진 인코딩이면 지어내지 않고 ASCII 폴백으로 내려간다.
+    }
+  }
+  const plain = /filename="([^"]+)"/i.exec(disposition);
+  return plain ? plain[1] : null;
+}
+
 export function createCostMaterial(body: {
   name: string;
   unit?: string | null;

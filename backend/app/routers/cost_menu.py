@@ -21,8 +21,10 @@ from decimal import Decimal
 from typing import Literal, Optional
 
 from io import BytesIO
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -31,6 +33,7 @@ from app.database import get_db
 from app.services.cost_menu import auto_refresh as AR
 from app.services.cost_menu import materials as M
 from app.services.cost_menu import recipes as R
+from app.services.cost_menu import round_trip as RT
 
 router = APIRouter(prefix="/api/cost", tags=["cost-menu"])
 
@@ -513,3 +516,46 @@ def cost_table_census(db: Session = Depends(get_db)):
 def standard_cost_board(db: Session = Depends(get_db)):
     """표준원가 보드 — SKU별 표준원가 · 현 `cost_price` 대조 · 격차(계약 §5-3 탭3)."""
     return R.board(db)
+
+
+@router.post("/roundtrip/download")
+def roundtrip_download(db: Session = Depends(get_db)):
+    """왕복 표를 **엑셀 파일로 내려보낸다** (계약 D-CPP-62 S3).
+
+    ★**GET이 아니라 POST다.** 이 호출은 스냅샷 행을 만든다 — 즉 상태를 바꾼다. GET으로 두면
+    브라우저 프리페치·링크 미리보기·크롤러가 스냅샷을 찍게 되고, 그러면 S4의 「내가 받았을 때」
+    축이 사람이 안 받은 순간들로 오염된다. (같은 내용이면 재발급이라 실질은 멱등이지만,
+    그건 최적화지 «아무것도 안 쓴다»는 뜻이 아니다.)
+
+    ★★**필터 인자를 받지 않는다 — 언제나 전건이다.**
+      화면의 왕복 표에는 폼팩터·「단가 없음만」·「모순만」 필터가 있다. 그 필터를 여기로 넘겨
+      **부분집합** 파일이 나가면, 그 파일을 그대로 재업로드했을 때 빠져 있던 종이 전부 S4의
+      「사라짐」 묶음에 선다 — **확인 클릭 한 번이 백여 종을 비활성화**한다.
+      그래서 인자를 「무시」하는 게 아니라 **아예 갖지 않는다**: 안 받으면 실수로도 못 넘긴다.
+
+    ★파일 안의 값은 스냅샷에서만 만든다(`build_workbook(snap)`) — DB를 다시 읽지 않는다.
+      둘이 각자 조회하면 그 사이의 변경이 조용히 끼어들어, 무수정 재업로드가 「변경 N건」으로
+      서는 유령 diff가 난다.
+    """
+    snap = RT.build_snapshot(db)
+    db.commit()
+
+    buf = RT.build_workbook(snap)
+    name = RT.filename(snap)
+    # 파일명이 한글이라 RFC 5987로 싣고 ASCII 폴백을 함께 준다. 그래도 스냅샷 ID의 정본은
+    # `_meta` 시트지 파일명이 아니다 — 파일명은 다른 이름으로 저장하는 순간 사라진다.
+    disposition = (
+        f'attachment; filename="{RT.snapshot_code(snap)}.xlsx"; '
+        f"filename*=UTF-8''{quote(name)}"
+    )
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": disposition,
+            # 화면이 「방금 받은 파일이 어느 스냅샷인가」를 파일을 열지 않고도 말할 수 있게 한다.
+            "X-Snapshot-Id": RT.snapshot_code(snap),
+            "X-Snapshot-Rows": str(snap.row_count),
+            "Access-Control-Expose-Headers": "X-Snapshot-Id, X-Snapshot-Rows",
+        },
+    )

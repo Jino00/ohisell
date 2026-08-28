@@ -7,8 +7,14 @@
 //   여기서 누르면 그 탭의 **기존 컴포넌트**로 간다(드릴다운). 「심플하게」의 구현은 기능 제거가
 //   아니라 **입구 수 축소**다 — 조작은 전부 남는다.
 // - **안 한다**: 새 숫자를 «계산»하지 않는다. 보드 스트립은 `/api/cost/board` payload를 **그대로**
-//   읽는다 — 같은 화면의 두 자리가 다른 숫자를 말하면 그게 결함이다. 표는 **읽기 전용**이고
-//   [다운로드]는 S3까지 비활성이다(계약 §1이 S3를 이번 범위에서 뺐다).
+//   읽는다 — 같은 화면의 두 자리가 다른 숫자를 말하면 그게 결함이다. 표는 이 화면에서
+//   **읽기 전용**이고, 값을 고치는 자리는 행을 눌러 여는 부자재 드릴다운이다.
+//
+// ★2026-08-28(S3): [다운로드]가 **살았다**. 누르면 `POST /api/cost/roundtrip/download`가 지금
+//   이 표를 스냅샷으로 굳히고 `.xlsx`를 내려보낸다. **파일은 언제나 전건이다 — 화면 필터를
+//   절대 넘기지 않는다**: 부분집합 파일이 나가면 그 파일의 재업로드(S4)에서 빠진 종이 전부
+//   「사라짐」 묶음에 서고, 확인 클릭 한 번이 백여 종을 비활성화한다.
+//   고쳐서 다시 올리는 길(diff·확인)은 S4다.
 //
 // ★**왜 `CostPage.tsx`가 아니라 별도 파일인가**: 컴포넌트 export가 있는 `.tsx`에 export를 더
 //   얹을 때마다 `react-refresh/only-export-components` 경고가 붙는데, CI 상한이 96이고 실측이
@@ -21,15 +27,17 @@
 //   밟은 병이 정확히 그것이다(`priceSourceLabel` docstring: *"사본을 두면 다음에 한쪽만 바뀐다"*).
 //   순환이 안전한 이유는 넷 다 **함수 선언**(호이스팅됨)이고 **렌더 시점에만** 불리기 때문이다 —
 //   모듈 최상위에서 읽는 자리가 하나도 없다.
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import type { CostBoard, CostMaterial } from "../lib/api";
+import { downloadCostRoundTrip } from "../lib/api";
 import { formatKstDateTime } from "../lib/costMenuSurface";
 import {
   ROUND_TRIP_COLUMNS,
   ROUND_TRIP_NUMERIC,
   roundTripBadges,
   roundTripCountText,
+  saveBlobAsFile,
   type CostInboxGroup,
   type CostInboxTarget,
   type RoundTripFilter,
@@ -242,6 +250,33 @@ export function CostRoundTripTable({
    *  (새 피커를 만들면 네 벌이 되고 네 벌은 갈라진다 — `RecipeDetail`의 `picker`와 같은 관례). */
   filterBar: ReactNode;
 }) {
+  // ★다운로드 상태를 이 컴포넌트가 직접 갖는다 — 호출부가 핸들러를 넘기는 모양으로 두면
+  //   그 두 줄을 지워도 화면 테스트가 전부 초록인 구멍이 생긴다(PR #533 P2-1이 정확히 그것).
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleDownload() {
+    setBusy(true);
+    setError(null);
+    // ★직전 성공의 스냅샷 ID도 지운다(적대 리뷰 P2-2) — 안 지우면 성공 뒤 실패했을 때
+    //   「받음 · CRT-7」과 「다운로드 실패」가 **동시에** 서서, 지금 손에 있는 파일이
+    //   어느 스냅샷인지 화면이 두 가지로 말한다.
+    setResult(null);
+    try {
+      // ★필터를 안 넘긴다 — 넘길 인자가 아예 없다. 부분집합 파일이 나가면 재업로드에서
+      //   빠진 종이 전부 S4 「사라짐」에 서고 확인 한 번에 백여 종이 비활성화된다.
+      const { blob, filename, snapshotId } = await downloadCostRoundTrip();
+      saveBlobAsFile(blob, filename);
+      setResult(snapshotId);
+    } catch (e) {
+      // ★실패를 삼키지 않는다. 안 삼켜야 「눌렀는데 아무 일도 안 일어났다」가 안 생긴다.
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="mt-5" data-testid="cost-home-roundtrip">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -249,14 +284,35 @@ export function CostRoundTripTable({
           왕복 표 (부자재 {totalCount}종 — 이 표가 다운로드 파일의 모양이다)
         </h2>
         <div className="flex items-center gap-2">
+          {/* ★받은 스냅샷 ID를 화면이 말한다 — 파일을 열지 않고도 「방금 받은 게 무엇인가」를
+              알 수 있어야, 여러 번 받았을 때 어느 파일을 고치고 있는지 사람이 안 헷갈린다. */}
+          {result ? (
+            <span className="text-[11px] text-gray-500" data-testid="roundtrip-download-result">
+              받음 · {result}
+            </span>
+          ) : null}
+          {error ? (
+            <span className="text-[11px] text-red-600" data-testid="roundtrip-download-error">
+              다운로드 실패 — {error}
+            </span>
+          ) : null}
           <button
             type="button"
-            disabled
-            title="S3에서 만든다 — 지금은 표만 서 있다"
+            onClick={handleDownload}
+            disabled={busy}
+            title={
+              busy
+                ? "만드는 중"
+                : "지금 이 표 전건을 엑셀로 만든다 — 화면 필터와 무관하게 항상 전건이다"
+            }
             data-testid="roundtrip-download"
-            className="text-xs px-2 py-1 rounded border text-gray-400 border-gray-300 cursor-not-allowed"
+            className={`text-xs px-2 py-1 rounded border ${
+              busy
+                ? "text-gray-400 border-gray-300 cursor-wait"
+                : "text-blue-700 border-blue-300 hover:bg-blue-50"
+            }`}
           >
-            다운로드 — S3에서 만든다
+            {busy ? "만드는 중…" : "다운로드"}
           </button>
         </div>
       </div>
@@ -269,9 +325,11 @@ export function CostRoundTripTable({
           계약 §3은 자백 문구의 **삭제를 금지**하고 이동·묶음·배지화만 허용한다 — 툴팁에만
           두면 마우스를 올린 사람에게만 보이므로 그건 이동이 아니라 사실상 숨김이다. */}
       <p className="mt-1 text-[11px] text-gray-500" data-testid="roundtrip-editable-legend">
-        열 머리의 <span className="text-blue-600">✎</span> = <b>수정 가능</b>(S3 파일에서 고쳐
-        올릴 수 있는 열) · <span className="text-gray-400">🔒</span> = <b>읽기전용</b>(파일에서
-        고쳐도 반영되지 않는 열).
+        열 머리의 <span className="text-blue-600">✎</span> = <b>수정 가능</b>(받은 파일에서 고쳐
+        올릴 수 있는 열 — 올리는 길은 S4) · <span className="text-gray-400">🔒</span> ={" "}
+        <b>읽기전용</b>(파일에서 고쳐도 반영되지 않는 열). 파일 헤더에도 같은 자백이{" "}
+        <b>«읽기전용»</b>으로 붙는다 — 시트 잠금은 쓰지 않는다(잠금은 풀 수 있어 방어가 아니고,
+        진짜 방어는 업로드 확인 화면이 「반영 불가」로 세워 보여 주는 것이다).
       </p>
 
       <div className="mt-2">{filterBar}</div>
