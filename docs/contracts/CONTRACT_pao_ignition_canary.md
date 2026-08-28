@@ -46,9 +46,13 @@
 
 ### 선행 (점화 전 — 이것이 「빨리」의 전부다)
 - [ ] **P2. 대상 선정 절차 실행** — Q5 규칙으로 prod 캠페인 **전수**의 memo·rationale·외부집행·데이터량을 판독한 **후보 목록 + 배제 사유표**가 채팅 화면에 제출되고, Jino가 §8-①로 최종 지정
-- [ ] **P3. 대조군 지정·기록** — 처치(스코프 행)·대조(명단+사유)가 트랙 파일에 D-N으로 기록. **코드 아님, 절차다**
-- [ ] **P4. M3 최소 조각 — 지혜 id 조인** — 성적표 부품을 지혜 id로 묶는 **읽기 조인 1개**, 콘솔에서 「지혜별 성적」이 조회됨. **표면**: 콘솔 화면 1곳(구현 시 지정)
-  - ⚠️ 세션 유보: P4가 카나리 «판정»에 정말 필수인지 이견 있음 — Jino 판단 몫
+- [x] **P3. 대조군 지정·기록** — 처치(스코프 행)·대조(명단+사유)가 트랙 파일에 D-N으로 기록. **코드 아님, 절차다**
+  - 증거(n=66 기록 + n=67 집행): **D-NAO-270** 트랙 기록(처치 `Z폴드8와이드` / 대조 = 같은 TPU 캠페인 나머지 57그룹 «집합» + 배제 2건 사유·실측 병기) + **prod 스코프 행 1행 실재** — `naver_adgroup_scope` id=1(`role=None`·`enabled=1`), `naver_change_log` #7640 `adgroup_scope_change` `changed_at 2026-08-29 00:25:03`(KST 명시 기입), roster `has_scope=true`·`scoped_count=1`·**초과 0**
+- [x] **P4. M3 최소 조각 — 지혜 id 조인** — 성적표 부품을 지혜 id로 묶는 **읽기 조인 1개**, 콘솔에서 「지혜별 성적」이 조회됨. **표면**: 콘솔 화면 1곳(구현 시 지정)
+  - **표면 지정(n=67)**: 콘솔 PAO 최적화 화면 **섹션 4 「지혜 성적표」** — `frontend/src/pages/NaverAdOptimizationConsole.tsx:1486`(섹션) · `:1788`(지혜별 카드 렌더, `#{w.wisdom_id}`·`profit_delta_sum`)
+  - 증거: 조인 경로 `OpsWisdomEntry.param_proposal_id → NaverProposal.id → NaverChangeLog`가 `wisdom_scorecard.py:59`(`_ATTRIBUTION_PATH` 상수로 명문화)·`:213-230`·`:375-381`에 실재 · API `GET /api/naver/ad/wisdom-scorecard`(`routers/naver_ad.py:725-742`, `wisdom_id` 필터 지원) · **prod 라이브 HTTP 200**(지혜 id=1·2 각각 행 반환) · **prod 프론트 번들에 렌더 실재**(`assets/index-0Qk7s0xp.js`에 `wisdom-scorecard`·`지혜 성적표`·`evidence_gap` 전건)
+  - ⚠️ **조인은 있고 흐를 물이 없다**: `wisdom_with_evidence=0` — `naver_change_log` 7,640행 중 `gave_before ∧ gave_after`가 둘 다 채워진 행 **0건**, `outcome_profit` **0건**. 승격 지혜 2건 중 #1은 낳은 제안 1건이 `rejected`(실집행 0), #2는 `param_proposal_id` 자체가 NULL. **코드가 이를 `evidence_gap` 문구로 스스로 자백한다.** 계약 P4 원문은 「조인 1개」·「조회됨」을 요구하고 「값이 채워짐」을 요구하지 않으므로 **충족으로 주장하되 재료 0건을 병기한다** — 재료는 점화 후에야 생긴다(C7과 같은 사슬)
+  - ⚠️ 승인 시점의 세션 유보(*"P4가 카나리 «판정»에 정말 필수인지 이견"*)는 **해소 불요로 지나갔다** — 이미 구현·배포돼 있어 추가 비용 0이었다
 
 ### 카나리 창 (점화 후 — M4 합격 관측 + D-NAO-230 각주)
 - [ ] **C1. 점화 상태** — `/naver-ad/scope` 화면의 카나리 스코프 행이 승인 명단과 **정확히 일치**(초과 0) + prod `auto_operate=1 ∧ optimizer='ours'`가 같은 명단과 일치
