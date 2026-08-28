@@ -225,7 +225,7 @@ def _delta(before: str | None, after: str | None) -> int | None:
         return None
 
 
-def po_history(db: Session, seq: int) -> dict:
+def po_history(db: Session, seq: int, vendor_id: str | None = None) -> dict:
     """★화면 표면: 발주 1건의 관측 이력 전체(시간순).
 
     「이 발주를 우리가 언제 확정했나」에 이 화면이 답한다 — 단 «시점»이 아니라 «구간»으로.
@@ -235,7 +235,7 @@ def po_history(db: Session, seq: int) -> dict:
         db.query(C).filter(C.purchase_order_seq == seq)
         .order_by(C.observed_at, C.id).all()
     )
-    start = history_start(db)
+    start = history_start(db, vendor_id)   # ★latest_round와 대칭(2R P2-D)
     # ★「배선 전 발주」와 「그런 발주 없음」을 가른다(적대 리뷰 1R P1-2 곁가지).
     #   구판은 없는 발주번호에도 「이력은 …부터입니다」라고 답했다 — 모름을 아는 척한 것이다.
     known = (

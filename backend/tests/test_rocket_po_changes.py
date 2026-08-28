@@ -370,3 +370,34 @@ def test_amount_reaches_the_response(db):
     _round(db, [_rec(1, "PA", order_amt=7404840)], T2)
     out2 = q.latest_round_changes(db, VID)
     assert out2["changed"]["amount"] == 7404840
+
+
+# ──────────────────────────────────────────────
+# ⑩ ★프로덕션 «배선» — 헬퍼가 아니라 진짜 경로가 회차를 남기는가 (적대 리뷰 2R B-M3)
+# ──────────────────────────────────────────────
+def test_ingest_itself_records_the_round(db, monkeypatch):
+    """★2R가 잡은 구멍: `_record_ingest_round` **호출**을 지워도 83개가 전부 초록이었다.
+    테스트 헬퍼 `_round()`가 그 함수를 직접 불러서, 유일한 프로덕션 호출부가 무방비였다.
+    ⇒ `ingest_purchase_orders`(진짜 경로)를 태워서 회차 행이 생기는지 잰다.
+    (1R M1과 같은 모양 — 「값은 만들어지는데 그것을 «부르는» 줄이 없다」.)
+    """
+    monkeypatch.setattr(sync.parser, "parse_purchase_order_list", lambda p: [_rec(1, "RP")])
+    sync.ingest_purchase_orders(db, [{"any": 1}])
+
+    rounds = db.query(CoupangRocketPoIngestRound).all()
+    assert len(rounds) == 1, "ingest가 회차를 안 남겼다 — 화면이 dropped를 영원히 못 읽는다"
+    assert rounds[0].records == 1 and rounds[0].dropped == 0
+    # ★그리고 그 회차 시각이 원장과 같아야 한다(한 회차 = 한 시각).
+    po = db.query(CoupangRocketPurchaseOrder).one()
+    assert rounds[0].observed_at == po.synced_at
+
+
+def test_round_result_none_is_not_zero(db):
+    """★「모름」을 0으로 접지 않는다(원칙22) — 회차 기록이 없으면 dropped는 None이다."""
+    from datetime import timedelta
+    _round(db, [_rec(1, "RP")], T1)
+    db.query(CoupangRocketPoIngestRound).delete()      # 회차 기록만 지운다
+    db.commit()
+    rr = q.round_result(db, T1)
+    assert rr["dropped"] is None and rr["records"] is None   # 0이 아니라 None
+    assert T1 + timedelta(0) == T1

@@ -96,11 +96,13 @@ def _create_round_table() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    if not _has_table(bind):
-        return
-    # ⚠️ 이 표는 **소급 복원이 불가능하다**(원장에 직전 값이 없다). 지우면 그 구간의 관측은
+    # ⚠️ 이 표들은 **소급 복원이 불가능하다**(원장에 직전 값이 없다). 지우면 그 구간의 관측은
     #    영구히 사라진다 — 실행 전 덤프를 뜰 것.
-    op.drop_table(_TABLE)
-    if _ROUND_TABLE in set(sa.inspect(bind).get_table_names()):
+    # ★upgrade와 대칭으로 표마다 따로 검사한다(적대 리뷰 2R): 구판은 change_log가 없으면
+    #   조기 return이라 round 표가 **고아로 남았다**.
+    bind = op.get_bind()
+    names = set(sa.inspect(bind).get_table_names())
+    if _TABLE in names:
+        op.drop_table(_TABLE)
+    if _ROUND_TABLE in names:
         op.drop_table(_ROUND_TABLE)

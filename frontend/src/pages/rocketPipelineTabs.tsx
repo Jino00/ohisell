@@ -83,7 +83,10 @@ export function PoChangesCard() {
   const none = data.first_seen.count === 0 && data.changed.count === 0;
   // ★적대 리뷰 1R P1-1: 이벤트 적재가 실패한 회차를 「달라진 게 없다」로 **단언**하면 안 된다.
   //   버린 수가 0이 아니면 그건 «변화가 없다»가 아니라 «못 봤다»다(원칙22).
-  const dropped = data.round?.dropped ?? 0;
+  // ★★2R P2-A: `?? 0`으로 접지 않는다 — 백엔드가 애써 가른 「모름(null)」을 여기서 0으로
+  //   되접으면 «회차 기록 자체가 없는» 경우까지 「없습니다」로 단언하게 된다. 셋을 가른다.
+  const dropped = data.round?.dropped ?? null;      // null = 「몇 건 버렸는지 모른다」
+  const roundUnknown = data.round?.dropped == null; // 회차 기록이 없다(배선 전이거나 기록 실패)
 
   return (
     <Card
@@ -104,7 +107,7 @@ export function PoChangesCard() {
         )}
       </div>
 
-      {dropped > 0 && (
+      {dropped != null && dropped > 0 && (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-snug text-amber-800">
           ⚠️ 이번 회차에서 관측 <b>{cnt(dropped)}건을 기록하지 못했습니다</b> —
           아래 목록은 <b>완전하지 않습니다</b>. 「달라진 게 없다」는 뜻이 아닙니다.
@@ -115,10 +118,16 @@ export function PoChangesCard() {
       )}
 
       {none ? (
-        dropped > 0 ? (
+        dropped != null && dropped > 0 ? (
           <EmptyState
             reason="이번 수집의 변화를 기록하지 못했습니다."
             hint="화면에 안 뜨는 것과 일어나지 않은 것은 다릅니다 — 위 사유를 보세요."
+          />
+        ) : roundUnknown ? (
+          // ★이 회차의 적재 결과를 «모른다». 「없습니다」로 단언하면 안 된다(2R P2-A).
+          <EmptyState
+            reason="이 회차에 변화가 있었는지 확인할 수 없습니다."
+            hint="회차 기록이 없습니다 — 배선 전 수집이거나 기록에 실패한 회차입니다."
           />
         ) : (
           <EmptyState reason="이번 수집에서는 달라진 발주가 없습니다." />

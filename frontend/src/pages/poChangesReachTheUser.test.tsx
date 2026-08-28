@@ -19,7 +19,9 @@ import type React from "react";
 
 const h = vi.hoisted(() => ({
   changes: null as unknown,
+  changesFails: null as null | string,
   history: null as unknown,
+  historyFails: null as null | string,
   historyCalls: [] as number[],
 }));
 
@@ -31,10 +33,15 @@ vi.mock("../lib/api", () => ({
   previewRocketInvoiceConfirm: () => new Promise<never>(() => {}),
   requestRocketInvoiceConfirm: () => new Promise<never>(() => {}),
   isPoStage: () => true,
-  fetchRocketPoChanges: () => Promise.resolve(h.changes),
+  fetchRocketPoChanges: () =>
+    h.changesFails ? Promise.reject(new Error(h.changesFails)) : Promise.resolve(h.changes),
   fetchRocketPoHistory: (seq: number) => {
     h.historyCalls.push(seq);
-    return Promise.resolve(h.history);
+    // ★거절은 «호출 시점»에 만든다 — 미리 만든 rejected Promise는 아무도 안 붙잡는 사이
+    //   unhandled rejection이 되어 러너가 「false positive 가능」을 경고한다.
+    return h.historyFails
+      ? Promise.reject(new Error(h.historyFails))
+      : Promise.resolve(h.history);
   },
 }));
 
@@ -95,7 +102,9 @@ const FULL = {
 
 beforeEach(() => {
   h.changes = FULL;
+  h.changesFails = null;
   h.history = HISTORY;
+  h.historyFails = null;
   h.historyCalls = [];
 });
 afterEach(cleanup);
@@ -172,7 +181,7 @@ describe("이번 수집에서 달라진 것 — 표면", () => {
   });
 
   it("조회 실패를 «달라진 게 없다»로 말하지 않는다", async () => {
-    h.changes = Promise.reject(new Error("boom")) as unknown;
+    h.changesFails = "boom";
     render(<Card />);
     expect(await screen.findByText(/조회 실패는 '달라진 게 없다'와 다릅니다/)).toBeTruthy();
   });
@@ -209,6 +218,39 @@ describe("이번 수집에서 달라진 것 — 표면", () => {
     });
   });
 
+  it("★펼친 이력이 «구간»으로 말한다 — §4-4의 답 문장 (2R F-S8)", async () => {
+    // 2R에서 이 표기를 지워도 아무 테스트가 안 죽었다. 「이 발주를 언제 확정했나」에
+    // 화면이 답하는 **그 문장**이라, 사라지면 이력이 남아도 질문에 답이 안 된다.
+    render(<Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "140778881" }));
+    await waitFor(() => {
+      const body = document.body.textContent ?? "";
+      // 상세 안의 구간 표기(카드 본문의 것과 별개로 «이력 행»에도 있어야 한다)
+      const n = (body.match(/2026-08-28 10:14 ~ 2026-08-28 12:34 사이에 바뀜/g) ?? []).length;
+      expect(n).toBeGreaterThanOrEqual(2);   // 카드 본문 1 + 펼친 이력 1
+    });
+  });
+
+  it("★이력 조회 실패를 «변화 없음»으로 말하지 않는다 (2R F-S9)", async () => {
+    h.historyFails = "500 boom";
+    render(<Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "140778881" }));
+    expect(await screen.findByText(/조회 실패는 「변화가 없었다」와 다릅니다/)).toBeTruthy();
+  });
+
+  it("★회차 기록이 «없으면» 「없습니다」로 단언하지 않는다 (2R P2-A)", async () => {
+    // 백엔드가 애써 가른 「모름(null)」을 프론트가 `?? 0`으로 되접고 있었다.
+    h.changes = {
+      ...FULL,
+      round: { records: null, changes: null, dropped: null, error: null },
+      first_seen: { count: 0, amount: 0, rows: [] },
+      changed: { count: 0, amount: 0, rows: [] },
+    };
+    render(<Card />);
+    expect(await screen.findByText(/변화가 있었는지 확인할 수 없습니다/)).toBeTruthy();
+    expect(screen.queryByText(/이번 수집에서는 달라진 발주가 없습니다/)).toBeNull();
+  });
+
   it("★이력이 없는 발주는 «왜» 비었는지 화면이 말한다", async () => {
     h.history = {
       ...HISTORY, rows: [],
@@ -217,6 +259,21 @@ describe("이번 수집에서 달라진 것 — 표면", () => {
     render(<Card />);
     fireEvent.click(await screen.findByRole("button", { name: "140778881" }));
     expect(await screen.findByText(/그 전 변화는 기록이 없습니다/)).toBeTruthy();
+  });
+
+  it("★아직 이력이 하나도 없을 때도 상세가 그 사유를 말한다 (2R P2-B)", async () => {
+    // 카드 헤더·note가 같은 문자열을 이미 내고 있어, 상세를 「변화 없음」으로 바꾸는 변이가
+    // 살아남았다. 상세 «안»에서 확인한다.
+    h.history = { ...HISTORY, rows: [], history_start: null,
+                  empty_reason: "아직 관측 이력이 없습니다 — 다음 수집부터 쌓입니다." };
+    render(<Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "140778881" }));
+    await waitFor(() => {
+      const n = (document.body.textContent ?? "").match(/다음 수집부터 쌓입니다/g) ?? [];
+      expect(n.length).toBeGreaterThanOrEqual(1);
+    });
+    // 「변화 없음」류로 바뀌지 않았다.
+    expect(document.body.textContent).not.toContain("변화 없음");
   });
 
   it("★원장에 없는 발주는 «배선 전»과 다르게 말한다", async () => {
@@ -248,5 +305,33 @@ describe("이번 수집에서 달라진 것 — 표면", () => {
     );
     expect(api).toContain("/api/overview/rocket-po-changes/${seq}");
     expect(api).toMatch(/export function fetchRocketPoHistory/);
+  });
+});
+
+
+// ══════════════════════════════════════════════════════════════
+// ★「소스로 재는 테스트」의 한계를 메운다 (적대 리뷰 2R 5절)
+//   2R 판정: 그 테스트가 검사하는 명제는 「그 이름과 경로 문자열이 파일 어딘가에 있다」뿐이라,
+//   **함수 본문만 비우고 경로를 주석으로 옮기면 통과**한다(M1b SURVIVED).
+//   ⇒ `../lib/api`를 **모킹하지 않고** 전역 fetch를 스텁으로 두어 «진짜 호출»을 관측한다.
+// ══════════════════════════════════════════════════════════════
+describe("발주 이력 클라이언트 — 진짜로 그 경로를 부른다", () => {
+  it("★fetchRocketPoHistory가 실제로 /rocket-po-changes/{seq}를 요청한다", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((url: string) => {
+      calls.push(String(url));
+      return Promise.resolve({
+        ok: true, status: 200, text: () => Promise.resolve("{}"),
+      } as Response);
+    }) as typeof fetch;
+    try {
+      const api = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+      await api.fetchRocketPoHistory(140778881);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("/api/overview/rocket-po-changes/140778881");
   });
 });
