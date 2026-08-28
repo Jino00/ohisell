@@ -562,8 +562,12 @@ export function MaterialPriceHistory({
               className={`border-b last:border-0 ${warn ? "bg-amber-50" : ""}`}
               data-testid={`price-row-${p.id}`}
             >
-              <td className="py-1.5 pr-3">{p.effective_date ?? "—"}</td>
-              <td className="py-1.5 pr-3">{priceSourceLabel(p.source)}</td>
+              {/* ★`whitespace-nowrap` — `2026-08-24`가 하이픈에서 접혀 **한 행이 두 줄**이
+                  되던 그 병이다(Jino 2026-08-28 11:09 «날짜가 2줄이 되지 않도록»).
+                  홈 왕복 표에는 그때 붙였는데(`costHome.tsx:440`) **부자재 탭 두 표에는
+                  안 붙었다** — 「한쪽만 고친다」의 재발이라 이번에 같이 잠근다. */}
+              <td className="py-1.5 pr-3 whitespace-nowrap">{p.effective_date ?? "—"}</td>
+              <td className="py-1.5 pr-3 whitespace-nowrap">{priceSourceLabel(p.source)}</td>
               <td className="py-1.5 pr-3">
                 {p.shipment ? (
                   <span title={`수입건 id=${p.shipment.id}`}>{p.shipment.hbl_no}</span>
@@ -683,9 +687,16 @@ export function MaterialList({
           onClick={() => onSelect(m.id)}
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="text-sm font-medium">{m.name}</span>
+            {/* ★2026-08-28 — 이름은 «접히고» 배지는 «안 접힌다». 초판은 둘 다 아무 지시가
+                없어서 긴 부자재명이 배지를 밀면 「미/확/인」이 세로로 깨졌다(`CostPage.tsx`
+                아래 3305 주석이 기록한 증상). 그때는 칼럼을 넓혀 **증상만 가렸고** 원인
+                클래스는 안 붙였다 — 폭이 조금만 좁아지면 그대로 재발한다.
+                줄바꿈 대상은 이름(문장)이고 배지(판정)는 한 줄로 남는다. */}
+            <span className="text-sm font-medium min-w-0 break-words" title={m.name}>
+              {m.name}
+            </span>
             <span
-              className={`text-[11px] px-1.5 py-0.5 rounded ${
+              className={`shrink-0 whitespace-nowrap text-[11px] px-1.5 py-0.5 rounded ${
                 m.status === "approved"
                   ? "bg-green-100 text-green-700"
                   : "bg-amber-100 text-amber-800"
@@ -857,16 +868,22 @@ export function LedgerMaterialLines({
     );
   }
   return (
-    <table className="w-full text-sm">
+    // ★2026-08-28 — 이 8열 표는 `w-full`인데 **가로 스크롤이 없었다.** 부자재 탭은 왼쪽
+    //   칼럼(22~28rem)을 빼고 나면 오른쪽이 ≈1,000px인데 거기에 8열을 밀어 넣으니
+    //   품목명·종 이름이 짜부라지고 날짜가 두 줄이 됐다. 게다가 이 표는 한 화면에
+    //   **최대 3벌** 동시에 뜬다. 값·날짜는 nowrap으로 잠그고, 그래도 안 들어가면
+    //   잘라 내는 대신 **가로로 흐르게** 한다(잘림은 정보 손실이고 스크롤은 아니다).
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
       <thead>
         <tr className="text-left text-gray-500 border-b">
-          <th className="py-1.5 pr-3">통관일</th>
-          <th className="py-1.5 pr-3">수입건</th>
-          <th className="py-1.5 pr-3">품목명</th>
-          <th className="py-1.5 pr-3 text-right">수량</th>
-          <th className="py-1.5 pr-3 text-right">단가(포함)</th>
-          <th className="py-1.5 pr-3 text-right">단가(제외)</th>
-          <th className="py-1.5 pr-3">상태</th>
+          <th className="py-1.5 pr-3 whitespace-nowrap">통관일</th>
+          <th className="py-1.5 pr-3 whitespace-nowrap">수입건</th>
+          <th className="py-1.5 pr-3 whitespace-nowrap">품목명</th>
+          <th className="py-1.5 pr-3 text-right whitespace-nowrap">수량</th>
+          <th className="py-1.5 pr-3 text-right whitespace-nowrap">단가(포함)</th>
+          <th className="py-1.5 pr-3 text-right whitespace-nowrap">단가(제외)</th>
+          <th className="py-1.5 pr-3 whitespace-nowrap">상태</th>
           <th className="py-1.5" />
         </tr>
       </thead>
@@ -877,7 +894,7 @@ export function LedgerMaterialLines({
           const suggestedName = materials.find((m) => m.id === suggested)?.name ?? null;
           return (
             <tr key={r.line_id} className="border-b last:border-0" data-testid={`ledger-line-${r.line_id}`}>
-              <td className="py-1.5 pr-3">{r.declaration_date ?? "—"}</td>
+              <td className="py-1.5 pr-3 whitespace-nowrap">{r.declaration_date ?? "—"}</td>
               <td className="py-1.5 pr-3">
                 {r.hbl_no}
                 {/* ★확정이 풀린 수입건은 그렇다고 말한다 — 초판은 이 행을 목록에서 통째로
@@ -888,23 +905,34 @@ export function LedgerMaterialLines({
                   </span>
                 ) : null}
               </td>
-              <td className="py-1.5 pr-3">{r.item_name}</td>
-              <td className="py-1.5 pr-3 text-right">{r.quantity ?? "—"}</td>
-              <td className="py-1.5 pr-3 text-right">{formatCostWon(r.unit_cost_inc_vat)}</td>
-              <td className="py-1.5 pr-3 text-right text-gray-500">
+              {/* ★품목명은 영문 혼재 긴 고유명사다 — 접혀도 되는 쪽이라 nowrap을 안 걸고,
+                  대신 `title`로 전문을 보장한다(접히면 어차피 다 보이지만, 칼럼이 좁아
+                  글자 단위로 깨질 때 원문 한 줄이 남는다). */}
+              <td className="py-1.5 pr-3 break-words" title={r.item_name}>
+                {r.item_name}
+              </td>
+              <td className="py-1.5 pr-3 text-right whitespace-nowrap">{r.quantity ?? "—"}</td>
+              <td className="py-1.5 pr-3 text-right whitespace-nowrap">
+                {formatCostWon(r.unit_cost_inc_vat)}
+              </td>
+              <td className="py-1.5 pr-3 text-right text-gray-500 whitespace-nowrap">
                 {formatCostWon(r.unit_cost_ex_vat)}
               </td>
               <td className="py-1.5 pr-3">
                 {r.linked_material_id ? (
                   ledgerCheckText(r.linked_price_check) ? (
-                    <span className="text-amber-800">
+                    // ★`title`에 종 이름 — 이 칸은 「연결됨 · <긴 종 이름>」이라 좁아지면
+                    //   정작 «어느 종에 연결됐나»가 먼저 깨진다.
+                    <span className="text-amber-800" title={r.linked_material_name ?? undefined}>
                       연결됨 · {r.linked_material_name}
                       <span className="block text-[11px]">
                         {ledgerCheckText(r.linked_price_check)}
                       </span>
                     </span>
                   ) : (
-                    <span className="text-green-700">연결됨 · {r.linked_material_name}</span>
+                    <span className="text-green-700" title={r.linked_material_name ?? undefined}>
+                      연결됨 · {r.linked_material_name}
+                    </span>
                   )
                 ) : (
                   <span className={r.suggestion.unmatched ? "text-red-600" : "text-amber-700"}>
@@ -915,9 +943,12 @@ export function LedgerMaterialLines({
               </td>
               <td className="py-1.5 text-right">
                 {!r.linked_material_id && suggested && onLink ? (
+                  // ★버튼 라벨에 긴 종 이름이 들어간다 — 초판은 지시가 없어 버튼이
+                  //   여러 줄로 깨졌다. 라벨은 한 줄로 잠그고 전문은 `title`이 준다.
                   <button
-                    className="text-xs px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-40"
+                    className="text-xs px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-40 whitespace-nowrap"
                     disabled={busy}
+                    title={suggestedName ? `「${suggestedName}」로 연결` : undefined}
                     onClick={() => onLink(suggested, r.line_id)}
                   >
                     「{suggestedName}」로 연결
@@ -928,7 +959,8 @@ export function LedgerMaterialLines({
           );
         })}
       </tbody>
-    </table>
+      </table>
+    </div>
   );
 }
 
@@ -1947,10 +1979,16 @@ function LineMaterialSwap({
   }
   return (
     <span className="ml-2 inline-flex items-center gap-1">
+      {/* ★2026-08-28 — `max-w-[14rem]`(224px)에 부자재 **139종의 긴 이름**이 들어간다.
+          네이티브 `<select>`는 `truncate`가 안 먹고 **말줄임표조차 안 붙어서** 그냥 잘린
+          채로 끝난다 — 지금 무엇이 골라져 있는지 화면에서 확인할 길이 없었다.
+          캡을 22rem으로 올리고 `title`로 현재 선택의 전문을 준다(펼치면 옵션 목록은
+          select 폭에 안 묶여 다 보이지만, **닫힌 상태**가 화면의 정본이다). */}
       <select
-        className="text-[11px] border rounded px-1 py-0.5 max-w-[14rem] disabled:opacity-40"
+        className="text-[11px] border rounded px-1 py-0.5 max-w-[22rem] disabled:opacity-40"
         data-testid={`breakdown-swap-${lineId}`}
         disabled={locked}
+        title={materials.find((m) => m.id === materialId)?.name ?? undefined}
         defaultValue={String(materialId)}
         onChange={(e) => {
           const next = Number(e.target.value);
@@ -2025,7 +2063,9 @@ export function StandardBreakdown({
         <tbody>
           {standard.lines.map((ln, i) => (
             <tr key={`${ln.label}-${i}`} className="border-b last:border-0">
-              <td className="py-1 pr-2">
+              {/* ★`title` — 이 칸은 긴 부자재명과 「종 바꾸기」 컨트롤이 **한 셀에서 경쟁**한다.
+                  컨트롤이 `ml-2`로 붙어 있어 좁아지면 이름이 먼저 깨진다. */}
+              <td className="py-1 pr-2 break-words" title={ln.label}>
                 {ln.label}
                 {/* ★종 교체 (설계 Q6) — `line_id`로 닿는다. 인덱스로 짝지으면 계산기에 라인
                     필터가 하나 생기는 순간 엉뚱한 줄이 바뀐다.
@@ -3618,7 +3658,13 @@ export default function CostPage() {
           {/* ★`items-start`가 없으면 `md:sticky`가 **작동하지 않는다** — 그리드 아이템이
               기본값(`stretch`)으로 칼럼 전체 높이를 차지해 붙을 여백이 안 생긴다.
               부자재 탭 그리드엔 이미 있었고 여기만 없었다(같은 규율의 나머지 반쪽). */}
-          <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6 items-start">
+          {/* ★2026-08-28 «홈·부자재·레시피 쪽도 같이 봐줘» — 레시피 목록 상품명이 **상시**
+              잘리던 원인이 여기다. 초판은 `320px` **고정**이라 창을 아무리 넓혀도 그 칼럼은
+              1px도 안 넓어졌다(그래서 이 탭은 페이지 폭 상한을 풀어도 소용이 없다 —
+              `costPageWidthClass`가 `recipes`를 상한에 남겨 둔 이유이기도 하다).
+              `minmax`로 바꿔 **넓으면 넓어지고 좁으면 320px는 지킨다**.
+              오른쪽 `1fr`은 그대로라 계산 내역이 좁아지지 않는다(28rem에서 멈춘다). */}
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(320px,28rem)_1fr] gap-6 items-start">
             {/* ★`min-w-0` — 없으면 320px 트랙이 내용 폭에 밀려 오른쪽 패널을 침범한다. */}
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-gray-700 mb-2">

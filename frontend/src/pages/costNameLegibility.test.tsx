@@ -24,15 +24,32 @@
 //     M7  상품명 텍스트 렌더 자체를 지운다(`title`만 남긴다) — 「닿는 층」 변이
 // ══════════════════════════════════════════════════════════════════════════════
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
-import { RecipeList, StandardCostBoard } from "./CostPage";
+import {
+  LedgerMaterialLines,
+  MaterialList,
+  RecipeList,
+  StandardBreakdown,
+  StandardCostBoard,
+  materialStatusLabel,
+} from "./CostPage";
+import { CostRoundTripTable } from "./costHome";
+import { ROUND_TRIP_FILTER_NONE } from "../lib/costHome";
 // ★`costPageWidthClass`는 `CostPage.tsx`가 아니라 `lib/costMenuSurface.ts`에 산다 —
 //   그 파일 헤더가 적어 둔 이유 그대로다: 컴포넌트도 export하는 .tsx에 순수 export를 하나
 //   더 얹으면 `react-refresh/only-export-components` 경고가 1건 늘고 CI의 warning 래칫이
 //   빨간불이 된다(2026-08-28 실측 — 96→97로 실제로 터졌고, 그래서 여기로 옮겼다).
 import { costPageWidthClass } from "../lib/costMenuSurface";
-import type { CostBoard, CostBoardRow, CostRecipe } from "../lib/api";
+import type {
+  CostBoard,
+  CostBoardRow,
+  CostLedgerMaterialLine,
+  CostMaterial,
+  CostRecipe,
+  CostStandard,
+  CostStandardLine,
+} from "../lib/api";
 
 /** 보드 상품명 칸의 testid — `recipe_id`까지 넣는 이유는 아래 「중복 SKU」 테스트가 말한다. */
 const BOARD_NAME_TESTID = "board-name-45-OHI-0442";
@@ -164,14 +181,19 @@ describe("★보드 표 — 상품명이 잘리지 않는다 (Jino «글자가 �
 // ★적대 리뷰 변이 M6이 **살아남은** 자리다: 보드 탭의 `max-w-[96rem]` 해제를 되돌려도
 //   프론트 1,173건이 전건 초록이었다. 최상위 wrapper의 className은 `<CostPage>`를 통째로
 //   렌더해야 닿아서 어느 테스트도 보지 않았기 때문이다. 판정을 순수 함수로 뽑아 잡는다.
-describe("★페이지 폭 상한 — 넓은 표(home·board)만 상한을 푼다", () => {
-  it("board·home은 폭 상한이 없다 (오른쪽을 비워 둔 채 이름을 자르던 자리)", () => {
+describe("★페이지 폭 상한 — 넓은 표를 그리는 탭만 상한을 푼다", () => {
+  it("board·home·materials는 폭 상한이 없다 (오른쪽을 비워 둔 채 이름을 자르던 자리)", () => {
     expect(costPageWidthClass("board")).not.toMatch(/\bmax-w-/);
     expect(costPageWidthClass("home")).not.toMatch(/\bmax-w-/);
+    // ★materials는 2026-08-28에 합류했다 — 「폼·목록 위주」라던 초판 주석이 사실과 달랐다.
+    //   오른쪽 `1fr` 칼럼에 8열 표가 **최대 3벌** 동시에 뜬다.
+    expect(costPageWidthClass("materials")).not.toMatch(/\bmax-w-/);
   });
 
-  it("materials·recipes는 상한을 유지한다 — 폼·목록이라 상한이 가독성을 돕는다", () => {
-    expect(costPageWidthClass("materials")).toMatch(/\bmax-w-\[96rem\]/);
+  it("★recipes만 상한을 유지한다 — 여기서는 상한을 풀어도 안 낫기 때문이다", () => {
+    // 레시피 탭에서 잘리는 것은 왼쪽 목록의 상품명인데 그 칼럼은 고정폭이라 페이지가
+    // 넓어져도 안 넓어진다. 그 자리는 `minmax(320px,28rem)`으로 따로 고쳤다.
+    // 「넓히면 낫는다」가 아니라 「무엇이 폭을 안 받고 있나」를 봐야 했던 자리다.
     expect(costPageWidthClass("recipes")).toMatch(/\bmax-w-\[96rem\]/);
   });
 });
@@ -220,5 +242,218 @@ describe("★레시피 목록 — 잘리더라도 전문을 볼 길은 있다", 
     render(<RecipeList recipes={[RECIPE]} selectedId={null} onSelect={() => {}} />);
     const named = screen.getByTitle(LONG_NAME);
     expect(named.textContent).toBe(LONG_NAME);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 부자재 탭 (2026-08-28 — Jino «홈, 부자재, 레시피쪽도 같이 봐줘»)
+//
+// ★보드에서 고친 것과 **같은 상태**가 여기 넷 더 있었다. 특히 원장 라인 표는 8열 `w-full`
+//   인데 **가로 스크롤조차 없어서** 품목명·종 이름이 짜부라지고 날짜가 두 줄이 됐다.
+// ══════════════════════════════════════════════════════════════════════════════
+const LONG_MATERIAL = "오하이 폴드7 외부액정 빛반사방지 지문방지 매트 필름 (대형)";
+
+function material(over: Partial<CostMaterial> = {}): CostMaterial {
+  return {
+    id: 7,
+    name: LONG_MATERIAL,
+    unit: "ea",
+    category: "film",
+    status: "unconfirmed",
+    excel_label: null,
+    excel_ref_price: null,
+    match_rule: null,
+    form_factor: "fold",
+    part: null,
+    note: null,
+    lot_count: 0,
+    price_count: 0,
+    stale_count: 0,
+    latest_price_ex_vat: null,
+    latest_price_inc_vat: null,
+    latest_price_inc_derived: false,
+    latest_price_source: null,
+    latest_price_effective_date: null,
+    price_rule: "latest",
+    lot_price_min: null,
+    lot_price_max: null,
+    lot_price_has_span: false,
+    price_conflict: false,
+    price_conflict_price_id: null,
+    prices: [],
+    used_by: [],
+    used_by_count: 0,
+    ...over,
+  };
+}
+
+function ledgerLine(over: Partial<CostLedgerMaterialLine> = {}): CostLedgerMaterialLine {
+  return {
+    line_id: 501,
+    shipment_id: 30,
+    hbl_no: "SETR2608170301",
+    declaration_date: "2026-08-17",
+    item_name: "Matte_Film_Fold7_Outer_AntiGlare_Large",
+    line_type: "material",
+    quantity: "1000.000",
+    unit_cost_ex_vat: "2820.00",
+    unit_cost_inc_vat: "3102.00",
+    allocated_cost_krw: "3102000.00",
+    linked_material_id: null,
+    linked_material_name: null,
+    linked_price_id: null,
+    shipment_status: "confirmed",
+    linked_price_check: null,
+    suggestion: {
+      line_id: 501,
+      item_name: "Matte_Film_Fold7_Outer_AntiGlare_Large",
+      material_id: null,
+      reason: "규칙 없음",
+      candidates: [],
+      ambiguous: false,
+      unmatched: false,
+    },
+    ...over,
+  };
+}
+
+describe("★부자재 탭 — 종 목록에서 이름이 배지를 깨지 않는다", () => {
+  it("이름은 접히고(min-w-0 break-words) 상태 배지는 안 접힌다(shrink-0 nowrap)", () => {
+    render(
+      <MaterialList
+        materials={[material()]}
+        selectedId={null}
+        onSelect={() => {}}
+        importedIds={new Set<number>()}
+      />,
+    );
+    const named = screen.getByTitle(LONG_MATERIAL);
+    expect(named.className).toMatch(/\bmin-w-0\b/);
+    expect(named.className).toMatch(/\bbreak-words\b/);
+
+    // ★배지가 «안 접히는» 쪽이다. 초판은 양쪽 다 지시가 없어 긴 이름이 배지를 밀면
+    //   「미/확/인」이 세로로 깨졌다 — 그때는 칼럼을 넓혀 증상만 가렸다.
+    const badge = screen.getByText(materialStatusLabel("unconfirmed"));
+    expect(badge.className).toMatch(/\bshrink-0\b/);
+    expect(badge.className).toMatch(/\bwhitespace-nowrap\b/);
+  });
+});
+
+describe("★부자재 탭 — 원장 라인 표(8열)가 잘리는 대신 가로로 흐른다", () => {
+  it("표가 `overflow-x-auto` 컨테이너 안에 있다 — 초판은 없어서 열이 짜부라졌다", () => {
+    const { container } = render(<LedgerMaterialLines rows={[ledgerLine()]} materials={[]} />);
+    const table = container.querySelector("table");
+    expect(table).toBeTruthy();
+    expect(table!.parentElement!.className).toMatch(/\boverflow-x-auto\b/);
+  });
+
+  it("★통관일이 두 줄로 갈라지지 않는다 (Jino «날짜가 2줄이 되지 않도록»의 미수복분)", () => {
+    render(<LedgerMaterialLines rows={[ledgerLine()]} materials={[]} />);
+    const cell = screen.getByText("2026-08-17");
+    expect(cell.className).toMatch(/\bwhitespace-nowrap\b/);
+  });
+
+  it("품목명이 `title`로 전문을 들고 있다 — 영문 혼재 긴 이름이라 글자 단위로 깨진다", () => {
+    render(<LedgerMaterialLines rows={[ledgerLine()]} materials={[]} />);
+    const cell = screen.getByTitle("Matte_Film_Fold7_Outer_AntiGlare_Large");
+    expect(cell.textContent).toBe("Matte_Film_Fold7_Outer_AntiGlare_Large");
+  });
+
+  it("★「연결됨 · <종 이름>」 칸도 `title`을 갖는다 — 좁아지면 «어느 종인가»가 먼저 깨진다", () => {
+    render(
+      <LedgerMaterialLines
+        rows={[ledgerLine({ linked_material_id: 7, linked_material_name: LONG_MATERIAL })]}
+        materials={[]}
+      />,
+    );
+    expect(screen.getByTitle(LONG_MATERIAL).textContent).toContain("연결됨");
+  });
+});
+
+describe("★홈 탭 왕복 표 — 이름이 «잘리지» 않는다 (캡은 남기되 접는다)", () => {
+  it("이름 열이 `truncate`를 안 쓰고 `break-words`로 접는다 — `title`은 그대로", () => {
+    render(
+      <CostRoundTripTable
+        rows={[material({ id: 12, name: LONG_MATERIAL })]}
+        totalCount={1}
+        filter={ROUND_TRIP_FILTER_NONE}
+        onFilterChange={() => {}}
+        onSelectRow={() => {}}
+        filterBar={null}
+      />,
+    );
+    const cell = screen.getByTitle(LONG_MATERIAL);
+    expect(cell.className).not.toMatch(/\btruncate\b/);
+    expect(cell.className).toMatch(/\bbreak-words\b/);
+    // ★캡은 **남긴다** — 이 표는 12열이라 이름 하나가 폭을 다 먹으면 나머지가 짜부라진다.
+    //   보드(9열·비고가 대개 빈 칸)와 처방이 갈리는 자리다.
+    expect(cell.className).toMatch(/\bmax-w-\[24rem\]/);
+    // ★★«닿는 층» — 이름이 **화면 본문에 실제로 그려지는가.** 적대 리뷰 변이 A가 바로 이
+    //   자리에서 살아남았다: `{m.name}` 렌더를 통째로 지우고 `title`만 남겨도 프론트
+    //   1,182건이 전건 초록이었다(위 세 줄은 className만 보고 `textContent`는 한 번도 안
+    //   봤다). 「값이 도는 층은 지키고 사람이 읽는 층은 안 지킨다」 — 이 저장소가 네 번
+    //   재발했다고 적어 둔 병이 다섯 번째로 여기 비어 있었다.
+    expect(cell.textContent).toContain(LONG_MATERIAL);
+  });
+});
+
+// ── 레시피 탭 계산 내역 — 이름과 「종 바꾸기」가 한 셀에서 경쟁한다 ──────────────
+// ★적대 리뷰 변이 H·I가 살아남은 자리다. 둘 다 이 PR이 «고쳤다»고 주장한 지점인데
+//   그것을 지키는 단언이 하나도 없었다.
+function standardLine(over: Partial<CostStandardLine> = {}): CostStandardLine {
+  return {
+    label: LONG_MATERIAL,
+    quantity: "1.000",
+    unit_price_ex_vat: "320.00",
+    unit_price_inc_vat: "352.00",
+    amount_ex_vat: "320.00",
+    amount_inc_vat: "352.00",
+    price_status: "ok",
+    inc_derived: false,
+    price_source: "manual",
+    price_note: null,
+    material_id: 7,
+    line_id: 900,
+    usable: true,
+    excel_ref_price: null,
+    ...over,
+  };
+}
+
+function standardWith(lines: CostStandardLine[]): CostStandard {
+  return {
+    computable: true,
+    std_cost_ex_vat: "320.00",
+    std_cost_inc_vat: "352.00",
+    reason: null,
+    unresolved: [],
+    partial_ex_vat: null,
+    partial_inc_vat: null,
+    line_count: lines.length,
+    lines,
+  };
+}
+
+describe("★레시피 탭 계산 내역 — 부자재 이름 칸", () => {
+  it("I — 라벨이 `break-words` + `title`을 갖고, 이름이 실제로 그려진다", () => {
+    render(<StandardBreakdown standard={standardWith([standardLine()])} />);
+    const cell = screen.getByTitle(LONG_MATERIAL);
+    expect(cell.className).toMatch(/\bbreak-words\b/);
+    // ★닿는 층 — 변이 I가 살아남은 이유가 이 단언이 없어서였다.
+    expect(cell.textContent).toContain(LONG_MATERIAL);
+  });
+
+  it("H — 「종 바꾸기」를 열면 select가 **지금 골라진 종**의 전문을 `title`로 들고 있다", () => {
+    render(
+      <StandardBreakdown
+        standard={standardWith([standardLine()])}
+        swap={{ materials: [material({ id: 7, name: LONG_MATERIAL })], onSwap: () => {} }}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-900"));
+    const select = screen.getByTestId("breakdown-swap-900");
+    // 네이티브 `<select>`는 `truncate`가 안 먹고 **말줄임표조차 안 붙는다** — 좁으면
+    // 그냥 잘린 채 끝나므로 `title`이 「지금 뭐가 골라졌나」를 볼 유일한 길이다.
+    expect(select.getAttribute("title")).toBe(LONG_MATERIAL);
   });
 });
