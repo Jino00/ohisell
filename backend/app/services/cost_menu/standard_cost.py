@@ -157,6 +157,11 @@ class RecipeLineInput:
     unit_price_inc_vat: Optional[Decimal] = None
     price_status: PriceStatus = "missing"
     material_id: Optional[int] = None
+    #: ★구성 줄의 DB id — 화면이 「이 줄의 종을 바꾼다」(설계 Q6)를 부를 때 필요하다.
+    #:  이 값이 라인을 «타고» 오지 않으면 화면은 `standard.lines[i]`와 `recipe.lines[i]`를
+    #:  **인덱스로 짝지어야** 하는데, 그 암묵 불변식은 계산기에 라인 필터가 하나만 생겨도
+    #:  조용히 깨지고 **엉뚱한 줄의 종이 바뀐다**. id를 실어 보내면 그 자리가 아예 없다.
+    line_id: Optional[int] = None
     ledger_item_name: Optional[str] = None
     price_source: Optional[str] = None           # ledger / manual — 근거 표시용
     price_note: Optional[str] = None
@@ -185,6 +190,7 @@ class StandardCostLine:
     price_source: Optional[str] = None
     price_note: Optional[str] = None
     material_id: Optional[int] = None
+    line_id: Optional[int] = None
     ledger_item_name: Optional[str] = None
     #: 참고값 — **단가가 아니다.** `usable`도 `amount_*`도 이 값을 보지 않는다(§3 금지선).
     excel_ref_price: Optional[Decimal] = None
@@ -246,6 +252,7 @@ def _resolve_line(line: RecipeLineInput) -> StandardCostLine:
             price_source=line.price_source,
             price_note=line.price_note,
             material_id=line.material_id,
+            line_id=line.line_id,
             ledger_item_name=line.ledger_item_name,
             # ★못 쓰는 라인일수록 참고값이 중요하다 — 「단가 없음」이라고만 말하면 사람은
             #   채택이라는 가장 싼 길을 못 본다. 그래도 금액은 여전히 None이다.
@@ -270,6 +277,7 @@ def _resolve_line(line: RecipeLineInput) -> StandardCostLine:
         price_source=line.price_source,
         price_note=line.price_note,
         material_id=line.material_id,
+        line_id=line.line_id,
         ledger_item_name=line.ledger_item_name,
         excel_ref_price=line.excel_ref_price,
     )
@@ -354,6 +362,7 @@ def breakdown_payload(result: StandardCostResult) -> list[dict]:
             "price_source": ln.price_source,
             "price_note": ln.price_note,
             "material_id": ln.material_id,
+            "line_id": ln.line_id,
             "ledger_item_name": ln.ledger_item_name,
             "excel_ref_price": (
                 None if ln.excel_ref_price is None else str(ln.excel_ref_price)

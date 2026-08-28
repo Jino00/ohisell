@@ -29,6 +29,7 @@ import type {
   CostMaterial,
   CostRecipe,
   CostSetting,
+  CostStandardLine,
 } from "../lib/api";
 // ★P1-1(적대 리뷰)용 — 승인/승인취소 호출부가 실제로 눌리는지 재려면 그 함수들
 //   «자신»을 vi.fn()으로 잡아야 한다(아래 vi.mock 팩토리에서 오버라이드).
@@ -71,6 +72,7 @@ import {
   MaterialPriceHistory,
   recipePlaceholderText,
   reconcileSelectedId,
+  RecipeDetail,
   RecipeList,
   StandardBreakdown,
   StandardCostBoard,
@@ -384,6 +386,7 @@ const RECIPE: CostRecipe = {
     lines: [
       {
         label: "지문방지필름 TPU 3매 · 필름 (bar)",
+        line_id: 8001,
         quantity: "3",
         unit_price_ex_vat: "600.00",
         unit_price_inc_vat: "660.00",
@@ -401,6 +404,7 @@ const RECIPE: CostRecipe = {
       },
       {
         label: "패키지 (bar)",
+        line_id: 8002,
         quantity: "1",
         unit_price_ex_vat: "98.00",
         unit_price_inc_vat: "107.80",
@@ -2686,6 +2690,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
             lines: [
               {
                 label: "지문방지필름 TPU 3매 · 필름 (bar)",
+                line_id: 8003,
                 quantity: "3",
                 unit_price_ex_vat: null,
                 unit_price_inc_vat: null,
@@ -2965,3 +2970,160 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
 // ★다른 라우트에서 같은 단언을 반복하지 않는다: 메뉴는 `Layout`이 라우트와 무관하게 그리므로
 //   SUR-4가 이미 그 사실을 잰다. 대신 다른 페이지(대시보드 등)를 렌더하면 그 페이지의 목데이터
 //   요구가 이 파일에 딸려 들어와, **원가와 무관한 이유로 빨개지는 테스트**가 된다.
+
+// ──────────────────────────────────────────────
+// 설계 Q6 — 구성 줄의 «종»을 화면에서 바꾼다
+//
+// ★prod 레시피 45·97(SKU 8개)이 각 196.9원 과대인 것을 고치는 유일한 표면이다. 백엔드
+//   엔드포인트만 있고 이 표면이 없으면 그건 이 저장소가 반복해 밟은 「만드는 층 ≠ 닿는 층」이다
+//   — 그래서 아래는 «컴포넌트가 값을 그리나»가 아니라 **「사람이 고르면 그 신호가 실제로
+//   나가나」**를 잰다.
+// ──────────────────────────────────────────────
+describe("Q6: 구성 줄의 종을 바꾸는 표면", () => {
+  const FOLD: CostMaterial = { ...KIT, id: 54, name: "패키지 (fold)", form_factor: "fold" };
+  const FLIP: CostMaterial = { ...KIT, id: 24, name: "패키지 (flip)", form_factor: "flip" };
+
+  function breakdown(overrides: Partial<CostStandardLine> = {}) {
+    return {
+      computable: true,
+      std_cost_ex_vat: "320.00",
+      std_cost_inc_vat: "352.00",
+      reason: null,
+      unresolved: [],
+      partial_ex_vat: "320.00",
+      partial_inc_vat: "352.00",
+      line_count: 1,
+      lines: [
+        {
+          label: "패키지 (fold)",
+          line_id: 300,
+          quantity: "1",
+          unit_price_ex_vat: "320.00",
+          unit_price_inc_vat: "352.00",
+          amount_ex_vat: "320.00",
+          amount_inc_vat: "352.00",
+          price_status: "ok",
+          inc_derived: false,
+          price_source: "manual",
+          price_note: null,
+          material_id: 54,
+          usable: true,
+          excel_ref_price: "171.00",
+          ...overrides,
+        },
+      ],
+    };
+  }
+
+  it("고른 종이 «그 줄의 id»와 함께 나간다 — 인덱스가 아니다", () => {
+    const calls: Array<[number, number]> = [];
+    render(
+      <StandardBreakdown
+        standard={breakdown()}
+        swap={{
+          materials: [FOLD, FLIP],
+          onSwap: (lineId, materialId) => calls.push([lineId, materialId]),
+        }}
+      />,
+    );
+
+    // ★접혀 있다 — 눌러야 열린다(139종 목록이 줄마다 펼쳐지면 표가 다시 넓어진다).
+    expect(screen.queryByTestId("breakdown-swap-300")).toBeNull();
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-300"));
+
+    const select = screen.getByTestId("breakdown-swap-300") as HTMLSelectElement;
+    expect(select.value).toBe("54");
+    fireEvent.change(select, { target: { value: "24" } });
+
+    expect(calls).toEqual([[300, 24]]);
+  });
+
+  it("같은 종을 다시 고르면 아무것도 안 나간다 — 헛쓰기를 만들지 않는다", () => {
+    const calls: Array<[number, number]> = [];
+    render(
+      <StandardBreakdown
+        standard={breakdown()}
+        swap={{ materials: [FOLD, FLIP], onSwap: (a, b) => calls.push([a, b]) }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-300"));
+    fireEvent.change(screen.getByTestId("breakdown-swap-300"), { target: { value: "54" } });
+    expect(calls).toEqual([]);
+  });
+
+  it("승인된 레시피면 잠기고, «왜»가 화면에 있다", () => {
+    render(
+      <StandardBreakdown
+        standard={breakdown()}
+        swap={{
+          materials: [FOLD, FLIP],
+          onSwap: () => {},
+          disabledReason: "승인된 레시피의 구성은 바꾸지 않는다 — 먼저 승인을 해제한다",
+        }}
+      />,
+    );
+
+    // 잠기면 «열 수조차» 없다 — 열어 놓고 고른 뒤에 거절하면 헛수고를 시킨다.
+    const opener = screen.getByTestId("breakdown-swap-open-300") as HTMLButtonElement;
+    expect(opener.disabled).toBe(true);
+    expect(opener.title).toContain("먼저 승인을 해제한다");
+  });
+
+  it("원장에서 단가가 오는 줄엔 안 선다 — 종을 가리키지 않는 줄이다", () => {
+    render(
+      <StandardBreakdown
+        standard={breakdown({ material_id: null, label: "2.5D Clear Glass 2ea" })}
+        swap={{ materials: [FOLD, FLIP], onSwap: () => {} }}
+      />,
+    );
+
+    expect(screen.queryByTestId("breakdown-swap-open-300")).toBeNull();
+  });
+
+  it("swap을 안 주면 종전대로 읽기 전용이다 — 조작이 아무 데나 따라다니지 않는다", () => {
+    render(<StandardBreakdown standard={breakdown()} />);
+    expect(screen.queryByTestId("breakdown-swap-open-300")).toBeNull();
+  });
+
+  // ★★호출부 — 위 다섯이 전부 통과해도 `RecipeDetail`이 `swap`을 안 넘기면 화면엔 아무것도
+  //   없다. 이 저장소가 반복해 밟은 결함이 정확히 그 자리(SUR-2)라 «주입»까지 잰다.
+  it("RecipeDetail이 계산 내역에 종 교체를 실제로 넘긴다", () => {
+    const calls: Array<[number, number]> = [];
+    render(
+      <RecipeDetail
+        recipe={{ ...RECIPE, status: "draft", standard: breakdown() }}
+        busy={false}
+        onApprove={() => {}}
+        onUnapprove={() => {}}
+        onAdopt={() => {}}
+        materials={[FOLD, FLIP]}
+        onSwapLineMaterial={(lineId, materialId) => calls.push([lineId, materialId])}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("breakdown-swap-open-300"));
+    fireEvent.change(screen.getByTestId("breakdown-swap-300"), { target: { value: "24" } });
+    expect(calls).toEqual([[300, 24]]);
+    // 규칙 문구도 화면에 선다 — 「추천하지 않는다」는 계약 §4 S4의 원문이다.
+    expect(screen.getByTestId("swap-rule-note").textContent).toContain("추천하지 않는다");
+  });
+
+  it("RecipeDetail이 승인된 레시피에서 잠금 사유를 내려보낸다", () => {
+    render(
+      <RecipeDetail
+        recipe={{ ...RECIPE, status: "approved", standard: breakdown() }}
+        busy={false}
+        onApprove={() => {}}
+        onUnapprove={() => {}}
+        onAdopt={() => {}}
+        materials={[FOLD, FLIP]}
+        onSwapLineMaterial={() => {}}
+      />,
+    );
+
+    expect((screen.getByTestId("breakdown-swap-open-300") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+});

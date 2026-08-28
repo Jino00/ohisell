@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -29,6 +30,8 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import (
+    CostMaterial,
+    CostMaterialPrice,
     CostRecipe,
     CostRecipeLine,
     CostTableItem,
@@ -631,3 +634,251 @@ def test_cost_table_census_is_read_only(client, db_session):
     assert refreshed.anomalies == before_anomalies
     for it in db_session.query(CostTableItem).all():
         assert it.uploaded_at == before_uploaded_at[it.id]
+
+
+# ──────────────────────────────────────────────
+# 설계 Q6 — 구성 한 줄의 «종»을 사람이 바꾼다
+#
+# ★이 경로가 없어서 prod 레시피 45·97(SKU 8개)이 각 196.9원 과대인 채로 «고칠 길 없이»
+#   남아 있었다. 구성이 바뀌는 길은 업로드 통짜 재생성과 픽뿐이었고 둘 다 「이 한 줄만」을
+#   못 한다. 병의 정체는 「단가가 틀렸다」가 아니라 「구성이 엉뚱한 종을 가리킨다」이다
+#   (Jino 2026-08-27 22:44 *"같은 부자재가 다른 값이 아니고, 다른 부자재인거지"*).
+# ──────────────────────────────────────────────
+
+
+def _mat(db, name, *, form_factor=None, status="approved") -> CostMaterial:
+    m = CostMaterial(
+        name=name, status=status, category="부자재", form_factor=form_factor
+    )
+    db.add(m)
+    db.flush()
+    return m
+
+
+def _recipe_with_one_line(db, material, *, product_name="오픽스 Z플립 폴드 4매"):
+    # ★`product_name`을 인자로 받는 이유: `cost_recipe`에 (상품명, 폼팩터) unique가 걸려 있어
+    #   한 테스트에서 레시피를 둘 만들려면 이름이 갈려야 한다. 그 제약 자체가 이 저장소의
+    #   설계다(한 상품·한 폼팩터 = 한 레시피).
+    r = _recipe(db, product_name=product_name)
+    line = CostRecipeLine(recipe_id=r.id, material_id=material.id, quantity=Decimal("1"))
+    db.add(line)
+    db.flush()
+    return r, line
+
+
+def _swap(client, recipe_id, line_id, material_id):
+    return client.patch(
+        f"/api/cost/recipes/{recipe_id}/lines/{line_id}/material",
+        json={"material_id": material_id},
+    )
+
+
+def test_swap_points_the_line_at_another_material(client, db_session):
+    """★prod 45·97을 고치는 바로 그 조작 — fold 종을 가리키던 줄이 flip 종을 가리키게."""
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    flip = _mat(db_session, "패키지 (flip)", form_factor="flip")
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    db_session.commit()
+
+    res = _swap(client, recipe.id, line.id, flip.id)
+    assert res.status_code == 200, res.text
+
+    db_session.expire_all()
+    assert db_session.get(CostRecipeLine, line.id).material_id == flip.id
+
+
+def test_swap_leaves_an_audit_stamp_saying_what_moved_where(client, db_session):
+    """★근거 보존 — 없으면 나중에 「이 폴드 레시피는 왜 flip 종을 쓰지?」에 못 답한다."""
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    flip = _mat(db_session, "패키지 (flip)", form_factor="flip")
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    db_session.commit()
+
+    _swap(client, recipe.id, line.id, flip.id)
+
+    db_session.expire_all()
+    note = db_session.get(CostRecipeLine, line.id).note or ""
+    assert "종 교체" in note
+    assert "패키지 (fold)" in note, "어디서 왔는지"
+    assert "패키지 (flip)" in note, "어디로 갔는지"
+    assert "KST" in note, "prod가 UTC라 라벨 없는 시각은 읽는 사람을 속인다"
+
+
+def test_swap_on_approved_recipe_is_refused(client, db_session):
+    """★승인은 「이 원가가 맞다」는 확정이다 — 구성이 바뀌면 그 숫자가 승인 없이 달라진다."""
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    flip = _mat(db_session, "패키지 (flip)", form_factor="flip")
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    recipe.status = "approved"
+    db_session.commit()
+
+    res = _swap(client, recipe.id, line.id, flip.id)
+    assert res.status_code == 409, res.text
+
+    db_session.expire_all()
+    assert db_session.get(CostRecipeLine, line.id).material_id == fold.id, "안 바뀐다"
+
+
+def test_swap_refuses_a_line_that_belongs_to_another_recipe(client, db_session):
+    """★남의 레시피 줄을 이 경로로 바꾸는 길을 열지 않는다."""
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    flip = _mat(db_session, "패키지 (flip)", form_factor="flip")
+    mine, _mine_line = _recipe_with_one_line(db_session, fold)
+    other, other_line = _recipe_with_one_line(
+        db_session, fold, product_name="오하이 갤럭시Z 힌지 보호 필름 2매"
+    )
+    db_session.commit()
+    assert other.id != mine.id
+
+    res = _swap(client, mine.id, other_line.id, flip.id)
+    assert res.status_code == 400, res.text
+
+    db_session.expire_all()
+    assert db_session.get(CostRecipeLine, other_line.id).material_id == fold.id
+
+
+def test_swap_refuses_a_ledger_priced_line(client, db_session):
+    """★원장에서 단가가 오는 줄은 종을 안 가리킨다 — 다른 축이다(계약 D-CPP-61)."""
+
+    flip = _mat(db_session, "패키지 (flip)", form_factor="flip")
+    recipe = _recipe(db_session)
+    line = CostRecipeLine(
+        recipe_id=recipe.id,
+        material_id=None,
+        ledger_item_name="2.5D Clear Glass 2ea",
+        quantity=Decimal("1"),
+    )
+    db_session.add(line)
+    db_session.commit()
+
+    res = _swap(client, recipe.id, line.id, flip.id)
+    assert res.status_code == 409, res.text
+
+    db_session.expire_all()
+    kept = db_session.get(CostRecipeLine, line.id)
+    assert kept.material_id is None
+    assert kept.ledger_item_name == "2.5D Clear Glass 2ea"
+
+
+def test_swap_refuses_an_unknown_material(client, db_session):
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    db_session.commit()
+
+    res = _swap(client, recipe.id, line.id, 999999)
+    assert res.status_code == 400, res.text
+
+    db_session.expire_all()
+    assert db_session.get(CostRecipeLine, line.id).material_id == fold.id
+
+
+def test_swapping_to_the_same_material_leaves_no_stamp(client, db_session):
+    """★감사 흔적을 오염시키지 않는다 — 같은 종으로 바꾸는 것은 사건이 아니다."""
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    db_session.commit()
+
+    res = _swap(client, recipe.id, line.id, fold.id)
+    assert res.status_code == 200, res.text
+
+    db_session.expire_all()
+    assert db_session.get(CostRecipeLine, line.id).note is None
+
+
+def test_swap_does_not_invent_a_price(client, db_session):
+    """★계약 §3 금지선 — 종을 바꾸면 그 종의 «있는» 단가가 따라올 뿐이다.
+
+    변이 시험: 서비스가 단가 행을 만들면 이 단언이 죽는다.
+    """
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    flip = _mat(db_session, "패키지 (flip)", form_factor="flip")
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    db_session.commit()
+    before = db_session.query(CostMaterialPrice).count()
+
+    _swap(client, recipe.id, line.id, flip.id)
+
+    db_session.expire_all()
+    assert db_session.query(CostMaterialPrice).count() == before, "단가를 지어내지 않는다"
+
+
+def test_breakdown_line_carries_its_own_line_id(client, db_session):
+    """★화면이 「이 줄의 종을 바꾼다」를 부르려면 줄 id가 **라인을 타고** 와야 한다.
+
+    이게 없으면 화면은 `standard.lines[i]` ↔ `recipe.lines[i]`를 **인덱스로 짝지어야** 하고,
+    그 암묵 불변식은 계산기에 라인 필터가 하나만 생겨도 조용히 깨져 **엉뚱한 줄의 종이
+    바뀐다.** 변이 시험: `_line_inputs`에서 `line_id=line.id`를 지우면 죽는다.
+    """
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    db_session.commit()
+
+    body = client.get(f"/api/cost/recipes/{recipe.id}").json()
+    rows = body["standard"]["lines"]
+    assert len(rows) == 1
+    assert rows[0]["line_id"] == line.id, "인덱스가 아니라 id로 닿는다"
+    assert rows[0]["material_id"] == fold.id
+
+
+def test_ledger_line_also_carries_its_line_id(client, db_session):
+    """★원장 줄도 id를 싣는다 — 안 실으면 화면이 그 줄만 인덱스로 세게 되고,
+    그러면 「대부분 id, 가끔 인덱스」라는 최악의 절충이 된다(그 틈이 곧 어긋남이다)."""
+
+    recipe = _recipe(db_session)
+    line = CostRecipeLine(
+        recipe_id=recipe.id,
+        material_id=None,
+        ledger_item_name="2.5D Clear Glass 2ea",
+        quantity=Decimal("1"),
+    )
+    db_session.add(line)
+    db_session.commit()
+
+    rows = client.get(f"/api/cost/recipes/{recipe.id}").json()["standard"]["lines"]
+    assert rows[0]["line_id"] == line.id
+    assert rows[0]["material_id"] is None
+
+
+def test_swap_moves_the_standard_cost_by_the_price_difference(client, db_session):
+    """★★끝까지 간다 — 종을 바꾸면 **표준원가 숫자가 실제로 움직인다.**
+
+    prod 45·97이 각 196.9원 과대인 그 산술을 그대로 재현한다: 320원짜리 fold 패키지를
+    171원짜리 flip 패키지로 바꾸면 −149 ex, ×1.1 = **−163.9 inc**.
+
+    ★이 테스트가 없으면 「종은 바뀌었는데 계산이 옛 종을 본다」를 아무도 못 잡는다 —
+    이 저장소가 반복해 밟은 「만드는 층 ≠ 닿는 층」이 정확히 그 모양이다.
+    """
+
+    fold = _mat(db_session, "패키지 (fold)", form_factor="fold")
+    flip = _mat(db_session, "패키지 (flip)", form_factor="flip")
+    for m, ex in ((fold, "320"), (flip, "171")):
+        m.prices.append(
+            CostMaterialPrice(
+                source="manual",
+                unit_price_ex_vat=Decimal(ex),
+                effective_date=date(2026, 8, 27),
+            )
+        )
+    recipe, line = _recipe_with_one_line(db_session, fold)
+    db_session.commit()
+
+    before = client.get(f"/api/cost/recipes/{recipe.id}").json()["standard"]
+    assert before["computable"] is True
+    assert before["std_cost_ex_vat"] == "320.00"
+
+    res = _swap(client, recipe.id, line.id, flip.id)
+    assert res.status_code == 200, res.text
+
+    after = res.json()["recipe"]["standard"]
+    assert after["std_cost_ex_vat"] == "171.00", "계산이 새 종을 본다"
+    assert after["std_cost_inc_vat"] == "188.10", "×1.1 파생도 새 값 기준"
+    # 응답만 맞고 DB가 안 바뀌는 경우를 막는다 — 다시 조회해 대조한다.
+    fresh = client.get(f"/api/cost/recipes/{recipe.id}").json()["standard"]
+    assert fresh["std_cost_ex_vat"] == "171.00"

@@ -37,6 +37,7 @@ import {
   refreshCostLedgerPrice,
   runCostAutoRefreshNow,
   unapproveCostRecipe,
+  swapRecipeLineMaterial,
   unpickCostTableItem,
   updateCostSetting,
   type CostAutoRefreshEntry,
@@ -1883,8 +1884,104 @@ export function RecipeList({
   );
 }
 
-/** ★계약 §7 합격 4의 표면 — 「계산되는 방법이 나오는」 화면. 부자재 × 수량 × 단가가 펼쳐진다. */
-export function StandardBreakdown({ standard }: { standard: CostStandard }) {
+/** 구성 한 줄의 종을 바꾸는 컨트롤 (설계 Q6) — **접혀 있다가 눌러야 펴진다.**
+ *
+ * ★왜 접나(둘 다 실측된 이유):
+ *   ①**표가 넓어진다.** 종이 139개인데 줄마다 목록을 세우면 부자재 칸이 이름 길이만큼
+ *     벌어지고, 그게 Jino가 2026-08-28에 지적한 「화면의 사용이 너무 비효율적」의 재생산이다.
+ *   ②**같은 이름이 화면에 둘이 된다.** 펼친 목록의 `<option>` 텍스트가 다른 줄의 부자재
+ *     이름과 겹쳐, 「이 이름이 화면에 있나」를 재던 기존 테스트가 실제로 깨졌다. 화면에서도
+ *     사람이 「어느 게 이 줄의 종이지?」를 헷갈린다.
+ * ⇒ 접힌 상태에선 이 줄의 종 이름 하나만 보이고(그건 왼쪽 라벨이 이미 말한다), 바꾸겠다고
+ *   누른 사람에게만 목록이 열린다.
+ */
+function LineMaterialSwap({
+  lineId,
+  materialId,
+  materials,
+  onSwap,
+  disabledReason,
+  busy,
+}: {
+  lineId: number;
+  materialId: number;
+  materials: CostMaterial[];
+  onSwap: (lineId: number, materialId: number) => void;
+  disabledReason?: string;
+  busy?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const locked = busy || !!disabledReason;
+
+  if (!open) {
+    return (
+      <button
+        className="ml-2 text-[11px] px-1.5 py-0.5 rounded border text-gray-600 disabled:opacity-40"
+        data-testid={`breakdown-swap-open-${lineId}`}
+        disabled={locked}
+        title={
+          disabledReason ??
+          "이 줄이 가리키는 부자재 종을 바꾼다 — 단가는 그 종에서 따라온다(새 단가를 만들지 않는다)"
+        }
+        onClick={() => setOpen(true)}
+      >
+        종 바꾸기
+      </button>
+    );
+  }
+  return (
+    <span className="ml-2 inline-flex items-center gap-1">
+      <select
+        className="text-[11px] border rounded px-1 py-0.5 max-w-[14rem] disabled:opacity-40"
+        data-testid={`breakdown-swap-${lineId}`}
+        disabled={locked}
+        defaultValue={String(materialId)}
+        onChange={(e) => {
+          const next = Number(e.target.value);
+          // ★같은 종을 다시 고르는 것은 사건이 아니다 — 서버에 헛쓰기를 보내지 않는다
+          //   (감사 흔적도 오염된다).
+          if (next !== materialId) onSwap(lineId, next);
+          setOpen(false);
+        }}
+      >
+        {materials.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.name}
+          </option>
+        ))}
+      </select>
+      <button
+        className="text-[11px] text-gray-500"
+        data-testid={`breakdown-swap-cancel-${lineId}`}
+        onClick={() => setOpen(false)}
+      >
+        취소
+      </button>
+    </span>
+  );
+}
+
+/** ★계약 §7 합격 4의 표면 — 「계산되는 방법이 나오는」 화면. 부자재 × 수량 × 단가가 펼쳐진다.
+ *
+ * ★`swap`은 **선택 주입**이다(설계 Q6). 주지 않으면 이 표는 종전대로 읽기 전용이고, 주면
+ * 부자재 칸마다 「이 줄이 가리키는 종을 바꾼다」가 선다. 왜 선택인가: 이 컴포넌트는 보드·
+ * 테스트 등 **여러 자리**에서 읽기 전용으로 쓰이는데, 거기까지 조작을 끌고 가면 「어디서든
+ * 바꿀 수 있지만 아무도 책임 안 지는」 표면이 된다.
+ */
+export function StandardBreakdown({
+  standard,
+  swap,
+}: {
+  standard: CostStandard;
+  swap?: {
+    /** 고를 수 있는 종 전건. **추천하지 않는다** — 목록만 주고 사람이 고른다(계약 §4 S4). */
+    materials: CostMaterial[];
+    onSwap: (lineId: number, materialId: number) => void;
+    /** 승인된 레시피는 서버가 409로 거부한다 — 화면이 먼저 말해 헛클릭을 막는다. */
+    disabledReason?: string;
+    busy?: boolean;
+  };
+}) {
   if (!standard.lines.length) {
     return <div className="text-xs text-gray-500">구성이 비어 있다 — 계산할 것이 없다.</div>;
   }
@@ -1912,7 +2009,23 @@ export function StandardBreakdown({ standard }: { standard: CostStandard }) {
         <tbody>
           {standard.lines.map((ln, i) => (
             <tr key={`${ln.label}-${i}`} className="border-b last:border-0">
-              <td className="py-1 pr-2">{ln.label}</td>
+              <td className="py-1 pr-2">
+                {ln.label}
+                {/* ★종 교체 (설계 Q6) — `line_id`로 닿는다. 인덱스로 짝지으면 계산기에 라인
+                    필터가 하나 생기는 순간 엉뚱한 줄이 바뀐다.
+                    ★원장에서 단가가 오는 줄(`material_id === null`)엔 안 세운다 — 그 줄은
+                    종을 가리키지 않으므로 서버도 409로 거부한다(화면이 먼저 말한다). */}
+                {swap && ln.line_id !== null && ln.material_id !== null ? (
+                  <LineMaterialSwap
+                    lineId={ln.line_id}
+                    materialId={ln.material_id}
+                    materials={swap.materials}
+                    onSwap={swap.onSwap}
+                    disabledReason={swap.disabledReason}
+                    busy={swap.busy}
+                  />
+                ) : null}
+              </td>
               <td className="py-1 pr-2 text-right">{ln.quantity ?? "—"}</td>
               <td className="py-1 pr-2 text-right">{formatCostWon(ln.unit_price_ex_vat)}</td>
               {/* ★참고값 칸 — 흐린 이탤릭으로 「값이지만 단가는 아니다」를 시각으로도 말한다.
@@ -2240,6 +2353,8 @@ export function RecipeDetail({
   onUnapprove,
   onAdopt,
   picker,
+  materials,
+  onSwapLineMaterial,
 }: {
   recipe: CostRecipe;
   busy: boolean;
@@ -2248,6 +2363,9 @@ export function RecipeDetail({
   onAdopt: () => void;
   /** 원가표 픽 패널 — 계약 합격 18·19가 사는 자리다(주입이라 테스트가 «호출부»까지 잰다). */
   picker?: ReactNode;
+  /** 종 교체(설계 Q6)에 고를 목록. 없으면 계산 내역은 종전대로 읽기 전용이다. */
+  materials?: CostMaterial[];
+  onSwapLineMaterial?: (lineId: number, materialId: number) => void;
 }) {
   const m = recipe.match;
   return (
@@ -2313,8 +2431,32 @@ export function RecipeDetail({
 
       <div className="mt-4">
         <h3 className="text-xs font-semibold text-gray-600 mb-1">계산 내역</h3>
-        <StandardBreakdown standard={recipe.standard} />
+        <StandardBreakdown
+          standard={recipe.standard}
+          swap={
+            materials && onSwapLineMaterial
+              ? {
+                  materials,
+                  onSwap: onSwapLineMaterial,
+                  busy,
+                  // ★승인된 레시피는 서버가 409로 거부한다(구성이 바뀌면 표준원가가 바뀌고,
+                  //   승인은 그 원가에 대한 확정이므로). 화면이 먼저 이유까지 말한다 —
+                  //   「눌렀는데 아무 일도 안 남」이 이 저장소가 반복해 만든 표면이다.
+                  disabledReason:
+                    recipe.status === "approved"
+                      ? "승인된 레시피의 구성은 바꾸지 않는다 — 먼저 승인을 해제한다"
+                      : undefined,
+                }
+              : undefined
+          }
+        />
       </div>
+      {materials && onSwapLineMaterial ? (
+        <p className="mt-1 text-[11px] text-gray-500" data-testid="swap-rule-note">
+          부자재 칸의 목록은 <b>추천하지 않는다</b> — 종을 바꾸면 그 종의 단가가 따라올 뿐이고,
+          새 단가를 만들지 않는다. 바꾼 내역은 그 줄에 시각과 함께 남는다.
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -3463,6 +3605,15 @@ export default function CostPage() {
               <RecipeDetail
                 recipe={selectedRecipe}
                 busy={busy}
+                // ★설계 Q6 — 이 두 줄이 「엔드포인트는 있는데 화면에서 못 부른다」를 막는
+                //   자리다. 이 저장소가 반복해 밟은 결함이 정확히 여기(호출부 미배선)였다.
+                materials={materials}
+                onSwapLineMaterial={(lineId, materialId) =>
+                  run(
+                    () => swapRecipeLineMaterial(selectedRecipe.id, lineId, materialId),
+                    "구성 줄의 종을 바꿨다 — 표준원가가 새 종의 단가로 다시 계산된다",
+                  )
+                }
                 onApprove={() =>
                   run(
                     () => approveCostRecipe(selectedRecipe.id),
