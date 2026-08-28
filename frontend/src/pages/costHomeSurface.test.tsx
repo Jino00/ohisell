@@ -456,6 +456,17 @@ describe("H5: 왕복 표 — 빈 칸은 0원이 아니고, [다운로드]는 S3�
     expect(M3.latest_price_effective_date).toBeNull();
     expect(cells3[9].textContent).toBe("—");
   });
+
+  // ★Jino 2026-08-28 11:09 «단가 발효일을 옆으로 좀 더 키워서 날짜가 2줄이 되지 않도록».
+  //   표가 `w-full`이라 브라우저가 「상태 / 비고」의 긴 글에 폭을 몰아주고 이 칸을 짜내면
+  //   `2026-08-24`가 하이픈에서 접힌다. jsdom은 실제 줄바꿈을 계산하지 못하므로 **접힘을
+  //   막는 선언 자체**를 잰다 — 이 클래스가 빠지는 변이가 이 테스트로 죽는다.
+  it("「단가 발효일」 칸이 줄바꿈되지 않는다 — 날짜 한 줄 유지", async () => {
+    await renderApp();
+    const row1 = screen.getByTestId(`roundtrip-row-${M1.id}`);
+    const cells1 = within(row1).getAllByRole("cell");
+    expect(cells1[9].className).toContain("whitespace-nowrap");
+  });
 });
 
 describe("H6: 기존 3탭이 여전히 있고, 홈에서 직행이 된다 (설계 Q2 — 익숙한 손이 안 깨진다)", () => {
