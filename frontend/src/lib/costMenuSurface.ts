@@ -107,3 +107,26 @@ export function sweepSummaryText(runs: CostAutoRefreshRun[]): string {
     `검사 ${latest.checked}종 · 갱신 ${latest.updated}건 · 실패 ${latest.failed}건 · 대기 ${latest.queued}건`
   );
 }
+
+/**
+ * 페이지 폭 상한 — 가르는 축은 「홈이냐」가 아니라 **「넓은 표냐 폼·목록이냐」**다.
+ * `home`(왕복 표 12열 × 139행)·`board`(9열 × 924 SKU)는 폭이 다 필요하고,
+ * `materials`·`recipes`는 폼·목록이라 `max-w-[96rem]`(1536px) 상한이 가독성을 돕는다.
+ *
+ * ★함수로 뽑은 이유는 순전히 **테스트가 잡을 수 있게** 하려는 것이다(2026-08-28 적대 리뷰 P2-2).
+ *   인라인 삼항으로 두었을 때 「보드 탭 상한 해제」를 되돌리는 변이가 프론트 1,173건 전건 초록
+ *   속에서 **살아남았다** — Jino가 «글자가 이렇게 잘리네»라고 한 잘림의 절반이 이 상한이었는데
+ *   그 절반을 아무도 안 지키고 있었다. 최상위 wrapper의 className은 `<CostPage>`를 통째로
+ *   렌더해야 닿는 자리라 어느 테스트도 보지 않았다.
+ *
+ * ★그리고 **이 파일에** 둔 이유는 이 파일 헤더가 이미 적어 둔 그대로다: `CostPage.tsx`에
+ *   순수 export를 하나 더 얹으면 `react-refresh/only-export-components` 경고가 1건 늘고
+ *   CI의 warning 래칫이 그 자리에서 빨간불이 된다(2026-08-28 실측 — 96→97로 실제로 터졌다).
+ *
+ * 탭 이름은 `CostPage.tsx`의 `CostTab`과 같은 값이다. 타입을 import하면 lib→pages 방향의
+ * 의존이 생기므로(이 파일이 `formatCostWon`을 로컬 사본으로 둔 것과 같은 이유) 여기서는
+ * 유니온을 그대로 적는다 — 값이 갈라지면 `costPageWidthClass`를 부르는 쪽에서 타입이 걸린다.
+ */
+export function costPageWidthClass(tab: "home" | "materials" | "recipes" | "board"): string {
+  return tab === "home" || tab === "board" ? "p-6" : "p-6 max-w-[96rem]";
+}
