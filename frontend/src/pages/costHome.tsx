@@ -349,7 +349,14 @@ export function CostRoundTripTable({
                     <td className="py-1 pr-2">
                       {m.latest_price_source ? priceSourceLabel(m.latest_price_source) : "—"}
                     </td>
-                    <td className="py-1 pr-2">{m.latest_price_effective_date ?? "—"}</td>
+                    {/* ★`whitespace-nowrap` — 이 표는 `w-full`이라 브라우저가 「상태 / 비고」의
+                        긴 글에 폭을 몰아주고 이 칸을 짜낸다. 그러면 `2026-08-24`가 하이픈에서
+                        접혀 **한 행이 두 줄**이 되고, 139행 전체의 높이가 들쭉날쭉해진다
+                        (Jino 2026-08-28 11:09 «날짜가 2줄이 되지 않도록»). 헤더 `th`는 이미
+                        nowrap이라 열 폭은 헤더가 잡아 주는데, 접히던 것은 값 쪽이었다. */}
+                    <td className="py-1 pr-2 whitespace-nowrap">
+                      {m.latest_price_effective_date ?? "—"}
+                    </td>
                     <td className="py-1 pr-2 text-right text-gray-500">
                       {formatCostWon(m.excel_ref_price)}
                     </td>
