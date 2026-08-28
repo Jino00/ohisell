@@ -133,3 +133,31 @@ def test_day_class_judgment_is_not_a_second_copy():
 
     for dc in DAY_CLASSES:
         assert out[dc]["n"] == expected[dc], dc
+
+
+def test_identity_ok_is_computed_not_hardcoded():
+    """★자기 변이 M5가 생존해서 추가한 테스트.
+
+    `identity.ok`를 `True`로 **하드코딩**해도 위 테스트들이 전부 초록이었다 — 항등식이
+    성립하는 입력만 넣었기 때문이다. 그러면 이 검산은 「합이 맞는다」가 아니라 「합이 맞는다고
+    적혀 있다」를 뜻하게 되고, 정작 이중계상이 생긴 날 조용히 참을 낸다.
+
+    그래서 **합이 어긋나는 상황을 강제로 만들어** ok가 거짓이 되는지 본다. board_rollup을
+    가로채 「칸의 합」과 「전체」가 다른 값을 내게 한다(순수 함수라 이렇게 갈라 놓을 수 있다).
+    """
+    from unittest.mock import patch
+
+    from app.services.naver_ad import retro_rollup
+
+    def _stub(n: int) -> dict:
+        return {"n": n, "correct": 0, "gray": 0, "wrong": 0, "no_spend": 0,
+                "precision_spenders": None, "bleed_sum": 0}
+
+    # 호출 순서: weekday · weekend · holiday · 전체
+    with patch.object(retro_rollup, "board_rollup",
+                      side_effect=[_stub(1), _stub(1), _stub(1), _stub(99)]):
+        out = retro_rollup.day_class_rollup([_Row(_a_date_of("weekday"))], 3)
+
+    assert out["identity"]["sum_of_parts"]["n"] == 3
+    assert out["identity"]["total"]["n"] == 99
+    assert out["identity"]["ok"] is False, "항등식이 깨졌는데 ok가 참이면 검산이 아니다"
