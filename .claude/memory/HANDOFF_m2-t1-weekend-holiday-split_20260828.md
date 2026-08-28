@@ -136,7 +136,12 @@ ssh sellc.ohitech.co.kr "curl -s 'http://127.0.0.1:8011/api/naver/ad/scope/roste
 - **설치본 도달 확인**: 배포 전 `day_class_split` 0·`weekend_holiday` 0 → 배포 후 **2·2·`limitation` 1**
 - **광고계정 쓰기 0 · 네이버 API 콜 0 · `auto_operate`/`optimizer` 변경 0**
 - 적대 리뷰 **1R FAIL(P1 1) → 2R PASS(새 P1 0)**
-- 멈춘 단계: **없음**
+- **멈춘 단계: 기록물 PR #540 머지** — ⛔**반착지**(코드 PR #538은 완주)
+  - **이유**: `origin/main` **자체**가 alembic head 2개(`pochg1obs9a`·`rtsnap1s3a`)라 `test_single_head_linear_chain`이 CI에서 실패. **내 변경 탓이 아니다**(origin/main에서 `get_heads()` 직접 확인 = 2).
+  - **소관**: 살아 있는 세션 `1p-계산서` n=3(`5a99b32c`)이 `origin/fix/stale-wording`에 **`87c889f2` 「fix(alembic): 헤드 2개 병합」**을 이미 올려 뒀다. ⛔**무접촉** — 그 브랜치를 내 PR로 끌어오면 남의 미머지 작업을 리뷰 없이 main에 넣게 된다.
+  - **`--force` 미사용**: 이번엔 「CI가 안 끝남」이 아니라 **실제 실패**다. 빨간 CI를 밀면 마이그 무결성이 깨진 채 굳는다.
+  - **재개**: n=3이 alembic 병합을 머지한 뒤 → `git fetch origin && git merge origin/main` → `git push` → `MERGE_WAIT=1500 bash scripts/safe_merge.sh 540`
+  - 기록물은 PR #540에 살아 있다 — 유실 아님.
 
 ## 8. 라이브 증거 (2026-08-28 14:3x KST, prod `:8011`)
 
