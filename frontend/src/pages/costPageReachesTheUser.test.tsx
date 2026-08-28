@@ -78,6 +78,7 @@ import {
   StandardCostBoard,
   unreachableLedgerLines,
   unreachableReason,
+  ValuationBadge,
 } from "./CostPage";
 
 // ── prod 실측값(2026-08-22) — 합격 1이 화면에서 보겠다는 바로 그 두 로트 ──
@@ -3125,5 +3126,63 @@ describe("Q6: 구성 줄의 종을 바꾸는 표면", () => {
     expect((screen.getByTestId("breakdown-swap-open-300") as HTMLButtonElement).disabled).toBe(
       true,
     );
+  });
+});
+
+// ──────────────────────────────────────────────
+// 화면 밀도 — 첫 화면이 조작으로 뒤덮이지 않는다
+//
+// ★Jino 2026-08-28 «화면의 사용이 너무 비효율적인거 아니야?». 원가 페이지 머리에 배너가
+//   다섯이고 그 중 재고 평가방법 카드가 «경로 안내 + 버튼 2개 + 이력»까지 항상 펼쳐 놓아
+//   본문이 스크롤 아래로 밀려 있었다.
+// ★접는 것은 **삭제가 아니다**(계약 §3은 자백 문구의 삭제를 금지하고 이동·묶음·배지화만
+//   허용한다). 그리고 접힌 것은 자백이 아니라 **조작**이다 — 「선입선출이 미확인이다」라는
+//   사실 자체는 접힌 줄 «위»에 그대로 서 있다.
+// ★`<details>`는 닫혀도 자식이 DOM에 남아 `getByText`가 그대로 찾는다 — 그래서 기존
+//   1,107건이 **전부 초록인 채로** 이 변경을 통과시켰다. 접힘은 이 테스트만 잰다.
+// ──────────────────────────────────────────────
+describe("화면 밀도: 재고 평가방법 카드", () => {
+  it("경고 줄은 늘 보이고, 확인 «절차»는 접혀 있다", () => {
+    render(
+      <ValuationBadge
+        settings={SETTINGS}
+        history={[]}
+        busy={false}
+        onReconfirm={() => {}}
+      />,
+    );
+
+    // ①경고 자체는 접힌 것 «밖»에 있다 — 이게 삭제도 은닉도 아님의 증거다.
+    const panel = screen.getByTestId("valuation-confirm-panel") as HTMLDetailsElement;
+    expect(screen.getByText(/재고 평가방법/).closest("details")).toBeNull();
+
+    // ②절차는 접혀 있다. `open`이 기본 true가 되는 변이는 여기서 죽는다.
+    expect(panel.tagName).toBe("DETAILS");
+    expect(panel.open).toBe(false);
+
+    // ③접었을 뿐 지우지 않았다 — 안의 문구·버튼은 그대로 있다(계약 §3).
+    expect(within(panel).getByText(/홈택스 → My홈택스/)).toBeTruthy();
+    expect(within(panel).getByText("선입선출 재확인 (기록만)")).toBeTruthy();
+  });
+
+  it("펴면 확정 버튼까지 닿는다 — 접은 것이 길을 끊지 않는다", () => {
+    const calls: Array<[string | null, boolean]> = [];
+    render(
+      <ValuationBadge
+        settings={SETTINGS}
+        history={[]}
+        busy={false}
+        onReconfirm={(note, confirmed) => calls.push([note, confirmed])}
+      />,
+    );
+
+    const panel = screen.getByTestId("valuation-confirm-panel") as HTMLDetailsElement;
+    fireEvent.click(within(panel).getByText("신고방법 확인·재확인"));
+
+    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("2025 귀속 신고서 확인");
+    fireEvent.click(screen.getByTestId("valuation-mark-confirmed"));
+    promptSpy.mockRestore();
+
+    expect(calls).toEqual([["2025 귀속 신고서 확인", true]]);
   });
 });

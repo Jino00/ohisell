@@ -403,8 +403,18 @@ export function ValuationBadge({
         </div>
       ) : null}
       {onReconfirm ? (
-        <div className="mt-1.5 border-t pt-1.5" data-testid="valuation-confirm-panel">
-          <div className="text-[11px] text-gray-500">
+        /* ★확인 «절차»는 접는다 — 경고 줄(위)은 항상 보이고, 경로·버튼·이력만 감춘다
+           (Jino 2026-08-28 «화면의 사용이 너무 비효율적인거 아니야?»).
+           ★지우는 게 아니라 **묶는** 것이다: 계약 §3은 자백 문구의 삭제를 금지하고
+           이동·묶음·배지화만 허용한다. 그리고 감춘 것은 자백이 아니라 **조작**이다 —
+           「선입선출이 미확인이다」라는 사실 자체는 접힌 줄 위에 그대로 서 있다.
+           ★`<details>`라 열림 상태가 DOM에 남는다 — 기존 테스트가 쓰는 `getByTestId`·
+           `getByText`는 닫힌 `<details>` 안의 노드도 찾는다(display:none이 아니다). */
+        <details className="mt-1.5 border-t pt-1.5" data-testid="valuation-confirm-panel">
+          <summary className="text-[11px] text-gray-500 cursor-pointer">
+            신고방법 확인·재확인
+          </summary>
+          <div className="text-[11px] text-gray-500 mt-1">
             신고방법 확인 경로: 홈택스 → My홈택스 → 신고내역 → 재고자산 평가조정명세서(별지
             제39호서식) ③신고방법
           </div>
@@ -481,7 +491,7 @@ export function ValuationBadge({
               </ul>
             )}
           </details>
-        </div>
+        </details>
       ) : null}
     </div>
   );
