@@ -438,3 +438,95 @@ def test_real_write_blocker_does_not_bind_the_human_hand(db):
 
     assert p.approval_source is None
     assert naver_execution_harness.real_write_blocker(p, db) is None
+
+
+def test_console_approved_is_scope_blocked_and_the_message_says_so_honestly(db):
+    """★적대 리뷰 P1-1 — 「사람 승인은 스코프 면제」는 **코드에 없다**. 그 사실을 못 박는다.
+
+    라우터는 사람이 콘솔에서 승인할 때 `approval_source`에 **NULL이 아니라 'console'**을
+    쓴다(`routers/naver_ad.py` status 전이). 그런데 `execute()`의 스코프 가드는
+    `approval_source is not None`을 쓰므로 **콘솔 승인분도 막힌다** — 그 가드 주석이 적어 둔
+    「NULL은 이 블록 밖」 면제는 실제로 발동한 적이 없다.
+
+    이 테스트가 지키는 것 둘:
+      ①`real_write_blocker`가 `execute()`와 **같은 답**을 한다(화면이 진실을 말한다).
+         `is_auto_exec`(NULL ∪ 'console' = 사람) 쪽으로 바꾸면 화면은 「실행 가능」인데
+         execute()는 거부하는 원래의 병이 되살아난다.
+      ②사유 문구가 **승인 주체를 단정하지 않는다** — 사람이 방금 누른 카드에 대고
+         「엔진이 승인했어도」라고 쓰면 원인을 엉뚱한 데로 돌린다.
+    """
+    _settings(db, auto_operate=True, optimizer="ours")
+    _scope(db, IN_GROUP)
+    p = _approved_proposal(db, adgroup_id=OUT_GROUP)
+    p.approval_source = "console"          # ★사람이 콘솔에서 승인한 실제 값
+    db.commit()
+
+    # ① 화면과 실행이 같은 답
+    reason = naver_execution_harness.real_write_blocker(p, db)
+    assert reason is not None and "스코프" in reason
+    with pytest.raises(naver_execution_harness.ScopeGuardError):
+        naver_execution_harness.execute(db, p.id, dry_run=False, now=NOW)
+
+    # ② 문구가 승인 주체를 단정하지 않는다
+    assert "엔진" not in reason
+
+    # 참고 — 이 저장소엔 승인원 술어가 둘이고 서로 다르다(그래서 헷갈린다)
+    assert naver_execution_harness.is_auto_exec(p) is False   # 이쪽 기준으론 「사람」
+    assert p.approval_source is not None                       # 스코프 가드 기준으론 「엔진」
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ★★문이 «유일한» 문인지를 구조로 잠근다 (적대 리뷰 P2-3)
+#
+# 리뷰어가 탐색·스파이럴·예산페이싱 세 레인에서 engine_approve 호출을 지우고 예전처럼
+# status="approved"를 직접 커밋하는 변이를 넣었더니 **199개 테스트가 전부 통과**했다.
+# 레인마다 회귀 테스트를 하나씩 다는 것으로는 «다음에 생길 레인»을 못 막는다 —
+# 그리고 그 「레인마다 각자」가 애초에 죽은 카드 119건을 만든 병이다.
+# ⇒ 「approved로 만드는 곳은 engine_approve 하나뿐」을 **구조(AST)로** 단언한다.
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_approved_is_only_ever_set_inside_the_single_door():
+    """★엔진 모듈에서 `status='approved'`를 쓰는 자리는 engine_approve 하나뿐이어야 한다.
+
+    새 레인이 생겨 문을 우회하면 이 테스트가 즉시 죽는다 — 레인별 테스트를 매번 기억해
+    다는 것에 기대지 않는다(그 기대가 실패한 기록이 죽은 카드 119건이다)."""
+    import ast
+    import pathlib
+
+    targets = [
+        "app/services/naver_ad/auto_operator.py",
+        "app/services/naver_ad/cold_start_bid_lane.py",
+        "app/services/naver_ad/exploration.py",
+    ]
+    root = pathlib.Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+
+    for rel in targets:
+        path = root / rel
+        if not path.exists():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if fn.name == "engine_approve":
+                continue  # ★유일하게 허용된 자리
+            for node in ast.walk(fn):
+                # ① proposal.status = "approved"
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                        and node.value.value == "approved":
+                    for tgt in node.targets:
+                        if isinstance(tgt, ast.Attribute) and tgt.attr == "status":
+                            offenders.append(f"{rel}:{node.lineno} in {fn.name}() — 대입")
+                # ② NaverProposal(..., status="approved", ...)
+                if isinstance(node, ast.Call):
+                    for kw in node.keywords:
+                        if kw.arg == "status" and isinstance(kw.value, ast.Constant) \
+                                and kw.value.value == "approved":
+                            offenders.append(f"{rel}:{node.lineno} in {fn.name}() — 생성 인자")
+
+    assert offenders == [], (
+        "엔진 승인 단일문(engine_approve)을 우회해 approved를 만드는 자리가 있다 — "
+        "스코프 검사(D-NAO-244)를 건너뛰어 «죽은 카드»가 다시 쌓인다:\n  "
+        + "\n  ".join(offenders)
+    )

@@ -2321,8 +2321,21 @@ def real_write_blocker(proposal: NaverProposal, db: Session | None = None) -> st
     제안(prod 실측 119건)에 대해 콘솔이 `executable=True`(사유 없음)를 표시했다 —
     **값이 도는 층은 막고 있는데 사람이 읽는 층은 「실행 가능」이라 말하는** 상태였다.
     `db` 없이 부르면 종전과 완전히 동일하게 동작한다(구조 판정만).
-    ★사람 손(수동 콘솔 승인, `approval_source=NULL`)에는 이 사유를 붙이지 않는다 —
-    execute()가 그 경로를 스코프에서 면제하므로, 붙이면 콘솔이 «실행되는 것»을 못 한다고 거짓말한다.
+
+    ★★조건을 `execute()`와 **같게** 두는 것이 이 함수의 전부다. 「무엇이 옳은가」가 아니라
+    「저기서 실제로 무엇이 일어나는가」를 말해야 화면이 진실이 된다.
+    ⚠️ 그래서 **`is_auto_exec`(사람 = NULL ∪ 'console')를 여기 쓰지 않는다** — 승인원 술어가
+    이 저장소에 **둘 다** 있고 서로 다른데, `execute()`의 스코프 가드가 쓰는 쪽은
+    `approval_source is not None`이다. `is_auto_exec`를 쓰면 콘솔 승인분이 여기선
+    「실행 가능」인데 execute()에서 `ScopeGuardError`로 죽는다 — 이 수리가 없애려는 바로 그
+    병이 범위만 좁혀 되살아난다.
+    ⚠️ **알려진 간극(이 수리 범위 밖·기존 코드, 적대 리뷰 P1-1이 잡았다)**: `execute()`의
+    스코프 가드 주석은 *"수동 콘솔 승인 approval_source=NULL은 이 블록 밖"*이라며 사람을
+    면제한다고 적어 뒀지만, 라우터는 사람 승인에 **NULL이 아니라 `'console'`을 쓴다**
+    (`routers/naver_ad.py` status 전이). 즉 **그 면제는 실제로 발동한 적이 없다.**
+    사유 문구가 승인 주체를 「엔진」이라 단정하지 않는 것은 그래서다 — 문구로 덮지 않고
+    간극을 그대로 드러낸다. 면제를 실제로 열려면 `execute()`를 고쳐야 하고, 그건
+    «사람이 스코프 밖 그룹에 쓸 수 있게 되는» 범위 확대라 별도 결정 사안이다.
     """
     if db is not None and proposal.approval_source is not None:
         # execute()의 스코프 가드와 같은 조건·같은 리졸버(위 ★ 참조). 순서: 구조 판정보다 먼저 —
@@ -2330,13 +2343,16 @@ def real_write_blocker(proposal: NaverProposal, db: Session | None = None) -> st
         from app.services.naver_ad import adgroup_scope as _adgroup_scope
 
         if _adgroup_scope.blocked_by_scope(db, proposal.campaign_id, proposal.adgroup_id):
+            # ★문구는 «승인 주체»를 단정하지 않는다 — 이 자리엔 콘솔 승인분('console')도 온다
+            #   (위 ⚠️ 간극). 「엔진이 승인했어도」라고 쓰면 사람이 방금 누른 카드에 대고
+            #   원인을 엔진에게 돌리는 거짓말이 된다.
             if proposal.adgroup_id is None:
                 return (
                     "자동운영 스코프 — 캠페인 레벨 액션은 그룹 귀속 불가로 실행 불가"
-                    "(D-NAO-244). 엔진이 승인했어도 쓰기 직전에 거부된다."
+                    "(D-NAO-244). 쓰기 직전 스코프 가드가 거부한다."
                 )
             return (
-                f"자동운영 스코프 밖 광고그룹({proposal.adgroup_id}) — 엔진 승인분은 실행 불가"
+                f"자동운영 스코프 밖 광고그룹({proposal.adgroup_id}) — 실행 불가"
                 "(D-NAO-244). 쓰기 직전 스코프 가드가 거부한다."
             )
     action = _ACTION_BY_PROPOSAL_TYPE.get(proposal.proposal_type)

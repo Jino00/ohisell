@@ -469,3 +469,39 @@ def test_console_unchanged_when_no_scope_rows(client, db):
     row = client.get("/api/naver/ad/proposals").json()["rows"][0]
     assert row["executable"] is True
     assert row["not_executable_reason"] is None
+
+
+def test_status_transition_response_also_tells_the_scope_truth(client, db):
+    """★적대 리뷰 P2-2 — 승인/반려 «응답»의 스코프 인지 배선이 테스트 사각지대였다.
+
+    리뷰어가 이 호출부에서 `db=db`를 지워도 35개 테스트가 전부 통과했다. 목록 화면만
+    진실을 말하고 방금 누른 카드의 응답은 「실행 가능」이라 하면, 사람은 그 응답을 보고
+    실행 버튼을 누른다."""
+    _settings(db)
+    _scope_row(db, adgroup_id="grp-in")
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-out",
+                  adgroup_id="grp-out", status="pending")
+    p.target_bid = 100
+    db.commit()
+
+    resp = client.post(f"/api/naver/ad/proposals/{p.id}/status", json={"status": "approved"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 승인되면서 approval_source='console'이 붙는다 — 그 순간부터 스코프 가드의 대상이다
+    assert body["executable"] is False
+    assert "스코프" in (body["not_executable_reason"] or "")
+
+
+def test_status_transition_response_unchanged_for_in_scope(client, db):
+    """반대 방향 — 스코프 안이면 승인 응답이 종전 그대로다(과잉 차단 회귀 가드)."""
+    _settings(db)
+    _scope_row(db, adgroup_id="grp-in")
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-in",
+                  adgroup_id="grp-in", status="pending")
+    p.target_bid = 100
+    db.commit()
+
+    body = client.post(f"/api/naver/ad/proposals/{p.id}/status",
+                       json={"status": "approved"}).json()
+    assert body["executable"] is True
+    assert body["not_executable_reason"] is None
