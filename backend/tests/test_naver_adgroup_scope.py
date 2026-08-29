@@ -486,47 +486,124 @@ def test_console_approved_is_scope_blocked_and_the_message_says_so_honestly(db):
 # ──────────────────────────────────────────────────────────────────────────
 
 def test_approved_is_only_ever_set_inside_the_single_door():
-    """★엔진 모듈에서 `status='approved'`를 쓰는 자리는 engine_approve 하나뿐이어야 한다.
+    """★엔진 모듈에서 제안을 `approved`로 만드는 자리의 **전수 목록을 고정**한다.
 
-    새 레인이 생겨 문을 우회하면 이 테스트가 즉시 죽는다 — 레인별 테스트를 매번 기억해
-    다는 것에 기대지 않는다(그 기대가 실패한 기록이 죽은 카드 119건이다)."""
+    새 레인이 생겨 문(engine_approve)을 우회하면 이 테스트가 즉시 죽는다 — 레인별 테스트를
+    매번 기억해 다는 것에 기대지 않는다(그 기대가 실패한 기록이 죽은 카드 119건이다).
+
+    ★적대 리뷰 2R이 초판 가드를 **실제로 두 번 우회**했다. 그 둘을 막은 것이 지금 형태다:
+      ①**대상 파일 화이트리스트** — 초판은 파일 3개를 손으로 적었다. 리뷰어가 «새 파일»에
+        우회를 심으니 통과했다. ⇒ `rglob`으로 `naver_ad/` **전체를 훑는다.** 「다음에 생길
+        레인」은 대개 «새 파일»이므로, 목록을 손으로 유지하는 가드는 원래 병의 반복이다.
+      ②**리터럴만 매칭** — `x = "approved"; p.status = x`로 우회됐다(난독화가 아니라 상수를
+        변수로 뽑는 평범한 리팩터로도 자연 발생한다). ⇒ 함수 안에서 문자열 상수가 바인딩된
+        이름을 **간이 상수 전파**로 따라간다.
+
+    ⚠️ **여전히 못 잡는 것(정직하게 적어 둔다)**: `setattr(p, "status", ...)`·조건식·리스트 경유·
+    다른 모듈에서 import한 상수·ORM 밖 raw SQL. 이 가드는 «실수와 평범한 리팩터»를 막지
+    «작정한 우회»를 막지 못한다. 그 층이 필요하면 런타임 계약(모델 validates)이 답이고,
+    그건 별도 결정 사안이다.
+
+    형태가 «전수 목록 고정»인 이유: 새 자리가 생겨도, 기존 자리가 사라져도 둘 다 드러난다.
+    """
     import ast
     import pathlib
 
-    targets = [
-        "app/services/naver_ad/auto_operator.py",
-        "app/services/naver_ad/cold_start_bid_lane.py",
-        "app/services/naver_ad/exploration.py",
-    ]
-    root = pathlib.Path(__file__).resolve().parents[1]
-    offenders: list[str] = []
+    # 자리마다 «왜 여기 있어도 되는가»를 적는다. 이 목록에 줄을 더하는 것이 곧 결정이다.
+    EXPECTED = {
+        # ★유일한 «문» — 스코프 검사를 통과한 제안만 여기서 approved가 된다
+        "auto_operator.py::engine_approve",
+        # harness 내부 — «승인» 전이가 아니라 실행 클레임(executing)의 원복·해제다
+        "naver_execution_harness.py::_claim_executing",
+        "naver_execution_harness.py::_execute_add_negative_keyword",
+        "naver_execution_harness.py::_execute_search_term_exclude",
+        "naver_execution_harness.py::_execute_update_bid",
+        "naver_execution_harness.py::_execute_set_user_lock",
+        "naver_execution_harness.py::_execute_update_budget",
+        # ⚠️이 둘은 «아직 문을 안 지난다» — 죽은 카드 0건이고 ss 레인은 카나리의 유일한
+        #   실집행 경로라 점화 다음날 아침 직전에 건드리지 않았다(다음 세션 후보).
+        #   목록에 있다는 것 자체가 그 부채의 기록이다.
+        "probe_revert.py::_execute_revert",
+        "search_term_ss_lane.py::_autofire_exclude",
+    }
 
-    for rel in targets:
-        path = root / rel
-        if not path.exists():
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for fn in ast.walk(tree):
-            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if fn.name == "engine_approve":
-                continue  # ★유일하게 허용된 자리
-            for node in ast.walk(fn):
-                # ① proposal.status = "approved"
-                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
-                        and node.value.value == "approved":
-                    for tgt in node.targets:
-                        if isinstance(tgt, ast.Attribute) and tgt.attr == "status":
-                            offenders.append(f"{rel}:{node.lineno} in {fn.name}() — 대입")
-                # ② NaverProposal(..., status="approved", ...)
-                if isinstance(node, ast.Call):
-                    for kw in node.keywords:
-                        if kw.arg == "status" and isinstance(kw.value, ast.Constant) \
-                                and kw.value.value == "approved":
-                            offenders.append(f"{rel}:{node.lineno} in {fn.name}() — 생성 인자")
+    root = pathlib.Path(__file__).resolve().parents[1] / "app" / "services" / "naver_ad"
+    assert root.is_dir(), f"스캔 대상 디렉터리가 없다 — 경로가 바뀌었으면 조용히 통과시키지 말 것: {root}"
 
-    assert offenders == [], (
-        "엔진 승인 단일문(engine_approve)을 우회해 approved를 만드는 자리가 있다 — "
+    found: set[str] = set()
+
+    class _Scan(ast.NodeVisitor):
+        def __init__(self, filename: str) -> None:
+            self.filename = filename
+            self.stack: list[str] = []
+            self.const_names: list[dict[str, str]] = [{}]
+
+        def _here(self) -> str:
+            return f"{self.filename}::{self.stack[-1] if self.stack else '<module>'}"
+
+        def visit_FunctionDef(self, node):
+            self.stack.append(node.name)
+            self.const_names.append(dict(self.const_names[-1]))
+            self.generic_visit(node)
+            self.const_names.pop()
+            self.stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def _fold(self, value) -> str | None:
+            """문자열로 «접힐 수 있으면» 그 값. 리터럴·이 스코프의 이름·리터럴 접합까지."""
+            if isinstance(value, ast.Constant):
+                return value.value if isinstance(value.value, str) else None
+            if isinstance(value, ast.Name):
+                return self.const_names[-1].get(value.id)
+            if isinstance(value, ast.JoinedStr):  # f-string: 조각이 전부 상수일 때만
+                out = ""
+                for piece in value.values:
+                    if not isinstance(piece, ast.Constant) or not isinstance(piece.value, str):
+                        return None
+                    out += piece.value
+                return out
+            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+                left, right = self._fold(value.left), self._fold(value.right)
+                return left + right if left is not None and right is not None else None
+            return None
+
+        def _is_approved(self, value) -> bool:
+            return self._fold(value) == "approved"
+
+        def visit_Assign(self, node):
+            # ① 이름 바인딩 수집(상수 전파용) — 리터럴·접합·f-string 전부
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                folded = self._fold(node.value)
+                if folded is not None:
+                    self.const_names[-1][node.targets[0].id] = folded
+            # ② proposal.status = "approved" (또는 그 값이 바인딩된 이름)
+            if self._is_approved(node.value):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Attribute) and tgt.attr == "status":
+                        found.add(self._here())
+            self.generic_visit(node)
+
+        def visit_Call(self, node):
+            for kw in node.keywords:
+                if kw.arg == "status" and self._is_approved(kw.value):
+                    found.add(self._here())
+            self.generic_visit(node)
+
+    scanned = 0
+    for path in sorted(root.rglob("*.py")):
+        _Scan(path.name).visit(ast.parse(path.read_text(encoding="utf-8")))
+        scanned += 1
+    assert scanned > 10, f"스캔한 파일이 {scanned}개뿐 — 글롭이 깨졌다(조용한 커버리지 유실)"
+
+    새로_생긴_자리 = sorted(found - EXPECTED)
+    사라진_자리 = sorted(EXPECTED - found)
+    assert not 새로_생긴_자리, (
+        "엔진 승인 단일문(engine_approve)을 우회해 approved를 만드는 자리가 생겼다 — "
         "스코프 검사(D-NAO-244)를 건너뛰어 «죽은 카드»가 다시 쌓인다:\n  "
-        + "\n  ".join(offenders)
+        + "\n  ".join(새로_생긴_자리)
+    )
+    assert not 사라진_자리, (
+        "EXPECTED에 적힌 자리가 코드에서 사라졌다 — 목록이 낡았으니 갱신할 것:\n  "
+        + "\n  ".join(사라진_자리)
     )
