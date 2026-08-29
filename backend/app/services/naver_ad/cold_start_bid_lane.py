@@ -273,11 +273,18 @@ def run_cold_start_lane(
                 "이후 입찰은 기존 레인(순위 서보·탐색UP)이 인수.",
                 decision["ceiling_cpc"],
             ),
-            status="approved", target_bid=decision["target_bid"],
-            approval_source=APPROVAL_SOURCE_COLD,
+            status="pending", target_bid=decision["target_bid"],
         )
         db.add(proposal)
-        db.commit()
+        db.flush()
+        # D-NAO-244 스코프 검사 — 승인은 auto_operator.engine_approve 단일 문으로만(지연 import:
+        # 순환 회피, 이 파일의 harness import 관례와 동형). 종전엔 스코프 밖 소재도 approved로
+        # 커밋된 뒤 harness가 거부해 죽은 카드가 됐다(prod 실측 cold_op 4건).
+        from app.services.naver_ad.auto_operator import engine_approve
+
+        if not engine_approve(db, proposal, source=APPROVAL_SOURCE_COLD, now=now):
+            result["held"] += 1
+            continue
         try:
             naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)
             result["executed"] += 1

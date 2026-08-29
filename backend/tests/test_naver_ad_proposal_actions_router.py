@@ -409,3 +409,63 @@ def test_execute_already_executed_returns_409(client, db):
 
     mock_write.assert_not_called()
     assert resp.status_code == 409
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★사용자에게 닿는 마지막 표면 — 콘솔이 「죽은 카드」를 실행 가능이라 말하지 않는가
+#
+# 2026-08-29 prod 실측 119건: 엔진이 approved로 커밋했으나 스코프 밖이라 harness가
+# 영원히 거부하는 카드인데, 이 API가 executable=True·사유 없음으로 실어 보내고 있었다.
+# 값이 도는 층(harness)은 막고 있었고 사람이 읽는 층만 몰랐다.
+# ══════════════════════════════════════════════════════════════════
+
+def _scope_row(db, campaign_id="cmp-1", adgroup_id="grp-in", enabled=True):
+    from app.models import NaverAdgroupScope
+    db.add(NaverAdgroupScope(
+        campaign_id=campaign_id, adgroup_id=adgroup_id, role="accel", enabled=enabled,
+    ))
+    db.commit()
+
+
+def test_console_does_not_call_out_of_scope_engine_card_executable(client, db):
+    """★엔진 승인분이 스코프 밖이면 화면에 「실행 가능」으로 뜨지 않고 사유가 실린다."""
+    _settings(db)
+    _scope_row(db, adgroup_id="grp-in")
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-out",
+                  adgroup_id="grp-out", status="approved")
+    p.approval_source = "auto_op_hr"      # 엔진 승인분
+    p.target_bid = 100
+    db.commit()
+
+    row = client.get("/api/naver/ad/proposals").json()["rows"][0]
+    assert row["executable"] is False
+    assert "스코프" in (row["not_executable_reason"] or "")
+
+
+def test_console_still_shows_in_scope_engine_card_executable(client, db):
+    """★반대 방향 — 스코프 «안»은 종전 그대로 실행 가능이다(과잉 차단 회귀 가드)."""
+    _settings(db)
+    _scope_row(db, adgroup_id="grp-in")
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-in",
+                  adgroup_id="grp-in", status="approved")
+    p.approval_source = "auto_op_hr"
+    p.target_bid = 100
+    db.commit()
+
+    row = client.get("/api/naver/ad/proposals").json()["rows"][0]
+    assert row["executable"] is True
+    assert row["not_executable_reason"] is None
+
+
+def test_console_unchanged_when_no_scope_rows(client, db):
+    """스코프를 안 쓰는 캠페인은 응답이 한 글자도 안 바뀐다(소급 0)."""
+    _settings(db)
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-any",
+                  adgroup_id="grp-any", status="approved")
+    p.approval_source = "auto_op_hr"
+    p.target_bid = 100
+    db.commit()
+
+    row = client.get("/api/naver/ad/proposals").json()["rows"][0]
+    assert row["executable"] is True
+    assert row["not_executable_reason"] is None

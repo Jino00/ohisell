@@ -276,8 +276,11 @@ def _serialize_proposal(
     p: NaverProposal, verdict: NaverExpertReview | None,
     ent_names: dict[tuple[str, str], str] | None = None,
     camp_names: dict[str, str] | None = None,
+    db: Session | None = None,
 ) -> dict:
-    blocker_reason = naver_execution_harness.real_write_blocker(p)
+    # db를 주면 스코프(D-NAO-244)까지 판정한다 — 엔진 승인분이 스코프 밖이면 콘솔이
+    # 「실행 가능」이라고 말하지 않는다(prod 실측 119건이 그렇게 표시되고 있었다).
+    blocker_reason = naver_execution_harness.real_write_blocker(p, db)
     return {
         "id": p.id,
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -411,7 +414,7 @@ def proposals(
     return {
         "total": total,
         "open_actions": naver_execution_harness.open_executable_actions(),
-        "rows": [_serialize_proposal(p, verdicts.get(p.id), ent_names, camp_names) for p in rows],
+        "rows": [_serialize_proposal(p, verdicts.get(p.id), ent_names, camp_names, db) for p in rows],
     }
 
 
@@ -564,7 +567,7 @@ def proposal_status_transition(
 
     db.refresh(proposal)
     verdicts = _latest_ok_verdicts_by_proposal(db, [proposal.id])
-    return _serialize_proposal(proposal, verdicts.get(proposal.id))
+    return _serialize_proposal(proposal, verdicts.get(proposal.id), db=db)
 
 
 @router.post("/proposals/{proposal_id}/execute")
@@ -635,7 +638,7 @@ def proposal_execute(proposal_id: int, db: Session = Depends(get_db)):
         "outcome": change_log.outcome,
         "before": _parse_json_or_raw(change_log.before_value),
         "after": _parse_json_or_raw(change_log.after_value),
-        "proposal": _serialize_proposal(proposal, verdicts.get(proposal.id)),
+        "proposal": _serialize_proposal(proposal, verdicts.get(proposal.id), db=db),
     }
 
 

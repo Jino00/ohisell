@@ -376,6 +376,56 @@ def _scope_hold_reason(db: Session, p) -> str | None:
     return f"자동운영 스코프 밖 광고그룹({p.adgroup_id}) — D-NAO-244"
 
 
+def engine_approve(
+    db: Session, proposal, *, source: str, now: datetime,
+    result: dict | None = None, held_key: str = "held",
+) -> bool:
+    """엔진이 제안을 `approved`로 커밋하는 **유일한 문**. 스코프 밖이면 승인하지 않고
+    blocked 일기만 남긴 뒤 False를 돌려준다(승인했으면 True).
+
+    ★왜 문을 하나로 모으나 (2026-08-29 실측, D-NAO-244 부수 결함):
+    스코프 검사(`_scope_hold_reason`)가 **레인마다 각자** 있었고 실제로는 일 레인 2곳에만
+    있었다. 나머지 세 레인(시간당·탐색·스파이럴)은 스코프 밖 제안을 그대로 `approved`로
+    커밋했고, harness가 쓰기 직전에 거부해(`ScopeGuardError`) **영원히 실행되지 않는
+    approved 카드**가 남았다 — prod 실측 **119건**(2026-07-28~08-29, `auto_op_hr` 92 ·
+    `explore_op` 19 · `auto_op` 4 · `cold_op` 4). 실쓰기는 0이라 손해는 없지만,
+    콘솔이 그 119건을 「실행 가능」으로 표시한다(`real_write_blocker`가 전건 None).
+    ⇒ 규칙을 레인마다 다시 적는 방식이 실패했으므로 **승인하는 자리 자체를 하나로 만든다**
+    (memory `same-defect-three-times-fix-the-shape`).
+
+    이 문은 **좁히기만 한다** — 이전에 승인되지 않던 제안을 승인하는 경로는 없다.
+    스코프가 없는 캠페인(`blocked_by_scope`가 False)은 종전과 완전히 동일하게 통과한다.
+
+    일기: 승인 거부 시 `_record_blocked`로 `blocked` 1행(actor는 approval_source에서 유도).
+    harness의 쓰기 직전 거부 일기와 «같은 사건을 두 번» 적지 않는다 — 승인을 안 했으므로
+    harness까지 가지 않는다(호출부는 False를 받으면 execute를 부르지 않아야 한다).
+    """
+    # ★순서가 계약이다: 스코프 조회 «전»에 커밋한다. `adgroup_scope.blocked_by_scope`는
+    # 세션이 아니라 **독립 커넥션**(`db.get_bind().connect()`)으로 읽는데, SQLite에서 세션이
+    # 아직 커밋 안 한 INSERT를 들고 있으면 그 커넥션이 닫히며 열린 트랜잭션이 되감겨
+    # 방금 flush한 제안 행이 사라진다(테스트가 즉시 StaleDataError로 잡았다 —
+    # "expected to update 1 row(s); 0 were matched"). 커밋해 두면 제안은 `pending`으로
+    # 남고, 스코프 밖이면 그 상태 그대로 끝난다(승인 안 함 = 죽은 카드 안 만듦).
+    db.commit()
+    scope_hold = _scope_hold_reason(db, proposal)
+    if scope_hold is not None:
+        if result is not None:
+            result.setdefault(held_key, []).append(
+                {"id": proposal.id, "target_id": proposal.target_id, "reason": scope_hold}
+            )
+        _record_blocked(
+            db, campaign_id=proposal.campaign_id,
+            actor=diary.actor_from_approval_source(source), reason=scope_hold, now=now,
+            target_type=proposal.target_type, target_id=proposal.target_id,
+            adgroup_id=proposal.adgroup_id, action=proposal.proposal_type,
+        )
+        return False
+    proposal.status = "approved"
+    proposal.approval_source = source
+    db.commit()
+    return True
+
+
 def _extract_rationale_clk(rationale: str | None) -> int | None:
     """D-NAO-48 조건②("rationale 창 클릭") 추출 — 로컬 루틴(사람/Claude가 rationale
     텍스트를 읽고 판단)과 동일 신호를 그대로 재현한다. target_bid처럼 구조화 컬럼이
@@ -954,18 +1004,9 @@ def _run_budget_envelope_lane(
             )
             continue
         # D-NAO-244 스코프 검사 — 예산은 캠페인 레벨이라 스코프가 있으면 항상 여기서 걸린다.
-        scope_hold = _scope_hold_reason(db, p)
-        if scope_hold is not None:
-            result["held"].append({"id": p.id, "reason": scope_hold})
-            _record_blocked(
-                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=scope_hold,
-                now=now, target_type=p.target_type, target_id=p.target_id,
-                adgroup_id=p.adgroup_id, action=p.proposal_type,
-            )
+        # (검사·승인·커밋은 engine_approve 단일 문이 한다 — 레인마다 다시 적지 않는다.)
+        if not engine_approve(db, p, source=APPROVAL_SOURCE_DAILY, now=now, result=result):
             continue
-        p.status = "approved"
-        p.approval_source = APPROVAL_SOURCE_DAILY
-        db.commit()
         result["budget_approved"] += 1
         try:
             naver_execution_harness.execute(db, p.id, dry_run=False, now=now)
@@ -1139,19 +1180,10 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             continue
 
         # D-NAO-244 스코프 검사(킬스위치와 나란히 — 원인이 다르면 사유도 다르게 남긴다).
-        scope_hold = _scope_hold_reason(db, p)
-        if scope_hold is not None:
-            result["held"].append({"id": p.id, "reason": scope_hold})
-            _record_blocked(
-                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=scope_hold,
-                now=now, target_type=p.target_type, target_id=p.target_id,
-                adgroup_id=p.adgroup_id, action=p.proposal_type,
-            )
+        # (검사·승인·커밋은 engine_approve 단일 문이 한다 — 레인마다 다시 적지 않는다.)
+        if not engine_approve(db, p, source=APPROVAL_SOURCE_DAILY, now=now, result=result):
             continue
 
-        p.status = "approved"
-        p.approval_source = APPROVAL_SOURCE_DAILY
-        db.commit()
         result["approved"] += 1
 
         try:
@@ -2816,10 +2848,16 @@ def _run_exploration_for_campaign(
             campaign_id=campaign_id, adgroup_id=adgroup_id,
             rationale=f"[{rank_tag}] {vreason}",
             expected_effect=expected_effect,
-            status="approved", target_bid=target, approval_source=exploration.APPROVAL_SOURCE_EXPLORE,
+            status="pending", target_bid=target,
         )
         db.add(proposal)
-        db.commit()
+        db.flush()
+        # D-NAO-244 스코프 검사 — 승인은 engine_approve 단일 문으로만(스코프 밖이면 pending인
+        # 채로 남고 blocked 일기가 남는다. 종전엔 approved로 커밋돼 죽은 카드가 됐다).
+        if not engine_approve(
+            db, proposal, source=exploration.APPROVAL_SOURCE_EXPLORE, now=now, result=result,
+        ):
+            continue
 
         try:
             naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)
@@ -2941,10 +2979,16 @@ def _fire_vitality_revive(db: Session, target: dict, now: datetime, result: dict
                 "스파이럴 조기 복원 — 흐름 붕괴(노출·순위 궤적 하락) 검증 그룹의 밴드 복원 방향 "
                 "UP(D-NAO-81 B축). BEP 가드레일·킬스위치·쿨다운·48h 재발사 쿨다운이 백스톱."
             ),
-            status="approved", target_bid=step_bid, approval_source=APPROVAL_SOURCE_HOURLY,
+            status="pending", target_bid=step_bid,
         )
         db.add(proposal)
-        db.commit()
+        db.flush()
+        # D-NAO-244 스코프 검사 — 승인은 engine_approve 단일 문으로만.
+        if not engine_approve(
+            db, proposal, source=APPROVAL_SOURCE_HOURLY, now=now,
+            result=result, held_key="vitality_held",
+        ):
+            return
     except Exception as e:  # noqa: BLE001 — GATE P3 fail-soft: 준비 구간 예외는 이 타깃만 건너뛴다
         db.rollback()
         result["vitality_held"].append(
@@ -3064,9 +3108,13 @@ def _bp_fire(
     )
     db.add(proposal)
     db.flush()
-    proposal.status = "approved"
-    proposal.approval_source = APPROVAL_SOURCE_PACING
-    db.commit()
+    # D-NAO-244 스코프 검사 — 승인은 engine_approve 단일 문으로만. 예산은 캠페인 레벨이라
+    # 스코프가 걸린 캠페인에서는 항상 여기서 멈춘다(그룹 귀속 불가 — harness와 같은 판정).
+    if not engine_approve(
+        db, proposal, source=APPROVAL_SOURCE_PACING, now=now,
+        result=result, held_key="budget_pacing_held",
+    ):
+        return False
 
     dry_run = budget_pacing.dry_run_enabled()
     try:
@@ -3898,9 +3946,13 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     )
                     continue
 
-                proposal.status = "approved"
-                proposal.approval_source = proposal_approval_source
-                db.commit()
+                # D-NAO-244 스코프 검사 — 종전엔 시간당 레인에만 이 검사가 없어서 스코프 밖
+                # 제안이 approved로 커밋된 뒤 harness가 거부하는 «죽은 카드»가 쌓였다
+                # (engine_approve docstring의 실측 119건 중 92건이 이 자리에서 났다).
+                if not engine_approve(
+                    db, proposal, source=proposal_approval_source, now=now, result=result,
+                ):
+                    continue
                 result["approved"] += 1
                 if exec_target_type == "ad":
                     # D-NAO-125 레인 캡(승인=자리 예약 시점) — 단 **그룹당 한 자리**(D-NAO-171).

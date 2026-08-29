@@ -319,3 +319,122 @@ def test_role_of_returns_label(db):
     _scope(db, IN_GROUP, role=adgroup_scope.ROLE_BRAKE)
     assert adgroup_scope.role_of(db, CAMPAIGN, IN_GROUP) == "brake"
     assert adgroup_scope.role_of(db, CAMPAIGN, OUT_GROUP) is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ★D-NAO-244 부수 결함 — 「죽은 카드」와 그것을 「실행 가능」이라 말하던 화면
+#
+# 2026-08-29 prod 실측: status='approved'인데 스코프 밖이라 harness가 영원히 거부하는
+# 제안이 **119건**(auto_op_hr 92 · explore_op 19 · auto_op 4 · cold_op 4, 07-28~).
+# 손해는 0(실쓰기 없음)이지만 콘솔은 그 119건을 전부 「실행 가능」으로 표시하고 있었다
+# (real_write_blocker가 전건 None). 원인은 하나 — 스코프 검사가 «레인마다 각자» 있었고
+# 실제로는 일 레인 2곳에만 있었다.
+#
+# 그래서 두 가지를 잠근다:
+#   ⓐ 승인하는 «문»이 하나다(engine_approve) — 새 레인이 생겨도 그 문을 지나야 approved가 된다
+#   ⓑ 사람이 읽는 층(real_write_blocker → 콘솔 executable)이 값이 도는 층과 같은 답을 한다
+# ──────────────────────────────────────────────────────────────────────────
+
+def _pending_proposal(db, *, adgroup_id, proposal_type="bid_down"):
+    p = NaverProposal(
+        proposal_type=proposal_type, target_type="adgroup", target_id=adgroup_id or "",
+        campaign_id=CAMPAIGN, adgroup_id=adgroup_id, status="pending",
+        rationale="테스트", target_bid=100,
+    )
+    db.add(p)
+    db.flush()          # ★일부러 커밋하지 않는다 — 레인들이 이 상태로 문을 두드린다
+    return p
+
+
+def test_engine_approve_refuses_out_of_scope_and_leaves_no_dead_card(db):
+    """★스코프 밖이면 approved로 만들지 않는다 — 죽은 카드가 생기는 자리를 막는다."""
+    from app.services.naver_ad import auto_operator
+
+    _settings(db, auto_operate=True, optimizer="ours")
+    _scope(db, IN_GROUP)
+    p = _pending_proposal(db, adgroup_id=OUT_GROUP)
+
+    assert auto_operator.engine_approve(db, p, source="auto_op_hr", now=NOW) is False
+    db.refresh(p)
+    assert p.status == "pending"          # approved가 아니다 = 죽은 카드 아님
+    assert p.approval_source is None
+    # 재료는 잃지 않는다 — blocked 일기 1행(C7 학습 사슬)
+    entries = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "blocked").all()
+    assert len(entries) == 1
+    assert "스코프" in (entries[0].rationale or "")
+
+
+def test_engine_approve_lets_in_scope_through(db):
+    """★반대 방향 — 스코프 «안»이면 종전과 완전히 같이 승인된다(이 문은 좁히기만 한다)."""
+    from app.services.naver_ad import auto_operator
+
+    _settings(db, auto_operate=True, optimizer="ours")
+    _scope(db, IN_GROUP)
+    p = _pending_proposal(db, adgroup_id=IN_GROUP)
+
+    assert auto_operator.engine_approve(db, p, source="auto_op_hr", now=NOW) is True
+    db.refresh(p)
+    assert p.status == "approved"
+    assert p.approval_source == "auto_op_hr"
+
+
+def test_engine_approve_unchanged_when_no_scope_rows(db):
+    """스코프 행이 0개면 전부 통과 — 「행이 없으면 기존 동작 그대로」(소급 0)."""
+    from app.services.naver_ad import auto_operator
+
+    _settings(db, auto_operate=True, optimizer="ours")
+    p = _pending_proposal(db, adgroup_id="아무-그룹이나")
+
+    assert auto_operator.engine_approve(db, p, source="explore_op", now=NOW) is True
+    db.refresh(p)
+    assert p.status == "approved"
+
+
+def test_engine_approve_survives_uncommitted_insert(db):
+    """★회귀 — 스코프 리졸버는 «독립 커넥션»으로 읽는다.
+
+    세션이 아직 커밋 안 한 INSERT를 들고 있는 채로 그 커넥션을 열고 닫으면 SQLite에서
+    열린 트랜잭션이 되감겨 방금 flush한 제안 행이 사라진다(StaleDataError: "expected to
+    update 1 row(s); 0 were matched"). engine_approve가 스코프 조회 «전»에 커밋하는 것이
+    그 방어다 — 순서를 되돌리면 이 테스트가 죽는다."""
+    from app.services.naver_ad import auto_operator
+
+    _settings(db, auto_operate=True, optimizer="ours")
+    _scope(db, IN_GROUP)
+    p = _pending_proposal(db, adgroup_id=IN_GROUP)   # flush만, 커밋 안 함
+
+    assert auto_operator.engine_approve(db, p, source="auto_op_hr", now=NOW) is True
+    # 행이 실제로 살아 있어야 한다(독립 커넥션으로 재확인 — 세션 캐시가 아니라 DB를 본다)
+    with db.get_bind().connect() as conn:
+        from sqlalchemy import text
+        row = conn.execute(
+            text("SELECT status, approval_source FROM naver_proposals WHERE id = :i"), {"i": p.id}
+        ).first()
+    assert row is not None and row[0] == "approved"
+
+
+def test_real_write_blocker_tells_the_truth_about_scope(db):
+    """★ⓑ 사람이 읽는 층 — 엔진 승인분이 스코프 밖이면 콘솔이 「실행 가능」이라 하지 않는다."""
+    _settings(db, auto_operate=True, optimizer="ours")
+    _scope(db, IN_GROUP)
+    p = _approved_proposal(db, adgroup_id=OUT_GROUP)
+
+    reason = naver_execution_harness.real_write_blocker(p, db)
+    assert reason is not None and "스코프" in reason
+    # db 없이 부르면 종전 그대로(구조 판정만) — 기존 호출부 행위 불변
+    assert naver_execution_harness.real_write_blocker(p) is None
+
+
+def test_real_write_blocker_does_not_bind_the_human_hand(db):
+    """★사람 손(approval_source=NULL)에는 스코프 사유를 붙이지 않는다.
+
+    execute()가 그 경로를 스코프에서 면제하므로(«스코프는 엔진의 자율 범위를 좁히는 장치이지
+    사람의 손을 묶는 게이트가 아니다»), 붙이면 콘솔이 «실제로 실행되는 것»을 못 한다고
+    거짓말한다 — 방향만 다른 같은 병이다."""
+    _settings(db, auto_operate=True, optimizer="ours")
+    _scope(db, IN_GROUP)
+    p = _pending_proposal(db, adgroup_id=OUT_GROUP)
+    db.commit()
+
+    assert p.approval_source is None
+    assert naver_execution_harness.real_write_blocker(p, db) is None
