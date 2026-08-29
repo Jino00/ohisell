@@ -278,7 +278,12 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
   return (
     <Table
       head={
-        <tr>
+        // ★`<tr>`로 감싸지 않는다 — `Table`이 이미 `<thead><tr>{head}</tr></thead>`로 감싼다
+        //   (`components/ui/Table.tsx:28`). 감싸면 `<tr><tr>…</tr></tr>` 중첩이 되고, 중첩 `<tr>`은
+        //   유효하지 않아 브라우저 table fixup이 헤더 행을 들어내면서 **헤더 셀이 본문과 같은 열
+        //   그리드에 참여하지 못한다** — 헤더는 왼쪽에 몰리고 본문 숫자는 오른쪽으로 밀려 보인다
+        //   (2026-08-29 Jino 지적 「이거 칸 안맞잖아」). 호출부 39곳 중 여기만 어긋나 있었다.
+        <>
           <Th>광고그룹</Th>
           <Th>맡김</Th>
           <Th>역할</Th>
@@ -288,7 +293,7 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
           <Th right>ROAS</Th>
           <Th right>BEP</Th>
           <Th right>총이익<span className="block text-[10px] font-normal text-gray-400">있는 그대로 / 구간</span></Th>
-        </tr>
+        </>
       }
     >
       {c.adgroups.map((g) => (
