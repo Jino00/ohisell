@@ -808,3 +808,35 @@ def test_nearest_position_fallback_never_goes_more_expensive():
 def test_cold_approval_source_fits_column():
     """approval_source는 String(12) — 넘치면 조용히 잘려 킬스위치 매칭이 깨진다."""
     assert len(lane.APPROVAL_SOURCE_COLD) <= 12
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★D-NAO-244 — 콜드 레인도 «승인하는 문»(auto_operator.engine_approve)을 지난다
+#
+# 이 테스트가 없으면 콜드 레인의 engine_approve 호출을 지워도 전건이 초록이다(변이 M8이
+# 실제로 그렇게 생존했다). prod 실측 죽은 카드 119건 중 cold_op이 4건이었다.
+# ══════════════════════════════════════════════════════════════════
+
+def test_lane_does_not_approve_out_of_scope_ad(db, writer_stub):
+    """★스코프 밖 그룹의 소재는 approved 카드도, writer 호출도 남기지 않는다."""
+    from app.models import NaverAdgroupScope, NaverProposal
+    _seed(db)
+    _market_rows(db)
+    # 스코프를 «다른» 그룹으로 좁힌다 ⇒ 이 소재(GID 소속)는 스코프 밖
+    db.add(NaverAdgroupScope(campaign_id=CID, adgroup_id="grp-딴데", role="accel", enabled=True))
+    db.commit()
+
+    out = lane.run_cold_start_lane(db, dry_run=False, today=TODAY)
+
+    assert out["executed"] == 0, out
+    assert writer_stub == []                                     # 실쓰기 0
+    assert db.query(NaverProposal).filter(NaverProposal.status == "approved").all() == []
+
+
+def test_lane_unchanged_when_no_scope_rows(db, writer_stub):
+    """스코프 행이 없으면 종전과 완전히 동일하다(소급 0) — 과잉 차단 회귀 가드."""
+    _seed(db)
+    _market_rows(db)
+    out = lane.run_cold_start_lane(db, dry_run=False, today=TODAY)
+    assert out["executed"] == 1, out
+    assert writer_stub == [(AD, 900)]

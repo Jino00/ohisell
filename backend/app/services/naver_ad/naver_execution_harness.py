@@ -2280,7 +2280,7 @@ def open_executable_actions() -> list[str]:
     return sorted(OPEN_ACTIONS & set(_WRITE_EXECUTORS))
 
 
-def real_write_blocker(proposal: NaverProposal) -> str | None:
+def real_write_blocker(proposal: NaverProposal, db: Session | None = None) -> str | None:
     """이 제안이 지금 실쓰기 불가능한 이유(사람이 읽을 한국어 문자열)를 반환, 가능하면 None
     (X1a T4). 콘솔의 실행 버튼 활성화 여부(`executable`, naver_ad.py `_serialize_proposal`)와
     사람이 읽을 사유(`not_executable_reason`) 판정에 쓰인다. **판정만 하고 DB를 절대
@@ -2315,7 +2315,46 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     ①·②만 가로챈다 — ③~⑥(구조 결함)·가드레일 위반은 harness에 그대로 넘겨
     MissingExecutionTargetError→422+failed 감사 기록 경로를 타게 한다(라우터가 여기서
     선점하면 그 감사 기록이 안 남는다 — T4 설계, 라우터 docstring 참조).
+    ★스코프(D-NAO-244) 판정은 `db`를 준 호출에서만 한다 — 조건은 execute()의 스코프 가드와
+    **글자 그대로 같다**(`approval_source is not None` ∧ `blocked_by_scope`, 같은 리졸버).
+    왜 필요한가: 이 함수가 스코프를 안 보던 동안, 엔진이 승인해 놓고 harness가 영원히 거부하는
+    제안(prod 실측 119건)에 대해 콘솔이 `executable=True`(사유 없음)를 표시했다 —
+    **값이 도는 층은 막고 있는데 사람이 읽는 층은 「실행 가능」이라 말하는** 상태였다.
+    `db` 없이 부르면 종전과 완전히 동일하게 동작한다(구조 판정만).
+
+    ★★조건을 `execute()`와 **같게** 두는 것이 이 함수의 전부다. 「무엇이 옳은가」가 아니라
+    「저기서 실제로 무엇이 일어나는가」를 말해야 화면이 진실이 된다.
+    ⚠️ 그래서 **`is_auto_exec`(사람 = NULL ∪ 'console')를 여기 쓰지 않는다** — 승인원 술어가
+    이 저장소에 **둘 다** 있고 서로 다른데, `execute()`의 스코프 가드가 쓰는 쪽은
+    `approval_source is not None`이다. `is_auto_exec`를 쓰면 콘솔 승인분이 여기선
+    「실행 가능」인데 execute()에서 `ScopeGuardError`로 죽는다 — 이 수리가 없애려는 바로 그
+    병이 범위만 좁혀 되살아난다.
+    ⚠️ **알려진 간극(이 수리 범위 밖·기존 코드, 적대 리뷰 P1-1이 잡았다)**: `execute()`의
+    스코프 가드 주석은 *"수동 콘솔 승인 approval_source=NULL은 이 블록 밖"*이라며 사람을
+    면제한다고 적어 뒀지만, 라우터는 사람 승인에 **NULL이 아니라 `'console'`을 쓴다**
+    (`routers/naver_ad.py` status 전이). 즉 **그 면제는 실제로 발동한 적이 없다.**
+    사유 문구가 승인 주체를 「엔진」이라 단정하지 않는 것은 그래서다 — 문구로 덮지 않고
+    간극을 그대로 드러낸다. 면제를 실제로 열려면 `execute()`를 고쳐야 하고, 그건
+    «사람이 스코프 밖 그룹에 쓸 수 있게 되는» 범위 확대라 별도 결정 사안이다.
     """
+    if db is not None and proposal.approval_source is not None:
+        # execute()의 스코프 가드와 같은 조건·같은 리졸버(위 ★ 참조). 순서: 구조 판정보다 먼저 —
+        # 스코프 밖이면 구조가 완벽해도 이 제안은 영원히 실행되지 않는다(사람이 읽는 층의 진실).
+        from app.services.naver_ad import adgroup_scope as _adgroup_scope
+
+        if _adgroup_scope.blocked_by_scope(db, proposal.campaign_id, proposal.adgroup_id):
+            # ★문구는 «승인 주체»를 단정하지 않는다 — 이 자리엔 콘솔 승인분('console')도 온다
+            #   (위 ⚠️ 간극). 「엔진이 승인했어도」라고 쓰면 사람이 방금 누른 카드에 대고
+            #   원인을 엔진에게 돌리는 거짓말이 된다.
+            if proposal.adgroup_id is None:
+                return (
+                    "자동운영 스코프 — 캠페인 레벨 액션은 그룹 귀속 불가로 실행 불가"
+                    "(D-NAO-244). 쓰기 직전 스코프 가드가 거부한다."
+                )
+            return (
+                f"자동운영 스코프 밖 광고그룹({proposal.adgroup_id}) — 실행 불가"
+                "(D-NAO-244). 쓰기 직전 스코프 가드가 거부한다."
+            )
     action = _ACTION_BY_PROPOSAL_TYPE.get(proposal.proposal_type)
     if action is None:
         # P4 리뷰 P3-3: 결정 전용(param_change)을 "정보성"으로 오라벨하면 informational=False/
