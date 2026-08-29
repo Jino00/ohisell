@@ -499,10 +499,19 @@ def test_approved_is_only_ever_set_inside_the_single_door():
         변수로 뽑는 평범한 리팩터로도 자연 발생한다). ⇒ 함수 안에서 문자열 상수가 바인딩된
         이름을 **간이 상수 전파**로 따라간다.
 
-    ⚠️ **여전히 못 잡는 것(정직하게 적어 둔다)**: `setattr(p, "status", ...)`·조건식·리스트 경유·
-    다른 모듈에서 import한 상수·ORM 밖 raw SQL. 이 가드는 «실수와 평범한 리팩터»를 막지
-    «작정한 우회»를 막지 못한다. 그 층이 필요하면 런타임 계약(모델 validates)이 답이고,
-    그건 별도 결정 사안이다.
+      ③**대입의 «형태»** — 3R에서 `p.status, p.approval_source = "approved", src`(튜플 다중
+        대입)로 통과했다. 이것도 이 저장소가 도처에서 쓰는 두 줄을 한 줄로 합친 것뿐이다.
+        ⇒ 값을 보기 «전에» 대입을 (타깃, 값) 쌍으로 **펼친다**(튜플·리스트·중첩·연쇄·
+        어노테이션 대입까지. 검증: 그 6종 전부 사망).
+
+    ⚠️ **여전히 못 잡는 것(정직하게 적어 둔다)**: `setattr(p, "status", ...)`·조건식(`x if y
+    else z`)·컨테이너 경유·다른 모듈에서 import한 상수·ORM 밖 raw SQL.
+    ★**그리고 이 목록은 원리적으로 안 닫힌다** — 정적 매칭은 형태를 쫓고 형태는 늘 하나 더
+    있다(리뷰 3라운드가 실제로 그렇게 흘렀다: 화이트리스트 → 리터럴 → 대입 형태).
+    이 가드가 막는 것은 «실수와 평범한 리팩터»이고, 그게 죽은 카드 119건을 만든 실제
+    원인이다. «작정한 우회»까지 막으려면 층이 달라야 한다 — 모델 `validates`로 승인 전이를
+    런타임에 계약화하는 것이 답이고, 그건 실행 경로에 가드를 새로 세우는 일이라 별도 결정
+    사안이다(전역 §1 「사고가 나도 게이트를 새로 세우지 않는다」).
 
     형태가 «전수 목록 고정»인 이유: 새 자리가 생겨도, 기존 자리가 사라져도 둘 다 드러난다.
     """
@@ -571,17 +580,45 @@ def test_approved_is_only_ever_set_inside_the_single_door():
         def _is_approved(self, value) -> bool:
             return self._fold(value) == "approved"
 
+        @staticmethod
+        def _pairs(targets, value):
+            """대입 한 줄을 (타깃, 값) 쌍으로 «펼친다».
+
+            ★적대 리뷰 3R이 여기서 뚫었다 — `p.status, p.approval_source = "approved", src`.
+            초판은 `node.value`가 통째로 "approved"로 접힐 때만 봤는데 이 형태의 value는
+            튜플이라 매치가 안 됐다. 코드베이스가 도처에서 쓰는 두 줄을 한 줄로 합치는
+            평범한 리팩터라 «작정한 우회»가 아니다. ⇒ 형태를 먼저 펼치고 값을 본다.
+            """
+            out = []
+            for tgt in targets:
+                if isinstance(tgt, (ast.Tuple, ast.List)):
+                    if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(tgt.elts):
+                        out.extend(zip(tgt.elts, value.elts))
+                    else:
+                        # 길이가 안 맞거나 우변이 시퀀스가 아니면(언패킹) 값을 특정 못 한다 —
+                        # 각 타깃에 우변 전체를 붙여 «접히면 잡히게» 둔다(보수적).
+                        out.extend((elt, value) for elt in tgt.elts)
+                else:
+                    out.append((tgt, value))
+            return out
+
         def visit_Assign(self, node):
             # ① 이름 바인딩 수집(상수 전파용) — 리터럴·접합·f-string 전부
-            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-                folded = self._fold(node.value)
-                if folded is not None:
-                    self.const_names[-1][node.targets[0].id] = folded
+            for tgt, val in self._pairs(node.targets, node.value):
+                if isinstance(tgt, ast.Name):
+                    folded = self._fold(val)
+                    if folded is not None:
+                        self.const_names[-1][tgt.id] = folded
             # ② proposal.status = "approved" (또는 그 값이 바인딩된 이름)
-            if self._is_approved(node.value):
-                for tgt in node.targets:
-                    if isinstance(tgt, ast.Attribute) and tgt.attr == "status":
-                        found.add(self._here())
+            for tgt, val in self._pairs(node.targets, node.value):
+                if isinstance(tgt, ast.Attribute) and tgt.attr == "status" and self._is_approved(val):
+                    found.add(self._here())
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node):
+            if node.value is not None and isinstance(node.target, ast.Attribute) \
+                    and node.target.attr == "status" and self._is_approved(node.value):
+                found.add(self._here())
             self.generic_visit(node)
 
         def visit_Call(self, node):
