@@ -100,9 +100,14 @@ def bands(db: Session, date_from: date_cls, date_to: date_cls) -> dict:
         truncated = True
 
     notes: list[str] = []
-    if truncated:
+    # ★「확정까지만 센다」는 사실은 «잘렸을 때»가 아니라 «확정이 오늘보다 뒤처졌을 때» 말해야
+    #   한다. `recent()`가 창 기준점을 최신 확정일로 옮긴 뒤 `truncated`는 원리적으로 늘
+    #   False가 되어(적대 리뷰 2R P2) 이 문장이 라이브에서 통째로 사라졌었다 — 숫자는 안
+    #   틀렸지만 「경계를 밝힌다」는 약속을 잃었다. 적재가 며칠 밀리면 화면은 오래된 창을
+    #   보여주면서 아무 말도 안 하게 된다.
+    if latest is not None and latest < kst_today():
         notes.append(
-            f"오늘·미확정 구간은 뺐습니다 — 밴드는 {date_to.isoformat()}까지의 확정 데이터만 셉니다."
+            f"오늘·미확정 구간은 뺐습니다 — 밴드는 {latest.isoformat()}까지의 확정 데이터만 셉니다."
         )
 
     if latest is None or date_from > date_to:

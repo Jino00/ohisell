@@ -208,6 +208,16 @@ def _parse_auto_operate(value: str | None) -> tuple[dict, bool]:
     return {}, False
 
 
+def _claims_something(value: str | None) -> bool:
+    """로그가 «실제로 무언가를 말했나». 빈 값은 주장이 아니다.
+
+    ★`None`과 `''`를 똑같이 「주장 없음」으로 본다(적대 리뷰 2R P2). 파서는 `''`를 기본값
+    주장으로 읽으므로, 이걸 안 거르면 값을 안 남긴 옛 행마다 «모순»이 나 화면이 통째로
+    모름이 된다 — 오탐이 「모름」 쪽으로 나는 것도 거짓말이다.
+    """
+    return value is not None and str(value).strip() != ""
+
+
 def _parse_scope(value: str | None) -> tuple[bool | None, bool]:
     """adgroup_scope_change의 before/after → (enabled | None=행 없음), 해석 성공 여부."""
     if value is None:
@@ -432,24 +442,15 @@ def build(db: Session) -> OwnershipTimeline:
                 }
             )
 
-        if campaign_id in unknown_before:
-            # 이 캠페인은 이미 더 나중의 이벤트 때문에 과거가 못 믿을 상태다. 구간 경계는 계속
-            # 그어 두되(전환일 표기는 유효) 상태 되감기는 의미가 없다.
-            cur_segs.append((None, state_after))
-            continue
-
         # ★모순 검사 — 로그가 말하는 «직후 상태»(after_value)와 우리가 들고 내려온 상태가
         #   다르면, 그 사이에 **기록 안 된 변경**이 있었다는 뜻이다. 되감기의 전제가 깨졌으므로
         #   확신에 찬 값을 내지 말고 해석불가와 같은 처분을 한다.
-        #   ★`after_value`가 비어 있으면 검사하지 않는다 — None은 「행이 없었다」와 「기록기가
-        #   안 남겼다」가 구별되지 않아, 주장으로 읽으면 옛 행마다 오탐이 난다. 검사는 로그가
-        #   실제로 무언가를 «말한» 경우에만 건다.
+        #   ★카운터는 «건너뛰기» 앞에 둔다 — 뒤에 두면 캠페인당 1건만 세어 화면 건수가 실제보다
+        #   적어진다(적대 리뷰 2R P2. 해석불가 카운터와 같은 병이었다).
         inconsistent = False
-        if after_value is not None:
+        if _claims_something(after_value):
             projected, ok_after = _apply(state_after, action, after_value, entity_id)
             inconsistent = ok_after and projected != state_after
-
-        if not ok or inconsistent:
             if inconsistent:
                 inconsistent_count += 1
                 if len(inconsistent_samples) < 5:
@@ -458,10 +459,18 @@ def build(db: Session) -> OwnershipTimeline:
                             "action": action,
                             "campaign_id": campaign_id,
                             "changed_at": changed_at.isoformat(),
-                            "after_value": (str(after_value)[:120] if after_value is not None else None),
+                            "after_value": str(after_value)[:120],
                             "reason": "로그의 직후 상태와 재구성이 어긋남 — 기록 안 된 변경이 있다",
                         }
                     )
+
+        if campaign_id in unknown_before:
+            # 이 캠페인은 이미 더 나중의 이벤트 때문에 과거가 못 믿을 상태다. 구간 경계는 계속
+            # 그어 두되(전환일 표기는 유효) 상태 되감기는 의미가 없다.
+            cur_segs.append((None, state_after))
+            continue
+
+        if not ok or inconsistent:
             # 이 시각보다 «과거»는 못 믿는다. 이벤트 당일까지 포함해 unknown으로 민다.
             unknown_before[campaign_id] = changed_at.date()
             cur_segs.append((None, state_after))

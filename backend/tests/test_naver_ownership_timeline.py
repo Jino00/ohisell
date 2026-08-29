@@ -294,6 +294,28 @@ def test_ownership_logging_gap_pushes_history_start(db):
     assert tl.band(date(2026, 6, 1), CAMP, SCOPED_GROUP) == ot.BAND_UNKNOWN
 
 
+def test_inconsistent_events_are_all_counted(db):
+    """★캠페인당 1건만 세면 화면 건수가 실제보다 적다(적대 리뷰 2R P2 — 해석불가와 같은 병)."""
+    _settings(db, optimizer="ours", auto_operate=False)
+    _log(db, "2026-07-15 09:00:00", ot.ACTION_OPTIMIZER, "none")
+    for when in ("2026-08-01 09:00:00", "2026-08-02 09:00:00"):
+        _log(db, when, ot.ACTION_AUTO_OPERATE, "false", after="true")
+    db.commit()
+    assert ot.build(db).inconsistent_count == 2
+
+
+def test_blank_after_value_is_not_a_claim(db):
+    """★빈 문자열을 「기본값이었다」는 주장으로 읽으면, 값을 안 남긴 옛 행마다 모순이 나
+    화면이 통째로 모름이 된다 — 오탐이 「모름」 쪽으로 나는 것도 거짓말이다(2R P2)."""
+    _settings(db, optimizer="ours", auto_operate=True)
+    _log(db, "2026-07-15 09:00:00", ot.ACTION_OPTIMIZER, "none", after="")
+    _log(db, "2026-08-01 09:00:00", ot.ACTION_OPTIMIZER, "none", after="   ")
+    db.commit()
+    tl = ot.build(db)
+    assert tl.inconsistent_count == 0
+    assert tl.band(date(2026, 8, 10), CAMP, SCOPED_GROUP) == ot.BAND_PAO
+
+
 def test_unparsable_events_are_all_counted(db):
     """★캠페인당 1건만 세면 화면이 「1건」이라 말하는데 실제로는 여럿인 상태가 된다(P2 채택)."""
     _settings(db, optimizer="ours", auto_operate=True)
@@ -375,6 +397,20 @@ def test_bands_never_include_unconfirmed_today(db):
     assert r["window"]["date_to"] == "2026-08-15"
     assert r["window"]["truncated"] is True
     assert any("확정" in n for n in r["notes"])
+
+
+def test_recent_still_says_the_window_is_confirmed_only(db):
+    """★적대 리뷰 2R P2 — `recent()`가 기준점을 최신 확정일로 옮기면서 `truncated`가 영구
+    False가 되어 「확정까지만 센다」 문장이 라이브에서 통째로 사라졌었다. 숫자는 안 틀렸지만
+    「경계를 밝힌다」는 약속을 잃은 것이고, 적재가 밀리면 오래된 창을 말없이 보여주게 된다."""
+    _prod_shaped_history(db)
+    _daily(db, "2026-08-15", 7000)  # 최신 확정일이 오늘보다 한참 뒤처진 상태
+    db.commit()
+
+    r = bands.recent(db, 30)
+    assert r["window"]["truncated"] is False, "기준점이 확정일이라 자를 게 없다"
+    assert any("확정 데이터만 셉니다" in n for n in r["notes"]), "그래도 경계는 말해야 한다"
+    assert any("2026-08-15" in n for n in r["notes"])
 
 
 def test_recent_window_counts_confirmed_days_not_calendar_days(db):
