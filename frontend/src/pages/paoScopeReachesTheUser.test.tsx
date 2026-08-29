@@ -350,3 +350,58 @@ describe("★평시·주말·공휴일 분리가 사람에게 닿는다", () => 
     expect(screen.queryByText(/항등식 불일치/)).toBeNull();
   });
 });
+
+// ── SUR-11: 표가 «칸이 맞게» 그려지는가 (2026-08-29, Jino 지적 「이거 칸 안맞잖아」) ──────
+//
+// ## 왜 이게 필요했나 — 위 19개가 전부 초록인데 화면은 깨져 있었다
+//
+// `AdgroupTable`이 `head`를 `<tr>`로 감싸 보냈는데 `Table`(`components/ui/Table.tsx:28`)이
+// 이미 `<thead><tr>{head}</tr></thead>`로 감싼다 ⇒ **`<tr><tr><th>…</th></tr></tr>` 중첩**.
+// ★깨지는 메커니즘은 **CSS 익명 테이블 박스 생성 규칙**이다(적대 리뷰가 초판의 「파서 fixup」
+// 설명을 정정했다): `table-row`의 자식이 `table-cell`이 아니면 익명 셀로 감싸이므로 안쪽
+// `<tr>`의 `<th>`들이 **본문과 같은 열 그리드에 참여하지 못한다.** HTML 파서 fixup이 아니라서
+// React가 `createElement`로 만든 DOM에도 **그대로 적용된다**(리뷰어가 실제 Chromium 렌더로
+// 증상 재현). 증상: 헤더는 왼쪽에 몰리고 숫자는 오른쪽으로 밀린다.
+// 호출부 39곳 중 **여기만** 어긋나 있었다(나머지 38곳은 프래그먼트 `<>…</>`).
+//
+// ★교훈: 이 파일은 「사용자에게 닿는가」를 재는 표면 테스트인데도 **텍스트 존재만 물어서**
+//   못 잡았다. **「값이 화면에 있다」와 「사람이 읽을 수 있게 배치됐다」는 다른 질문이다.**
+//   그래서 이 블록은 내용이 아니라 **구조**를 잰다.
+describe("★SUR-11: 광고그룹 표의 헤더와 본문이 같은 열 그리드에 있다", () => {
+  it("thead 안에 `<tr>`이 정확히 1개다 — 중첩되면 헤더가 열 정렬에서 떨어져 나간다", async () => {
+    const { container } = await renderApp();
+    await screen.findByTitle(/이 그룹을 끕니다/); // 표가 그려질 때까지 기다린다
+    const theads = Array.from(container.querySelectorAll("thead"));
+    expect(theads.length).toBeGreaterThan(0);
+    for (const thead of theads) {
+      expect(thead.querySelectorAll("tr").length).toBe(1);
+      // 중첩이면 바깥 tr 안에 또 tr이 있다 — 그 모양 자체를 직접 금지한다
+      expect(thead.querySelectorAll("tr tr").length).toBe(0);
+    }
+  });
+
+  // ⚠️★정직 기록 — 아래 테스트는 **이번 버그를 못 잡는다**(변이 주입으로 확인, 2026-08-29).
+  //   jsdom은 React가 `createElement`/`appendChild`로 만든 중첩 `<tr>`을 그대로 두므로
+  //   `thead th`=9 · `tbody td`=9로 **개수는 여전히 맞다** — 깨지는 건 «브라우저 레이아웃»이지
+  //   개수가 아니다. 이번 버그를 죽이는 것은 위의 중첩 검사 하나뿐이다.
+  //   그래도 이 테스트를 남기는 이유: **다른 실패 모드**(Th/Td를 한쪽만 추가·삭제)를 지킨다.
+  //   ★「살아남은 변이」를 지우지 않고 적어 두는 것이 이 저장소 관례다 — 무엇을 «안» 지키는지
+  //   모르는 초록이 가장 위험하다.
+  it("헤더 칸 수 == 본문 칸 수 — 하나라도 어긋나면 숫자가 다른 라벨 아래에 선다", async () => {
+    const { container } = await renderApp();
+    await screen.findByTitle(/이 그룹을 끕니다/);
+    const tables = Array.from(container.querySelectorAll("table"));
+    expect(tables.length).toBeGreaterThan(0);
+    let checked = 0;
+    for (const t of tables) {
+      const headCells = t.querySelectorAll("thead th").length;
+      const firstBodyRow = t.querySelector("tbody tr");
+      if (!firstBodyRow) continue;                              // 본문 없는 표는 정렬 대상 아님
+      if (firstBodyRow.querySelector("td[colspan]")) continue;  // 빈 상태 안내 행 제외
+      expect(firstBodyRow.querySelectorAll("td").length).toBe(headCells);
+      checked += 1;
+    }
+    // ★0건 통과 금지 — 「검사했는데 깨끗하다」와 「검사가 아무것도 안 봤다」는 같은 초록이다(교훈 #123)
+    expect(checked).toBeGreaterThan(0);
+  });
+});

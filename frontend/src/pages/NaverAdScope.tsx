@@ -278,7 +278,20 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
   return (
     <Table
       head={
-        <tr>
+        // ★`<tr>`로 감싸지 않는다 — `Table`이 이미 `<thead><tr>{head}</tr></thead>`로 감싼다
+        //   (`components/ui/Table.tsx:28`). 감싸면 `<tr><tr>…</tr></tr>` 중첩이 된다.
+        //
+        //   ★왜 깨지나 (적대 리뷰가 내 초판 설명을 정정했다 — 2026-08-29):
+        //   HTML **파서**의 fixup이 아니다. React는 `createElement`+`appendChild`로 DOM을 만들지
+        //   HTML 문자열 파서를 타지 않아서 그 경로는 애초에 안 걸린다(리뷰어 실측: 스크립트로 만든
+        //   중첩 `<tr>`은 `outerHTML`에 **그대로 보존**된다). 진짜 원인은 **CSS 익명 테이블 박스
+        //   생성 규칙**이다 — `table-row`의 자식이 `table-cell`이 아니면 익명 셀로 감싸이므로,
+        //   안쪽 `<tr>`의 `<th>`들이 **본문과 같은 열 그리드에 참여하지 못한다.** 이 규칙은 DOM이
+        //   파싱으로 만들어졌든 스크립트로 만들어졌든 동일하게 적용된다(리뷰어가 실제 Chromium
+        //   렌더로 증상 재현·수정본 정렬 확인).
+        //   증상: 헤더는 왼쪽에 몰리고 본문 숫자는 오른쪽으로 밀린다
+        //   (2026-08-29 Jino 지적 「이거 칸 안맞잖아」). 호출부 39곳 중 여기만 어긋나 있었다.
+        <>
           <Th>광고그룹</Th>
           <Th>맡김</Th>
           <Th>역할</Th>
@@ -288,7 +301,7 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
           <Th right>ROAS</Th>
           <Th right>BEP</Th>
           <Th right>총이익<span className="block text-[10px] font-normal text-gray-400">있는 그대로 / 구간</span></Th>
-        </tr>
+        </>
       }
     >
       {c.adgroups.map((g) => (
