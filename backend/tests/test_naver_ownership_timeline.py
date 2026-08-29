@@ -39,7 +39,11 @@ def db():
         session.close()
 
 
-def _log(db, when: str, action: str, before, *, campaign_id=CAMP, entity_id=""):
+def _log(db, when: str, action: str, before, *, campaign_id=CAMP, entity_id="", after="__auto__"):
+    """★`after`는 기본으로 «되감기와 일치하는 값»을 쓰지 않고 None을 쓴다.
+
+    None이면 모순 검사가 «비교 대상 없음»으로 지나간다. 모순을 일부러 만들 때만 값을 준다.
+    """
     db.add(
         NaverChangeLog(
             changed_at=datetime.fromisoformat(when),
@@ -48,7 +52,7 @@ def _log(db, when: str, action: str, before, *, campaign_id=CAMP, entity_id=""):
             campaign_id=campaign_id,
             action=action,
             before_value=before,
-            after_value=None,
+            after_value=(None if after == "__auto__" else after),
         )
     )
 
@@ -241,6 +245,65 @@ def test_unparsable_event_makes_earlier_dates_unknown(db):
     assert tl.band(date(2026, 8, 10), CAMP, SCOPED_GROUP) == ot.BAND_PAO
 
 
+def test_inconsistent_log_makes_earlier_dates_unknown(db):
+    """★적대 리뷰 P1-1 — 로그가 「직후 auto=true」라 적었는데 되감기가 False를 들고 있으면,
+    그 사이에 **기록 안 된 변경**이 있었다는 뜻이다. 확신에 찬 오답 대신 모름을 낸다.
+
+    prod 실사례: `auto_operate`에는 앱 writer가 없어(grep 0건) 스크립트가 바꾼 변경이
+    로그에 안 남는다 — 이벤트 865가 after='true'인데 그 뒤 끈 로그가 0건이고 현재는 False다.
+    """
+    _settings(db, optimizer="ours", auto_operate=False)  # 현재 auto=False
+    _log(db, "2026-07-15 09:00:00", ot.ACTION_OPTIMIZER, "none")
+    _log(db, "2026-07-28 12:44:41", ot.ACTION_AUTO_OPERATE, "false", after="true")
+    db.commit()
+    tl = ot.build(db)
+
+    assert tl.inconsistent_count == 1
+    assert tl.diagnostics()["inconsistent_samples"][0]["after_value"] == "true"
+    # 07-28보다 과거는 못 믿는다 — 종전엔 not_pao라고 «확신»했다
+    assert tl.band(date(2026, 7, 20), CAMP, SCOPED_GROUP) == ot.BAND_UNKNOWN
+    assert tl.band(date(2026, 7, 29), CAMP, SCOPED_GROUP) == ot.BAND_NOT_PAO  # 이후는 판정 가능
+
+
+def test_consistent_log_is_not_flagged(db):
+    """after_value가 되감기와 맞으면 모순이 아니다 — 오탐이 나면 화면이 전부 모름이 된다."""
+    _settings(db, optimizer="ours", auto_operate=True)
+    _log(db, "2026-07-15 09:00:00", ot.ACTION_OPTIMIZER, "none", after="ours")
+    db.commit()
+    tl = ot.build(db)
+    assert tl.inconsistent_count == 0
+    assert tl.band(date(2026, 8, 10), CAMP, SCOPED_GROUP) == ot.BAND_PAO
+
+
+def test_ownership_logging_gap_pushes_history_start(db):
+    """로그는 도는데 관할 기록만 한참 뒤에 시작했으면 그 사이는 모름이다(적대 리뷰 P2 채택)."""
+    _settings(db, optimizer="ours", auto_operate=True)
+    # 관할과 무관한 로그가 훨씬 먼저 시작
+    db.add(
+        NaverChangeLog(
+            changed_at=datetime.fromisoformat("2026-05-01 09:00:00"),
+            entity_type="adgroup", entity_id="grp-x", campaign_id=CAMP,
+            action="update_bid", before_value="100", after_value="200",
+        )
+    )
+    _log(db, "2026-07-15 09:00:00", ot.ACTION_OPTIMIZER, "none")
+    db.commit()
+    tl = ot.build(db)
+
+    assert tl.history_start == date(2026, 7, 15), "관할 기록 시작으로 밀려야 한다"
+    assert tl.band(date(2026, 6, 1), CAMP, SCOPED_GROUP) == ot.BAND_UNKNOWN
+
+
+def test_unparsable_events_are_all_counted(db):
+    """★캠페인당 1건만 세면 화면이 「1건」이라 말하는데 실제로는 여럿인 상태가 된다(P2 채택)."""
+    _settings(db, optimizer="ours", auto_operate=True)
+    _log(db, "2026-07-15 09:00:00", ot.ACTION_OPTIMIZER, "none")
+    for when in ("2026-08-01 09:00:00", "2026-08-02 09:00:00", "2026-08-03 09:00:00"):
+        _log(db, when, ot.ACTION_OPTIMIZER, "쓰레기값")
+    db.commit()
+    assert ot.build(db).unparsable_count == 3
+
+
 def test_campaign_without_settings_row_is_never_pao(db):
     _log(db, "2026-07-15 09:00:00", ot.ACTION_OPTIMIZER, "none", campaign_id="cmp-other")
     db.commit()
@@ -312,6 +375,28 @@ def test_bands_never_include_unconfirmed_today(db):
     assert r["window"]["date_to"] == "2026-08-15"
     assert r["window"]["truncated"] is True
     assert any("확정" in n for n in r["notes"])
+
+
+def test_recent_window_counts_confirmed_days_not_calendar_days(db):
+    """★적대 리뷰 P1-2 — 「N일」이라 적었으면 **확정 N일**이어야 한다.
+
+    창 기준점을 오늘로 잡고 date_to만 최신 확정일로 자르면, 확정이 D-1까지인 이상 실제 창은
+    항상 N-1일이 되어 **가장 오래된 하루가 말없이 빠진다**. 실사례에서 빠진 날이 하필
+    07-30 — 관할이 끊긴 바로 그날 — 이었다.
+    """
+    _prod_shaped_history(db)
+    _daily(db, "2026-07-30", 3000)  # 창의 첫날(전환일)
+    _daily(db, "2026-08-15", 7000)
+    _daily(db, "2026-08-28", 5000)  # 최신 확정일
+    db.commit()
+
+    r = bands.recent(db, 30)
+    assert r["window"]["latest_confirmed"] == "2026-08-28"
+    assert r["window"]["date_to"] == "2026-08-28"
+    # 08-28에서 30일 = 07-30 포함
+    assert r["window"]["date_from"] == "2026-07-30"
+    assert _band(r, ot.BAND_TRANSITION)["cost"] == 3000, "창 첫날이 빠지면 안 된다"
+    assert r["total"]["cost"] == 15000
 
 
 def test_band_denominators_are_reported(db):

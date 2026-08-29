@@ -36,12 +36,26 @@ PAO가 217만원 굴렸다」고 말하는데, 그 30일 중 29.5일은 관할�
 
 # 모르는 것은 «모름»으로 남긴다 (0으로 뭉개지 않는다)
 
-세 가지가 unknown이다:
+네 가지가 unknown이다:
 1. **이력 시작 이전** — `naver_change_log`의 최초 행보다 앞선 날짜. 되돌릴 근거가 없다.
 2. **해석불가 이벤트보다 앞선 날짜(그 캠페인만)** — 뒤집을 수 없는 이벤트를 만나면 그
    지점보다 과거는 신뢰할 수 없다. 조용히 건너뛰면 **틀린 상태로 계속 되감게** 된다.
-3. (별도 밴드) **전환일** — 하루 중간에 관할이 바뀐 날. `naver_ad_daily`가 하루 통짜라
+3. ★**로그와 «모순»되는 이벤트보다 앞선 날짜(그 캠페인만)** — 아래 참조.
+4. (별도 밴드) **전환일** — 하루 중간에 관할이 바뀐 날. `naver_ad_daily`가 하루 통짜라
    시각 분할이 원리적으로 불가하다. 임의 배정은 임의 오차를 «정확한 숫자»의 얼굴로 내보낸다.
+
+## ★모순 검사 — 되감기의 전제가 깨진 것을 로그 자신이 증언한다 (적대 리뷰 P1-1)
+
+되감기는 「세 축의 모든 변경이 로그에 남는다」를 전제한다. 그런데 **`auto_operate`에는 앱
+writer가 없다**(`auto_operate` 대입이 앱 코드에 0건 — prod의 3행은 스크립트가 남긴 것이다).
+즉 로그에 안 남은 변경이 있을 수 있고, 그러면 「현재 False」가 과거로 그대로 실려 내려가
+**확신에 찬 오답**이 된다 — `unparsable`도 `unknown`도 아니라서 화면은 완벽하게 깨끗해 보인다.
+
+★그런데 **그 모순은 같은 테이블 안에 증거가 있다**: 이벤트의 `after_value`는 「그 직후 상태」를
+말하는데, 우리가 들고 내려온 상태가 그것과 다르면 그 사이에 **기록 안 된 변경이 있었다는 뜻**이다.
+실측(2026-07-28 12:44 이벤트 865): `after_value='true'`인데 그 뒤 auto를 끈 로그가 0건이고
+현재는 False다. 그래서 `after_value`를 함께 읽어 대조하고, 어긋나면 **해석불가와 같은 처분**
+(그 캠페인의 그 지점보다 과거를 전부 unknown)을 하고 건수를 화면까지 올린다.
 
 `before_value`/`after_value` 포맷이 **비일관**이라 파서가 세 형태를 다 받는다(실측):
 스칼라 문자열(`'none'`·`'true'`) · JSON(`'{"optimizer": "ours", "auto_operate": true}'`) ·
@@ -95,6 +109,11 @@ _DEFAULT_OPTIMIZER = "none"
 _DEFAULT_AUTO_OPERATE = False
 
 _ENABLED_RE = re.compile(r"enabled\s*=\s*(true|false|1|0)", re.IGNORECASE)
+
+# 로그가 돌기 시작한 날과 첫 «관할» 이벤트 사이의 유예. 이보다 벌어지면 「관할 기록이 나중에
+# 배선됐다」로 보고 그 앞을 모름으로 둔다 — 「그 동안 아무 변경도 없었다」와 구별이 안 되므로
+# 안전한 쪽(모름)으로 기운다.
+OWNERSHIP_LOGGING_GRACE_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -247,6 +266,8 @@ class OwnershipTimeline:
         history_start: date_cls | None,
         unparsable_count: int,
         unparsable_samples: list[dict],
+        inconsistent_count: int = 0,
+        inconsistent_samples: list[dict] | None = None,
     ):
         # segments[campaign] = [(valid_from|None, state), ...] — valid_from 내림차순.
         # None = 「이력 시작까지 거슬러 이 상태」.
@@ -256,6 +277,9 @@ class OwnershipTimeline:
         self.history_start = history_start
         self.unparsable_count = unparsable_count
         self.unparsable_samples = unparsable_samples
+        # 로그의 after_value와 되감기 상태가 어긋난 이벤트 — 「기록 안 된 변경이 있었다」의 증거
+        self.inconsistent_count = inconsistent_count
+        self.inconsistent_samples = inconsistent_samples or []
 
     # ── 판정 ──
     def state_at(self, campaign_id: str, on: date_cls) -> CampaignState:
@@ -287,6 +311,8 @@ class OwnershipTimeline:
             "history_start": self.history_start.isoformat() if self.history_start else None,
             "unparsable_events": self.unparsable_count,
             "unparsable_samples": self.unparsable_samples,
+            "inconsistent_events": self.inconsistent_count,
+            "inconsistent_samples": self.inconsistent_samples,
             "campaigns_with_unknown_tail": {
                 cid: d.isoformat() for cid, d in sorted(self._unknown_before.items())
             },
@@ -334,10 +360,21 @@ def build(db: Session) -> OwnershipTimeline:
     #   관할 액션의 최초(prod 실측 07-12)를 쓰면, 되감기로 «알 수 있는» 07-11~07-12 구간까지
     #   모름으로 밀어 버린다 — 그 구간은 첫 이벤트를 되돌리면 확정된다.
     #   ⚠️ 이 선택이 기대는 가정: 「로그가 돌기 시작한 시점부터 관할 변경도 함께 기록됐다」.
-    #   관할 기록만 나중에 배선됐다면 그 사이 구간을 «안다»고 잘못 말하게 된다. prod 실측은
-    #   로그 최초 2026-07-11 07:37 · 첫 관할 이벤트 07-12로 하루 차이라 이 가정이 성립한다.
+    #   그 가정이 깨지는 모양은 «로그는 도는데 관할 기록만 나중에 배선된» 경우이고, 그때는
+    #   로그 최초와 첫 관할 이벤트 사이가 길게 벌어진다 — 그래서 간격이 유예를 넘으면 첫 관할
+    #   이벤트 날짜를 시작점으로 삼아 그 앞을 모름으로 둔다(적대 리뷰 P2 채택).
+    #   prod 실측은 로그 최초 2026-07-11 07:37 · 첫 관할 이벤트 07-12로 하루 차이라 무영향.
     history_start_dt = db.query(sqlfunc.min(NaverChangeLog.changed_at)).scalar()
+    first_ownership_dt = (
+        db.query(sqlfunc.min(NaverChangeLog.changed_at))
+        .filter(NaverChangeLog.action.in_(OWNERSHIP_ACTIONS))
+        .scalar()
+    )
     history_start = history_start_dt.date() if history_start_dt else None
+    if history_start and first_ownership_dt:
+        gap = (first_ownership_dt.date() - history_start).days
+        if gap > OWNERSHIP_LOGGING_GRACE_DAYS:
+            history_start = first_ownership_dt.date()
 
     events = (
         db.query(
@@ -346,6 +383,7 @@ def build(db: Session) -> OwnershipTimeline:
             NaverChangeLog.entity_id,
             NaverChangeLog.action,
             NaverChangeLog.before_value,
+            NaverChangeLog.after_value,
         )
         .filter(NaverChangeLog.action.in_(OWNERSHIP_ACTIONS))
         .order_by(NaverChangeLog.changed_at.desc(), NaverChangeLog.id.desc())
@@ -360,14 +398,20 @@ def build(db: Session) -> OwnershipTimeline:
     unknown_before: dict[str, date_cls] = {}
     unparsable_count = 0
     unparsable_samples: list[dict] = []
+    inconsistent_count = 0
+    inconsistent_samples: list[dict] = []
 
-    for changed_at, campaign_id, entity_id, action, before_value in events:
+    def _note_unparsable(sample: dict) -> None:
+        # ★카운터는 «건너뛰기» 앞에 둔다 — 뒤에 두면 캠페인당 1건만 세어, 화면이 「1건」이라
+        #   말하는데 실제로는 여러 건인 상태가 된다(적대 리뷰 P2 채택).
+        nonlocal unparsable_count
+        unparsable_count += 1
+        if len(unparsable_samples) < 5:
+            unparsable_samples.append(sample)
+
+    for changed_at, campaign_id, entity_id, action, before_value, after_value in events:
         if not campaign_id or changed_at is None:
-            unparsable_count += 1
-            if len(unparsable_samples) < 5:
-                unparsable_samples.append(
-                    {"action": action, "reason": "campaign_id 또는 changed_at 없음"}
-                )
+            _note_unparsable({"action": action, "reason": "campaign_id 또는 changed_at 없음"})
             continue
 
         transition_dates.setdefault(campaign_id, set()).add(changed_at.date())
@@ -377,24 +421,47 @@ def build(db: Session) -> OwnershipTimeline:
         _, state_after = cur_segs[-1]
         cur_segs[-1] = (changed_at, state_after)
 
+        state_before, ok = _apply(state_after, action, before_value, entity_id)
+        if not ok:
+            _note_unparsable(
+                {
+                    "action": action,
+                    "campaign_id": campaign_id,
+                    "changed_at": changed_at.isoformat(),
+                    "before_value": (str(before_value)[:120] if before_value is not None else None),
+                }
+            )
+
         if campaign_id in unknown_before:
-            # 이 캠페인은 이미 더 나중의 해석불가 이벤트 때문에 과거가 못 믿을 상태다.
-            # 구간 경계는 계속 그어 두되(전환일 표기는 유효) 상태 되감기는 의미가 없다.
+            # 이 캠페인은 이미 더 나중의 이벤트 때문에 과거가 못 믿을 상태다. 구간 경계는 계속
+            # 그어 두되(전환일 표기는 유효) 상태 되감기는 의미가 없다.
             cur_segs.append((None, state_after))
             continue
 
-        state_before, ok = _apply(state_after, action, before_value, entity_id)
-        if not ok:
-            unparsable_count += 1
-            if len(unparsable_samples) < 5:
-                unparsable_samples.append(
-                    {
-                        "action": action,
-                        "campaign_id": campaign_id,
-                        "changed_at": changed_at.isoformat(),
-                        "before_value": (str(before_value)[:120] if before_value is not None else None),
-                    }
-                )
+        # ★모순 검사 — 로그가 말하는 «직후 상태»(after_value)와 우리가 들고 내려온 상태가
+        #   다르면, 그 사이에 **기록 안 된 변경**이 있었다는 뜻이다. 되감기의 전제가 깨졌으므로
+        #   확신에 찬 값을 내지 말고 해석불가와 같은 처분을 한다.
+        #   ★`after_value`가 비어 있으면 검사하지 않는다 — None은 「행이 없었다」와 「기록기가
+        #   안 남겼다」가 구별되지 않아, 주장으로 읽으면 옛 행마다 오탐이 난다. 검사는 로그가
+        #   실제로 무언가를 «말한» 경우에만 건다.
+        inconsistent = False
+        if after_value is not None:
+            projected, ok_after = _apply(state_after, action, after_value, entity_id)
+            inconsistent = ok_after and projected != state_after
+
+        if not ok or inconsistent:
+            if inconsistent:
+                inconsistent_count += 1
+                if len(inconsistent_samples) < 5:
+                    inconsistent_samples.append(
+                        {
+                            "action": action,
+                            "campaign_id": campaign_id,
+                            "changed_at": changed_at.isoformat(),
+                            "after_value": (str(after_value)[:120] if after_value is not None else None),
+                            "reason": "로그의 직후 상태와 재구성이 어긋남 — 기록 안 된 변경이 있다",
+                        }
+                    )
             # 이 시각보다 «과거»는 못 믿는다. 이벤트 당일까지 포함해 unknown으로 민다.
             unknown_before[campaign_id] = changed_at.date()
             cur_segs.append((None, state_after))
@@ -409,4 +476,6 @@ def build(db: Session) -> OwnershipTimeline:
         history_start=history_start,
         unparsable_count=unparsable_count,
         unparsable_samples=unparsable_samples,
+        inconsistent_count=inconsistent_count,
+        inconsistent_samples=inconsistent_samples,
     )

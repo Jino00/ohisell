@@ -21,7 +21,7 @@ import { num, won, roasX, pctFromFraction, isoKST, NO_DATA } from "../lib/format
 import { baseDateError, compareDateError, defaultCompareDate } from "../lib/perfDateRules";
 import { stripBoldMarkers, marketBidTone, marketBidCaption } from "../lib/bepBreakdownRules";
 import {
-  matchesBandFilter, ownershipBadgeText, emptyReasonFor, isPaoSide,
+  matchesBandFilter, ownershipBadgeText, emptyReasonFor, isPaoSide, undeterminedCount,
   BAND_FILTER_LABEL, type BandFilter,
 } from "../lib/ownershipBandRules";
 import {
@@ -1057,9 +1057,10 @@ export default function NaverAdPerformance() {
   const byOwnership = ownership.data?.campaigns ?? {};
   const bandOf = (id: string): NaverOwnershipCampaignSlot | undefined => byOwnership[id];
   // 판정 규칙은 ownershipBandRules가 정본이다 — 여기 복제하면 테스트가 지키는 자리와 갈라진다.
-  const shown = (showIdle ? data.campaigns : active).filter((c) =>
-    matchesBandFilter(bandOf(c.campaign_id), bandFilter),
-  );
+  const candidates = showIdle ? data.campaigns : active;
+  const shown = candidates.filter((c) => matchesBandFilter(bandOf(c.campaign_id), bandFilter));
+  // 필터가 가려낸 「판정 못 한」 광고 수 — 숨기면서 아무 말 안 하면 「없다」와 구별이 안 된다.
+  const hiddenUndetermined = undeterminedCount(candidates.map((c) => c.campaign_id), bandOf);
   const actions = data.today_actions;
   const dayWord = data.is_today ? "오늘" : data.date;
 
@@ -1080,6 +1081,11 @@ export default function NaverAdPerformance() {
       {ownership.data?.as_of && (
         <span className="text-xs text-gray-400 tabular-nums">
           {ownership.data.as_of} 시점 담당 기준
+        </span>
+      )}
+      {bandFilter !== "all" && hiddenUndetermined > 0 && (
+        <span className="text-xs text-gray-500 break-keep">
+          {`담당을 판정할 수 없는 광고 ${num(hiddenUndetermined)}개는 목록에서 뺐습니다.`}
         </span>
       )}
     </div>
@@ -1132,7 +1138,7 @@ export default function NaverAdPerformance() {
 
           {shown.length === 0 ? (
             <EmptyState
-              reason={emptyReasonFor(bandFilter)}
+              reason={emptyReasonFor(bandFilter, hiddenUndetermined)}
               hint={idle.length > 0 ? `쉬고 있는 광고 ${idle.length}개는 아래 버튼으로 볼 수 있습니다.` : undefined}
             />
           ) : (

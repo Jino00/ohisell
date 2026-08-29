@@ -2562,8 +2562,7 @@ def performance_ownership_bands(
     ★오늘치는 안 들어간다 — `naver_ad_daily`가 D-1 확정 적재라 오늘 행이 없고, 오늘 카드가
     쓰는 시간별 스냅샷엔 광고그룹 축이 아예 없다. `window.truncated`가 그 사실을 말한다.
     """
-    today = kst_today()
-    return perf_ownership_bands.bands(db, today - timedelta(days=days - 1), today)
+    return perf_ownership_bands.recent(db, days)
 
 
 @router.get("/performance/ownership-campaigns")

@@ -4,6 +4,8 @@ import {
   matchesBandFilter,
   ownershipBadgeText,
   emptyReasonFor,
+  isUndetermined,
+  undeterminedCount,
   type BandFilter,
 } from "./ownershipBandRules";
 import type { NaverOwnershipCampaignSlot } from "./api";
@@ -31,6 +33,23 @@ describe("matchesBandFilter", () => {
   it("★판정이 없는 캠페인은 PAO에도 비PAO에도 안 든다 — 모름을 0으로 밀지 않는다", () => {
     expect(matchesBandFilter(undefined, "pao")).toBe(false);
     expect(matchesBandFilter(undefined, "not_pao")).toBe(false);
+  });
+
+  it("★백엔드가 「모름」이라 답한 캠페인도 마찬가지다 (적대 리뷰 P1-3)", () => {
+    // 종전엔 slot===undefined만 걸러서, 명시적 「모름」은 pao_adgroups===0이라는 이유로
+    // 「PAO가 안 돌리는 광고」 목록에 그대로 담겼다 — 모르는 것이 아는 것으로 둔갑했다.
+    const unknown = slot({ band: "unknown", label: "모름(기록 없음)", unknown_adgroups: 3, not_pao_adgroups: 0 });
+    expect(matchesBandFilter(unknown, "not_pao")).toBe(false);
+    expect(matchesBandFilter(unknown, "pao")).toBe(false);
+    expect(matchesBandFilter(unknown, "all")).toBe(true);
+    expect(isUndetermined(unknown)).toBe(true);
+  });
+
+  it("★장중 전환일 캠페인도 같은 처분을 받는다", () => {
+    const transition = slot({ band: "transition", label: "담당이 바뀐 날", transition_adgroups: 3, not_pao_adgroups: 0 });
+    expect(matchesBandFilter(transition, "not_pao")).toBe(false);
+    expect(matchesBandFilter(transition, "pao")).toBe(false);
+    expect(matchesBandFilter(transition, "all")).toBe(true);
   });
 
   it("한 그룹이라도 PAO면 PAO 목록이다 (「광고그룹만도 가져올 수 있잖아」)", () => {
@@ -80,5 +99,30 @@ describe("emptyReasonFor", () => {
     const seen = new Set<string>();
     for (const f of ["all", "pao", "not_pao"] as BandFilter[]) seen.add(emptyReasonFor(f));
     expect(seen.size).toBe(3);
+  });
+
+  it("★가려낸 광고가 있으면 「없다」고 단언하지 않는다", () => {
+    expect(emptyReasonFor("pao", 0)).toContain("없습니다.");
+    const withHidden = emptyReasonFor("pao", 2);
+    expect(withHidden).toContain("확인되지 않습니다.");
+    expect(withHidden).toContain("담당을 판정할 수 없는 광고 2개는 목록에서 뺐습니다.");
+    expect(withHidden).not.toContain("없습니다.");
+  });
+
+  it("전체 필터는 가려내지 않으므로 문구가 안 바뀐다", () => {
+    expect(emptyReasonFor("all", 5)).toBe(emptyReasonFor("all", 0));
+  });
+});
+
+describe("undeterminedCount", () => {
+  it("판정 못 한 광고 수를 센다 — 숨기면서 말 안 하면 「없다」와 구별이 안 된다", () => {
+    const slots: Record<string, ReturnType<typeof slot> | undefined> = {
+      a: slot({ band: "unknown" }),
+      b: slot({ band: "transition" }),
+      c: slot({ band: "pao", pao_adgroups: 1 }),
+      d: slot(),
+      e: undefined,
+    };
+    expect(undeterminedCount(["a", "b", "c", "d", "e"], (id) => slots[id])).toBe(3);
   });
 });

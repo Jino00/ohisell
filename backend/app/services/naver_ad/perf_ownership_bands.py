@@ -22,7 +22,7 @@ Jino 2026-08-29: *"전체/PAO가 돌리는광고/PAO가 돌리지 않는광고/ 
 
 from __future__ import annotations
 
-from datetime import date as date_cls
+from datetime import date as date_cls, timedelta
 
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
@@ -31,6 +31,7 @@ from app.models import NaverAdDaily
 from app.services.naver_ad import ownership_timeline as ot
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.metrics_aggregator import aggregate
+from app.utils.kst import kst_today
 
 _SUM_KEYS = ("imp", "clk", "cost", "conv_direct_amt", "conv_indirect_amt")
 
@@ -53,6 +54,18 @@ def latest_confirmed_date(db: Session) -> date_cls | None:
         .filter(NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP)
         .scalar()
     )
+
+
+def recent(db: Session, days: int) -> dict:
+    """최근 N일 밴드. ★창의 기준점은 «오늘»이 아니라 «최신 확정일»이다.
+
+    오늘을 기준점으로 잡고 `date_to`만 최신 확정일로 자르면, 확정 데이터가 D-1까지인 이상
+    실제 창은 항상 N-1일이 되어 **가장 오래된 하루가 말없이 빠진다**(적대 리뷰 P1-2 실사례:
+    「30일」이 07-31~08-28이 되어 07-30 — 관할이 끊긴 바로 그날 — 을 통째로 놓쳤다).
+    「N일」이라고 적었으면 **확정 N일**이어야 한다.
+    """
+    anchor = latest_confirmed_date(db) or kst_today()
+    return bands(db, anchor - timedelta(days=days - 1), anchor)
 
 
 def _blank() -> dict:
@@ -150,6 +163,11 @@ def bands(db: Session, date_from: date_cls, date_to: date_cls) -> dict:
         notes.append(
             f"담당 변경 기록 {diag['unparsable_events']}건을 해석하지 못했습니다 — "
             "그 앞 구간은 «모름»에 넣었습니다."
+        )
+    if diag["inconsistent_events"]:
+        notes.append(
+            f"담당 변경 기록 {diag['inconsistent_events']}건이 기록끼리 어긋납니다"
+            "(기록에 안 남은 변경이 있었다는 뜻입니다) — 그 앞 구간은 «모름»에 넣었습니다."
         )
 
     return {
