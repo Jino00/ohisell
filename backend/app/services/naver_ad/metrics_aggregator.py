@@ -23,6 +23,9 @@ _GRAIN_COLS = {
     "campaign": (NaverAdDaily.campaign_id, NaverAdDaily.campaign_type),
     "adgroup": (NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id),
     "keyword": (NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id, NaverAdDaily.keyword_id),
+    # 날짜×광고그룹 — 「그날 그 그룹을 누가 맡고 있었나」를 물으려면 날짜가 키에 남아야 한다
+    # (ownership_timeline 밴드 판정의 입력. additive — 기존 grain 동작 불변).
+    "date_adgroup": (NaverAdDaily.ad_date, NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id),
 }
 GRAINS = tuple(_GRAIN_COLS.keys())
 
@@ -110,6 +113,10 @@ def aggregate(
             row["campaign_id"], row["campaign_type"] = keys[0], keys[1]
         elif grain == "adgroup":
             row["campaign_id"], row["adgroup_id"] = keys[0], keys[1]
+        elif grain == "date_adgroup":
+            row["ad_date"] = keys[0].isoformat() if hasattr(keys[0], "isoformat") else str(keys[0])
+            row["ad_date_obj"] = keys[0]
+            row["campaign_id"], row["adgroup_id"] = keys[1], keys[2]
         else:  # keyword
             row["campaign_id"], row["adgroup_id"], row["keyword_id"] = keys[0], keys[1], keys[2]
         rows.append(row)
