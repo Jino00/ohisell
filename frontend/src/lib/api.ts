@@ -7061,3 +7061,83 @@ export interface OtaoStock {
 export function fetchOtaoStock(): Promise<OtaoStock> {
   return fetchApi<OtaoStock>("/api/otao-po/stock");
 }
+
+// ── 성과 화면 관할 밴드 — 전체 / PAO가 돌린 광고 / 안 돌린 광고 (성과분리 목표) ──
+// ★밴드는 «그 날짜의 당시 관할»이다(방법 B). 지금 관할을 과거에 소급하지 않는다.
+
+export type NaverOwnershipBandName = "pao" | "not_pao" | "transition" | "unknown";
+
+export interface NaverOwnershipBand {
+  band: NaverOwnershipBandName;
+  /** 백엔드가 준 한글 라벨 — 프론트에서 다시 만들지 않는다. */
+  label: string;
+  /** 전환일·모름 밴드의 «왜 따로 뒀나» 설명. 나머지는 null. */
+  note: string | null;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  roas: number | null;
+  cpc: number | null;
+  /** 분모 — 금액만 내면 「얼마나 맡고 있나」가 안 읽힌다. */
+  campaigns: number;
+  adgroups: number;
+  days: number;
+  share_of_cost: number | null;
+}
+
+export interface NaverOwnershipBands {
+  window: {
+    date_from: string;
+    date_to: string | null;
+    requested_to: string;
+    latest_confirmed: string | null;
+    /** 오늘·미확정 구간이 잘렸는가. */
+    truncated: boolean;
+  };
+  total: Omit<NaverOwnershipBand, "band" | "label" | "note">;
+  bands: NaverOwnershipBand[];
+  /** 전체 = 관할+비관할+전환일+모름. ok=false면 화면 숫자를 믿으면 안 된다. */
+  identity: { ok: boolean; total_cost: number; band_cost_sum: number; diff: number };
+  diagnostics: {
+    history_start: string | null;
+    unparsable_events: number;
+    unparsable_samples: Array<Record<string, unknown>>;
+    campaigns_with_unknown_tail: Record<string, string>;
+    transition_days: Record<string, string[]>;
+  };
+  notes: string[];
+  empty: boolean;
+}
+
+export function fetchNaverOwnershipBands(days: number): Promise<NaverOwnershipBands> {
+  return fetchApi<NaverOwnershipBands>(
+    `/api/naver/ad/performance/ownership-bands?days=${days}`,
+  );
+}
+
+export interface NaverOwnershipCampaignSlot {
+  band: NaverOwnershipBandName;
+  label: string;
+  /** 캠페인 안 일부 그룹만 PAO인가("광고그룹만도 가져올 수 있잖아"). */
+  partial: boolean;
+  pao_adgroups: number;
+  not_pao_adgroups: number;
+  transition_adgroups: number;
+  unknown_adgroups: number;
+  adgroups: number;
+}
+
+export interface NaverOwnershipCampaigns {
+  /** 목록은 기간이 아니라 «시점» 판정이다 — 기준일을 화면에 밝힌다. */
+  as_of: string | null;
+  campaigns: Record<string, NaverOwnershipCampaignSlot>;
+}
+
+export function fetchNaverOwnershipCampaigns(
+  date?: string,
+): Promise<NaverOwnershipCampaigns> {
+  return fetchApi<NaverOwnershipCampaigns>(
+    `/api/naver/ad/performance/ownership-campaigns${date ? `?date=${date}` : ""}`,
+  );
+}

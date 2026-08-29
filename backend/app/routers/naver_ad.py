@@ -114,6 +114,7 @@ from app.services.naver_ad import modification_feed
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
 from app.services.naver_ad import perf_campaign_harness
+from app.services.naver_ad import perf_ownership_bands
 from app.services.naver_ad import perf_timeline_harness
 from app.services.naver_ad import retro_rollup
 from app.services.naver_ad import perf_today_harness
@@ -2542,6 +2543,41 @@ def performance_campaigns(db: Session = Depends(get_db)) -> dict:
     읽는 자리에는 절대 나가지 않는다.
     """
     return perf_today_harness.campaign_options(db)
+
+
+@router.get("/performance/ownership-bands")
+def performance_ownership_bands(
+    days: int = Query(30, ge=1, le=_MAX_PERFORMANCE_LOOKBACK_DAYS, description="최근 N일"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """관할 밴드 — 전체 / PAO가 돌린 광고 / 안 돌린 광고 (+ 전환일·모름).
+
+    Jino 2026-08-29: *"전체/PAO가 돌리는광고/PAO가 돌리지 않는광고/ 이렇게 나눠줄 수 있어?"*
+
+    ★밴드는 **그 날짜의 당시 관할**로 판정한다(방법 B) — 지금 관할을 과거에 소급하면
+    「지금 맡은 것들의 과거 성과」라는 다른 질문에 답하게 된다. 실측(2026-08-29): 현재
+    스코프는 그날 00:25에 생겼는데 그걸 30일에 투영하면 2,170,514원으로 뜬다. 당시 관할로는
+    같은 창이 **0원**이다.
+
+    ★오늘치는 안 들어간다 — `naver_ad_daily`가 D-1 확정 적재라 오늘 행이 없고, 오늘 카드가
+    쓰는 시간별 스냅샷엔 광고그룹 축이 아예 없다. `window.truncated`가 그 사실을 말한다.
+    """
+    today = kst_today()
+    return perf_ownership_bands.bands(db, today - timedelta(days=days - 1), today)
+
+
+@router.get("/performance/ownership-campaigns")
+def performance_ownership_campaigns(
+    date_: date | None = Query(None, alias="date", description="판정 기준일(기본 최신 확정일)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """캠페인별 관할 — 목록 밴드 필터용. **시점 판정**이라 기준일을 같이 돌려준다.
+
+    한 캠페인 안에서 일부 그룹만 PAO일 수 있어(Jino: *"광고그룹만도 가져올 수 있잖아"*)
+    `pao_adgroups/adgroups`와 `partial` 플래그를 같이 낸다.
+    """
+    day = _validate_performance_date(date_, field="date") if date_ else None
+    return perf_ownership_bands.campaign_bands(db, as_of=day)
 
 
 @router.get("/performance/campaign/{campaign_id}")

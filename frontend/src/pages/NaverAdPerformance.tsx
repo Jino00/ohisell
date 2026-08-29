@@ -21,6 +21,10 @@ import { num, won, roasX, pctFromFraction, isoKST, NO_DATA } from "../lib/format
 import { baseDateError, compareDateError, defaultCompareDate } from "../lib/perfDateRules";
 import { stripBoldMarkers, marketBidTone, marketBidCaption } from "../lib/bepBreakdownRules";
 import {
+  matchesBandFilter, ownershipBadgeText, emptyReasonFor, isPaoSide,
+  BAND_FILTER_LABEL, type BandFilter,
+} from "../lib/ownershipBandRules";
+import {
   confidenceLabel, observationBadge, deltaText, partialDataNote, toChartMarkers,
 } from "../lib/timelineRules";
 import { useAsyncData } from "../lib/useAsyncData";
@@ -32,6 +36,11 @@ import {
   fetchNaverPerformanceDay,
   fetchNaverPerformanceBepBreakdown,
   fetchNaverPerformanceTimeline,
+  fetchNaverOwnershipBands,
+  fetchNaverOwnershipCampaigns,
+  type NaverOwnershipBand,
+  type NaverOwnershipBandName,
+  type NaverOwnershipCampaignSlot,
   type NaverPerformanceCampaignCard,
   type NaverPerformanceActionItem,
   type NaverPerformanceCompareRow,
@@ -91,8 +100,12 @@ function BudgetGauge({ spent, budget, ratio }: {
   );
 }
 
-function CampaignCard({ c, onOpen }: {
-  c: NaverPerformanceCampaignCard; onOpen: (id: string) => void;
+function CampaignCard({ c, onOpen, ownership }: {
+  c: NaverPerformanceCampaignCard;
+  onOpen: (id: string) => void;
+  /** 그 «날짜»의 담당. `managed_by_label`은 **지금** 담당이라 둘이 다를 수 있고,
+   *  다른 것이 정상이다 — 그래서 라벨에 「그날」을 박아 둘을 구별한다. */
+  ownership?: NaverOwnershipCampaignSlot;
 }) {
   const tone = roasTone(c);
   return (
@@ -110,6 +123,11 @@ function CampaignCard({ c, onOpen }: {
         <Badge tone={c.status_label === "정상 노출 중" ? "owner" : "neutral"}>{c.status_label}</Badge>
         {c.review_label && <Badge>{c.review_label}</Badge>}
         <Badge tone={c.auto_operate ? "owner" : "neutral"}>{c.managed_by_label}</Badge>
+        {ownership && (
+          <Badge tone={isPaoSide(ownership) ? "owner" : "neutral"}>
+            {ownershipBadgeText(ownership)}
+          </Badge>
+        )}
       </div>
 
       <div className="mt-3">
@@ -201,6 +219,126 @@ function GroupBadgeRow({ g }: { g: NaverPerformanceGroup }) {
       <Td right>{g.roas == null ? NO_DATA : roasX(g.roas)}</Td>
       <Td><span className="text-gray-600 break-keep">{g.reason_sentence}</span></Td>
     </tr>
+  );
+}
+
+/** 관할 밴드 — 「누가 돌린 광고인가」 (성과분리 목표).
+ *
+ *  ★밴드는 **그 날짜의 당시 관할**이다. 지금 관할을 과거에 소급하면 「지금 맡은 것들의 과거
+ *    성과」라는 다른 질문에 답하게 된다 — 실측에서 그 차이가 0원 vs 217만원이었다.
+ *  ★전환일·모름을 어느 밴드에도 더하지 않는다. 대신 «왜 따로 뒀나»를 백엔드 문장 그대로 쓴다. */
+const BAND_ACCENT: Record<NaverOwnershipBandName, string> = {
+  pao: "border-owner-ours",
+  not_pao: "border-gray-300",
+  transition: "border-judge-warn",
+  unknown: "border-gray-200",
+};
+
+const BAND_WINDOWS = [30, 90, 180];
+
+function BandTile({ b, isTotal }: { b: NaverOwnershipBand; isTotal?: boolean }) {
+  const share = b.share_of_cost;
+  return (
+    <div className={`rounded-lg border-l-4 ${BAND_ACCENT[b.band]} border border-gray-200 bg-white p-3`}>
+      <p className="text-xs text-gray-500 break-keep">{b.label}</p>
+      <p className="mt-1 text-lg font-semibold tabular-nums">{won(b.cost)}</p>
+      <p className="text-xs text-gray-500 tabular-nums">
+        {isTotal ? "전체 기준" : share == null ? NO_DATA : `전체의 ${pctFromFraction(share)}`}
+        {" · "}광고 {num(b.campaigns)}개 · 그룹 {num(b.adgroups)}개
+      </p>
+      <p className="text-xs text-gray-500 tabular-nums">
+        {b.days > 0 ? `${num(b.days)}일 · ` : ""}ROAS {b.roas == null ? NO_DATA : roasX(b.roas)}
+      </p>
+      {b.note && <p className="mt-2 text-xs text-gray-500 break-keep">{b.note}</p>}
+    </div>
+  );
+}
+
+function OwnershipBandSection() {
+  const [days, setDays] = useState(30);
+  const { data, error } = useAsyncData(() => fetchNaverOwnershipBands(days), [days]);
+
+  const windowButtons = (
+    <div className="flex gap-1">
+      {BAND_WINDOWS.map((d) => (
+        <button
+          key={d}
+          type="button"
+          onClick={() => setDays(d)}
+          className={`rounded px-2 py-0.5 text-xs ${
+            d === days ? "bg-gray-800 text-white" : "bg-gray-100 text-gray-600"
+          }`}
+        >
+          {d}일
+        </button>
+      ))}
+    </div>
+  );
+
+  const title = "누가 돌린 광고인가";
+  if (error) {
+    return <Card title={title} right={windowButtons}><EmptyState reason={`불러오지 못했습니다: ${error}`} /></Card>;
+  }
+  if (data === null) {
+    return <Card title={title} right={windowButtons}><Loading rows={3} /></Card>;
+  }
+
+  const main = data.bands.filter((b) => b.band === "pao" || b.band === "not_pao");
+  const aside = data.bands.filter((b) => b.band === "transition" || b.band === "unknown");
+  const shownAside = aside.filter((b) => b.cost > 0 || b.adgroups > 0);
+  const totalTile: NaverOwnershipBand = {
+    ...data.total, band: "not_pao", label: "전체", note: null,
+  };
+
+  return (
+    <Card title={title} right={windowButtons}>
+      <div className="p-4 space-y-3">
+        {data.window.date_to && (
+          <p className="text-xs text-gray-500 tabular-nums">
+            {data.window.date_from} ~ {data.window.date_to} · 그날그날의 실제 담당 기준
+          </p>
+        )}
+        {data.empty ? (
+          <EmptyState reason="이 기간엔 확정된 광고 데이터가 없습니다." />
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <BandTile b={totalTile} isTotal />
+              {main.map((b) => <BandTile key={b.band} b={b} />)}
+            </div>
+
+            {shownAside.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {shownAside.map((b) => <BandTile key={b.band} b={b} />)}
+              </div>
+            )}
+
+            {/* ★항등식 — 이게 「뭉갠 게 없다」의 증거다. 깨지면 숨기지 않고 크게 말한다. */}
+            <p
+              className={`text-xs break-keep border-l-2 pl-2 ${
+                data.identity.ok
+                  ? "text-gray-500 border-gray-200"
+                  : "text-judge-bad border-judge-bad font-medium"
+              }`}
+            >
+              {data.identity.ok
+                ? `합계 확인: 전체 ${won(data.identity.total_cost)} = 네 칸의 합. 빠뜨린 광고비가 없습니다.`
+                : `⚠️ 합계가 ${won(data.identity.diff)} 어긋납니다 — 이 화면의 숫자를 믿지 마세요.`}
+            </p>
+          </>
+        )}
+
+        {data.notes.map((n) => (
+          <p key={n} className="text-xs text-gray-500 break-keep border-l-2 border-gray-200 pl-2">{n}</p>
+        ))}
+        {data.diagnostics.history_start && (
+          <p className="text-xs text-gray-400 break-keep">
+            담당 변경 기록은 {data.diagnostics.history_start}부터 남아 있습니다. 그 전 구간은
+            «모름»으로 두고 어느 쪽에도 더하지 않았습니다.
+          </p>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -829,8 +967,14 @@ export default function NaverAdPerformance() {
   const [compareDate, setCompareDate] = useState(() => defaultCompareDate(today));
   const [trendDays, setTrendDays] = useState<number>(30);
   const [showIdle, setShowIdle] = useState(false);
+  // 밴드 필터 — 목록은 기간이 아니라 «시점» 판정이라 선택한 날짜를 기준으로 판정한다.
+  const [bandFilter, setBandFilter] = useState<BandFilter>("all");
 
   const options = useAsyncData(() => fetchNaverPerformanceCampaignOptions(), []);
+  const ownership = useAsyncData(
+    () => fetchNaverOwnershipCampaigns(date),
+    [date],
+  );
   const dateError = baseDateError(date, today);
   const compareError = compareOn ? compareDateError(date, compareDate, today) : null;
   // ★날짜가 잘못됐으면 **요청 자체를 보내지 않는다.** 빈 날짜를 보내면 백엔드가 오늘로
@@ -910,9 +1054,36 @@ export default function NaverAdPerformance() {
 
   const active = data.campaigns.filter((c) => c.active_today);
   const idle = data.campaigns.filter((c) => !c.active_today);
-  const shown = showIdle ? data.campaigns : active;
+  const byOwnership = ownership.data?.campaigns ?? {};
+  const bandOf = (id: string): NaverOwnershipCampaignSlot | undefined => byOwnership[id];
+  // 판정 규칙은 ownershipBandRules가 정본이다 — 여기 복제하면 테스트가 지키는 자리와 갈라진다.
+  const shown = (showIdle ? data.campaigns : active).filter((c) =>
+    matchesBandFilter(bandOf(c.campaign_id), bandFilter),
+  );
   const actions = data.today_actions;
   const dayWord = data.is_today ? "오늘" : data.date;
+
+  const bandFilterRow = (
+    <div className="flex flex-wrap items-center gap-2">
+      {(Object.entries(BAND_FILTER_LABEL) as [BandFilter, string][]).map(([key, label]) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => setBandFilter(key)}
+          className={`rounded px-2 py-0.5 text-xs ${
+            bandFilter === key ? "bg-gray-800 text-white" : "bg-gray-100 text-gray-600"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+      {ownership.data?.as_of && (
+        <span className="text-xs text-gray-400 tabular-nums">
+          {ownership.data.as_of} 시점 담당 기준
+        </span>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -957,15 +1128,22 @@ export default function NaverAdPerformance() {
             </p>
           )}
 
+          {bandFilterRow}
+
           {shown.length === 0 ? (
             <EmptyState
-              reason="집행된 광고가 없습니다."
+              reason={emptyReasonFor(bandFilter)}
               hint={idle.length > 0 ? `쉬고 있는 광고 ${idle.length}개는 아래 버튼으로 볼 수 있습니다.` : undefined}
             />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {shown.map((c) => (
-                <CampaignCard key={c.campaign_id} c={c} onOpen={setCampaignId} />
+                <CampaignCard
+                  key={c.campaign_id}
+                  c={c}
+                  onOpen={setCampaignId}
+                  ownership={bandOf(c.campaign_id)}
+                />
               ))}
             </div>
           )}
@@ -983,6 +1161,9 @@ export default function NaverAdPerformance() {
           )}
         </div>
       </Card>
+
+      {/* 관할 밴드 — 누가 돌린 광고인가 */}
+      <OwnershipBandSection />
 
       {/* 날짜 비교 */}
       {compareOn && (
