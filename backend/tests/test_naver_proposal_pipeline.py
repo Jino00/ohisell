@@ -130,6 +130,62 @@ def test_run_daily_full_happy_path_generates_proposal(db, monkeypatch):
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "account_brief").count() == 1
 
 
+def test_run_daily_posts_campaign_name_to_slack_not_raw_ids(db, monkeypatch):
+    """D-NAO-249 ★표면 테스트 — 08:00 묶음 통지가 **webhook에 실제로 실어 보내는 본문**에
+    캠페인 이름과 사람 말 라벨이 있는지 본다.
+
+    ★왜 이 형태여야 하나(적대 리뷰 R1 P1): 이름 주입 배선(`proposal_pipeline`의 entity_names
+    블록·summaries의 campaign_id)을 통째로 지워도 전 스위트가 초록이었다. 「함수는 문자열을
+    만드는데 사람은 그걸 못 본다」가 이 프로젝트에서 반복된 병이라, 마지막 표면인
+    `requests.post`의 payload를 직접 잰다."""
+    from app.services.naver_ad import slack_notifier
+
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp1",
+                       campaign_type="WEB_SITE", name="● 03. 아이폰_강화유리", status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1",
+                       campaign_type="WEB_SITE", name="출혈키워드", status="on", bid_amt=500))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=1000)
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [
+            {"keyword": "출혈키워드", "position": 2, "nccKeywordId": it["key"], "bid": 300} for it in items
+        ],
+    )
+    monkeypatch.setenv("NAVER_SLACK_WEBHOOK_URL", "https://hooks.example/xyz")
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_post(url, json=None, timeout=None):
+        captured["text"] = json["text"]
+        return _Resp()
+
+    monkeypatch.setattr(slack_notifier.requests, "post", fake_post)
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["slack"] == "ok"
+    text = captured["text"]
+
+    # ① 캠페인 이름이 ID 대신 실렸다(장식 ● 만 정리되고 코드 접두 03. 은 보존)
+    assert "03. 아이폰_강화유리" in text
+    assert "cmp1" not in text
+    # ② 키워드 ID 폴백으로 새지 않았다 — campaign_id가 summaries에서 빠지면 여기로 떨어진다
+    assert "nkw-1" not in text
+    # ③ 내부 코드명이 아니라 사람 말 라벨
+    assert "account_brief" not in text and "bid_down" not in text
+    assert "참고용" in text or "승인" in text
+
+
 def test_run_daily_uses_campaign_target_roas_override_not_account_default(db, monkeypatch):
     """codex 지적(라이브검증 후속): 계정 기본 target_roas(=2.5, 낮음)로는 출혈 판정되는
     키워드도, 캠페인에 훨씬 높은 override(=100)가 걸려 있으면 그 override로 economic_ceiling이
