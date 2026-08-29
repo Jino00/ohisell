@@ -17,9 +17,11 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, cleanup, within, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+// ★fixture에 타입을 건다 — `unknown`으로 두면 응답 타입에 필수 필드를 추가해도 tsc가
+//   fixture 갱신을 강제하지 않아 다음 필드 추가에서 조용히 어긋난다(적대 리뷰 P2).
 const h = vi.hoisted(() => ({
-  bands: null as unknown,
-  ownership: null as unknown,
+  bands: null as import("../lib/api").NaverOwnershipBands | null,
+  ownership: null as import("../lib/api").NaverOwnershipCampaigns | null,
 }));
 
 vi.mock("../lib/api", () => ({
@@ -269,6 +271,17 @@ describe("★고른 날짜가 확정 전이면 그 사실을 말한다 (완료 Q
     renderPage();
     expect(await screen.findByText("2026-08-28 시점 담당 기준")).toBeTruthy();
     expect(screen.queryByText(/확정 전이라/)).toBeNull();
+  });
+
+  it("★확정 데이터가 0건일 때의 문장도 화면에 닿는다 — 죽은 문자열이 아니다", async () => {
+    // 게이트가 `clamped &&`였을 때 이 문장은 백엔드가 만들고 화면이 버렸다(적대 리뷰 P2).
+    h.ownership = {
+      as_of: null, requested: null, clamped: false,
+      note: "확정된 광고 데이터가 아직 없습니다.",
+      campaigns: {},
+    };
+    renderPage();
+    expect(await screen.findByText("확정된 광고 데이터가 아직 없습니다.")).toBeTruthy();
   });
 });
 

@@ -460,8 +460,13 @@ def test_campaign_bands_say_when_the_date_was_clamped(db):
     assert r["as_of"] == "2026-08-28"
     assert r["requested"] == "2026-08-30"
     assert r["clamped"] is True
-    assert "2026-08-30" in r["note"] and "확정 전" in r["note"]
-    assert "2026-08-28" in r["note"], "무엇을 대신 보여주는지도 말해야 한다"
+    # ★전문 대조다. 「두 날짜가 들어 있나」로 검사하면 **역할이 안 지켜진다** — 자리만 바꾼
+    #   변이(「08-28은 확정 전이니 08-30을 보여줍니다」)가 포함 검사를 통과한다(적대 리뷰 P1).
+    #   문장의 «존재»는 표면 테스트가 지키고, «진위»는 값을 만드는 이쪽이 지켜야 한다.
+    assert r["note"] == (
+        "2026-08-30은 아직 확정 전이라 그날 담당을 가릴 수 없습니다 — "
+        "2026-08-28 기준으로 보여줍니다."
+    )
 
 
 def test_campaign_bands_are_quiet_when_nothing_was_clamped(db):
@@ -473,6 +478,31 @@ def test_campaign_bands_are_quiet_when_nothing_was_clamped(db):
     r = bands.campaign_bands(db, as_of=date(2026, 8, 28))
     assert r["clamped"] is False
     assert r["note"] is None
+
+
+def test_campaign_bands_default_asks_for_the_latest_confirmed_day(db):
+    """기본 경로(as_of 미지정) — 되돌린 게 아니므로 경고가 없다(적대 리뷰 P2 채택)."""
+    _prod_shaped_history(db)
+    _daily(db, "2026-08-28", 5000)
+    db.commit()
+
+    r = bands.campaign_bands(db)
+    assert r["as_of"] == "2026-08-28"
+    assert r["requested"] is None
+    assert r["clamped"] is False
+    assert r["note"] is None
+
+
+def test_campaign_bands_say_when_there_is_nothing_confirmed(db):
+    """확정 데이터가 0건이면 «비었다»가 아니라 «아직 없다»를 말한다 — 그리고 그 문장은
+    `clamped`가 False라도 화면에 닿아야 한다(적대 리뷰 P2 — 종전엔 죽은 문자열이었다)."""
+    _prod_shaped_history(db)  # 설정·로그만 있고 naver_ad_daily는 비어 있다
+    db.commit()
+
+    r = bands.campaign_bands(db)
+    assert r["as_of"] is None
+    assert r["clamped"] is False
+    assert r["note"] == "확정된 광고 데이터가 아직 없습니다."
 
 
 def test_campaign_bands_expose_partial_ownership(db):

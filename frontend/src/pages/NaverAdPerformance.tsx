@@ -1089,8 +1089,11 @@ export default function NaverAdPerformance() {
         </span>
       )}
       {/* ★고른 날짜가 확정 전이라 되돌려졌으면 «왜»를 말한다 — 날짜만 바꿔 놓고 침묵하면
-          사용자는 날짜 불일치를 눈치채야만 안다(완료 QA가 잡은 자리). */}
-      {ownership.data?.clamped && ownership.data.note && (
+          사용자는 날짜 불일치를 눈치채야만 안다(완료 QA가 잡은 자리).
+          ★게이트는 `note`만 본다. `clamped &&`를 걸었더니 확정 데이터가 0건일 때의 문장
+          (「확정된 광고 데이터가 아직 없습니다」)이 원리적으로 버려졌다 — 백엔드는 만들고
+          화면은 못 띄우는 죽은 문자열이었다(적대 리뷰 P2). 문장이 있으면 말한다. */}
+      {ownership.data?.note && (
         <span className="w-full text-xs text-judge-warn break-keep">
           {ownership.data.note}
         </span>
