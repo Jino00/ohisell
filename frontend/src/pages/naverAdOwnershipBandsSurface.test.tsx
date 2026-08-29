@@ -116,6 +116,9 @@ function bandsPayload(over: Record<string, unknown> = {}) {
 function ownershipPayload(band: string, over: Record<string, unknown> = {}) {
   return {
     as_of: "2026-08-28",
+    requested: "2026-08-28",
+    clamped: false,
+    note: null as string | null,
     campaigns: {
       [CAMPAIGN_ID]: {
         band,
@@ -245,6 +248,27 @@ describe("밴드 필터와 「그날 담당」 배지", () => {
     h.ownership = ownershipPayload("pao", { partial: true, pao_adgroups: 1, adgroups: 58 });
     renderPage();
     expect(await screen.findByText("그날 PAO 부분 담당 (1/58 그룹)")).toBeTruthy();
+  });
+});
+
+describe("★고른 날짜가 확정 전이면 그 사실을 말한다 (완료 QA가 잡은 자리)", () => {
+  it("되돌렸으면 «왜»가 화면에 뜬다 — 날짜만 바꿔 놓고 침묵하지 않는다", async () => {
+    h.ownership = {
+      ...ownershipPayload("not_pao"),
+      as_of: "2026-08-29",
+      requested: "2026-08-30",
+      clamped: true,
+      note: "2026-08-30은 아직 확정 전이라 그날 담당을 가릴 수 없습니다 — 2026-08-29 기준으로 보여줍니다.",
+    };
+    renderPage();
+    expect(await screen.findByText(/2026-08-30은 아직 확정 전이라/)).toBeTruthy();
+    expect(await screen.findByText(/2026-08-29 기준으로 보여줍니다/)).toBeTruthy();
+  });
+
+  it("되돌린 게 없으면 경고를 안 띄운다 — 상시 경고는 아무도 안 읽는다", async () => {
+    renderPage();
+    expect(await screen.findByText("2026-08-28 시점 담당 기준")).toBeTruthy();
+    expect(screen.queryByText(/확정 전이라/)).toBeNull();
   });
 });
 

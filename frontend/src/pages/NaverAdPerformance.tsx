@@ -1088,6 +1088,13 @@ export default function NaverAdPerformance() {
           {`담당을 판정할 수 없는 광고 ${num(hiddenUndetermined)}개는 목록에서 뺐습니다.`}
         </span>
       )}
+      {/* ★고른 날짜가 확정 전이라 되돌려졌으면 «왜»를 말한다 — 날짜만 바꿔 놓고 침묵하면
+          사용자는 날짜 불일치를 눈치채야만 안다(완료 QA가 잡은 자리). */}
+      {ownership.data?.clamped && ownership.data.note && (
+        <span className="w-full text-xs text-judge-warn break-keep">
+          {ownership.data.note}
+        </span>
+      )}
     </div>
   );
 

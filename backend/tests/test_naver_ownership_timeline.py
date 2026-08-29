@@ -449,6 +449,32 @@ def test_band_denominators_are_reported(db):
     assert pao["share_of_cost"] == 1.0
 
 
+def test_campaign_bands_say_when_the_date_was_clamped(db):
+    """★완료 QA가 잡은 자리 — 확정 전 날짜를 되돌리면서 **말없이** 바꾸면, 사용자는 날짜
+    불일치를 눈치채야만 안다. 「말없이」가 이 계약이 통째로 겨냥한 것이다."""
+    _prod_shaped_history(db)
+    _daily(db, "2026-08-28", 5000)
+    db.commit()
+
+    r = bands.campaign_bands(db, as_of=date(2026, 8, 30))  # 확정(08-28)보다 뒤 = 확정 전
+    assert r["as_of"] == "2026-08-28"
+    assert r["requested"] == "2026-08-30"
+    assert r["clamped"] is True
+    assert "2026-08-30" in r["note"] and "확정 전" in r["note"]
+    assert "2026-08-28" in r["note"], "무엇을 대신 보여주는지도 말해야 한다"
+
+
+def test_campaign_bands_are_quiet_when_nothing_was_clamped(db):
+    """되돌린 게 없으면 경고를 만들지 않는다 — 상시 경고는 아무도 안 읽는다."""
+    _prod_shaped_history(db)
+    _daily(db, "2026-08-28", 5000)
+    db.commit()
+
+    r = bands.campaign_bands(db, as_of=date(2026, 8, 28))
+    assert r["clamped"] is False
+    assert r["note"] is None
+
+
 def test_campaign_bands_expose_partial_ownership(db):
     """Jino: "광고그룹만도 가져올 수 있잖아" — 부분 관할이 숫자로 보여야 한다."""
     _prod_shaped_history(db)
