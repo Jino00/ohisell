@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
-    anomaly_feed, bid_rank_curve, bid_simulator, budget_allocator, budget_envelope,
+    alert_humanizer, anomaly_feed, bid_rank_curve, bid_simulator, budget_allocator, budget_envelope,
     campaign_target_resolver, diagnosis, diary, expansion_allocator, expansion_pressure,
     gave_score, growth_sweeper, proposal_writer, retro_snapshotter, slack_notifier, trigger_watch,
 )
@@ -1014,7 +1014,10 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
             proposal_writer.account_brief_singleton(db, diag, as_of)
             db.commit()
             result["generated"] = len(saved)
-            proposal_summaries = [{"proposal_type": p.proposal_type, "target_id": p.target_id} for p in saved]
+            proposal_summaries = [
+                {"proposal_type": p.proposal_type, "target_id": p.target_id, "campaign_id": p.campaign_id}
+                for p in saved
+            ]
             result["stage_status"]["proposal_writer"] = "ok"
         except Exception as e:  # noqa: BLE001
             db.rollback()
@@ -1023,6 +1026,18 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
             result["errors"].append(f"proposal_writer: {e}")
     else:
         result["stage_status"]["proposal_writer"] = "skipped"
+
+    # 통지 직전에 캠페인 ID → 이름을 붙인다(D-NAO-249) — Slack 본문이 ID 대신 사람이 아는
+    # 이름을 쓰게 하는 유일한 목적. 실패해도 통지는 그대로 나간다(ID 폴백, 저하만).
+    if proposal_summaries:
+        try:
+            names = alert_humanizer.entity_names(
+                db, "campaign", [s["campaign_id"] for s in proposal_summaries if s.get("campaign_id")],
+            )
+            for s in proposal_summaries:
+                s["name"] = names.get(s.get("campaign_id") or "", "")
+        except Exception as e:  # noqa: BLE001 — 이름은 가독성 향상분(부분 실패 격리 원칙 동일)
+            log.warning("proposal_pipeline 캠페인 이름 조회 실패(ID로 통지): %s", e)
 
     try:
         notify_result = slack_notifier.notify(proposal_summaries)

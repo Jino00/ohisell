@@ -23,7 +23,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverForecastDaily, NaverHourlySnapshot, NaverProposal
-from app.services.naver_ad import hourly_pattern, slack_notifier
+from app.services.naver_ad import alert_humanizer, hourly_pattern, slack_notifier
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now, kst_today
 
@@ -350,6 +350,83 @@ def _cpc_proposal(item: dict) -> dict:
     }
 
 
+def _ratio_text(ratio: float) -> str:
+    """배수를 사람 말로. 극단 저속에서 `{:.1f}`가 「기대의 0.0배」로 뭉개지는 것을 막는다
+    (적대 리뷰 R1 P2-4 실측: ratio 0.0002 → "0.0배"). 0.0배는 정보가 아니라 잡음이다."""
+    r = float(ratio)
+    if r < 0.05:
+        return "기대치의 5%도 안 됨"
+    return f"기대의 {r:.1f}배"
+
+
+def _pacing_human(item: dict) -> dict:
+    """Slack 본문용 사람 문장(D-NAO-249). rationale과 **별개다** — rationale은
+    retro_pacing_scorer가 정규식으로 파싱하는 기계용 문자열이라 손대지 않는다.
+
+    기대 소진액은 expected_pace(일예산 대비 비율) × 일예산으로 되돌린다 — 「배수 0.2」보다
+    「6.6만 원쯤 나갔을 자리에 1.2만 원」이 사람에게 훨씬 빨리 읽힌다."""
+    over = item["kind"] == "overpace"
+    expected_won = int(round(float(item["expected_pace"]) * float(item["daily_budget"])))
+    return {
+        "headline": "예산 소진이 너무 빠름" if over else "예산 소진이 너무 느림",
+        "detail": (
+            f"{item['hour']}시 기준 {alert_humanizer.money(item['cost'])} 씀 "
+            f"/ 하루예산 {alert_humanizer.money(item['daily_budget'])}\n"
+            f"이 시각이면 {alert_humanizer.money(expected_won)}쯤 나갔을 자리 "
+            f"({_ratio_text(item['ratio'])})\n"
+            + (
+                "→ 이 속도면 오늘 예산이 일찍 바닥나 오후 노출이 끊길 수 있습니다."
+                if over else
+                "→ 이대로면 오늘 예산을 다 못 씁니다."
+            )
+        ),
+    }
+
+
+def _cpc_human(item: dict) -> dict:
+    """Slack 본문용 사람 문장(D-NAO-249) — CPC 급등."""
+    return {
+        "headline": "클릭 한 번 값이 갑자기 뛰었음",
+        "detail": (
+            f"{item['hour']}시 클릭 {alert_humanizer.count(item['clk'])}회 "
+            f"평균 {alert_humanizer.money(item['current_cpc'])}\n"
+            f"최근 {CPC_SPIKE_LOOKBACK_DAYS}일 평균은 {alert_humanizer.money(item['baseline_cpc'])} "
+            f"({float(item['ratio']):.1f}배)\n"
+            "→ 같은 예산으로 살 수 있는 클릭이 그만큼 줄어듭니다."
+        ),
+    }
+
+
+_HUMAN_BY_TYPE: dict[str, Callable[[dict], dict]] = {
+    PROPOSAL_TYPE_PACING: _pacing_human,
+    PROPOSAL_TYPE_CPC: _cpc_human,
+}
+
+
+def _slack_payload(db: Session, alerts: list[tuple[str, dict, dict]]) -> list[dict]:
+    """제안 dict + 사람 문장 + 캠페인 이름을 합친 **통지 전용** 사본(D-NAO-249).
+
+    DB에 넣는 dict(NaverProposal(**p))와 갈라 둔다 — 모델에 없는 키를 섞으면 저장이 깨진다.
+    이름 조회가 실패해도 통지는 나간다(ID 폴백) — 알림이 사라지는 게 더 나쁘다.
+    """
+    try:
+        names = alert_humanizer.entity_names(
+            db, "campaign", [item["campaign_id"] for _, item, _ in alerts],
+        )
+    except Exception as e:  # noqa: BLE001 — 이름은 가독성 향상분, 없으면 ID로 보낸다
+        log.warning("trigger_watch 캠페인 이름 조회 실패(ID로 통지): %s", e)
+        names = {}
+    out = []
+    for proposal_type, item, proposal in alerts:
+        # ★새 트리거 유형이 사람 문장 없이 추가돼도 통지 자체는 나가야 한다(적대 리뷰 R1 P2-5):
+        # KeyError로 죽으면 통지가 통째로 사라지는데 결과 dict은 "no_proposals"라 **원인을
+        # 오보한다** — 유형 라벨만으로 떨어지는 게 훨씬 낫다(slack_notifier가 폴백을 갖는다).
+        builder = _HUMAN_BY_TYPE.get(proposal_type)
+        human = builder(item) if builder else {}
+        out.append({**proposal, **human, "name": names.get(item["campaign_id"], "")})
+    return out
+
+
 def run_hourly(db: Session, *, ad_date: date | None = None) -> dict:
     """매시 :05 snapshot_naver_ad_hourly_job 직후 실행 — 페이싱 이탈 + CPC 급등 감지 →
     쿨다운 통과분만 즉시 제안 생성 + Slack. 순위 이탈은 이번 스코프 제외(모듈 docstring 참조).
@@ -368,12 +445,15 @@ def run_hourly(db: Session, *, ad_date: date | None = None) -> dict:
 
     recent = _recent_trigger_keys(db, {(pt, item["campaign_id"]) for pt, item, _ in candidates}, now)
     proposals: list[dict] = []
+    alerts: list[tuple[str, dict, dict]] = []  # 통지 전용 — (유형, 감지 원본, 제안 dict)
     cooled_down = 0
     for proposal_type, item, builder in candidates:
         if (proposal_type, item["campaign_id"]) in recent:
             cooled_down += 1
             continue
-        proposals.append(builder(item))
+        proposal = builder(item)
+        proposals.append(proposal)
+        alerts.append((proposal_type, item, proposal))
 
     saved: list[NaverProposal] = []
     try:
@@ -390,7 +470,9 @@ def run_hourly(db: Session, *, ad_date: date | None = None) -> dict:
     notify_result = {"sent": False, "reason": "no_proposals", "slack_ts": None, "proposal_count": 0}
     if proposals:
         try:
-            notify_result = slack_notifier.notify(proposals)
+            # 사람이 읽는 본문으로 보낸다(D-NAO-249) — 이름·숫자 문장을 여기서 붙여 넘기는 게
+            # harness의 몫이다(slack_notifier는 DB를 모르는 순수 함수, 원칙18-6).
+            notify_result = slack_notifier.notify(_slack_payload(db, alerts))
         except Exception as e:  # noqa: BLE001 — slack 실패는 저하만, 제안 저장은 이미 끝남
             log.exception("trigger_watch slack 발송 실패: %s", e)
 

@@ -290,6 +290,113 @@ def test_run_hourly_respects_cooldown(db):
     assert len(saved) == 1
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# D-NAO-249 — 경보가 사람 말로 Slack까지 «닿는지»
+#
+# ★여기서 재는 것은 함수 반환값이 아니라 **webhook에 실제로 실린 본문**이다. 호출부 제거·렌더
+#   제거 같은 배선 끊김을 단위 테스트가 못 잡아 라이브에서 네 번 터진 전례가 있다(전역 §4).
+
+def _posted_text(db, monkeypatch) -> str:
+    """run_hourly → notify → requests.post 까지 통째로 태우고 실제 페이로드를 돌려준다."""
+    from app.services.naver_ad import slack_notifier
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_post(url, json=None, timeout=None):
+        captured["text"] = json["text"]
+        return _Resp()
+
+    monkeypatch.setattr(slack_notifier.requests, "post", fake_post)
+    trigger_watch.run_hourly(db, ad_date=AD_DATE, )
+    return captured.get("text", "")
+
+
+def test_hourly_alert_reaches_slack_as_human_sentences(db, monkeypatch):
+    from app.models import NaverEntity
+
+    monkeypatch.setenv("NAVER_SLACK_WEBHOOK_URL", "https://hooks.example/xyz")
+    db.add(_snap("cmp1", 10, cost=10000, daily_budget=10000))  # 10시에 일예산 전액 소진 = 과속
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp1", name="● 03. 아이폰_강화유리"))
+    db.commit()
+
+    text = _posted_text(db, monkeypatch)
+
+    assert "trigger_pacing" not in text                 # 내부 코드명이 안 나간다
+    assert "예산 소진이 너무 빠름" in text               # 무슨 일인지
+    assert "03. 아이폰_강화유리" in text                 # 어느 캠페인인지(장식 ● 은 정리, 코드 접두는 보존)
+    assert "1.0만 원" in text                           # 얼마 썼는지
+    assert "자동으로 바뀌는 건 없습니다" in text          # 뭘 해야 하는지
+
+
+def test_hourly_alert_uses_campaign_id_when_entity_row_missing(db, monkeypatch):
+    monkeypatch.setenv("NAVER_SLACK_WEBHOOK_URL", "https://hooks.example/xyz")
+    db.add(_snap("cmp-noname", 10, cost=10000, daily_budget=10000))
+    db.commit()
+
+    text = _posted_text(db, monkeypatch)
+    assert "cmp-noname" in text
+    assert "예산 소진이 너무 빠름" in text
+
+
+def test_slack_enrichment_never_leaks_into_the_saved_proposal(db, monkeypatch):
+    """통지용 사본과 DB용 dict는 갈라져 있어야 한다 — 모델에 없는 키가 섞이면 저장이 깨지고,
+    rationale이 바뀌면 retro_pacing_scorer의 정규식 채점이 죽는다."""
+    monkeypatch.setattr(
+        "app.services.naver_ad.trigger_watch.slack_notifier.notify",
+        lambda proposals: {"sent": True, "reason": None, "slack_ts": None, "proposal_count": len(proposals)},
+    )
+    db.add(_snap("cmp1", 10, cost=10000, daily_budget=10000))
+    db.commit()
+    trigger_watch.run_hourly(db, ad_date=AD_DATE)
+
+    saved = db.query(NaverProposal).filter(NaverProposal.proposal_type == "trigger_pacing").one()
+    assert saved.rationale.startswith("[trigger_watch] 페이싱 이탈 과속")
+    assert "기대의" not in saved.rationale  # 사람 문장은 rationale로 새지 않는다
+
+
+def test_saved_rationale_still_parses_for_retro_scoring(db, monkeypatch):
+    """★회귀 가드: 사후 채점기가 rationale을 정규식으로 읽는다 — 이 형식이 깨지면 채점이 죽는다."""
+    from app.services.naver_ad import retro_pacing_scorer
+
+    monkeypatch.setattr(
+        "app.services.naver_ad.trigger_watch.slack_notifier.notify",
+        lambda proposals: {"sent": True, "reason": None, "slack_ts": None, "proposal_count": len(proposals)},
+    )
+    db.add(_snap("cmp1", 13, cost=5000, daily_budget=50000))  # 13시 10% 소진 = 저속
+    db.commit()
+    trigger_watch.run_hourly(db, ad_date=AD_DATE)
+
+    saved = db.query(NaverProposal).filter(NaverProposal.proposal_type == "trigger_pacing").one()
+    assert retro_pacing_scorer._PATTERN.search(saved.rationale) is not None
+
+
+def test_extreme_underpace_does_not_collapse_to_zero_point_zero_times():
+    """적대 리뷰 R1 P2-4 — ratio 0.0002가 「기대의 0.0배」로 뭉개지면 배수가 잡음이 된다."""
+    assert trigger_watch._ratio_text(0.0002) == "기대치의 5%도 안 됨"
+    assert trigger_watch._ratio_text(0.18) == "기대의 0.2배"
+    assert trigger_watch._ratio_text(12.7) == "기대의 12.7배"
+
+
+def test_trigger_type_without_human_sentence_still_gets_notified(db, monkeypatch):
+    """적대 리뷰 R1 P2-5 — 사람 문장 빌더가 없는 유형이 생겨도 통지가 사라지면 안 된다
+    (사라지면서 result가 'no_proposals'로 원인을 오보하던 경로)."""
+    monkeypatch.delitem(trigger_watch._HUMAN_BY_TYPE, "trigger_pacing")  # 미등록 유형 재현(teardown이 복원)
+    monkeypatch.setenv("NAVER_SLACK_WEBHOOK_URL", "https://hooks.example/xyz")
+    db.add(_snap("cmp1", 10, cost=10000, daily_budget=10000))
+    db.commit()
+
+    text = _posted_text(db, monkeypatch)
+    # 사람 문장은 없지만 유형 라벨로라도 나간다 — 침묵보다 낫다
+    assert "예산 소진 속도가 평소와 다름" in text
+
+
 def test_run_hourly_no_anomalies_no_slack_call(db, monkeypatch):
     called = {"count": 0}
     monkeypatch.setattr(
