@@ -1,296 +1,296 @@
-# PAO 운영판 — 지금 우리 광고가 어떻게 돌고 있나
+# PAO 운영 정본 — 지금 광고가 어떻게 돌고 있고, 주기적으로 무엇을 봐야 하나
 
-> **무엇**: 네이버 SA 광고 최적화 엔진 **PAO(Profit Ad Optimizer)**의 운영 상태를 한 장으로.
-> **언제 보나**: 필요할 때. 「지금 뭐가 어떻게 돌고 있지?」 싶을 때 이 파일 하나만 연다.
-> **관측 시각**: **2026-08-30 08:5x KST** — 아래 값은 그 시점 실측이다. **숫자는 낡지만 「재는 법」은 안 낡는다** → 각 항목에 관측 명령을 붙였다(§11).
-> **분모**(무엇을 훑었나): 트랙 파일 `docs/tracks/active/track_naver-ad-optimization.md`(D-NAO-1~277) · PAO 계약 6종 · 북극성 `docs/references/82_pao_north_star_20260819.md` · 크론 등록부 · 코드(auto_operator·harness·delegation_gate·search_term_ss_lane·guardrail_gate·adgroup_scope) · prod 라이브 DB.
+> **정본 — 좌표는 `scripts/check_pao_canon.py`가 검사한다** (계약 `docs/contracts/CONTRACT_pao_ops_canon.md` §8 · S3 산출물).
+> **서식 규약 요약 (다음 저자도 지킬 것)**:
+> 1. 좌표(백틱)는 5유형만 검사된다 — 파일경로 / «경로::심볼» / «GET|PUT /api/…» / «테이블.컬럼» / 크론 잡 이름. **줄 번호 금지**(커밋 하나에 낡는다 — 심볼로 쓴다). 명령어·예시는 백틱에 넣지 않는다(검사기 오탐 방지).
+> 2. **날마다 변하는 실측값은 전부 `<!-- MEASURED -->` … `<!-- /MEASURED -->` 블록 안에** 쓴다 — 검사기는 블록 **밖**의 백틱만 본다.
+> 3. 실측값에는 **관측 시각(KST)과 창의 시작·끝 날짜**를 병기한다(라벨만 병기하면 라벨이 틀렸을 때 같은 병이 재발한다 — ref 111 반증 1·2).
+> 4. 재현 안 된 주장은 무표기 금지 — `[미상]` + 출처·날짜로만. 📄=문서 주장(재검증 안 됨).
+>
+> 전면 개정: 2026-08-30 (계약 승인 D-NAO-279 · 재검증 정본 `docs/references/111_paoops_reverify_20260830.md` — 사실 주장 153개 중 재현 52 / **반증 4** / 미상 다수. 옛 판은 git 역사에 있다).
 
 ---
 
-## §0. ⚠️ 지금 알아야 할 것 — 이것만 읽어도 된다
+## §0. ⚠️ 지금 알아야 할 것 — 결정·조치가 필요한 것부터
 
-### ★1. 점화는 했는데, 카나리가 쏠 총알이 없다
+### ★0-1. 카나리는 「발화는 하되 아무것도 집행하지 않는」 상태다
 
-2026-08-29 12:53에 카나리 1캠페인을 켰다(D-NAO-275). 그런데 **그 그룹에서 엔진이 스스로 실행할 수 있는 액션이 지금 하나도 없다.**
+08-29 12:53 카나리 1캠페인 점화(D-NAO-275 📄). 그런데 그 캠페인은 **SHOPPING**이고, 자동 발사되는 검색어 제외의 실행 경로는 **파워링크(WEB_SITE) 전용**이다(`backend/app/services/naver_ad/search_term_ss_lane.py::_autofire_exclude` — 쇼핑 후보는 브리핑 diary만). 입찰 레버는 표본·ROAS 게이트에 걸려 있다.
 
-| 레버 | 왜 안 쏘나 | 근거 |
+★**검색어 제외 파이프라인은 «둘»이고 섞으면 오판한다** (ref 111이 재현 확인):
+
+| | 파이프라인 | 크론 | proposal_type | 자동 발사 | 실행 이력 |
+|---|---|---|---|---|---|
+| A | PAO 고유 `search_term_ss_lane` | 08:50 | search_term_exclude | 파워링크만 | 전 기간 **1건**(07-22, 파워링크) |
+| B | 레거시 `backend/app/services/naver_ad/proposal_writer.py` | 08:00 | negative_keyword | 없음 | 전 기간 실행 **0건** — 게이트 0겹, SHOPPING 대상은 실행돼도 항상 실패(WEB_SITE 전용 API). 그 안전은 설계가 아니라 우연 |
+
+<!-- MEASURED -->
+- 2026-08-30 17:1x KST (ref 111): 오늘 A 레인 산출물 0건(계정 전체) · 오늘 우리 엔진 실쓰기(flight_pacing 제외) 0건 · 제외 원장 총 3,990행, 최신 생성 2026-08-17(13일째 신규 0) · B 파이프라인 pending 11건(08-30 08:00 생성, 6개 그룹에 걸침 — 카나리 스코프 밖).
+- PAO 마지막 실집행: 2026-07-30 📄(ref 109) — 이후 31일+ 0건.
+<!-- /MEASURED -->
+
+### ★0-2. 결정 대기 (전부 Jino 몫 — 이 문서는 사실까지만)
+
+| | 무엇 | 비고 |
 |---|---|---|
-| 검색어 제외 | **쇼핑이라 구조적으로 Confirm 전용** | `search_term_ss_lane.py:891` *"쇼핑은 파워링크처럼 자동 발사는 하지 않는다"* — ★**08:50 레인은 이 캠페인에 후보를 «아예 만들지 않았다»**: 오늘 계정 전체 `search_term_exclude` 신규 **0건**(완료 QA 재현) |
-| 입찰 상향 | ROAS **1.42** < BEP **1.976** — 원리적으로 안 남 | `_judge_hourly` UP 게이트 |
-| 입찰 하향 | 당일 소진 **3,501원** < 정착창 하루평균 **30,705원** → 고삐가 「과소추정 방어」로 유보 | `_intraday_loss_leash` |
+| A | **카나리 실집행 경로** — ①A 레인 후보 Confirm(지금은 후보 0) ②카나리를 파워링크로 교체 ③C2 합격기준 개정(=계약 개정) ④「구조상 실집행 0」을 M4 판정으로 기록 ⑤쇼핑 자동 발사 개방(§0-3) — 다섯 다 계약 사안 | 대기 시작 08-30 📄 |
+| B | **소유권 분리**(북극성 §8-②) — 재개방·A급 실험·개입 검증 셋을 동시에 막는다 | 08-19부터 📄 |
+| C | **prod 배포가 타 트랙 마이그에 막힘** — 죽은 카드 수리(PR #573 머지 📄)가 미배포. `scripts/safe_deploy.sh`가 원가 트랙 마이그 미적용을 이유로 거부. 남의 마이그레이션은 대신 적용하지 않는다 | 📄 |
+| D | ADVoost·GFA 취급 / 스마트스토어 대조축 / n-gram 적자어 처분 / A3 회색 토큰 4건 / WEB_SITE 승계 3건 / ref94 하한 음수 후속 | 전부 📄(옛 판 §8, 08-19~) — 상세는 북극성 `docs/references/82_pao_north_star_20260819.md` §8 |
 
-**08:50 레인은 정상 무인 발화했다**(`last_run_at 2026-08-30 08:50:20.098495` — 크론 슬롯과 소수점까지 일치, `status=ok`). 발화했는데 **집행이 0**인 것이다.
+### ★0-3. 쇼핑 검색어 제외 자동 발사 — 결정 A-⑤의 근거 요약 (옛 판 §3-b 압축, 2026-08-30 조사 📄)
 
-⇒ **M4 합격기준 C2(「실집행 diary 행 ≥1」)가 현 구조로는 도달 불가능할 수 있다.** 계약 C4가 요구하는 「7일 연속 관측」의 표본이 원리적으로 0이 될 수 있다.
-⇒ **자동 발사되는 검색어 제외는 파워링크 전용**이고, `ss_exclude` 승인원으로 실제 발사된 이력은 **전 기간 1건**(2026-07-22, 파워링크 캠페인 `cmp-a001-01-…10236310`)뿐이다.
+- 막힌 명시적 근거가 없다 — 「쇼핑 API 불가」 전제는 D-NAO-180·181로 폐기됐고, 이후 「왜 안 여는가」의 새 근거는 grep으로 안 나온다 📄. 의도적 정지가 아니라 관성.
+- **비대칭이 핵심**: 파워링크 검색어는 전환을 구조적으로 못 재서 잘못 잘라도 잃을 게 없지만, **쇼핑은 전환이 찍히므로 잘못 자르면 진짜 매출을 잃는다**. <!-- MEASURED -->실측(2026-08-30 17:1x, 창 대략 07-30~08-29): expkeyword 82,141행·전환 0건 / shopping 328,126행·전환 1,584건(0.483%) — 옛 판 값과 ±4%(창 경계 차이)<!-- /MEASURED -->
+- 단점 셋 다 실측 📄: ①14일 창의 오탐 실증(「폴드8와이드필름」 24클릭·창내 전환 0인데 90일 전환 9) ②**되돌릴 손이 없다** — 수동 재개방 API 0건, 자동 재심사는 우리 생성 2칸에만 닿음 ③일일 캡 10건을 파워링크와 공유.
 
-### ★1-b. ⚠️정정 — 검색어 제외 파이프라인이 «둘»이고 초판은 그 둘을 섞었다
+### ★0-4. 켜져 있는 부채
 
-**완료 QA가 이 문서의 초판을 반증했다.** 초판은 *「08:50 레인이 만든 후보 11건이 전부 pending」*이라 적었는데, 그 11건은 **다른 파이프라인**의 산출물이었다.
+<!-- MEASURED -->
+| 부채 | 값 (관측 시각) | 소관 |
+|---|---|---|
+| 죽은 승인 카드(approved·영구 미실행) | 141건(08-30 08:5x 📄) → 154건(10:17 📄) → **180건**(17:19, ref 111) — 증가 중 | 이 트랙 — 수리는 main에, 배포만 남음(§0-2-C) |
+| 제외 원장 신규 | 08-17 이후 0건 (08-30 기준 13일째) | 이 트랙 |
+| 지혜 승격→적용 왕복 | prod 0회 📄 | 이 트랙 |
+| 학습 재료 만료 | 2026-10-28에 3,863건 이탈 📄(D-NAO-251) | 이 트랙 |
+| 쿠팡 계열 크론 last_run_at 08-22 정지 📄 | 7종 | ⚠️PAO 밖 — 쿠팡 트랙 소관, 기록만 |
+<!-- /MEASURED -->
 
-| | 파이프라인 | 크론 | `proposal_type` | 실행 액션 | 자동 발사 | 실제 실행 이력 |
-|---|---|---|---|---|---|---|
-| ① | **PAO 고유** `search_term_ss_lane` | **08:50** | `search_term_exclude` | `exclude_search_term` | 파워링크만 | **전 기간 1건**(07-22, 파워링크) |
-| ② | **레거시** `proposal_writer` | **08:00** | `negative_keyword` | `add_negative_keyword` | 없음 | ★**전 기간 실행 0건** — 과거 배치(07-28·29) 16건은 `rejected`, 오늘 11건은 아직 `pending` |
+---
 
-오늘 보이는 11건은 **②**의 산출물이다(`created_at` = 2026-08-30 08:00:15 KST). 그리고 **①은 오늘 이 캠페인에 아무것도 만들지 않았다**(계정 전체 `search_term_exclude` 신규 0건).
+## §1. ★광고 성과 — 광고가 돈을 벌고 있나 (신설, Jino 질문 *"광고 성과 지표는 안봐?"* 대응)
 
-⇒ **그림은 초판보다 나쁘다.** 「후보를 만들었는데 승인을 안 해서 안 나갔다」가 아니라 **「PAO 파이프라인이 후보 자체를 안 만들었다」**이다.
-⇒ ⚠️**②가 지금도 PAO 소관인지, 더 오래된 시스템의 잔재인지 미상.** 늘 rejected되는 경로가 매일 제안을 만들고 있다 — **다음 세션 확인 항목.**
+### 1-1. 성과 원장 (구조 — 안 변하는 것)
 
-★**이 사실이 이전 인계에서 빠져 있었다** — n=68 HANDOFF는 *「자동 발사되는 유일한 레버 = 검색어 제외」*라고만 적었고 **「파워링크 한정」이라는 한정이 없었다.**
+- `naver_ad_daily` — grain (ad_date, campaign_id, adgroup_id, keyword_id). `naver_ad_daily.cost`·`naver_ad_daily.conv_direct_cnt` 등 보유, **D-1 확정 적재**(오늘치 없음). ★집계 정본: `adgroup_id <> '__backfill__'`, keyword 필터 걸지 말 것(2배 중복 사고 전력).
+- `naver_search_term_daily` — grain에 search_term·source. source='shopping'만 전환이 채워지고 source='expkeyword'(파워링크)는 구조적으로 항상 0.
+- 상품 BEP 스냅샷 `naver_product_bep` · 조치 채점 `naver_change_log.outcome_profit`(+gave 전후).
 
-### ★1-c. 📏지금 상태 (2026-08-30 14:51 실측) — **자동화된 것은 없다**
+### 1-2. 총이익(목적함수)을 재는 코드와 그 표면
+
+- **`backend/app/services/naver_ad/profit_scorecard.py`** — D-NAO-59 목적함수(총이익 절대액)를 캠페인별로 매일 계산(식: 보정 전환매출 ÷ bep_roas − cost). 크론 `run_naver_profit_scorecard` 08:40. 대상은 `backend/app/services/naver_ad/campaign_roster.py::observation_campaign_ids`(auto_operate 무관).
+- ★**단, 이 계산 결과는 diary·Slack으로만 간다 — API·화면 배선 0건**(ref 111 §5-3, grep 확인). 화면들이 보여주는 ROAS·공헌이익은 **별도 코드 경로의 재계산**이다. 두 벌 계산이 갈라지는지는 [미상 — 대조 안 됨, ref 111].
+
+### 1-3. 사람이 보는 곳 (전부 실재 — ref 111 「가장 놀란 것」: 옛 판 13개 절이 이 화면을 한 번도 언급 안 함)
+
+- 화면: `frontend/src/pages/NaverAdPerformance.tsx` — `/naver-ad/performance` 라우팅. ROAS 카드(목표/BEP 대비)·캠페인 추이·공헌이익.
+- API 10종: `GET /api/naver/ad/performance/ownership-bands`(전체/PAO 관할/비관할/전환일/모름 — `backend/app/services/naver_ad/perf_ownership_bands.py`, 항등식 identity.ok 검사 내장) · `GET /api/naver/ad/performance/bep-breakdown`(상품별 BEP 구성 되짚기 — `backend/app/services/naver_ad/bep_breakdown.py`) · today/day/compare/campaigns/campaign/{id}/budget/timeline/ownership-campaigns.
+
+### 1-4. 지금 값
+
+<!-- MEASURED -->
+관측 2026-08-30 17:17 KST, prod naver_ad_daily, adgroup_id <> '__backfill__' (ref 111 — 옛 판의 「어제 537,105원」·「7일 4,051,618원」은 반증됐다: 각각 08-28 값·8일 합이었다. 그래서 창의 시작·끝을 명시한다):
+
+| 창 (시작~끝, KST) | 비용 | 전환 | 전환매출 | ROAS |
+|---|---:|---:|---:|---:|
+| 07-30~08-29 (달력일 31일 포함창) — 계정 전체 | 19,923,726원 | 2,225 | 35,377,700원 | 177.5% |
+| 07-30~08-29 — 카나리 캠페인만 | 7,724,101원 | — | 11,583,480원 | 150.0% |
+| 08-23~08-29 (7일) — 계정 전체 | 3,561,309원 | — | — | — |
+| 08-29 (하루) | 443,894원 | — | — | — |
+| 참고: 08-28 (하루) | 537,105원 | — | — | — |
+
+- 최근 7일 naver_change_log 776건: flight_pacing(관찰) 516 · 대행사 external 3종 256(키워드 제거 133·입찰 119·상태 4) · optimizer_change 3 · scope 1. **우리 엔진 실쓰기 0건.** (옛 판의 756/238과 총계 불일치 — 관측 시각차 8h인지 오류인지 미분리, ref 111 부분반증)
+- 카나리 총이익 기준선: 점화 시점 하한 자 −275,787원 📄(옛 판 §6, 재검증 안 됨) — 계약 금지선 「하한 자 적자면 확대 금지」에 걸려 있는 상태 📄.
+<!-- /MEASURED -->
+
+⚠️**§1-4의 ROAS(31일 포함창)를 BEP 171.1%와 그대로 비교하지 말 것 — 창이 다르다.** BEP 171.1%는 **391일 창 계정 블렌디드** 📄(ref 63)다. 창이 달라 「본전 위/아래」 판정은 [미상 — 같은 창으로 다시 재기 전엔 비교 불가]. 상품 단위 BEP는 624그룹 미확보 📄라 그 구간은 블렌디드로 뭉개진다(알려진 구멍).
+
+### 1-5. 성과 판독의 구멍 (있는 것/없는 것만 — 배선 목록은 §12)
+
+①profit_scorecard 화면 미배선(§12-12) ②관할 밴드 × 캠페인유형 교차 없음(§12-13) ③관할 분리를 «총이익 기준»으로도 하는지 [미상] ④상품 단위 «실현» 이익(성과×마진) 도달 여부 [미상] ⑤D-0은 원리적으로 밴드 분리 불가(설계 한계 — D-1 적재).
+
+---
+
+## §2. 엔진의 손 — 무엇이 열려 있나
+
+<!-- MEASURED -->
+2026-08-30 17:14 KST (ref 111 정확 재현):
 
 | | 값 |
 |---|---|
-| 스위치 | 08-29 12:53 점화 그대로 — **변화 없음** |
-| 오늘 A 레인 산출물(`search_term_exclude`) | **0건**(계정 전체) |
-| 오늘 우리 엔진 실쓰기(`flight_pacing` 제외) | **0건** |
-| 제외 원장 | **08-17 이후 신규 0** (총 3,990행) |
-| 그 11건 | 여전히 `pending` — ★**눌러도 실패한다**(아래 A안 참조) |
+| 계정 전체 캠페인 | 46 (SHOPPING 31 · WEB_SITE 13 · BRAND_SEARCH 2) |
+| optimizer='ours' | 1 — cmp-a001-02-000000008425541 (갤럭시_지문방지_TPU, SHOPPING) |
+| auto_operate=1 | 1 (동일 캠페인) |
+| 스코프 행 | 1행 — 광고그룹 grp-…70523564 (Z폴드8와이드), enabled=1. 같은 캠페인의 다른 8개 그룹은 스코프 밖 📄(ref 109) |
 
-⇒ **카나리는 「발화는 하되 아무것도 집행하지 않는」 상태로 M4의 7일 창을 흘려보내고 있다.**
+되돌리기 1줄: `UPDATE naver_campaign_settings SET auto_operate=0 WHERE campaign_id='cmp-a001-02-000000008425541';`
+<!-- /MEASURED -->
 
-### ★2. 결정이 필요한 것
+- ⚠️`auto_operate`를 **켜는 API는 없다** — 직접 DB UPDATE가 유일한 경로(`backend/app/services/naver_ad/ignition_preflight.py::check` 모듈 주석). `optimizer`는 전용 엔드포인트 있음: `PUT /api/naver/ad/campaign-settings/optimizer`.
+- 점화 «직전» 검사: `GET /api/naver/ad/campaign-settings/ignition-preflight` — scope_empty(스코프 0행이면 켜는 순간 **전 그룹 개방** — 진리표 기본값)·slots_exhausted 경고. safe_to_ignite는 «경고 없음»이지 «켜도 좋다»가 아니다(코드 원문). ★캠페인 타입×레버 정합(§0-1)은 **안 잡는다** — §12-4.
+- 쓰기 유일 어댑터: `backend/app/services/naver_ad/naver_sa_writer.py` — 성공 판정은 응답 코드가 아니라 재조회 실측(fail-closed). 제외 읽기는 `backend/app/services/naver_ad/naver_sa_writer.py::RESTRICT_TYPES` 둘 다(한 타입만 물으면 「없다」는 거짓말을 받는다).
 
-| | 무엇 | 왜 지금 |
-|---|---|---|
-| **A** | **카나리에서 무엇으로 실집행을 만들 것인가** | ⚠️**초판의 ①이 대상을 잘못 짚었다 — 아래가 정정본**(2026-08-30 14:5x 실측). ①**A 레인이 후보를 낼 때 Jino가 Confirm** — ★~~「지금 11건 대기」는 틀렸다~~: 그 11건은 **레거시 B 파이프라인**(§1-b) 산출물이고 **카나리는 SHOPPING인데 B의 실행 경로는 WEB_SITE 전용 API**라 **Confirm해도 API 콜조차 안 나가고 실패**한다. 진짜 대상인 A 레인은 오늘 후보 **0건** ⇒ **지금은 누를 것이 없다** ②카나리를 파워링크 캠페인으로 바꿔 자동 발사를 관측 ③C2 합격기준을 「Confirm 경유 실집행」으로 개정(=계약 개정) ④그대로 두고 「구조상 실집행 0」을 M4 판정으로 기록 ⑤**쇼핑 자동 발사를 연다**(§3-b — 스위치 하나이나 **되돌리는 입구가 없다**). **다섯 다 계약 사안이다** |
-| **B** | **소유권 분리(북극성 §8-②)** — 2026-08-19부터 **11일째 대기** | 이 하나가 재개방·A급 실험·개입 검증 **셋을 동시에** 막고 있다 |
-| **C** | prod 배포가 다른 트랙에 막혀 있다 | PR #573(죽은 카드 수리)이 머지됐으나 **미배포**. `safe_deploy`가 원가 메뉴 트랙 마이그 `pgprice1s1a_cost_purchased_price.py` 미적용을 이유로 거부. **남의 마이그레이션은 대신 적용하지 않는다** |
+## §3. 무엇이 언제 도는가 (크론)
 
-### ★3. 지금 켜져 있는 부채
+★**시각의 정본은 prod scheduler_state 행이다.** 아래는 `backend/app/services/scheduler_service.py::_ensure_default_states` seed 값 — 한 번 seed되면 코드는 기존 행을 안 고친다. prod와의 대조는 §14 레시피. 실쓰기 5종의 cron은 prod와 일치 확인됨(ref 111 정확 재현). 총 개수는 세는 방법에 따라 다르다(<!-- MEASURED -->job_name LIKE '%naver%' 기준 36건, 2026-08-30 — 옛 판 「35종」은 반증(약함), ref 111<!-- /MEASURED -->) — **이 문서는 총계를 자로 쓰지 않는다.**
 
-| 부채 | 값 | 소관 |
-|---|---|---|
-| 죽은 카드(승인됐으나 스코프에 막혀 영구 미실행) | **141건**(08:5x) → **154건**(10:17) — ★**지금도 시간당 늘고 있다** | 이 트랙 — 수리는 main에 있고 배포만 남음 |
-| 제외 원장 신규 | **08-17 이후 13일째 0건** | 이 트랙 |
-| 지혜 승격 → 적용 왕복 | prod **0회** (test DB에서만 돎) | 이 트랙 |
-| 학습 재료 만료 | **2026-10-28** (D-59일) — 3,863건 이탈 | 이 트랙 |
-| 쿠팡 계열 크론 7종 매일 에러 | `last_run_at`이 **08-22에 멈춤** | ⚠️**PAO 밖** — 쿠팡 트랙 소관, 여기선 기록만 |
-
----
-
-## §1. 엔진의 손이 어디까지 열려 있나
-
-| | 값 |
-|---|---|
-| 계정 전체 캠페인 | **46** (SHOPPING 31 · WEB_SITE 13 · BRAND_SEARCH 2) |
-| `optimizer='ours'` | **1** |
-| `auto_operate=1` | **1** |
-| 스코프 행(`naver_adgroup_scope`) | **1행** — 광고그룹 `grp-…70523564`(Z폴드8와이드), enabled=True |
-
-**열린 곳**: `cmp-a001-02-000000008425541`(● 01. 갤럭시_지문방지_TPU, **SHOPPING**) → 그 안 광고그룹 **1개**.
-**나머지 45캠페인은 전부 관찰만.** 되돌리기 1줄: `UPDATE naver_campaign_settings SET auto_operate=0 WHERE campaign_id='cmp-a001-02-000000008425541';`
-
-⚠️ **`auto_operate`를 켜는 API가 없다** — 직접 DB UPDATE가 유일한 경로다(`ignition_preflight.py:6-19`). 반면 `optimizer`는 전용 엔드포인트가 있다(`PUT /api/naver/ad/campaign-settings/optimizer`).
-
----
-
-## §2. 무엇이 언제 도는가 (네이버 광고 크론 35종)
-
-**실제로 광고 계정에 쓰는 크론은 5개뿐이다.** 나머지 30개는 읽기·적재·판정·보고다.
+**실쓰기 크론 5종** (광고 계정을 실제로 바꿀 수 있는 것):
 
 | KST | 잡 | 무엇 |
 |---|---|---|
-| **08:50** | `run_naver_auto_operator_daily` | **실쓰기** — 일 레인(bid_up/down/pause) + 검색어 제외 + 예산봉투 + 콜드스타트 |
-| **매시 :20** | `run_naver_auto_operator_hourly` | **실쓰기** — 핫셋 시간당 입찰·탐색·소재 입찰·복원·예산 페이싱 |
-| **08:55** | `run_naver_probe_settlement` | **실쓰기** — 탐침 되돌림 |
-| **00:05** | `run_naver_budget_pacing_reset` | **실쓰기** — 예산 원복 |
-| **08:05** | `generate_expert_desk` | **실쓰기 가능** — Ava 평결 + 위임 게이트 자동승인 |
-| 07:00~09:55 | 수집·적재 20여 종 | 읽기만 |
-| 08:00 | `generate_naver_proposals` | 제안 생성(전부 `pending`) |
-| 08:10/08:30/08:35/08:40/08:45 | 학습·소급채점·반성·성적표·지혜 | 읽기·판정만 |
-| 2시간 :15 | `run_naver_flight_loop` | **`dry_run=True` 고정** — 관찰 전용 |
+| 08:50 | `run_naver_auto_operator_daily` | 일 레인 — `backend/app/services/naver_ad/auto_operator.py::run_daily_lane` |
+| 매시 :20 | `run_naver_auto_operator_hourly` | 시간당 레인 — `backend/app/services/naver_ad/auto_operator.py::run_hourly_lane` + 예산 페이싱 |
+| 08:55 | `run_naver_probe_settlement` | 탐침 되돌림 |
+| 00:05 | `run_naver_budget_pacing_reset` | 예산 원복 |
+| 08:05 | `generate_expert_desk` | Ava 평결 + 위임 게이트 자동승인 가능 |
 
-⚠️ **환경변수 기본값이 서로 반대다**: `NAVER_BP_DRY_RUN` 미설정 = **실쓰기**, `NAVER_CS_DRY_RUN` 미설정 = **dry-run**.
+**읽기·판정·학습** (주요): 07:30 `sync_naver_ad_daily` · 07:35 `sync_naver_entity` · 07:50 `run_naver_forecast_engine` · 08:00 `generate_naver_proposals` · 08:10 `run_naver_learning_loops` · 08:25 `verify_search_term_exclusions` · 08:30 `run_naver_retro_scoring` · 08:35 `run_naver_diary_reflection` · 08:40 `run_naver_profit_scorecard` · 08:45 `run_naver_wisdom` · 09:03 `run_naver_probe_learning` · 09:35 `sync_naver_adgroup_targets`(제외 슬롯 라이브 count 적재) · 09:50 `sync_naver_keyword_baseline`(★소급 불가 축) · 매시 :05 `snapshot_naver_ad_hourly` · :47 `run_naver_inday_catchup` · :57 `sweep_naver_today_hourly` · 2시간 :15 `run_naver_flight_loop`(dry_run 고정 — 관찰 전용).
 
----
+⚠️환경변수 기본값이 서로 반대 📄(옛 판, 미재검증): NAVER_BP_DRY_RUN 미설정=실쓰기 / NAVER_CS_DRY_RUN 미설정=dry-run — [미상].
 
-## §3. 엔진이 스스로 쏘는 것 vs 사람이 눌러야 하는 것
+## §4. 엔진이 스스로 쏘는 것 vs 사람이 눌러야 하는 것 (📄 옛 판 §3 — 검색어 제외 항목만 재검증됨, 나머지 [미상])
 
-**자동 발사 (사람 없이)**
-입찰 상향·하향(일/시간당/소재) · 탐색 상향 · 콜드 첫 입찰(env가 dry-run 기본) · rank-step · 예산봉투 태그 증액(≤10만) · 예산 페이싱 증액·원복 · 탐침·되돌림 · 스파이럴 복원 · **파워링크 검색어 제외**
+- **자동 발사**: 입찰 상향·하향(일/시간당/소재) · 탐색 상향 · rank-step · 예산봉투 태그 증액(≤10만) · 예산 페이싱 증액·원복 · 탐침·되돌림 · 스파이럴 복원 · **파워링크 검색어 제외**(전부 📄 — 개별 미검증).
+- **사람 Confirm**: **쇼핑 검색어 제외**(★카나리가 여기 걸림 — 재현됨) · 비태그 예산 증액 · negative_keyword(콘솔) · 신규 캠페인 생성·재구축·예산 상한 인상(영구, D-NAO-5·42) · 위임 스위치(Jino만, D-NAO-25).
+- **원리적 불가**: 의미 단위 검색어 제외(판정층까지만 — 계약이 그렇게 정함 📄).
 
-**사람 Confirm 필요**
-**쇼핑 검색어 제외** ← ★카나리가 여기 걸린다 · 비태그 예산 증액 · `add_negative_keyword`(콘솔) · 신규 캠페인 생성·재구축·예산 상한 인상(D-NAO-5·42 영구) · 위임 스위치(D-NAO-25, Jino만)
+## §5. 가드레일 — 지금 값
 
-**원리적으로 실행 불가**: 의미 단위(semantic) 검색어 제외 — 판정층까지만 배선(계약이 그렇게 정함)
+코드에서 직접 확인한 것(무표기)과 옛 판 주장(📄)을 구분한다. 정본 모듈: `backend/app/services/naver_ad/guardrail_gate.py` · DB 봉투층 `backend/app/services/naver_ad/guardrail_params.py::SPECS`(폴백은 코드 상수 — fail-to-current).
 
----
+| 이름 | 값 | 근거 |
+|---|---|---|
+| 변경폭 클램프 | ±15% (탐색 ±30%) | `backend/app/services/naver_ad/guardrail_gate.py::_MAX_CHANGE_PCT` · `backend/app/services/naver_ad/guardrail_gate.py::_EXPLORATION_MAX_CHANGE_PCT` |
+| 쿨다운 | 2시간 | `backend/app/services/naver_ad/guardrail_gate.py::_COOLDOWN_HOURS` (D-NAO-55) |
+| 일일 변경 상한 | 3회 | `backend/app/services/naver_ad/guardrail_gate.py::_MAX_DAILY_CHANGES` |
+| 입찰 클램프 | 70~100,000원·10원 단위 | `backend/app/services/naver_ad/guardrail_gate.py::_MAX_BID` (이중 방벽 — writer에도 있음) |
+| 누적 상승 상한 | 기준가 ×2.0 | `backend/app/services/naver_ad/guardrail_params.py::max_auto_up_multiple` |
+| 스톱로스 | 무전환 지출 ≥ 기준가 ×10 📄 | [미상 — 상수 미조회] |
+| BEP 이익하한 | 보정ROAS < 목표면 증액 금지 | accel_gate_view가 이 게이트의 차단량을 셈(§8) |
+| CPC 급등 하향 배율 | ×2 📄 (PLAN 문서엔 ×1.5 — 코드가 정본 📄) | [미상 — ref 111도 실행 코드 상수 못 찾음] |
+| 제외 슬롯 | 그룹당 70칸(파워링크 자동은 60 📄) | `backend/app/services/naver_ad/exclusion_slot_usage.py` |
+| SPECS(DB 우선) | ss_min_click 10 / ss_window_days 14 / pl 5·30 / cooldown_hours 2 📄 | 현재값 표면: `GET /api/naver/ad/settings/guardrail-params` |
 
-## §3-b. ★쇼핑 검색어 제외를 「자동 발사」로 바꾸면 (2026-08-30 조사)
-
-Jino 질문 *「1번을 자동화하면 장단점이 뭐야?」*에 대한 실측 답. §0-★2 **A안**의 근거다.
-
-### 왜 막혀 있었나 — **명시적 근거가 없다**
-원래 이유는 *「쇼핑은 API로 제외를 못 쓴다」*(2026-07-21, HTTP 400 `code 3728`)였고 **그 전제는 D-NAO-180·181(08-17)로 폐기**됐다(`PUT /ncc/targets`로 쓸 수 있고 기존 보존·`editTm` 낙관적 잠금·롤백 3겹 배선 완료). 폐기 «이후» 「왜 아직 안 여는가」의 새 근거는 **트랙·계약 전수 grep으로 안 나온다.**
-⇒ 지금 상태는 **의도적 정지가 아니라 승인이 안 난 채 남은 관성**이다.
-
-### 전환 귀속 비대칭 — 이게 파워링크와의 결정적 차이
-
-| source | 30일 행수 | 전환>0 행 |
-|---|---:|---:|
-| 파워링크(`expkeyword`) | 78,952 | **0 (0.00%)** — 구조적으로 못 잼 |
-| 쇼핑 | 316,273 | **1,521 (0.48%)** — 실제 구매가 찍힌다 |
-
-파워링크는 「전환을 못 재는」 축이라 잘못 잘라도 **잃을 게 없어** 자동이 안전하다. **쇼핑은 잘못 자르면 진짜 매출을 잃는다.**
-
-### 장점
-- **카나리에 총알이 생긴다**(지금 M4가 막힌 유일한 이유)
-- **스위치 하나** — 승인원 `ss_exclude`는 파워링크와 **같은 상수**이고 킬스위치 화이트리스트에도 이미 등록돼 있다
-- 게이트가 이미 보수적: 14일 창·클릭≥10·**전환 0 fail-closed**·화이트리스트·최소비용
-- **당장 폭주하지 않는다** — 오늘 A 게이트 통과 후보 **0건**
-
-### 단점 (셋 다 실측)
-1. **오탐이 실증된다 — 14일 창이 좁다.** 카나리 그룹 안의 실제 쌍:
-
-| 검색어 | 90일 전환 | 14일 창 |
-|---|---:|---|
-| 갤럭시**폴드와이드** | **0** | 후보 |
-| 갤럭시**폴드8와이드**필름 | **9** | ★24클릭·전환 0 — **게이트를 통과할 뻔했다** |
-
-한 글자 차이인데 성과가 갈린다. 30일로 넓히면 후자는 전환 8건이 보인다 — **「방금 산 사람이 아직 안 잡힌」 구간을 자를 위험.**
-2. ★★**되돌릴 손이 없다.** 수동 재개방 API **0건**(grep 확인). 자동 재심사(PX3)는 `next_review_at`이 있어야 도는데 계정 제외 3,986건 중 **우리가 만든 건 2칸뿐**이다(나머지는 `console_import`=대행사분이라 이 루프에 안 잡힌다).
-3. **일일 캡 10건을 파워링크와 나눠 쓴다**(`_SS_DAILY_EXCLUDE_CAP=10`, 계정 전체 공유) — 쇼핑용 별도 예산이 생기는 게 아니다. 그룹당 칸은 70개(카나리 그룹 11칸 사용).
-
-### ⚠️그리고 B는 자동화 대상이 아니라 «정리» 대상이다
-§1-b의 ②(레거시 `proposal_writer`)는 **게이트가 0겹**이고(15일 비용 상위 20건을 그냥 뽑는다), 오늘 만든 11건이 **카나리 스코프를 벗어나 6개 그룹**(S23울트라·S24울트라·S25울트라·S25FE·노트20울트라 등)에 걸쳐 있다. 다행히 SHOPPING 대상은 실행돼도 **항상 실패**한다(WEB_SITE 전용 API) — 그러나 그 안전은 설계가 아니라 **우연**이다.
+⚠️옛 판 §5의 판정 임계값 다수(표본 30·창 3h·UP 최소 전환 2 등)는 재검증이 가장 얕았던 절이다(ref 111 자백: 18개 중 1개 시도) — 전부 📄로 강등. 값을 쓰려면 코드를 열어 확인할 것.
 
 ---
 
-## §4. 액셀·브레이크 대칭 — ★두 축을 섞지 말 것
+## §6. 주기 체크리스트 — 모드 A: 정지 국면 (지금)
 
-북극성 §7이 *「자동화는 브레이크가 액셀보다 만들기 쉬워서 방치하면 반드시 ROAS 방어로 기운다」*(D-NAO-85 실측: ROAS +7% · **매출 −52%**)고 경계한다. 그런데 대칭은 **두 가지 다른 질문**이다.
+질문은 둘: 「멈춰 있다는 사실이 보이는가」 「멈춘 동안 부패·손실이 쌓이지 않는가」. 대행사는 정지 중에도 계정을 바꾼다. (🤖=자동 산출, 표면 병기 / 👁=사람이 봐야 함. 주기 근거: 일=D-1 확정 적재+아침 배치 사슬, 주=승격 TTL 14일·주간 잡, 월·시즌=전환 정착 D+7·시즌 준공선. 매분·매시 항목이 없는 이유: 정지 국면엔 그 주기의 신호가 실재하지 않는다.)
 
-| 축 | 액셀 | 브레이크 | 판정 |
+### A-일 1회
+
+| # | 무엇 | 왜 (목적 5요소·금지선) | 좌표 | 판정 | 이상 시 |
+|---|---|---|---|---|---|
+| A1 🤖 | 수집 크론 생존·데이터 나이 | ①의 전제 | `GET /api/scheduler/health` → 전역 헬스 배너. `backend/app/services/scheduler_health.py`(잡 자기보고+data_stale 이중 감시) | STALE/FAILED 0건 | 해당 잡 재실행·원인 조사 |
+| A2 👁 | 죽은 승인 카드 잔량 | 원장이 거짓말 금지 — 콘솔이 «실행 가능»으로 오표시 📄 | `naver_proposals.executed_change_log_id` IS NULL ∧ approved (§14 레시피) — 전용 표면 없음(§12-1) | 0건 정상 | 배포 판단(§0-2-C) |
+| A3 🤖 | 반성 루프 침묵 — 재료 없음 vs 고장 구분 | ⑤ (20일 침묵 실사고 재발 방지) | `backend/app/services/naver_ad/reflection_health.py` → `GET /api/naver/ad/wisdom-scorecard` 응답 reflection_health → 콘솔 `frontend/src/pages/NaverAdOptimizationConsole.tsx` | 재료 있는 결번만 이상. 08:35 전 조회는 not_due | 스케줄러 로그 조사 |
+| A4 🤖 | 우리 제외의 생존(대행사 되돌림) | 학습 오염 금지선 — 되돌림 2회 전례, 1회는 로그 무흔적 | `verify_search_term_exclusions` 08:25 → `backend/app/services/naver_ad/exclusion_survival.py`(delFlag까지 상태 대조) → `GET /api/naver/ad/search-term/exclusion-survival` | 되돌림 0 | 기록·표면화(감시가 조치를 바꾸면 감시가 아니다) |
+| A5 🤖 | 제외 슬롯 사용률·미귀속 칸 | 70/70=음의 레버 소멸 | `GET /api/naver/ad/search-term/exclusion-slots` ← 09:35 스윕 적재 | 70/70 무조건 빨강. 미귀속을 0으로 뭉개지 않았는지 | 처분은 Jino(소유권 분리 계열) |
+| A6 🤖 | 외부 변경 감지(소재 grain 포함) | 학습 오염 — 값 비교만으론 왕복 되돌림이 무변동으로 보임 | `backend/app/services/naver_ad/ad_external_change.py`(editTm 앵커) · `backend/app/services/naver_ad/bm_diff.py` | 기대값 없음 — 급증만 주시 | 개입 검증은 소유권 분리 전 금지 |
+
+### A-주 1회
+
+| # | 무엇 | 왜 | 좌표 | 판정 |
+|---|---|---|---|---|
+| A7 👁 | 정지 일수 자체(마지막 실집행 이후 N일) | ④ — D-NAO-226 검토의 원료 | §14 실쓰기 레시피. 전용 카운터 없음(§12-5) | 추세가 늘기만 하면 병목은 §0-2-A·B |
+| A8 🤖 | pending 만료 발생 | 「승인 대기가 조용히 죽는」 경로 — promote 300건 만료 전례 📄 | `GET /api/naver/ad/proposals` — 만료 알림 없음(§12-2) | expired 신규 0 |
+| A9 🤖 | 지혜 성적표의 «표본 0» 정직성 | ⑤ — 0을 «문제없음»으로 렌더 금지 | `backend/app/services/naver_ad/wisdom_scorecard.py`(has_evidence/evidence_gap) → `GET /api/naver/ad/wisdom-scorecard` | «잴 것 없음»과 «재 봤더니 나쁨»이 구분돼 보이는가 |
+| A10 👁 | 학습 재료 만료 시계 | ⑤ — 10-28에 3,863건 이탈 📄 | 표면 없음(§12-8) | 날짜 상기만 — 재개 촉구는 이 문서 소관 아님 |
+
+### A-월·시즌 / 이벤트
+
+- A11 🤖 소급 불가 축 지속 가동(`sync_naver_keyword_baseline` 09:50) — 죽으면 그 구간 영구 결번. A1 배너가 겸함.
+- A12 👁 시즌 준공선(아이폰 9월·Z 7월중~8월초, D-NAO-183 불가역 📄) — 재개 전후 비교 창 설계 시 상수.
+- A13 [점화 직전] preflight 조회(§2) + 부품 생존(§14 — ⚠️레시피 수정됨) + **캠페인 타입×레버 정합은 사람이 대조**(§12-4).
+- A14 [배포 직후] 블루-그린이 pm2 로그 파일을 옮긴다 📄 — 배포 «전» 발화가 활성 로그에서 사라짐(에러 아닌 빈 결과). 정본은 `scheduler_state.last_run_at`.
+
+## §7. 주기 체크리스트 — 모드 B: 가동 국면 (실집행이 재개되면. 모드 A 전 항목 유효)
+
+### B-매시간
+
+| # | 무엇 | 좌표 | 판정 |
 |---|---|---|---|
-| **자동 발사 경로 수** | 7 | 7 | **표면상 대칭** |
-| **학습 가능 파라미터(SPECS)** | **0** | **7종 전부** | ⚠️**비대칭** |
+| B1 🤖 | 시간당 레인 발화·킬스위치 실시간 재확인 | `run_naver_auto_operator_hourly` :20 → `backend/app/services/naver_ad/auto_operator.py::run_hourly_lane`(실행 직전 auto_operate 재확인 — 킬스위치 OFF pending은 폐기 안 함 「정지≠폐기」) | OFF 시 즉시 hold |
+| B2 🤖 | 손실 방어 발동(RL3 고삐·CD 밸브) | `backend/app/services/naver_ad/auto_operator.py::_intraday_loss_leash`(추정ROAS<BEP→한 등 하향, kill 아닌 leash — D-NAO-59) · 발동 캠페인은 탐색 UP 제외 | diary에 [순위고삐] 구분 기록 |
+| B3 🤖 | 예산 페이싱 | `backend/app/services/naver_ad/budget_pacing.py`(소진율≥90% ∧ 프록시 ROAS≥target · fail-closed 8종 · ★프록시는 상한 프록시 — 광고 외 유입 포함) · 00:05 원복 | 증액분 익일 원복 확인 |
+| B4 👁 | 무인 발화 확증 | as_of·last_run_at이 크론 슬롯과 소수점까지 일치(§14) — 자동 판정 없음(§12-9) | 임의 시각=수동 |
 
-⇒ 「엔진이 올릴 수도 있다」는 참이지만, 「엔진이 **배워서** 더 올리게 되는 길」은 없다. 배움은 조이는 쪽으로만 열려 있다.
+### B-일 1회
 
-**액셀 전용 상한(=액셀의 브레이크)**: 누적 상승 ×2.0 · 레인당 소재 쓰기 15건 · 결정 5건 · 장중 단독 UP 일 1스텝.
+| # | 무엇 | 좌표 | 판정 |
+|---|---|---|---|
+| B5 🤖 | 승인→실행 관통률 | A2와 같은 SQL — 가동 중 신규 죽은 카드 0이어야. 레인별 스코프 검사 단일화는 `backend/app/services/naver_ad/auto_operator.py::engine_approve` | 신규 0 |
+| B6 🤖 | 실집행↔일기 정합 | `backend/app/services/naver_ad/diary.py` ← 08:35 `backend/app/services/naver_ad/reflection_loop.py::run_daily_reflection`(backfill→해석, 단계 격리) | 실쓰기 수 = diary execute 행 수 |
+| B7 👁 | 가드레일 차단 사유 분포 | 봉투 현재값 `GET /api/naver/ad/settings/guardrail-params`. ★전례: 차단 1위는 봉투(2.2%)가 아니라 소급채점 stale(55%)이었다(guardrail_params 독스트링) | 봉투 차단 급증 시 상류 데이터부터 의심. 완화는 사람 승인 경로만 |
+| B8 🤖 | 대행사 되돌림 0 (M4 합격 관측 항목) | A4·A6 기제 | 카나리 창 «연속» 관측 |
+| B9 🤖 | 총이익 스코어카드·소급 채점 | 08:30 `run_naver_retro_scoring` · 08:40 `run_naver_profit_scorecard` · 08:55 정산 · 09:03 학습 | 성적엔 자(尺)의 가정·창 병기 — §9 |
+| B10 👁 | 누적 상향 상한(×2.0) 잔여 | §5 — 기준점 리셋은 사람 개입만 | 상한 근접 목록 |
 
----
+### B-주 1회
 
-## §5. 가드레일 (지금 값)
+- B11 👁 **액셀·브레이크 대칭** — §8.
+- B12 🤖 지혜 승격·성적(`run_naver_wisdom` 08:45, TTL 14일/유사 3회 → 독립 판사) — 「지혜→총이익 기여」 양수 ≥1건이 M5 관측 항목.
+- B13 🤖 판정면 주입 클램프 — `backend/app/services/naver_ad/wisdom_apply.py::propose_param_changes`: scope='unconditional' ∧ SPECS 화이트리스트 **둘 다**일 때만 제안. 반영 트리거는 콘솔 승인 핸들러(`POST /api/naver/ad/proposals/{proposal_id}/status`)뿐 — D-NAO-249 「승인=반영」, 무승인 자동 반영 0건 확인.
+- B14 👁 카나리 성적 일반화 금지(M4 «안 함») — 확대는 새 계약.
 
-| 이름 | 값 |
-|---|---|
-| 변경폭 클램프 | ±15% (탐색 ±30%) |
-| 쿨다운 | 2시간 |
-| 일일 변경 상한 | 3회 (자동 하향 별도 3회) |
-| 입찰 범위 | 70원(쇼핑 50원) ~ 100,000원, 10원 단위 |
-| 누적 상승 상한 | 기준가 **×2.0** |
-| 스톱로스 | 무전환 지출 ≥ 기준가 **×10** |
-| BEP 이익하한 | 보정ROAS < 목표(BEP×공격성)면 증액 금지 |
-| 일예산 | 상한 불가침 / 증액폭 최대 +100% |
-| CPC 급등 하향 | 당일 CPC > 정착창 **×2** ⚠️(PLAN 문서엔 ×1.5로 적혀 있다 — **코드가 정본**) |
-| 검색어 제외 슬롯 | 그룹당 **70칸**(파워링크 자동은 60) |
+## §8. 횡단 — 액셀·브레이크 대칭 검사 (금지선 1번의 집행 지점)
 
-**판정 임계값** — ★모듈 상수인지 DB(SPECS)인지가 중요하다. DB면 콘솔에서 바꿀 수 있고, 모듈 상수면 배포해야 한다.
+상습 실패 = ROAS 방어 표류(D-NAO-85: ROAS +7%·매출 −52%). 대칭은 **두 축의 다른 질문**이고, 집행 지점 셋이 이미 배선돼 있다:
 
-| 이름 | 값 | 출처 |
+| 지점 | 무엇을 세나 | 좌표 | 판정 |
+|---|---|---|---|
+| ① 게이트에서 죽는 액셀 | BEP 증액금지가 하한 자에서 몇 건 막았고 상한이면 몇 건이었나 — 양끝 나란히 | `backend/app/services/naver_ad/accel_gate_view.py` → `GET /api/naver/ad/diagnosis` 응답 accel_gate | 하한-상한 격차가 크면 자의 폭이 액셀을 죽이는 것. unmeasurable은 통과로 안 센다 |
+| ② 봉투 변경의 방향 분류 | SPECS 키별 brake/accel 카운트 | `backend/app/services/naver_ad/wisdom_scorecard.py`의 방향 분류 → 콘솔(isBrakeOnlyDrift) | brake만 쌓이면 표류 — 단 실집행 0 국면은 verdict_pending |
+| ③ 확장 압력의 실가동 | 액셀의 실물 | `backend/app/services/naver_ad/expansion_pressure.py`(3게이트 fail-closed) → 배분 `backend/app/services/naver_ad/expansion_allocator.py` | expansion_mode=True인데 집행 0 지속이면 액셀 배선 단선 |
+
+축 구분(옛 판 §4 📄): 자동 발사 «경로»는 7:7 표면상 대칭이나, **학습 가능 파라미터(SPECS)는 브레이크 7 : 액셀 0 비대칭** — 「배움이 조이는 쪽으로만 열려 있다」. [미상 — SPECS 방향 분류는 ref 111 미조회.]
+
+## §9. 횡단 — 자(尺) 건전성 (D-NAO-230: M4 합격 관측엔 총이익 항이 없어 자가 부풀어도 통과한다)
+
+| 검사 | 좌표 | 판정 |
 |---|---|---|
-| 표본 게이트(시간당 imp합) | 30 | 모듈 상수 |
-| 최근 시간 창 | 3시간 | 모듈 상수 |
-| 승인 최소 클릭 | 10 | 모듈 상수 |
-| 장중 UP 최소 전환 | 2 | 모듈 상수 |
-| 장중 UP 여유계수 | ×1.2 | 모듈 상수 |
-| `ss_min_click` / `ss_window_days` | 10 / 14 | **DB(SPECS) 우선** |
-| `pl_min_click` / `pl_window_days` | 5 / 30 | **DB(SPECS) 우선** |
-| `cooldown_hours` | 2 | **DB(SPECS) 우선** |
+| 구간 자 생존 [0.827, 점추정] | `backend/app/services/naver_ad/correction_interval.py::CORRECTION_FACTOR_FLOOR`(=0.827, 근거 창 2026-07-25~08-23, ref 95) · `backend/app/services/naver_ad/diagnosis.py::_as_interval` | 하한 1.0 회귀는 결함. factor_floor_applied 확인 |
+| 산출 불가 시 퇴화 | source unavailable이면 [1,1](근거 없이 매출 17% 깎기 금지) | unavailable인데 0.827 적용이면 결함 |
+| 점추정 창 | `backend/app/services/naver_ad/diagnosis.py::_CORRECTION_LOOKBACK_DAYS`(30일 롤링). ★하한은 고정 창 상수 — 재검 주기 없음(§12-7) | — |
+| 실운용 | 카나리·M5 성적 판독은 **「하한으로도 흑자인가」**(북극성 §6 각주) | 자의 가정·창 병기 없는 성적은 판정 재료 아님 |
+| 밴드 순환성 | 캠페인유형·상품BEP·절대액 3축을 «발견»으로 소비 금지 | 🧠 자동 검사 없음 — 새 판정 규칙 추가 시 사람이 대조 |
 
----
+## §10. 금지선 (정책 — 옛 판 §7 유지, 라이브 대조 대상 아님)
 
-## §6. 돈 (관측 2026-08-30)
+- `optimizer` 'ours' 아닌 캠페인 쓰기 절대 금지(D-NAO-13, 코드 하드체크) · 목적함수는 총이익 절대액(D-NAO-59) · **하한 자 적자면 카나리 확대 금지**(D-NAO-230) · 예산 변경 개방 금지 · 개별 캠페인 하드코딩 금지 · 카나리 성적 즉시 일반화 금지 · 홀드아웃 없이 발견을 집행에 넣지 않음(판정면 주입은 A/B 등급만) · 되돌릴 수 없는 액션은 항상 사람 Confirm(D-NAO-5·42), 위임 스위치는 Jino만(D-NAO-25) · 지혜발 파라미터 변경은 승인 카드·SPECS·봉투 안에서만(D-NAO-249), 무승인 자동 반영 금지 · 대행사 칸 반납 금지(소유권 분리 협의 전) · 실험 배치(memo) 캠페인 점화 금지 · 새 게이트·안전장치 발명 금지.
+- 소진·폐기: yardstick 금지선 2건은 D-NAO-234·236으로 해제 📄(2026-08-24 배포).
 
-⚠️**창은 라벨과 맞춰 적을 것** — 초판이 「30일」이라 썼으나 실제 창은 **07-30~08-29(31일 포함)**였다. 계약 C5가 요구하는 「창 병기」 규율에 초판이 스스로 어긋났고 완료 QA가 잡았다.
+## §11. 문서·코드·라이브가 어긋난 자리 (반복 사고 지점 — ref 111 판정 병기)
 
-| | 비용 | 전환 | 전환액 | ROAS |
-|---|---:|---:|---:|---:|
-| 계정 전체 (07-30~08-29, **31일 포함창**) | 19,923,726원 | 2,225 | 35,377,700원 | **177.5%** |
-| **카나리 캠페인 (같은 창)** | **7,724,101원** | — | 11,583,480원 | **149.9%** |
-| 계정 7일 | 4,051,618원 | — | — | — |
-| 어제(08-29) | 537,105원 | — | — | — |
+| # | 어긋남 | 정본 | ref 111 |
+|---|---|---|---|
+| 1 | `backend/app/services/naver_ad/naver_execution_harness.py` docstring 「자동 발사 없음」 ↔ `backend/app/services/naver_ad/search_term_ss_lane.py::_autofire_exclude`가 실제 자동 배선(08:50) | 코드(ss_lane) | 재현 |
+| 2 | `backend/app/services/naver_ad/auto_operator.py::AD_BID_CANARY_CAMPAIGNS`(카나리 제한) ↔ `backend/app/services/naver_ad/auto_operator.py::AD_BID_ROUTING_ENABLED`=True라 `backend/app/services/naver_ad/auto_operator.py::_ad_bid_canary`가 무조건 True — 카나리 범위 제한은 **지금 작동 안 함** | 스위치 | 재현 |
+| 3 | `backend/app/services/naver_ad/adgroup_scope.py`의 in_scope_now·campaign_level_allowed_now — 프로덕션 호출 0건(테스트만), 화면 `backend/app/services/naver_ad/pao_scope_roster.py`는 진리표를 자기 재조합(★ref 109: 「행 없음=전 그룹 ON」을 전 그룹 False로 계산 📄 — §12-10) | ⚠️미확정 — 잠재 결함 감시 | 재현(호출 0건) |
+| 4 | `docs/contracts/CONTRACT_ignition_readiness.md` 헤더 「초안—승인 대기」 ↔ 사실상 종결 | 확인줄 | 재현 |
+| 5 | 카나리 계약 헤더에 점화 완료 표시 없음 📄 | 확인줄 | 미상 |
+| 6 | PLAN CPC ×1.5 ↔ 코드 ×2 📄 | 코드 📄 | 미상(실행 코드 상수 미발견) |
+| 7 | §14 부품 생존 레시피가 prod에서 실행 불가였다(**반증 3** — 수정 반영됨) | 이 문서 | 반증→수정 |
 
-⚠️ **카나리의 총이익은 이미 적자로 출발했다** — 점화 시점 기준선 **하한 자 −275,787원**(있는 그대로 −220,835 / 상한 −119,729). 계약 §3 금지선이 *「하한 자 기준 적자면 카나리 확대 금지」*라 **지금 상태로는 확대가 막혀 있다.**
-⚠️ 창을 안 밝히면 답이 뒤집힌다 — 흑자에 필요한 제외 칸이 30일 창이면 189칸(불가), 최근 7일 창이면 19칸(가능). **모든 총이익 수치엔 창을 병기할 것.**
+## §12. [미배선]·[표면 없음] — **13건** (+판정 보류 2)
 
-**최근 7일 실제 활동**: `naver_change_log` 756건 중 **우리 엔진의 실쓰기 0건**(전부 `flight_pacing` 관찰기록) · **대행사 238건**(입찰 119 · 키워드 제거 133 · 상태 4).
+배선·수리는 전부 이 문서 범위 밖 — 목록이 산출물이다.
 
----
+1. [표면 없음] 죽은 승인 카드 카운터(콘솔은 오히려 «실행 가능» 오표시 📄).
+2. [표면 없음] pending 만료(expired) 알림 — promote 300건 무음 만료 전례 📄.
+3. [미배선] prod↔origin/main 배포 드리프트 상시 감시 — CAS는 배포 순간만.
+4. [미배선] 점화 preflight의 캠페인 타입×레버 정합 경고(§0-1의 구멍을 못 잡음).
+5. [표면 없음] 「마지막 실집행 이후 N일」 카운터.
+6. [표면 없음] Slack 발송 생존 — `backend/app/services/naver_ad/slack_notifier.py`는 webhook 미설정 시 무음 no-op이 정상 경로. prod 설정 여부 [미상].
+7. [미배선] 보정계수 하한 0.827의 근거 창(07-25~08-23) 재검 주기.
+8. [표면 없음] 학습 재료 만료 시계(10-28 📄).
+9. [미배선] 무인 발화 자동 판정(소수점 대조가 수동 SQL).
+10. [미배선·알려진 결함] `backend/app/services/naver_ad/pao_scope_roster.py`가 D-NAO-244 진리표 미준수 📄(ref 109 — 현 prod엔 스코프 행이 있어 미발현).
+11. [미배선·알려진 결함] `backend/app/routers/naver_ad.py`의 스코프 PUT이 갱신에도 before_value=None 📄 — 되감기 오염 위험(미발현).
+12. [미배선] **profit_scorecard(목적함수 그 자체)의 API·화면 배선 0건** — diary·Slack만(§1-2).
+13. [미배선] 관할 밴드 × 캠페인유형 교차 표면(perf 하니스별로 campaign_type 사용이 갈린다 — ref 111).
 
-## §7. 금지선 (지금도 유효한 것)
+판정 보류(배선 유무 자체가 [미상]): ⓐ관할 분리를 총이익 기준으로도 하는지 ⓑ상품 단위 실현 이익 도달 여부.
 
-- `optimizer='ours'` 아닌 캠페인 **쓰기 절대 금지**(D-NAO-13, 코드 하드체크)
-- **목적함수는 총이익 절대액**이지 ROAS가 아니다(D-NAO-59) — ROAS 방어로의 표류가 이 트랙 상습 실패 모드
-- **하한 자 기준 적자면 카나리 확대 금지**(D-NAO-230)
-- 예산 변경 개방 금지 / 개별 캠페인 하드코딩 금지 / 카나리 성적 즉시 일반화 금지
-- **홀드아웃 없이 발견을 집행에 넣지 않는다**
-- 되돌릴 수 없는 액션(신규 캠페인·재구축·예산 상한 인상)은 **항상 사람 Confirm**(D-NAO-5·42), 위임 스위치는 **Jino만**(D-NAO-25)
-- 지혜발 파라미터 변경은 **Jino 승인 카드 경유·SPECS 3종·봉투 안**에서만(D-NAO-249). 무승인 자동 반영 금지(D-NAO-54)
-- 밴드 정의 3축(캠페인유형·상품BEP·절대액)을 **발견의 근거로 재사용 금지**(순환성)
-- 대행사 칸은 우리가 반납하지 않는다 — 소유권 분리 협의 전엔 금지선
-- 실험 배치(memo) 표기 캠페인 점화 금지 / 새 게이트·안전장치 발명 금지
+## §13. 스코프 밖이지만 의존하는 것
 
-**소진·폐기된 것**: yardstick 금지선 2건(계수 코드 동결·자 단독 배포 금지)은 D-NAO-234·236으로 목적 달성 후 해제(2026-08-24 배포 완료).
+상품 원가·매핑(product-connection-map 트랙) · 주문 수집(프록시 매출·보정계수 분모) · Wing 매출 정합 · 타 트랙 마이그레이션이 배포를 막는 구조(§0-2-C) · Mac 페처·IP 허용목록 · 쿠팡 계열 크론(§0-4 — 기록만).
 
----
+## §14. 재는 법 (숫자가 낡으면 여기부터)
 
-## §8. Jino 결정 대기 (8건)
-
-| 무엇 | 대기 시작 | 막고 있는 것 |
-|---|---|---|
-| **소유권 분리**(§8-②) | 2026-08-19 (**11일**) | 재개방·A급 실험·개입 검증 **3개 동시** |
-| ADVoost·GFA 취급(§8-④) | 2026-08-19 | 90일 528만원의 처분 |
-| 스마트스토어 대조축 개통(§8-⑤) | 2026-08-19 | 커머스 절반의 연관 확인 |
-| n-gram 「관련어인데 적자」 처분(§8-⑥) | 2026-08-19 | M2 S1-ⓒ 출구 |
-| A3 회색 토큰 4건(§8-⑦) | 2026-08-19 | L1 텍스트 축 확정 — **데이터로 못 가른다, Jino만 판별 가능** |
-| WEB_SITE 승계 3건(§8-⑧) | 승계분 | 급하지 않음 |
-| ref94 하한 음수 건 후속 처분 | 2026-08-23 | P2 상신 |
-| **§0-★2-A 카나리 실집행 경로** | **2026-08-30(오늘)** | **M4 판정 자체** |
-
----
-
-## §9. ★문서·코드·라이브가 어긋난 자리 (이 트랙의 반복 사고 지점)
-
-| # | 어긋남 | 어느 쪽이 정본인가 |
-|---|---|---|
-| 1 | `naver_execution_harness.py:1296` docstring: *"자동 발사 없음… 자동 승인원(ss_exclude)은 정의만 돼 있고 어디에서도 자동 승인을 배선하지 않는다"* ↔ `search_term_ss_lane._autofire_exclude`가 **실제로 자동 승인+집행을 배선**하고 매일 08:50에 돈다 | **코드(ss_lane)가 정본.** harness 주석이 stale |
-| 2 | `AD_BID_CANARY_CAMPAIGNS`(카나리 1개 제한) ↔ `AD_BID_ROUTING_ENABLED=True`라 `_ad_bid_canary`가 **campaign_id와 무관하게 무조건 True** | 스위치가 정본 — 「카나리 범위 제한」은 **지금 작동하지 않는다** |
-| 3 | `adgroup_scope.in_scope_now`·`campaign_level_allowed_now` docstring: *"화면·진단·API에서 쓴다"* ↔ **프로덕션 호출부 0건**(테스트만). 화면(`pao_scope_roster`)은 진리표를 **자기 나름대로 재조합** | ⚠️미확정 — 재조합이 진리표와 다른 값을 낼 수 있는지 미대조. **잠재 결함으로 감시** |
-| 4 | `CONTRACT_ignition_readiness.md` 헤더 `상태:` = **「초안 — Jino 승인 대기」** ↔ 실제로는 8/26 착수·§4-C 12/13 완료·사실상 종결 | 확인줄이 정본. **헤더만 보면 오독한다** |
-| 5 | 카나리 계약에 **「점화 완료」 표시가 헤더에 없다** — 8/29 12:53 점화가 확인줄에만 | 확인줄이 정본 |
-| 6 | PLAN 문서 CPC 급등 배율 **×1.5** ↔ 코드 **×2** | 코드가 정본(개발자가 스스로 명시) |
-
----
-
-## §10. 트랙 목표 대비 위치
-
-**궁극 목표**(Jino 2026-07-19, D-NAO-59): *"Roas는 떨어지지만 매출이 늘어서 총 이익이 늘어나는 경우, 구간도 분명히 있거든. 우리의 최종목표는 이거야."*
-
-**진행률 2/7** — M0·M1만 닫힘. **2026-08-21 이후 30여 세션 동안 불변.**
-
-| M | 내용 | 상태 |
-|---|---|---|
-| M0 효율 검정 | ✅ | |
-| M1 L0 마감 | ✅ | |
-| M2 L2 배선 | ⬜ | S1 완료, S2는 T1만 |
-| M3 L4 부품 | ⬜ | 조인은 실재하나 `wisdom_with_evidence=0` |
-| **M4 L3 재개** | ⬜ | **점화했으나 §0-★1로 관측 창이 위태롭다** |
-| M5 3속도 루프 | ⬜ | |
-| M6 S4 정교수학 | ⬜ | |
-
-**5요소 중 움직인 것**: ④자동화(점화 1건) · ⑤학습(재료 확보). **①②③은 여러 세션째 0.**
-
----
-
-## §11. 재는 법 (숫자가 낡으면 여기부터)
-
-prod 조회는 스크립트를 파일로 만들어 `scp` 후 stdin 실행한다(인라인 heredoc은 따옴표가 벗겨져 SQL이 깨진다). 스크립트 첫 줄에 `load_dotenv("/home/ubuntu/ohisell/backend/.env")`.
+prod 조회는 스크립트를 파일로 만들어 `scp` 후 stdin 실행한다(인라인 heredoc은 따옴표가 벗겨져 SQL이 깨진다). 스크립트 첫 줄에 `load_dotenv("/home/ubuntu/ohisell/backend/.env")`. 서버는 UTC.
 
 ```bash
 ssh -o BatchMode=yes sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python - < /tmp/q.py"
@@ -298,27 +298,19 @@ ssh -o BatchMode=yes sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .ve
 
 | 무엇 | 어떻게 |
 |---|---|
-| 엔진의 손 범위 | `SELECT campaign_id, optimizer, auto_operate FROM naver_campaign_settings` + `SELECT * FROM naver_adgroup_scope` |
-| 크론이 돌았나 | `SELECT job_name, last_run_at, last_status FROM scheduler_state WHERE job_name LIKE 'run_naver%'` — ★**무인 판정 = `last_run_at`이 크론 슬롯과 소수점까지 일치** |
-| 우리 엔진 실쓰기 | `naver_change_log`에서 `action NOT IN ('flight_pacing')` 이고 `dry_run=0` — `external_*`는 대행사 |
-| 죽은 카드 | `naver_proposals` `status='approved' AND approval_source IS NOT NULL` + `adgroup_scope.blocked_by_scope` |
-| 돈 | `naver_ad_daily`에서 `adgroup_id <> '__backfill__'` (★keyword 필터 걸지 말 것 — 2배 중복 사고 전력) |
-| 부품 생존 | `python scripts/ignition_parts_alive.py` (prod에서 — 로컬은 4KB 미끼 DB) |
-| 진행률 | `grep -c '^[[:space:]]*-[[:space:]]*\[[xX]\]'` / `grep -c '^[[:space:]]*-[[:space:]]*\['` — TRACK-CONTRACT 블록 안에서만 |
+| 엔진의 손 범위 | `SELECT campaign_id, optimizer, auto_operate FROM naver_campaign_settings` + `SELECT * FROM naver_adgroup_scope` (★naver_campaign_settings는 소수 행짜리 override 테이블 — 전체 캠페인 목록은 naver_entity_snapshot) |
+| 크론이 돌았나 | `SELECT job_name, last_run_at, last_status FROM scheduler_state` — ★무인 판정 = `scheduler_state.last_run_at`이 크론 슬롯과 **소수점까지** 일치 |
+| 우리 엔진 실쓰기 | `naver_change_log`에서 action NOT IN ('flight_pacing') ∧ dry_run=0 — external_*는 대행사 |
+| 죽은 카드 | `naver_proposals`에서 status='approved' ∧ `naver_proposals.executed_change_log_id` IS NULL |
+| 돈 | `naver_ad_daily`에서 `adgroup_id <> '__backfill__'` (★keyword 필터 걸지 말 것 — 2배 중복 사고 전력. ★창의 시작·끝 날짜를 라벨에 명시 — ref 111 반증 1·2가 「하루 밀림」 한 원인의 두 증상이었다) |
+| 부품 생존 | ⚠️**옛 레시피(「prod에서 ignition_parts_alive 실행」)는 실행 불가** — prod에 scripts/ 디렉터리가 없다(2026-08-30 실측, ref 111 반증 3). 수정: 로컬 `scripts/ignition_parts_alive.py`를 scp로 prod의 /tmp에 올린 뒤, /home/ubuntu/ohisell/backend 에서 .venv/bin/python 으로 실행 🧠(이 수정 레시피 자체는 미검증 — 스크립트는 포트 자동탐지·읽기 전용). ★repo 루트 4KB ohisell.db는 미끼 — prod에도 있다: 반드시 backend/에서 실행 |
+| 좌표 생사 | `scripts/check_pao_canon.py`를 python으로 실행 (repo 루트, S3 산출물) |
+| 진행률 | TRACK-CONTRACT 블록 안에서만 `grep -c '^[[:space:]]*-[[:space:]]*\[[xX]\]'` / `grep -c '^[[:space:]]*-[[:space:]]*\['` |
 
-⚠️ **시간대 혼재**: `scheduler_state.last_run_at` = **KST** / `naver_proposals.created_at`·`naver_change_log.changed_at`·`ops_diary_entries.created_at` = **UTC**(SQLite `now()`). 모르면 **「미상」이라 적고 추측하지 말 것.**
+⚠️**시간대 혼재**: `scheduler_state.last_run_at` = **KST** / `naver_proposals.created_at`·`naver_change_log.changed_at` = **UTC**(SQLite now()). 모르면 「미상」이라 적고 추측하지 말 것.
 
----
+## §15. 이 문서가 다루지 않는 것 / [미상] 목록
 
-## §12. 이번 조사가 다루지 않은 것
-
-- **`track_pao-ui-ux.md`(성과 소관 분리 화면)** — 별도 트랙·별도 세션 진행 중(PR #574). 소관이 겹치므로 손대지 않음
-- 트랙 파일의 D-NAO-1~236 개별 세부(헤더·최근 구간 중심으로 훑음)
-- `docs/PLAN_naver-profit-yardstick-review.md` 원문
-- 라이브 네이버 API의 `restrictKeywordCount`(API 호출 필요 — 읽기 전용 원칙상 스킵, DB 원장만 봄)
-- 쿠팡 계열 크론 에러 7종 — **PAO 밖**, 쿠팡 트랙 소관
-- §9-3(화면 진리표 재조합)이 실제로 다른 값을 내는지의 라인 대조
-
----
-
-*갱신: 이 문서의 숫자는 관측 시각의 스냅샷이다. 낡았다고 판단되면 §11의 명령으로 다시 재고, 구조(§1~§5·§7·§9)가 바뀌었으면 그때 이 문서를 고친다.*
+- **다루지 않음**: PAO UI/UX 트랙(성과 소관 분리 화면 — 별도 트랙) · 광고 전략(어느 상품에 얼마는 Jino 몫) · [미배선] 13건의 수리 · 값 자동 채움 대시보드(별도 계약).
+- **[미상] 주요** (ref 111 §6 전체 목록이 정본): §4 자동/Confirm 표의 검색어 제외 외 10항목 · §5 판정 임계값 다수 · 환경변수 기본값 반대 주장 · CPC ×2 코드 좌표 · SPECS 브레이크7:액셀0 실측 · 카나리 총이익 기준선 −275,787원 · BEP 171.1%와 현행 ROAS의 같은 창 비교 · change_log 756↔776 불일치의 원인 · D-NAO·PR 번호 전수.
+- 이 문서의 실측값은 전부 MEASURED 블록 안 스냅샷이다 — 관측 시각에서 몇 시간만 지나도 낡는다. **좌표가 낡으면 검사기가 잡고, 값이 낡으면 §14가 잡는다.**

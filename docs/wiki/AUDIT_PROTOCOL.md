@@ -40,6 +40,7 @@ grep -l "^enforcement: none" docs/wiki/*.md
 1. **«이 기능은 있다»를 근거로 내린 결론**이 있었는가? 3단계(존재/호출/영향) 중 어디까지 확인했나?
 2. 메모리·위키에 **기록된 지식** 중, 관련 코드 경로가 **읽지 않는 것**이 새로 보이는가?
 3. 새로 만든 쓰기 경로가 **실효 레이어**에 닿는지 확인했는가? ([[write-to-the-binding-layer]])
+4. **PAO_OPS.md 좌표 생사**는 사람이 다시 재지 않는다 — `python scripts/check_pao_canon.py`가 기계로 센다(계약 `docs/contracts/CONTRACT_pao_ops_canon.md` §8 · S3 산출물). 실패 목록이 곧 이 절의 후보다.
 
 발견은 표에 행으로 추가한다 — **추가 자체가 이 주의 산출물**이다.
 
