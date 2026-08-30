@@ -3748,3 +3748,41 @@ def test_probe_floor_uses_account_band_only_via_fallback():
     fired, reason = auto_operator._probe_trigger(
         curve, now, rank_floor=auto_operator._probe_rank_floor("1.0-2.0"))
     assert fired is True and "학습밴드" in reason
+
+
+# ══════════════════════════════════════════════════════════════════
+# ★D-NAO-244 부수 결함 — 시간당 레인이 스코프 밖을 approved로 커밋하던 자리
+#
+# 이 테스트가 없으면 auto_operator.py의 engine_approve 호출 한 줄을 지워도 나머지
+# 테스트는 전부 초록이다(스코프 단위 테스트는 함수만 보고 «레인이 그 문을 지나는가»는
+# 안 본다). prod 실측 죽은 카드 119건 중 92건이 정확히 이 레인에서 났다.
+# ══════════════════════════════════════════════════════════════════
+
+def test_hourly_lane_does_not_approve_out_of_scope_unit(db):
+    """★스코프 밖 유닛은 approved 카드를 남기지 않는다(harness도 안 부른다)."""
+    from app.models import NaverAdgroupScope
+
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-down", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-down", ad_date=window_from, clk=10, cost=100)
+    # 스코프를 «다른» 그룹으로 좁힌다 ⇒ 이 유닛(grp-1 소속)은 스코프 밖
+    db.add(NaverAdgroupScope(campaign_id=CAMPAIGN, adgroup_id="grp-딴데", role="accel", enabled=True))
+    db.commit()
+
+    curve = [
+        _hour(6, imp=15, clk=2, cost=100, avg_rank=2.0),
+        _hour(7, imp=15, clk=2, cost=100, avg_rank=2.0),
+    ]
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=NOW, fetch_intraday=lambda tid, d: curve,
+        )
+
+    mock_exec.assert_not_called()                 # 실행 시도 자체가 없다
+    assert result["approved"] == 0
+    approved = db.query(NaverProposal).filter(NaverProposal.status == "approved").all()
+    assert approved == []                         # ★죽은 카드 0
+    assert any("스코프" in (h.get("reason") or "") for h in result["held"])
