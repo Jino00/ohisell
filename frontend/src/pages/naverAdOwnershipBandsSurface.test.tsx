@@ -19,6 +19,8 @@ import { MemoryRouter } from "react-router-dom";
 
 // ★fixture에 타입을 건다 — `unknown`으로 두면 응답 타입에 필수 필드를 추가해도 tsc가
 //   fixture 갱신을 강제하지 않아 다음 필드 추가에서 조용히 어긋난다(적대 리뷰 P2).
+type BandName = import("../lib/api").NaverOwnershipBandName;
+
 const h = vi.hoisted(() => ({
   bands: null as import("../lib/api").NaverOwnershipBands | null,
   ownership: null as import("../lib/api").NaverOwnershipCampaigns | null,
@@ -84,7 +86,7 @@ const DAY = {
 
 /** prod 실측 모양(2026-08-29) — 픽스처가 prod와 같아야 결함을 잡는다. */
 function bandsPayload(over: Record<string, unknown> = {}) {
-  const band = (b: string, label: string, cost: number, note: string | null = null) => ({
+  const band = (b: BandName, label: string, cost: number, note: string | null = null) => ({
     band: b, label, note, cost, imp: 0, clk: 0, conv_amt: 0, roas: null, cpc: null,
     campaigns: 1, adgroups: 1, days: 1, share_of_cost: cost / 19479832,
   });
@@ -115,7 +117,7 @@ function bandsPayload(over: Record<string, unknown> = {}) {
   };
 }
 
-function ownershipPayload(band: string, over: Record<string, unknown> = {}) {
+function ownershipPayload(band: BandName, over: Record<string, unknown> = {}) {
   return {
     as_of: "2026-08-28",
     requested: "2026-08-28",
