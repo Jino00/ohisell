@@ -93,7 +93,7 @@
 - 카나리 총이익 기준선: 점화 시점 하한 자 −275,787원 📄(옛 판 §6, 재검증 안 됨) — 계약 금지선 「하한 자 적자면 확대 금지」에 걸려 있는 상태 📄.
 <!-- /MEASURED -->
 
-⚠️**ROAS 177.5%(31일 포함창)를 BEP 171.1%와 그대로 비교하지 말 것** — BEP 171.1%는 **391일 창 계정 블렌디드** 📄(ref 63)다. 창이 달라 「본전 위/아래」 판정은 [미상 — 같은 창으로 다시 재기 전엔 비교 불가]. 상품 단위 BEP는 624그룹 미확보 📄라 그 구간은 블렌디드로 뭉개진다(알려진 구멍).
+⚠️**§1-4의 ROAS(31일 포함창)를 BEP 171.1%와 그대로 비교하지 말 것 — 창이 다르다.** BEP 171.1%는 **391일 창 계정 블렌디드** 📄(ref 63)다. 창이 달라 「본전 위/아래」 판정은 [미상 — 같은 창으로 다시 재기 전엔 비교 불가]. 상품 단위 BEP는 624그룹 미확보 📄라 그 구간은 블렌디드로 뭉개진다(알려진 구멍).
 
 ### 1-5. 성과 판독의 구멍 (있는 것/없는 것만 — 배선 목록은 §12)
 
@@ -152,9 +152,9 @@
 |---|---|---|
 | 변경폭 클램프 | ±15% (탐색 ±30%) | `backend/app/services/naver_ad/guardrail_gate.py::_MAX_CHANGE_PCT` · `backend/app/services/naver_ad/guardrail_gate.py::_EXPLORATION_MAX_CHANGE_PCT` |
 | 쿨다운 | 2시간 | `backend/app/services/naver_ad/guardrail_gate.py::_COOLDOWN_HOURS` (D-NAO-55) |
-| 일일 변경 상한 | 3회 | 모듈 상수(주석 확인) |
-| 입찰 클램프 | 70~100,000원·10원 단위 | 모듈 머리 주석 (이중 방벽 — writer에도 있음) |
-| 누적 상승 상한 | 기준가 ×2.0 | guardrail_params 독스트링 |
+| 일일 변경 상한 | 3회 | `backend/app/services/naver_ad/guardrail_gate.py::_MAX_DAILY_CHANGES` |
+| 입찰 클램프 | 70~100,000원·10원 단위 | `backend/app/services/naver_ad/guardrail_gate.py::_MAX_BID` (이중 방벽 — writer에도 있음) |
+| 누적 상승 상한 | 기준가 ×2.0 | `backend/app/services/naver_ad/guardrail_params.py::max_auto_up_multiple` |
 | 스톱로스 | 무전환 지출 ≥ 기준가 ×10 📄 | [미상 — 상수 미조회] |
 | BEP 이익하한 | 보정ROAS < 목표면 증액 금지 | accel_gate_view가 이 게이트의 차단량을 셈(§8) |
 | CPC 급등 하향 배율 | ×2 📄 (PLAN 문서엔 ×1.5 — 코드가 정본 📄) | [미상 — ref 111도 실행 코드 상수 못 찾음] |
