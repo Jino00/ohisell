@@ -17,9 +17,13 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, cleanup, within, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+// ★fixture에 타입을 건다 — `unknown`으로 두면 응답 타입에 필수 필드를 추가해도 tsc가
+//   fixture 갱신을 강제하지 않아 다음 필드 추가에서 조용히 어긋난다(적대 리뷰 P2).
+type BandName = import("../lib/api").NaverOwnershipBandName;
+
 const h = vi.hoisted(() => ({
-  bands: null as unknown,
-  ownership: null as unknown,
+  bands: null as import("../lib/api").NaverOwnershipBands | null,
+  ownership: null as import("../lib/api").NaverOwnershipCampaigns | null,
 }));
 
 vi.mock("../lib/api", () => ({
@@ -82,7 +86,7 @@ const DAY = {
 
 /** prod 실측 모양(2026-08-29) — 픽스처가 prod와 같아야 결함을 잡는다. */
 function bandsPayload(over: Record<string, unknown> = {}) {
-  const band = (b: string, label: string, cost: number, note: string | null = null) => ({
+  const band = (b: BandName, label: string, cost: number, note: string | null = null) => ({
     band: b, label, note, cost, imp: 0, clk: 0, conv_amt: 0, roas: null, cpc: null,
     campaigns: 1, adgroups: 1, days: 1, share_of_cost: cost / 19479832,
   });
@@ -113,9 +117,12 @@ function bandsPayload(over: Record<string, unknown> = {}) {
   };
 }
 
-function ownershipPayload(band: string, over: Record<string, unknown> = {}) {
+function ownershipPayload(band: BandName, over: Record<string, unknown> = {}) {
   return {
     as_of: "2026-08-28",
+    requested: "2026-08-28",
+    clamped: false,
+    note: null as string | null,
     campaigns: {
       [CAMPAIGN_ID]: {
         band,
@@ -245,6 +252,38 @@ describe("밴드 필터와 「그날 담당」 배지", () => {
     h.ownership = ownershipPayload("pao", { partial: true, pao_adgroups: 1, adgroups: 58 });
     renderPage();
     expect(await screen.findByText("그날 PAO 부분 담당 (1/58 그룹)")).toBeTruthy();
+  });
+});
+
+describe("★고른 날짜가 확정 전이면 그 사실을 말한다 (완료 QA가 잡은 자리)", () => {
+  it("되돌렸으면 «왜»가 화면에 뜬다 — 날짜만 바꿔 놓고 침묵하지 않는다", async () => {
+    h.ownership = {
+      ...ownershipPayload("not_pao"),
+      as_of: "2026-08-29",
+      requested: "2026-08-30",
+      clamped: true,
+      note: "2026-08-30은 아직 확정 전이라 그날 담당을 가릴 수 없습니다 — 2026-08-29 기준으로 보여줍니다.",
+    };
+    renderPage();
+    expect(await screen.findByText(/2026-08-30은 아직 확정 전이라/)).toBeTruthy();
+    expect(await screen.findByText(/2026-08-29 기준으로 보여줍니다/)).toBeTruthy();
+  });
+
+  it("되돌린 게 없으면 경고를 안 띄운다 — 상시 경고는 아무도 안 읽는다", async () => {
+    renderPage();
+    expect(await screen.findByText("2026-08-28 시점 담당 기준")).toBeTruthy();
+    expect(screen.queryByText(/확정 전이라/)).toBeNull();
+  });
+
+  it("★확정 데이터가 0건일 때의 문장도 화면에 닿는다 — 죽은 문자열이 아니다", async () => {
+    // 게이트가 `clamped &&`였을 때 이 문장은 백엔드가 만들고 화면이 버렸다(적대 리뷰 P2).
+    h.ownership = {
+      as_of: null, requested: null, clamped: false,
+      note: "확정된 광고 데이터가 아직 없습니다.",
+      campaigns: {},
+    };
+    renderPage();
+    expect(await screen.findByText("확정된 광고 데이터가 아직 없습니다.")).toBeTruthy();
   });
 });
 

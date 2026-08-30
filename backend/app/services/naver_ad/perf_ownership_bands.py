@@ -197,13 +197,26 @@ def campaign_bands(db: Session, as_of: date_cls | None = None) -> dict:
 
     한 캠페인 안에서 일부 그룹만 PAO일 수 있으므로(Jino: "광고그룹만도 가져올 수 있잖아")
     `pao_adgroups / known_adgroups`를 같이 낸다 — 「부분 관할」이 숫자로 보이게.
+
+    ★요청한 날짜가 확정 전(대개 오늘)이면 최신 확정일로 되돌리는데, **그 사실을 말한다**
+    (`clamped`·`note`). 완료 QA가 잡은 자리다: 종전엔 `date=오늘`을 서버가 **말없이** 어제로
+    바꾸고 화면엔 그 날짜만 떴다 — 사용자는 날짜 불일치를 눈치채야만 알 수 있었다.
+    「말없이」야말로 이 계약이 통째로 겨냥한 것이므로 밴드 카드와 같은 규율을 목록에도 건다.
     """
     latest = latest_confirmed_date(db)
+    requested = as_of
     if as_of is None:
         as_of = latest
     if as_of is None:
-        return {"as_of": None, "campaigns": {}}
-    if latest is not None and as_of > latest:
+        return {
+            "as_of": None,
+            "requested": requested.isoformat() if requested else None,
+            "clamped": False,
+            "note": "확정된 광고 데이터가 아직 없습니다.",
+            "campaigns": {},
+        }
+    clamped = latest is not None and as_of > latest
+    if clamped:
         as_of = latest
 
     timeline = ot.build(db)
@@ -253,4 +266,15 @@ def campaign_bands(db: Session, as_of: date_cls | None = None) -> dict:
             else ot.BAND_LABEL[slot["band"]]
         )
 
-    return {"as_of": as_of.isoformat(), "campaigns": out}
+    return {
+        "as_of": as_of.isoformat(),
+        "requested": requested.isoformat() if requested else None,
+        "clamped": clamped,
+        "note": (
+            f"{requested.isoformat()}은 아직 확정 전이라 그날 담당을 가릴 수 없습니다 — "
+            f"{as_of.isoformat()} 기준으로 보여줍니다."
+            if clamped and requested
+            else None
+        ),
+        "campaigns": out,
+    }

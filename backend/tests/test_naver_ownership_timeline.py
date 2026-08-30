@@ -449,6 +449,62 @@ def test_band_denominators_are_reported(db):
     assert pao["share_of_cost"] == 1.0
 
 
+def test_campaign_bands_say_when_the_date_was_clamped(db):
+    """★완료 QA가 잡은 자리 — 확정 전 날짜를 되돌리면서 **말없이** 바꾸면, 사용자는 날짜
+    불일치를 눈치채야만 안다. 「말없이」가 이 계약이 통째로 겨냥한 것이다."""
+    _prod_shaped_history(db)
+    _daily(db, "2026-08-28", 5000)
+    db.commit()
+
+    r = bands.campaign_bands(db, as_of=date(2026, 8, 30))  # 확정(08-28)보다 뒤 = 확정 전
+    assert r["as_of"] == "2026-08-28"
+    assert r["requested"] == "2026-08-30"
+    assert r["clamped"] is True
+    # ★전문 대조다. 「두 날짜가 들어 있나」로 검사하면 **역할이 안 지켜진다** — 자리만 바꾼
+    #   변이(「08-28은 확정 전이니 08-30을 보여줍니다」)가 포함 검사를 통과한다(적대 리뷰 P1).
+    #   문장의 «존재»는 표면 테스트가 지키고, «진위»는 값을 만드는 이쪽이 지켜야 한다.
+    assert r["note"] == (
+        "2026-08-30은 아직 확정 전이라 그날 담당을 가릴 수 없습니다 — "
+        "2026-08-28 기준으로 보여줍니다."
+    )
+
+
+def test_campaign_bands_are_quiet_when_nothing_was_clamped(db):
+    """되돌린 게 없으면 경고를 만들지 않는다 — 상시 경고는 아무도 안 읽는다."""
+    _prod_shaped_history(db)
+    _daily(db, "2026-08-28", 5000)
+    db.commit()
+
+    r = bands.campaign_bands(db, as_of=date(2026, 8, 28))
+    assert r["clamped"] is False
+    assert r["note"] is None
+
+
+def test_campaign_bands_default_asks_for_the_latest_confirmed_day(db):
+    """기본 경로(as_of 미지정) — 되돌린 게 아니므로 경고가 없다(적대 리뷰 P2 채택)."""
+    _prod_shaped_history(db)
+    _daily(db, "2026-08-28", 5000)
+    db.commit()
+
+    r = bands.campaign_bands(db)
+    assert r["as_of"] == "2026-08-28"
+    assert r["requested"] is None
+    assert r["clamped"] is False
+    assert r["note"] is None
+
+
+def test_campaign_bands_say_when_there_is_nothing_confirmed(db):
+    """확정 데이터가 0건이면 «비었다»가 아니라 «아직 없다»를 말한다 — 그리고 그 문장은
+    `clamped`가 False라도 화면에 닿아야 한다(적대 리뷰 P2 — 종전엔 죽은 문자열이었다)."""
+    _prod_shaped_history(db)  # 설정·로그만 있고 naver_ad_daily는 비어 있다
+    db.commit()
+
+    r = bands.campaign_bands(db)
+    assert r["as_of"] is None
+    assert r["clamped"] is False
+    assert r["note"] == "확정된 광고 데이터가 아직 없습니다."
+
+
 def test_campaign_bands_expose_partial_ownership(db):
     """Jino: "광고그룹만도 가져올 수 있잖아" — 부분 관할이 숫자로 보여야 한다."""
     _prod_shaped_history(db)

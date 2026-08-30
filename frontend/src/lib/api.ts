@@ -7131,6 +7131,12 @@ export interface NaverOwnershipCampaignSlot {
 export interface NaverOwnershipCampaigns {
   /** 목록은 기간이 아니라 «시점» 판정이다 — 기준일을 화면에 밝힌다. */
   as_of: string | null;
+  /** 사용자가 고른 날짜. `as_of`와 다르면 확정 전이라 되돌려진 것이다. */
+  requested: string | null;
+  /** 확정 전 날짜를 최신 확정일로 되돌렸는가. */
+  clamped: boolean;
+  /** 되돌렸을 때 «왜»를 말하는 문장. 말없이 바꾸지 않는다. */
+  note: string | null;
   campaigns: Record<string, NaverOwnershipCampaignSlot>;
 }
 
