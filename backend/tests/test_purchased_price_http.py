@@ -117,11 +117,38 @@ def test_preview_groups_by_recipe_and_price_and_writes_nothing(client):
     assert body["read_columns"] == {"name": "상품명", "price": "원가"}
     assert body["counts"]["groups"] == 2
     assert body["counts"]["target_skus"] == 3
+    # ★값을 «못 박는다». 초판은 `or len(prices) == 2`를 달아 마지막 항이 항상 참이었고,
+    #   단가를 통째로 바꿔도 이 줄은 안 잡았다(적대 리뷰 P2-8).
     prices = sorted(g["price"] for g in body["groups"])
-    assert prices == ["2400.00", "922.00"] or prices == [2400.0, 922.0] or len(prices) == 2
+    assert prices == ["2400.00", "922.00"]
+    # ★돈은 문자열이다 — float면 원가 시스템에서 정밀도가 조용히 샌다(P2-7).
+    assert all(isinstance(g["price"], str) for g in body["groups"])
+    assert all(
+        isinstance(s["file_price"], str) for g in body["groups"] for s in g["skus"]
+    )
     # ★확인 전까지 아무 값도 안 써진다 (계약 §4 S1 첫 항목)
     with client.testing_session() as s:
         assert s.scalars(select(CostPurchasedPrice)).all() == []
+
+
+def test_preview_carries_every_field_the_screen_needs(client):
+    """★계약 §4 S1 둘째·셋째 항목의 «응답» 표면(적대 리뷰 M22 SURVIVED 회귀).
+
+    화면 테스트는 픽스처로 렌더하므로 **라우터가 키를 빠뜨려도 초록이다** — 그러면 사람은
+    「차이」 열이 통째로 빈 화면을 본다. 응답 계약을 여기서 못 박는다.
+    """
+    r = upload(client, xlsx([("일미리 케이스, 아이폰15", 922, "카페24")]))
+    sku = r.json()["groups"][0]["skus"][0]
+    for key in (
+        "internal_sku", "product_name", "source_product_name", "file_price",
+        "is_placeholder", "current_cost_price", "diff", "recipe_id",
+        "recipe_name", "excluded_reason", "approved_price",
+    ):
+        assert key in sku, f"응답에 「{key}」가 없다 — 화면의 그 칸이 통째로 빈다"
+    # SKU별 제 값 · 현재 원가 · 차이가 «나란히» 실린다
+    assert sku["file_price"] == "922.00"
+    assert sku["current_cost_price"] == "1000.00"
+    assert sku["diff"] == "-78.00"
 
 
 def test_preview_shows_excluded_assembly_with_its_reason(client):

@@ -187,12 +187,21 @@ export default function CostPurchasedPricePanel() {
               .map((s) => `${s.internal_sku}: ${s.reason}`)
               .join(" / ")})`,
       );
-      // 확정된 것이 「이미 근거 있음」으로 보이도록 제안을 다시 만든다.
+      // ★★배지는 «실제로 써진 건수»만 말한다(적대 리뷰 P1-2). 초판은 `x.sku_count`를
+      //   그대로 찍어, 서버가 전건 거부해도 카드가 「이미 근거 있음 2건」으로 초록이 됐다 —
+      //   메시지 줄은 거부를 말하는데 배지는 반대를 말하는 상태다. `ConfirmResult`가
+      //   *"막는 것과 막았다고 말하는 것은 다른 일이다"*라고 적어 둔 그 자리를 화면이 어겼다.
+      const refused = new Set(r.skipped.map((s) => s.internal_sku));
       setPreview({
         ...preview,
         groups: preview.groups.map((x) =>
           x.recipe_id === g.recipe_id && x.price === g.price
-            ? { ...x, already_approved: x.sku_count }
+            ? {
+                ...x,
+                already_approved: x.skus.filter(
+                  (s) => !refused.has(s.internal_sku),
+                ).length,
+              }
             : x,
         ),
       });

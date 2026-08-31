@@ -295,3 +295,53 @@ describe("매입품 단가 화면", () => {
     expect(screen.getByText(/「상품명」·「\s*원가」 열을 읽었다/)).toBeTruthy();
   });
 });
+
+// ── 적대 리뷰 1R 회귀 (PR #595) ──────────────────────────────────────────────
+
+describe("적대 리뷰가 살려 보낸 자리", () => {
+  it("P1-2 서버가 전건 거부하면 배지가 「이미 근거 있음」으로 초록이 되면 안 된다", async () => {
+    confirmSpy.mockResolvedValueOnce({
+      written: 0,
+      skipped: [
+        { internal_sku: "C1", reason: "조립품 — 구성이 있는 레시피다" },
+        { internal_sku: "C2", reason: "조립품 — 구성이 있는 레시피다" },
+      ],
+      board: BOARD,
+    });
+    await uploadAndWait();
+    fireEvent.click(screen.getAllByTestId("purchased-confirm")[0]);
+
+    await screen.findByTestId("purchased-msg");
+    // 메시지는 거부를 말하는데 배지가 반대를 말하던 자리
+    expect(screen.queryByText(/이미 근거 있음/)).toBeNull();
+  });
+
+  it("P1-2b 일부만 거부되면 배지는 «실제로 써진 수»만 말한다", async () => {
+    confirmSpy.mockResolvedValueOnce({
+      written: 1,
+      skipped: [{ internal_sku: "C2", reason: "조립품 — 구성이 있는 레시피다" }],
+      board: BOARD,
+    });
+    await uploadAndWait();
+    fireEvent.click(screen.getAllByTestId("purchased-confirm")[0]);
+
+    expect(await screen.findByText(/이미 근거 있음 1건/)).toBeTruthy();
+  });
+
+  it("P2-2 묶음을 펼치면 SKU별 제 값과 «차이»가 실제로 렌더된다", async () => {
+    // ★계약 §4 S1 둘째·셋째 항목의 표면. 초판 테스트는 묶음을 한 번도 «펼치지» 않아
+    //   SkuTable 통째 제거·diff 열 제거 변이가 전부 살아남았다(M20·M22·M23 SURVIVED).
+    await uploadAndWait();
+    fireEvent.click(screen.getAllByText(/SKU 2건 보기/)[0]);
+
+    const table = await screen.findAllByTestId("purchased-sku-table");
+    const t = within(table[0]);
+    expect(t.getByText("C1")).toBeTruthy();
+    expect(t.getByText("C2")).toBeTruthy();
+    // SKU별 제 값 — 파일 단가와 현재 원가가 «나란히»
+    expect(t.getAllByText("922").length).toBeGreaterThan(0);
+    expect(t.getAllByText("1,000").length).toBeGreaterThan(0);
+    // 차이가 부호와 함께 선다
+    expect(t.getAllByText("-78").length).toBeGreaterThan(0);
+  });
+});

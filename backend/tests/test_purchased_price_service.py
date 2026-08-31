@@ -356,3 +356,125 @@ def test_film_draft_with_no_lines_still_reaches_the_human_not_auto_written(db):
     # 그러나 «아무것도 안 써졌다»
     assert db.scalars(select(CostPurchasedPrice)).all() == []
     assert db.get(ProductMaster, 1).cost_price == D("4254")
+
+
+# ── 적대 리뷰 P1 회귀 (PR #595 1R) ──────────────────────────────────────────
+
+
+def test_p1_1_sku_linked_to_both_empty_and_assembly_recipe_is_excluded(db):
+    """★P1-1 — 조립품 차단이 «행 순서»에 걸려 있었다.
+
+    한 SKU가 살아 있는 링크를 둘 갖는 것은 스키마가 허용한다(`cost_recipe_link`의 유니크는
+    `(internal_sku, recipe_id)`이고 `_sync_links`는 승인 링크를 안 지운다). 초판은
+    「먼저 만난 링크가 이긴다」라 **빈 레시피 링크가 먼저 오면 구성 3줄짜리 필름이 대상으로
+    섰고**, `confirm_group`의 재검사도 같은 함수를 부르므로 같은 오답을 두 번 냈다.
+    """
+    empty = mk_recipe(db, "케이스 초안", lines=0)          # id 작음 → 먼저 온다
+    film = mk_recipe(db, "유리코팅 필름", lines=3, status="approved")
+    db.add(ProductMaster(internal_sku="F1", product_name="필름, 아이폰16",
+                         cost_price=D("2616")))
+    for r in (empty, film):
+        db.add(CostRecipeLink(internal_sku="F1", recipe_id=r.id, status="draft",
+                              source="manual"))
+    db.flush()
+
+    p = PP.build_proposal(db, parse_price_sheet(sheet(("필름, 아이폰16", 4352.7))), "v3")
+    assert p.groups == []
+    assert p.excluded[0].excluded_reason == PP.REASON_ASSEMBLY
+
+    res = PP.confirm_group(db, internal_skus=["F1"], price=D("4352.7"), source_file="v3")
+    db.flush()
+    assert res.written == 0
+    assert db.scalars(select(CostPurchasedPrice)).all() == []
+
+
+def test_p1_1_two_empty_recipes_is_ambiguous_not_a_silent_pick(db):
+    """후보 레시피가 둘이면 어느 쪽 단가인지 시스템이 못 고른다 — 고르지 않는다."""
+    a = mk_recipe(db, "케이스 A", lines=0)
+    b = mk_recipe(db, "케이스 B", lines=0)
+    db.add(ProductMaster(internal_sku="X1", product_name="케이스, 아이폰16",
+                         cost_price=D("900")))
+    for r in (a, b):
+        db.add(CostRecipeLink(internal_sku="X1", recipe_id=r.id, status="draft",
+                              source="manual"))
+    db.flush()
+
+    p = PP.build_proposal(db, parse_price_sheet(sheet(("케이스, 아이폰16", 922))), "f")
+    assert p.groups == []
+    assert p.excluded[0].excluded_reason == PP.REASON_MULTI_RECIPE
+
+
+def test_p1_3_duplicate_rows_for_one_sku_collapse_to_one(db):
+    """★P1-3 — 「SKU N건」이 실은 «행 수»였다.
+
+    계약 §0-B 실측이 944행 / 고유 상품명 940이라 중복은 실재한다. 접지 않으면 묶음 건수가
+    부풀고 확정 시 원장에 같은 SKU의 행이 둘 쌓인다.
+    """
+    r = mk_recipe(db, "일미리 케이스", lines=0)
+    mk_sku(db, "C1", "일미리 케이스, 아이폰15", r, cost_price=D("1000"))
+
+    p = PP.build_proposal(db, parse_price_sheet(sheet(
+        ("일미리 케이스, 아이폰15", 922),
+        ("일미리 케이스, 아이폰15", 922),
+    )), "08-07판")
+
+    assert len(p.groups) == 1
+    assert p.groups[0].sku_count == 1
+    assert [s.internal_sku for s in p.groups[0].skus] == ["C1"]
+
+
+def test_p1_3_same_sku_with_two_different_prices_is_a_conflict_not_two_groups(db):
+    """단가가 갈리면 시스템이 고르지 않는다 — 「충돌」로 사람 앞에 세운다."""
+    r = mk_recipe(db, "일미리 케이스", lines=0)
+    mk_sku(db, "C1", "일미리 케이스, 아이폰15", r, cost_price=D("1000"))
+
+    p = PP.build_proposal(db, parse_price_sheet(sheet(
+        ("일미리 케이스, 아이폰15", 922),
+        ("일미리 케이스, 아이폰15", 2400),
+    )), "08-07판")
+
+    assert p.groups == []
+    assert p.excluded[0].excluded_reason == PP.REASON_PRICE_CONFLICT
+    assert any("서로 다른 단가" in a for a in p.anomalies)
+
+
+def test_p1_3_confirm_dedupes_repeated_skus(db):
+    """화면이 접어서 보내리라 믿지 않는다 — 원장에 행이 둘 쌓이면 안 된다."""
+    r = mk_recipe(db, "케이스", lines=0)
+    mk_sku(db, "C1", "케이스, 아이폰16", r)
+
+    res = PP.confirm_group(db, internal_skus=["C1", "C1"], price=D("922"),
+                           source_file="f")
+    db.flush()
+    assert res.written == 1
+    assert len(db.scalars(select(CostPurchasedPrice)).all()) == 1
+
+
+def test_p2_4_unapproved_newer_row_does_not_hide_the_approved_one(db):
+    """★M15 SURVIVED 회귀 — 승인 행 «위»에 더 최신 미승인 제안이 있어도 배지는 승인 값이다."""
+    r = mk_recipe(db, "케이스", lines=0)
+    mk_sku(db, "A", "케이스, 1", r)
+    db.add(CostPurchasedPrice(internal_sku="A", unit_price_inc_vat=D("922"),
+                              source="file", approved_at=datetime(2026, 8, 31, 10, 0),
+                              created_at=datetime(2026, 8, 31, 10, 0)))
+    db.add(CostPurchasedPrice(internal_sku="A", unit_price_inc_vat=D("999"),
+                              source="file", approved_at=None,
+                              created_at=datetime(2026, 8, 31, 11, 0)))
+    db.flush()
+
+    assert PP._load_approved_prices(db) == {"A": D("922")}
+    assert PP.board_counts(db)["grounded"] == 1
+
+
+def test_p2_1_board_and_badge_read_the_same_latest_price_logic(db):
+    """★로직 두 벌 금지(계약 §2) — 같은 데이터에서 답이 갈리면 안 된다."""
+    r = mk_recipe(db, "케이스", lines=0)
+    mk_sku(db, "A", "케이스, 1", r)
+    db.add(CostPurchasedPrice(internal_sku="A", unit_price_inc_vat=None,
+                              source="manual", approved_at=datetime(2026, 8, 31, 10, 0)))
+    db.flush()
+
+    # 배지용(값 있는 것만) ↔ 보드용(보류 포함)이 같은 사실을 말한다
+    assert PP._load_approved_prices(db) == {}
+    assert PP.board_counts(db)["held_blank"] == 1
+    assert PP.board_counts(db)["grounded"] == 0

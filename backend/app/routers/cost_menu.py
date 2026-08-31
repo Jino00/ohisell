@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal, Optional
 
 from io import BytesIO
@@ -585,19 +585,36 @@ class PurchasedConfirmIn(BaseModel):
     note: Optional[str] = None
 
 
+def _money(v) -> Optional[str]:
+    """Decimal → 문자열. **float로 내보내지 않는다.**
+
+    ★적대 리뷰 P2-7이 잡은 자리: 이 라우터는 Pydantic 모델이 아니라 raw dict를 돌려주므로
+    `jsonable_encoder`가 `Decimal`을 **float**로 바꾼다(실측: `2694.5` number). 원가 시스템에서
+    돈을 float로 내보내는 것은 그 자체로 결함이고, 이 저장소의 다른 원가 엔드포인트는 전부
+    문자열이다(`CostMaterial.latest_price_ex_vat` 등) — 축마다 타입이 다르면 프론트가
+    「어느 축은 string, 어느 축은 number」를 외워야 한다.
+    """
+
+    if v is None:
+        return None
+    # ★2자리로 못 박는다 — 저장 컬럼이 `Numeric(14,2)`라 표시와 저장이 갈리면 안 된다
+    #   (파일에서 온 `Decimal("922")`가 화면엔 「922」, DB엔 「922.00」으로 서는 상태).
+    return str(Decimal(v).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 def _sku_out(s: PP.SkuProposal) -> dict:
     return {
         "internal_sku": s.internal_sku,
         "product_name": s.product_name,
         "source_product_name": s.source_product_name,
-        "file_price": s.file_price,
+        "file_price": _money(s.file_price),
         "is_placeholder": s.is_placeholder,
-        "current_cost_price": s.current_cost_price,
-        "diff": s.diff,
+        "current_cost_price": _money(s.current_cost_price),
+        "diff": _money(s.diff),
         "recipe_id": s.recipe_id,
         "recipe_name": s.recipe_name,
         "excluded_reason": s.excluded_reason,
-        "approved_price": s.approved_price,
+        "approved_price": _money(s.approved_price),
     }
 
 
@@ -628,7 +645,7 @@ def preview_purchased_prices(
             {
                 "recipe_id": g.recipe_id,
                 "recipe_name": g.recipe_name,
-                "price": g.price,
+                "price": _money(g.price),
                 "sku_count": g.sku_count,
                 "already_approved": g.already_approved,
                 "skus": [_sku_out(s) for s in g.skus],

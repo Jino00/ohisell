@@ -71,6 +71,14 @@ REASON_IMPORTED = "수입 완제품 — 통관 원장에서 단가가 온다(파
 REASON_NO_RECIPE = "레시피에 연결되지 않은 SKU — 먼저 연결해야 한다"
 REASON_NO_SKU = "이 상품명에 맞는 판매 SKU가 없다"
 REASON_AMBIGUOUS = "이 상품명이 SKU 여러 건에 걸린다 — 자동으로 고르지 않는다"
+#: ★적대 리뷰 P1-1. 한 SKU가 살아 있는 링크를 둘 이상 갖는 것은 스키마가 «허용하는» 상태다
+#: (`cost_recipe_link`의 유니크는 `(internal_sku, recipe_id)`이고 `_sync_links`는 승인 링크를
+#: 안 지운다 — SKU가 레시피를 옮기면 옛 승인 링크가 남는다). 후보 레시피가 둘이면 어느 쪽
+#: 단가인지 시스템이 못 고른다.
+REASON_MULTI_RECIPE = "이 SKU가 레시피 여러 건에 걸려 있다 — 링크를 먼저 정리해야 한다"
+#: ★적대 리뷰 P1-3. 같은 SKU가 파일 두 행에서 «다른» 단가로 온다. 계약 §0-B가 944행/고유
+#: 상품명 940이라 적었으니 중복은 실재한다. 시스템이 고르면 「추측 금지」를 넘는다.
+REASON_PRICE_CONFLICT = "파일이 이 SKU에 서로 다른 단가를 준다 — 사람이 골라야 한다"
 
 
 def _norm_name(raw: str) -> str:
@@ -195,7 +203,22 @@ class _SkuFacts:
     internal_sku: str
     product_name: str
     cost_price: Optional[Decimal]
-    recipe_id: Optional[int]
+    #: ★살아 있는 링크 «전부». 하나만 들고 있으면 조립품 차단이 «행 순서»에 걸린다
+    #: (적대 리뷰 P1-1 — 빈 레시피 링크가 먼저 오면 필름이 대상으로 선다).
+    links: tuple["_LinkFact", ...] = ()
+
+    @property
+    def recipe_id(self) -> Optional[int]:
+        return self.links[0].recipe_id if len(self.links) == 1 else None
+
+    @property
+    def recipe_name(self) -> Optional[str]:
+        return self.links[0].recipe_name if len(self.links) == 1 else None
+
+
+@dataclass(frozen=True)
+class _LinkFact:
+    recipe_id: int
     recipe_name: Optional[str]
     recipe_kind: Optional[str]
     line_count: int
@@ -233,26 +256,41 @@ def _load_sku_facts(db: Session) -> dict[str, _SkuFacts]:
         .outerjoin(line_counts, line_counts.c.recipe_id == CostRecipe.id)
     ).all()
 
-    facts: dict[str, _SkuFacts] = {}
+    # ★「먼저 만난 링크가 이긴다」로 접지 않는다 — 그러면 조립품 차단이 **행 순서**에
+    #   걸린다(적대 리뷰 P1-1: 빈 레시피 링크가 먼저 오면 구성 3줄짜리 필름 SKU가
+    #   대상으로 서고, `confirm_group`의 재검사도 같은 함수를 부르므로 같은 오답을 두 번
+    #   낸다 — 방어가 코드가 아니라 우연이 된다). 전부 모아 두고 판정에서 fail-closed 한다.
+    base: dict[str, tuple[str, Optional[Decimal]]] = {}
+    links: dict[str, list[_LinkFact]] = {}
     for sku, pname, cost, rid, rname, kind, n in rows:
-        # ★한 SKU가 살아 있는 링크를 둘 이상 갖는 것은 데이터 이상이다. 조용히 마지막
-        #   것으로 덮지 않고 **먼저 만난 것을 유지**한다 — 덮으면 어느 쪽이 이겼는지
-        #   재현이 안 된다. 이상 자체는 대상 판별에서 「구성 있음」으로 걸러진다.
-        if sku in facts:
+        base.setdefault(sku, (pname, cost))
+        if rid is None:
             continue
-        facts[sku] = _SkuFacts(
+        bucket = links.setdefault(sku, [])
+        if any(l.recipe_id == rid for l in bucket):
+            continue
+        bucket.append(
+            _LinkFact(
+                recipe_id=rid,
+                recipe_name=rname,
+                recipe_kind=kind,
+                line_count=int(n or 0),
+            )
+        )
+    return {
+        sku: _SkuFacts(
             internal_sku=sku,
             product_name=pname,
             cost_price=cost,
-            recipe_id=rid,
-            recipe_name=rname,
-            recipe_kind=kind,
-            line_count=int(n or 0),
+            links=tuple(sorted(links.get(sku, []), key=lambda l: l.recipe_id)),
         )
-    return facts
+        for sku, (pname, cost) in base.items()
+    }
 
 
-def _load_approved_prices(db: Session) -> dict[str, Decimal]:
+def _load_approved_prices(
+    db: Session, *, include_blank: bool = False
+) -> dict[str, Optional[Decimal]]:
     """SKU → 이미 «확정된» 매입가(최신 1건).
 
     ★`approved_at IS NULL`은 제안이지 확정이 아니다(모델 주석). 확정만 읽는 이 규칙이
@@ -277,6 +315,11 @@ def _load_approved_prices(db: Session) -> dict[str, Decimal]:
         )
         .where(CostPurchasedPrice.approved_at.isnot(None))
     ).all()
+    # ★`include_blank`는 「사람이 «값이 없다»를 확인한 상태」를 살려 돌려준다 — 보드가
+    #   「보류」와 「미확인」을 가르려면 그 구분이 필요하다. 기본값에서는 값 있는 것만
+    #   준다(제안 화면의 「이미 근거 있음」 배지가 값을 요구하기 때문).
+    if include_blank:
+        return dict(rows)
     return {sku: price for sku, price in rows if price is not None}
 
 
@@ -288,12 +331,17 @@ def _exclusion_reason(f: _SkuFacts) -> Optional[str]:
     덮이고, 그 사고는 화면에서 안 보인다.
     """
 
-    if f.recipe_id is None:
+    if not f.links:
         return REASON_NO_RECIPE
-    if (f.recipe_kind or "") == "imported_goods":
-        return REASON_IMPORTED
-    if f.line_count > 0:
-        return REASON_ASSEMBLY
+    # ★fail-closed: 링크 «하나라도» 대상이 아니면 그 SKU는 대상이 아니다. 「어느 링크가
+    #   진짜인가」를 시스템이 고르는 순간 필름에 파일 값이 닿는 길이 열린다(계약 §3).
+    for l in f.links:
+        if (l.recipe_kind or "") == "imported_goods":
+            return REASON_IMPORTED
+        if l.line_count > 0:
+            return REASON_ASSEMBLY
+    if len(f.links) > 1:
+        return REASON_MULTI_RECIPE
     return None
 
 
@@ -323,22 +371,47 @@ def build_proposal(
     # (recipe_id, price) → SkuProposal들
     buckets: dict[tuple[int, Decimal], list[SkuProposal]] = {}
 
+    # ★★행이 아니라 **SKU로 접는다**(적대 리뷰 P1-3). 파일에 같은 상품명이 두 행 있으면
+    #   (계약 §0-B 실측: 944행 / 고유 상품명 940) 접지 않은 채로는 ①묶음의 「SKU N건」이
+    #   실은 «행 수»가 되고 — 계약 §4 S1 둘째 항목이 「51 SKU가 922×29 / 2,400×22」라는
+    #   **그 숫자 자체**를 합격 조건으로 세웠다 — ②확정 시 같은 SKU에 원장 행이 두 개
+    #   쌓이며 ③단가가 다르면 같은 SKU가 **두 묶음에 서는데 아무도 충돌이라 말하지 않는다.**
+    seen_rows: dict[str, PriceRow] = {}
+    conflicts: set[str] = set()
+    ordered: list[str] = []
     for row in parsed.rows:
         hits = by_name.get(_norm_name(row.product_name), [])
         if not hits:
             proposal.unmatched.append(row.product_name)
             continue
+        if len(hits) == 1:
+            sku = hits[0].internal_sku
+            prev = seen_rows.get(sku)
+            if prev is None:
+                seen_rows[sku] = row
+                ordered.append(sku)
+            elif prev.price != row.price or prev.is_placeholder != row.is_placeholder:
+                # 값이 갈리면 시스템이 고르지 않는다 — 사람 앞에 「충돌」로 세운다.
+                conflicts.add(sku)
+                proposal.anomalies.append(
+                    f"{hits[0].product_name}: 파일이 서로 다른 단가를 준다 "
+                    f"({prev.raw_price} / {row.raw_price}) — 사람이 골라야 한다"
+                )
+    # 이름이 여러 SKU에 걸리는 행은 종전대로 «고르지 않는다».
+    for row in parsed.rows:
+        hits = by_name.get(_norm_name(row.product_name), [])
         if len(hits) > 1:
             # 이름이 여러 SKU에 걸리면 고르지 않는다 — 「자동 매칭을 사람 확인 없이
             # 굳히지 않는다」(상속 금지선)의 이름 축 적용이다.
             for f in hits:
-                proposal.excluded.append(
-                    _mk(row, f, approved, REASON_AMBIGUOUS)
-                )
-            continue
+                proposal.excluded.append(_mk(row, f, approved, REASON_AMBIGUOUS))
 
-        f = hits[0]
+    for sku in ordered:
+        row = seen_rows[sku]
+        f = facts[sku]
         reason = _exclusion_reason(f)
+        if reason is None and sku in conflicts:
+            reason = REASON_PRICE_CONFLICT
         item = _mk(row, f, approved, reason)
 
         if reason is not None:
@@ -346,6 +419,7 @@ def build_proposal(
         elif row.is_placeholder or row.price is None:
             proposal.blanks.append(item)
         else:
+            assert f.recipe_id is not None  # _exclusion_reason이 이미 보장한다
             buckets.setdefault((f.recipe_id, row.price), []).append(item)
 
     for (rid, price), items in buckets.items():
@@ -443,7 +517,14 @@ def confirm_group(
     facts = _load_sku_facts(db)
     names = source_names or {}
 
+    # ★같은 SKU가 두 번 오면 원장에 확정 행이 둘 쌓인다(적대 리뷰 P1-3). 순서를 지키며
+    #   접는다 — 화면이 접어서 보내리라 «믿지» 않는다(§3 「화면을 믿지 않는다」와 같은 결).
+    deduped: list[str] = []
     for sku in internal_skus:
+        if sku not in deduped:
+            deduped.append(sku)
+
+    for sku in deduped:
         f = facts.get(sku)
         if f is None:
             result.skipped.append((sku, REASON_NO_SKU))
@@ -483,16 +564,11 @@ def board_counts(db: Session) -> dict[str, int]:
     facts = _load_sku_facts(db)
     candidates = [f for f in facts.values() if _exclusion_reason(f) is None]
 
-    rows = db.execute(
-        select(
-            CostPurchasedPrice.internal_sku,
-            CostPurchasedPrice.unit_price_inc_vat,
-            func.max(CostPurchasedPrice.created_at),
-        )
-        .where(CostPurchasedPrice.approved_at.isnot(None))
-        .group_by(CostPurchasedPrice.internal_sku)
-    ).all()
-    latest = {sku: price for sku, price, _ in rows}
+    # ★「최신 확정 매입가」를 «두 벌»로 쓰지 않는다(적대 리뷰 P2-1 · 계약 §2 *"단가 선택·
+    #   적재 로직은 항상 한 벌이다"*). 초판은 여기서 bare-column GROUP BY로 따로 셌고,
+    #   `_load_approved_prices`의 서브쿼리 조인과 같은 데이터에서 답이 갈렸다(카드는
+    #   「이미 근거 있음」인데 보드는 `held_blank`). 08-28 교훈 #375의 재현이다.
+    latest = _load_approved_prices(db, include_blank=True)
 
     grounded = held = 0
     for f in candidates:
