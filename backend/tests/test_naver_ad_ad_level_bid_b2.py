@@ -459,7 +459,7 @@ def test_build_shopping_bep_skips_disconnected_group(db):
     _ad(db, "grp-d", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
     diagnosis = _diagnosis(shopping_group_bep=[_bep_board_row()])
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False):
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False):
         out = proposal_writer.build(
             db, diagnosis,
             bid_sims={("adgroup", "grp-d"): _sim(direction="down", current_bid=200)},
@@ -569,7 +569,7 @@ def test_hourly_lane_holds_band_down_for_disconnected_group(db):
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup",
                       return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:

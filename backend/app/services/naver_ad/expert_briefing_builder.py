@@ -79,7 +79,8 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
     # B4 GATE P2-2(D-NAO-65): 카나리 캠페인 전면 제외(아래 filter) — delegation_gate의
     # canary_confirm_only 게이트와 대칭. 함수 레벨 import(순환 리스크 회피, delegation_gate와
     # 동일 관례).
-    from app.services.naver_ad.auto_operator import AD_BID_CANARY_CAMPAIGNS
+    # ★D-NAO-281: «제한»(Confirm-only) 의미의 집합이다 — 개방 allowlist가 아니다.
+    from app.services.naver_ad.auto_operator import AD_BID_CONFIRM_ONLY_CAMPAIGNS
 
     rows = db.query(NaverProposal).filter(
         NaverProposal.status == "pending",
@@ -93,7 +94,7 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
         NaverProposal.target_type != "ad",
         # B4 GATE P2-2: 카나리 캠페인의 비-ad 제안(lever-resume의 resume 등)도 전부 제외 —
         # 카나리 기간 = 캠페인 전체 Confirm-only. 카나리 졸업(상수 제거) 시 자동 해제.
-        NaverProposal.campaign_id.notin_(AD_BID_CANARY_CAMPAIGNS),
+        NaverProposal.campaign_id.notin_(AD_BID_CONFIRM_ONLY_CAMPAIGNS),
     ).order_by(NaverProposal.id.asc()).all()
 
     pairs = {(r.target_type, r.target_id) for r in rows if r.target_id}

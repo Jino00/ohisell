@@ -1028,13 +1028,17 @@ def run_naver_auto_operator_daily_job():
     # 일 레인/SS/PX 결과를 되돌리지 않는다. 수집(①)이 실패해도 레인(②)은 돌린다 —
     # load_today_ladder가 행 없음을 "시세 없음"으로 읽어 전건 보류하므로 안전하게 no-op이 된다.
     #
-    # ★dry_run 기본값 = True(관측만·쓰기 없음). 실집행 전환은 prod .env에
-    #   `NAVER_CS_DRY_RUN=0`을 넣고 재시작하는 것으로만 열린다(코드 배포 없이 되돌릴 수 있게).
-    #   첫 배포 후에는 반드시 dry-run 회차의 제안값을 눈으로 확인한 뒤 전환한다.
+    # ★dry_run 코드 기본값 = True(관측만·쓰기 없음).
+    # ★D-NAO-281(계약 P2-ⓑ) — 이 스위치는 이제 **런타임**이다. 종전엔 `.env` 수정 + **재시작**이
+    #   유일한 길이었고, 무엇보다 «지금 켜져 있는지»가 화면 어디에도 안 보였다.
+    #   이제 우선순위는 **DB(가드레일 화면) > env > 코드 기본값**이고, 화면 「출처」 칸이 셋 중
+    #   어디서 온 값인지 그대로 말한다.
+    #   ⚠️env를 폐기하지 **않았다** — prod `.env`에 `NAVER_CS_DRY_RUN=0`이 실재한다(2026-08-31
+    #   실측). 폐기했으면 배포 순간 CS 레인이 dry-run으로 조용히 뒤집혔을 것이다.
     db4 = _get_own_db_session()
     try:
         from app.services.naver_ad.cold_start_bid_lane import (
-            collect_market_bids_daily, run_cold_start_lane,
+            cold_start_dry_run, collect_market_bids_daily, run_cold_start_lane,
         )
 
         # ★리뷰 P3-13: today를 now(ss_now)에서 파생시킨다. 종전엔 now=ss_now(과거 시각)와
@@ -1046,7 +1050,7 @@ def run_naver_auto_operator_daily_job():
             "[스케줄러] naver CS 시장가 수집: 소재=%s 행=%s floor=%s",
             collected.get("ads"), collected.get("rows"), collected.get("floor_ads"),
         )
-        cs_dry_run = os.getenv("NAVER_CS_DRY_RUN", "1") != "0"
+        cs_dry_run = cold_start_dry_run(db4)
         cs = run_cold_start_lane(db4, dry_run=cs_dry_run, now=ss_now, today=cs_today)
         log.info(
             "[스케줄러] naver CS 콜드 첫 입찰(dry_run=%s): 후보=%s 제안=%s 집행=%s 실패=%s "

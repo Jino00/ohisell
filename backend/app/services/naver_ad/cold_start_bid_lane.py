@@ -24,7 +24,8 @@ from app.models import (
     NaverProposal,
 )
 from app.services.naver_ad import (
-    bid_ceiling_calculator, cold_start_bid_decider, market_bid_probe, naver_execution_harness,
+    bid_ceiling_calculator, cold_start_bid_decider, guardrail_params, market_bid_probe,
+    naver_execution_harness,
 )
 from app.services.naver_ad.bid_step_types import (
     APPROVAL_SOURCE_COLD,  # 재수출 — 단일 소스는 bid_step_types(리뷰 P3-12: harness가 무의존 경로로 읽게)
@@ -51,6 +52,24 @@ COLD_WINDOW_DAYS = 7
 COLD_MAX_IMP_7D = 50
 # 한 회차에 발사할 최대 소재 수(라운드 캡). 첫 개방이라 보수적으로 시작한다.
 MAX_PROPOSALS_PER_RUN = 5
+
+
+def cold_start_dry_run(db: Session) -> bool:
+    """이 레인의 dry-run 스위치 **실효값**. 도는 그 순간에 읽는다 (D-NAO-281 · 계약 P2-ⓑ).
+
+    종전엔 스케줄러가 `os.getenv("NAVER_CS_DRY_RUN", "1") != "0"` 한 줄로 판정했다. 문제는
+    두 가지였다 — ①바꾸려면 `.env` 수정 + **재시작** ②«지금 켜져 있는지»가 화면 어디에도
+    안 보였다. 되돌림 스위치가 되돌리기 어렵고 보이지도 않으면 스위치가 아니다.
+
+    ⇒ `guardrail_params` SPECS 키 `naver_cs_dry_run`으로 옮겼다. 우선순위 **DB > env > 코드
+    기본값**이고, 폴백 규칙은 `get_switch` 한 곳에 있다(여기 다시 적지 않는다).
+
+    ⚠️**env를 폐기하지 않았다.** prod `.env`에 `NAVER_CS_DRY_RUN=0`이 실재한다(2026-08-31
+    실측 — 즉 이 레인은 지금 실쓰기 허용 상태다). env를 무시하고 코드 기본값(True)으로
+    떨어뜨렸다면 배포 그 순간 레인이 dry-run으로 **조용히** 뒤집혔을 것이다. 「값을 옮기는 것」이
+    「동작을 바꾸는 것」이 되는 자리라 층을 남긴다.
+    """
+    return guardrail_params.get_switch(db, "naver_cs_dry_run")
 
 
 def _auto_campaigns(db: Session) -> list[str]:

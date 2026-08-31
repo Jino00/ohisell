@@ -52,6 +52,9 @@ function daysAgo(n: number): string {
 // 안전 봉투 파라미터(D-NAO-172) — 값 표기는 키별 하드코딩 분기. 소수 그대로 보이면
 // (0.15·2.0) 사람이 즉시 「이게 뭔가」를 못 읽는다 — 키가 4개뿐이라 일반화보다 이게 정직하다.
 function fmtGuardrailValue(p: NaverGuardrailParam): string {
+  // ★D-NAO-281 — 킬스위치는 1/0이 아니라 «켜짐/꺼짐»으로 읽혀야 한다. 숫자로 두면 사람이
+  //   「1이 켜진 건가 꺼진 건가」를 매번 되묻고, 그 되묻기가 스위치를 안 만지게 만든다.
+  if (p.kind === "bool") return p.value ? "켜짐 (ON)" : "꺼짐 (OFF)";
   switch (p.key) {
     // max_change_pct는 현재 SPECS에 없다(적대 리뷰 P1-1로 제외) — P2가 스텝을
     // 건드릴 때 되살아나므로 분기는 남겨 둔다. 지금은 도달하지 않는다.
@@ -68,6 +71,7 @@ function fmtGuardrailValue(p: NaverGuardrailParam): string {
   }
 }
 function fmtGuardrailRange(p: NaverGuardrailParam): string {
+  if (p.kind === "bool") return "꺼짐 / 켜짐";
   switch (p.key) {
     case "max_change_pct":
       return `±${(p.min * 100).toFixed(0)}% ~ ±${(p.max * 100).toFixed(0)}%`;
@@ -1029,9 +1033,28 @@ export default function NaverAdOptimizationConsole() {
 
         {guardrailError && <div className="text-sm text-red-600 mb-3">{guardrailError}</div>}
 
+        {/* ★D-NAO-281 적대 리뷰 P1-1 — 종전 문구는 「모든 값이 코드 기본값으로 돕니다」였는데
+            **거짓이 될 수 있었다**: 되돌림 스위치가 끄는 것은 DB 층뿐이고, env 폴백이 있는
+            항목(prod `.env`의 NAVER_CS_DRY_RUN=0)은 여전히 그 값으로 돈다. 사고 중에 레버를
+            내린 사람이 「= 코드 기본값 = dry-run = 안전」으로 읽으면 정반대다.
+            ⇒ 문장을 하드코딩하지 않고 **응답 데이터에서 계산**한다 — env 층이 언젠가 사라지면
+            목록이 비고 문장이 저절로 「전부 코드 기본값」으로 돌아온다(문구가 코드보다 오래
+            살아남아 거짓이 되는 것을 구조로 막는다). */}
         {guardrail && !guardrail.from_db_enabled && (
           <div className="bg-gray-50 border border-gray-200 text-gray-600 text-xs rounded-lg p-3 mb-3">
-            되돌림 스위치가 내려가 있어 모든 값이 코드 기본값으로 돕니다.
+            {guardrail.params.some((p) => p.source === "env") ? (
+              <>
+                되돌림 스위치가 내려가 있어 DB 값을 읽지 않습니다. 단 서버 환경변수가 설정된 항목은
+                코드 기본값이 아니라 <strong>그 환경변수 값으로 돕니다</strong> —{" "}
+                {guardrail.params
+                  .filter((p) => p.source === "env")
+                  .map((p) => `${p.label}(${p.env})`)
+                  .join(" · ")}
+                . 되돌리려면 서버 .env를 고치고 재시작해야 합니다.
+              </>
+            ) : (
+              <>되돌림 스위치가 내려가 있어 모든 값이 코드 기본값으로 돕니다.</>
+            )}
           </div>
         )}
 
@@ -1124,6 +1147,14 @@ export default function NaverAdOptimizationConsole() {
                   <tr key={p.key} className="border-b border-gray-50 align-top">
                     <td className="py-2 pr-3 text-gray-700 min-w-[160px]">
                       {p.label}
+                      {/* ★D-NAO-281 — 접히지 않는 경고. 「이 스위치를 내리면 무슨 일이
+                          벌어지는가」는 「근거 보기」 안에 있으면 안 된다: 접힌 곳에 적은
+                          사실은 없는 사실과 같다. */}
+                      {p.warn && (
+                        <p className="mt-1 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 leading-relaxed max-w-xs">
+                          ⚠️ {p.warn}
+                        </p>
+                      )}
                       <details className="mt-1">
                         <summary className="text-[11px] text-blue-600 cursor-pointer select-none">
                           근거 보기
@@ -1137,30 +1168,61 @@ export default function NaverAdOptimizationConsole() {
                     <td className="py-2 pr-3">
                       <span
                         className={`px-1.5 py-0.5 text-[11px] rounded font-medium ${
-                          p.source === "db" ? "bg-blue-50 text-blue-700" : "bg-gray-100 text-gray-500"
+                          p.source === "db"
+                            ? "bg-blue-50 text-blue-700"
+                            : p.source === "env"
+                              ? "bg-amber-50 text-amber-700"
+                              : "bg-gray-100 text-gray-500"
                         }`}
                       >
-                        {p.source === "db" ? "설정값" : "기본값"}
+                        {p.source === "db" ? "설정값" : p.source === "env" ? "서버 환경변수" : "기본값"}
                       </span>
+                      {/* ★D-NAO-281: env에서 온 값은 «화면에서 못 바꾼 값»이다. 그 사실을 말해
+                          주지 않으면 사람은 화면 숫자를 자기가 정한 값으로 오해한다. */}
+                      {p.source === "env" && p.env && (
+                        <div className="text-[11px] text-amber-700 mt-1 max-w-[180px]">
+                          서버 {p.env} 값입니다 — 여기서 저장하면 그 값을 덮어씁니다
+                        </div>
+                      )}
                       {p.rejected && (
                         <div className="text-[11px] text-red-600 mt-1 max-w-[160px]">
                           설정한 값이 허용 범위를 벗어나 기본값으로 되돌아갔습니다
                         </div>
                       )}
+                      {p.env_rejected && p.env && (
+                        <div className="text-[11px] text-red-600 mt-1 max-w-[180px]">
+                          서버 {p.env} 값도 읽을 수 없어 기본값으로 되돌아갔습니다
+                        </div>
+                      )}
                     </td>
                     <td className="py-2 pr-3 text-xs text-gray-500 whitespace-nowrap">{fmtGuardrailRange(p)}</td>
                     <td className="py-2 pr-3">
-                      <input
-                        type="number"
-                        step="any"
-                        min={p.min}
-                        max={p.max}
-                        value={guardrailEdits[p.key] ?? String(p.value)}
-                        disabled={guardrailSaving}
-                        onChange={(ev) => updateGuardrailEdit(p.key, ev.target.value)}
-                        title={`API 단위 그대로 입력(예: max_auto_up_multiple은 2.0 = 2.0배)`}
-                        className="w-24 border border-gray-200 rounded px-1.5 py-1 text-xs disabled:opacity-50"
-                      />
+                      {p.kind === "bool" ? (
+                        /* ★스위치는 숫자칸이 아니라 토글이어야 한다. 저장 본문은 종전대로
+                           숫자(1/0)로 나간다 — buildGuardrailSaveBody가 Number()로 읽는다. */
+                        <select
+                          aria-label={p.label}
+                          value={guardrailEdits[p.key] ?? String(p.value)}
+                          disabled={guardrailSaving}
+                          onChange={(ev) => updateGuardrailEdit(p.key, ev.target.value)}
+                          className="w-24 border border-gray-200 rounded px-1.5 py-1 text-xs disabled:opacity-50"
+                        >
+                          <option value="1">켜짐 (ON)</option>
+                          <option value="0">꺼짐 (OFF)</option>
+                        </select>
+                      ) : (
+                        <input
+                          type="number"
+                          step="any"
+                          min={p.min}
+                          max={p.max}
+                          value={guardrailEdits[p.key] ?? String(p.value)}
+                          disabled={guardrailSaving}
+                          onChange={(ev) => updateGuardrailEdit(p.key, ev.target.value)}
+                          title={`API 단위 그대로 입력(예: max_auto_up_multiple은 2.0 = 2.0배)`}
+                          className="w-24 border border-gray-200 rounded px-1.5 py-1 text-xs disabled:opacity-50"
+                        />
+                      )}
                     </td>
                   </tr>
                 ))}

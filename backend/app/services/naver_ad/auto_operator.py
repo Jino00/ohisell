@@ -90,15 +90,38 @@ _CTR_ALERT_LADDER_SKIP_REASON = "CTR경보 — 소재 처방 대상, 추가 UP �
 ACTION_GHOST_VISIBILITY_BRIEFING = "ghost_visibility_briefing"  # diary observe action(관측 렌더용)
 _GHOST_VISIBILITY_BRIEFING_TOP_N = 20
 
-# B3(D-NAO-65) 소재-레벨 입찰 제어 카나리 게이트. auto_operate 캠페인 중 이 집합에 든
-# 캠페인만 레버 미연결(source='ad') 그룹에서 ad-레벨 실쓰기(update_ad_bid)로 라우팅한다 —
-# 나머지는 기존 [레버 미연결] hold(B2 억제) 유지. ★기본 빈 집합 = 전면 hold(현행 동작 보존,
-# 배포 즉시 행위 변화 0). 개방은 운영 결정으로 이 상수에 캠페인 id를 채운다(마이그레이션 0 —
-# 코드 배포로만 변경, D-NAO-16 개방 순서 관례·OPEN_ACTIONS와 동형). §0 "개별 캠페인 하드코딩
-# 금지"의 유일 예외 자리(카나리 상수) — 산출 규칙 자체는 전역(source='ad' 판별)이고, 이 상수는
-# "어느 캠페인에 먼저 개방하느냐"의 카나리 스코프만 좁힌다.
-AD_BID_CANARY_CAMPAIGNS: frozenset[str] = frozenset({
+# ══ D-NAO-281(계약 P2-ⓐ) — 한 이름이 겸하던 «정반대 두 의미»를 각자 이름으로 가른다 ══
+#
+# 종전 이름 `AD_BID_CANARY_CAMPAIGNS` 하나가 아래 둘을 동시에 뜻했다(값은 같은 집합):
+#   ①**개방(allowlist)** — 집합에 들면 소재 제안 생성 «허용». `_ad_bid_canary`가 본다.
+#   ②**제한(Confirm-only)** — 집합에 들면 위임 자동승인·전문가 브리핑에서 «제외».
+#     `delegation_gate`·`expert_briefing_builder`가 본다.
+# 그래서 「카나리를 넓히자」를 상수 채우기로 이행하면 **넓히려던 그 캠페인들이 위임에서 전부
+# 빠져 자동 실행이 죽는다.** 이 함정은 아래 D-NAO-125 주석(:186~)이 이미 서술해 뒀는데,
+# **이름이 여전히 하나여서** 다음 사람이 같은 자리에 다시 걸릴 수 있었다.
+# ⇒ 이름을 둘로 가른다. **값·판정 로직은 그대로**라 행위 변화 0이다(rename + 주석).
+#
+# ★★두 상수가 지금 가리키는 캠페인은 **2026-07-30 01:48:31에 `optimizer='none'`으로 꺼졌다**
+#   (2026-08-31 prod 실측 — `auto_operate=0`). 즉 ②는 «이미 안 도는 캠페인»을 위임·브리핑에서
+#   빼고 있고, 실제로 도는 캠페인에는 안 걸려 있다. **이건 이름 위생이 아니라 살아 있는
+#   오조준이다.** 다만 «어느 캠페인이 Confirm-only여야 하는가»는 라이브 게이팅을 바꾸는
+#   운영 결정이라 이 PR의 스코프가 아니다(계약 §6 P2 해당 항목은 「이름/주석」만 요구한다).
+#   값을 고치려면 그 결정을 먼저 세울 것 — 여기 적어 두는 이유가 그것이다.
+#
+# §0 "개별 캠페인 하드코딩 금지"의 유일 예외 자리(카나리 상수) — 산출 규칙 자체는 전역
+# (source='ad' 판별)이고, 이 상수들은 "어느 캠페인이냐"의 스코프만 좁힌다.
+
+# 의미① — 킬스위치(`ad_bid_routing_enabled`)를 **OFF로 내렸을 때 되돌아갈** 카나리 집합.
+# 스위치가 ON인 동안 이 집합은 **도달 불가**다(`_ad_bid_canary`가 앞에서 True로 끝난다).
+# ⇒ OFF는 「전면 정지」가 아니라 「이 집합으로 복귀」다 — 화면 경고문이 그 사실을 말한다.
+AD_BID_ROUTING_FALLBACK_CAMPAIGNS: frozenset[str] = frozenset({
     # 카나리 1호 = 맥세이프카드케이스_쇼검 (Jino 확정 2026-07-20 "카나리는 맥세이프로 열자")
+    "cmp-a001-02-000000010769985",
+})
+
+# 의미② — 위임 자동승인·전문가 브리핑에서 **빼는**(사람 Confirm 전용) 캠페인.
+# 킬스위치와 무관하게 **항상** 적용된다(`delegation_gate`·`expert_briefing_builder`가 직접 읽는다).
+AD_BID_CONFIRM_ONLY_CAMPAIGNS: frozenset[str] = frozenset({
     "cmp-a001-02-000000010769985",
 })
 
@@ -168,23 +191,26 @@ _GROUP_STEP_ALL_ADS: bool = True
 _MAX_AD_WRITES_PER_LANE = 15
 
 
-def _ad_auto_exec(proposal_type: str) -> bool:
+def _ad_auto_exec(db: Session, proposal_type: str) -> bool:
     """이 소재 제안을 레인이 인라인 자동 실행하는가.
 
     ★킬스위치를 여기서도 본다(테스트 정리 중 발견): 두 게이트가 독립 축이면
-    AD_BID_ROUTING_ENABLED=False로 내려도 카나리 상수에 남은 캠페인의 소재 하향은 계속
+    라우팅 스위치를 OFF로 내려도 카나리 상수에 남은 캠페인의 소재 하향은 계속
     자동 실행돼 **"되돌리는 스위치가 완전히 되돌리지 않는" 상태**가 된다(현재는 맥세이프에
     ad-레버 유닛이 없어 도달 불가능하지만, 롤백 보장은 도달 가능성과 무관하게 성립해야
     한다 — 사고 났을 때 한 줄로 원복된다는 믿음이 이 스위치의 존재 이유다).
+
+    ★D-NAO-281: `db`를 받는다. 스위치가 런타임 값이 됐으므로 **쓰는 시점에** 읽어야 한다 —
+    모듈 상수로 캐시하면 「사람이 화면에서 끈 것」과 「엔진이 보는 것」이 갈라진다.
     """
-    return AD_BID_ROUTING_ENABLED and proposal_type in _AD_AUTO_EXEC_PROPOSAL_TYPES
+    return ad_bid_routing_enabled(db) and proposal_type in _AD_AUTO_EXEC_PROPOSAL_TYPES
 
 
 # D-NAO-125(Jino 확정 2026-07-29) — 소재-레벨 **제안 생성** 스코프를 카나리 상수에서
 # 떼어내 auto_operate에 위임한다. Jino 원문: *"적용되는 건 우리가 MOP에서 관리하는
 # 캠페인만 적용하면 되잖아?"*
 #
-# ★왜 상수를 채우지 않고 분리했는가(이게 이 변경의 핵심): AD_BID_CANARY_CAMPAIGNS는 한
+# ★왜 상수를 채우지 않고 분리했는가(이게 이 변경의 핵심): 옛 AD_BID_CANARY_CAMPAIGNS는 한
 #   이름으로 **정반대 두 의미**를 겸하고 있었다 —
 #     · auto_operator/proposal_writer: 집합에 들면 소재 제안 생성 **허용**(개방)
 #     · delegation_gate·expert_briefing_builder: 집합에 들면 위임·브리핑에서 **제외**(제한)
@@ -199,20 +225,40 @@ def _ad_auto_exec(proposal_type: str) -> bool:
 #   재확인) 둘을 통과한 것뿐이다. 캠페인 목록을 코드에 또 적는 것은 중복이자, 새 캠페인을
 #   인수할 때마다 상수를 고쳐야 하는 구멍이다(오늘 사고의 직접 원인 — 07:37 인수 시
 #   상수 갱신 누락).
-# ★AD_BID_CANARY_CAMPAIGNS는 **건드리지 않는다** — 그 상수의 Confirm-only 의미
+# ★Confirm-only 집합(AD_BID_CONFIRM_ONLY_CAMPAIGNS)은 **건드리지 않는다** — 그 의미
 #   (delegation_gate·expert_briefing_builder)는 그대로 유지된다.
-AD_BID_ROUTING_ENABLED: bool = True  # 킬스위치 — False면 종전 카나리 전면 hold로 즉시 복귀
+#
+# ══ D-NAO-281(계약 P2-ⓑ) — 이 스위치는 이제 «런타임»이다 ══
+# 종전엔 `AD_BID_ROUTING_ENABLED: bool = True` 모듈 상수라 내리려면 **배포**가 필요했다.
+# 「사고 났을 때 한 줄로 원복된다」는 이 스위치의 존재 이유가, 정작 그 한 줄을 배포로만
+# 바꿀 수 있어 반쯤 무효였다. 이제 `guardrail_params` SPECS 키 `ad_bid_routing_enabled`로
+# 화면에서 바뀐다(코드 기본값은 `runtime_switches` — 순환 import 회피).
+#
+# ★**모듈 상수를 남기지 않았다.** 남겨 두면 「옛 이름을 읽는 코드」가 조용히 옛 값을 보고
+#   화면과 갈라진다. 지우면 그런 코드는 AttributeError로 **시끄럽게** 죽는다 — 이 저장소가
+#   반복해 데인 실패 모드가 「조용히 틀린 값을 본다」이므로 시끄러운 쪽을 고른다.
 
 
-def _ad_bid_canary(campaign_id: str) -> bool:
+def ad_bid_routing_enabled(db: Session) -> bool:
+    """소재(ad) 입찰 라우팅 킬스위치의 **실효값**. 판정하는 그 순간에 읽는다.
+
+    단일 출처는 `guardrail_params.get_switch(db, ...)`다 — 값의 우선순위(DB > env > 코드 상수)도
+    **조회 실패 시 폴백 규칙**도 거기 한 곳에 있다. 이 함수가 아는 것은 «키 이름» 하나뿐이다.
+    폴백 규칙을 여기 다시 적으면 두 곳이 갈라지고, 갈라진 쪽은 사고가 나야 드러난다.
+    """
+    return guardrail_params.get_switch(db, "ad_bid_routing_enabled")
+
+
+def _ad_bid_canary(db: Session, campaign_id: str) -> bool:
     """이 캠페인에서 소재-레벨 제안 생성을 개방하는지.
 
     스코프 판정(우리가 관리하는 캠페인인가)은 상위 auto_operate 게이트가 이미 두 번 했으므로
-    여기서는 킬스위치만 본다. 킬스위치를 내리면 종전 카나리 집합으로 되돌아간다.
+    여기서는 킬스위치만 본다. 킬스위치를 내리면 종전 카나리 집합으로 되돌아간다 —
+    **전면 정지가 아니다**(그 집합이 비어 있지 않으면 그 캠페인엔 계속 생성된다).
     """
-    if AD_BID_ROUTING_ENABLED:
+    if ad_bid_routing_enabled(db):
         return True
-    return campaign_id in AD_BID_CANARY_CAMPAIGNS
+    return campaign_id in AD_BID_ROUTING_FALLBACK_CAMPAIGNS
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
 # ★D-NAO-258(S1-a): 소급채점(retro) as-of 허용 지연 — _bleeding_hold_reason 조건④의 신선도 계약.
@@ -3497,7 +3543,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     log.warning("auto_operator: 실효입찰 파생 실패 adgroup=%s: %s", target_id, e)
                     eff = None
                 if eff is not None and eff["source"] == "ad":
-                    if not (_ad_bid_canary(campaign_id) and eff.get("max_ad_id")):
+                    if not (_ad_bid_canary(db, campaign_id) and eff.get("max_ad_id")):
                         hold_reason = (
                             f"[레버 미연결] 그룹입찰 무효(실효=소재입찰 {eff['effective_bid']}원) "
                             f"— B3 대기"
@@ -3837,7 +3883,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 #   있던 stale pending 하향 카드 한 장이 이후 모든 하향 판정을 영구히 skip시키는**
                 #   역방향 사고가 난다(생성 자체가 막히니 일기에도 안 남아 조용히 죽는다).
                 if exec_target_type == "ad":
-                    if _ad_auto_exec(proposal_type):
+                    if _ad_auto_exec(db, proposal_type):
                         # ★D-NAO-125 codex[P1] 동시 실행 중복 쓰기 방지. 쿨다운은 change_log가
                         #   커밋된 **뒤에야** 보이므로, 레인이 겹쳐 돌면(수동 트리거 + 크론,
                         #   또는 다중 프로세스) 두 인스턴스가 각자 제안을 만들어 둘 다 쿨다운을
@@ -3916,12 +3962,12 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 #   (`group_slot_taken`). 잡은 뒤의 형제 소재는 같은 결정의 일부라 다시 세지 않는다.
                 #   ②쓰기 캡 — 소재마다 본다. 둘 중 하나라도 걸리면 Confirm 대기로 강등(드롭 아님).
                 decision_capped = (
-                    _ad_auto_exec(proposal_type)
+                    _ad_auto_exec(db, proposal_type)
                     and not group_slot_taken
                     and result["ad_auto_exec_reserved"] >= _MAX_AD_AUTO_EXEC_PER_LANE
                 )
                 write_capped = (
-                    _ad_auto_exec(proposal_type)
+                    _ad_auto_exec(db, proposal_type)
                     and result["ad_writes_reserved"] >= _MAX_AD_WRITES_PER_LANE
                 )
                 lane_capped = decision_capped or write_capped
@@ -3936,7 +3982,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         result["ad_writes_reserved"], _MAX_AD_WRITES_PER_LANE,
                         proposal.id, exec_target_id,
                     )
-                if exec_target_type == "ad" and (not _ad_auto_exec(proposal_type) or lane_capped):
+                if exec_target_type == "ad" and (not _ad_auto_exec(db, proposal_type) or lane_capped):
                     db.commit()
                     result["ad_confirm_pending"] += 1
                     log.info(

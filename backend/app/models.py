@@ -2610,7 +2610,7 @@ class NaverAdgroupScope(Base):
     「캠페인 OFF인데 그룹만 ON」은 지원하지 않는다 — 끄는 방향이 항상 이겨야(fail-safe) 하고,
     캠페인 OFF가 마스터 킬이 아니게 되는 순간 킬스위치의 의미가 흐려진다.
 
-    ★행이 0개면 배포해도 행위 변화 0 — B3 카나리 게이트(AD_BID_CANARY_CAMPAIGNS)가 세운
+    ★행이 0개면 배포해도 행위 변화 0 — B3 카나리 게이트(D-NAO-281로 AD_BID_ROUTING_FALLBACK_CAMPAIGNS로 개명)가 세운
     「기본값은 아무것도 안 열림」 원칙을 테이블로 옮긴 것이다. 개시(행 삽입)는 별도 계약.
 
     role: accel/boundary/brake — «이 그룹에 무엇을 기대하는가»의 라벨. 판정과 역할별 가드가

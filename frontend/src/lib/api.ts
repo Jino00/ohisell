@@ -4461,14 +4461,24 @@ export function putNaverExpertDelegation(delegatedTypes: string[]): Promise<Nave
 export interface NaverGuardrailParam {
   key: string;
   label: string;
+  // ★bool 파라미터도 숫자로 온다(1.0/0.0) — 응답의 수치 계약을 안 바꾸기 위해서다.
+  //   «모양»은 kind가 말하고, 화면이 그걸 보고 토글로 그린다(D-NAO-281).
   value: number;
-  source: "db" | "code";
+  // ★"env" 추가(D-NAO-281): 우선순위 DB > env > 코드 상수. prod .env에 NAVER_CS_DRY_RUN=0이
+  //   실재하므로 env 층을 지우면 배포 순간 동작이 조용히 뒤집힌다 — 층도, 표기도 남긴다.
+  source: "db" | "env" | "code";
   code_default: number;
   min: number;
   max: number;
   why: string;
   direction: "tighten_down" | "tighten_up";
+  kind: "decimal" | "int" | "bool";
+  // 접지 않고 **항상 보이는** 경고. why는 「근거 보기」 안에 접혀 있어서, 끄기 직전에 봐야 하는
+  // 사실(예: 「OFF = 전면 정지가 아니라 카나리 allowlist 복귀」)을 담기엔 자리가 틀렸다.
+  warn: string | null;
+  env: string | null;
   rejected: boolean;
+  env_rejected: boolean;
   updated_at: string | null;
 }
 export interface NaverGuardrailRetroFreshness {

@@ -282,7 +282,7 @@ def test_build_lever_resume_bid_down_first_canary_generates_ad_bid_down(db):
     shape: target_type='ad')로 재개 준비. 소재 800 하향 스텝 680."""
     _ours(db)
     diagnosis = _diagnosis(shopping_lever_resume_candidates=[_resume_board_row("bid_down_first")])
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(proposal_writer, "_adgroup_is_manual_bid", return_value=True):
         out = proposal_writer.build(db, diagnosis, as_of=TODAY)
     assert len(out) == 1
@@ -298,7 +298,7 @@ def test_build_lever_resume_resume_canary_generates_resume(db):
     [GATE P2-1 c] rationale 정직화 — '자동 감시' 부재, 교정 제안 = 콘솔 Confirm 대기 명시."""
     _ours(db)
     diagnosis = _diagnosis(shopping_lever_resume_candidates=[_resume_board_row("resume")])
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(proposal_writer, "_adgroup_is_manual_bid", return_value=True):
         out = proposal_writer.build(db, diagnosis, as_of=TODAY)
     assert len(out) == 1
@@ -321,7 +321,7 @@ def test_build_lever_resume_blocked_by_pending_ad_bid_down(db):
     ))
     db.commit()
     diagnosis = _diagnosis(shopping_lever_resume_candidates=[_resume_board_row("resume")])
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(proposal_writer, "_adgroup_is_manual_bid", return_value=True):
         out = proposal_writer.build(db, diagnosis, as_of=TODAY)
     assert [p for p in out if p["proposal_type"] == "resume"] == []
@@ -336,7 +336,7 @@ def test_build_lever_resume_ml_or_unknown_group_skipped(db, manual_bid):
         _resume_board_row("resume"),
         _resume_board_row("bid_down_first", adgroup_id="grp-2", effective_ad_id="nad-2"),
     ])
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(proposal_writer, "_adgroup_is_manual_bid", return_value=manual_bid):
         out = proposal_writer.build(db, diagnosis, as_of=TODAY)
     assert out == []
@@ -353,7 +353,7 @@ def test_build_lever_resume_non_canary_skips(db):
         _resume_board_row("bid_down_first"),
         _resume_board_row("resume", adgroup_id="grp-2", effective_ad_id="nad-2"),
     ])
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False), \
          patch.object(proposal_writer, "_adgroup_is_manual_bid") as m_manual:
         out = proposal_writer.build(db, diagnosis, as_of=TODAY)  # 카나리 패치 없음 + 킬스위치 off
     assert out == []
@@ -365,7 +365,7 @@ def test_build_lever_resume_non_ours_skips(db):
     db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="none"))
     db.commit()
     diagnosis = _diagnosis(shopping_lever_resume_candidates=[_resume_board_row("resume")])
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(proposal_writer, "_adgroup_is_manual_bid", return_value=True):
         out = proposal_writer.build(db, diagnosis, as_of=TODAY)
     assert out == []
@@ -401,7 +401,7 @@ def test_delegation_excludes_canary_campaign_resume(db):
     p = _pending(db, proposal_type="resume", target_type="adgroup", target_id="grp-mo",
                  campaign_id=CAMP, target_lock=False)
     skipped = _delegation_skipped()
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})):
+    with patch.object(auto_operator, "AD_BID_CONFIRM_ONLY_CAMPAIGNS", frozenset({CAMP})):
         assert delegation_gate._eligible(db, p, {"resume"}, skipped) is False
     assert skipped["canary_confirm_only"] == 1
 
@@ -413,7 +413,7 @@ def test_delegation_excludes_canary_campaign_adgroup_bid_down(db):
     p = _pending(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-mo",
                  campaign_id=CAMP, target_bid=170)
     skipped = _delegation_skipped()
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})):
+    with patch.object(auto_operator, "AD_BID_CONFIRM_ONLY_CAMPAIGNS", frozenset({CAMP})):
         assert delegation_gate._eligible(db, p, {"bid_down"}, skipped) is False
     assert skipped["canary_confirm_only"] == 1
 
@@ -425,7 +425,7 @@ def test_delegation_non_canary_campaign_still_passes(db):
     p = _pending(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-x",
                  campaign_id="cmp-other", target_bid=170)
     skipped = _delegation_skipped()
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})):
+    with patch.object(auto_operator, "AD_BID_CONFIRM_ONLY_CAMPAIGNS", frozenset({CAMP})):
         assert delegation_gate._eligible(db, p, {"bid_down"}, skipped) is True
     assert skipped["canary_confirm_only"] == 0
 
@@ -438,7 +438,7 @@ def test_expert_briefing_excludes_canary_campaign_pending(db):
                         campaign_id=CAMP, target_lock=False)
     other_p = _pending(db, proposal_type="bid_down", target_type="keyword", target_id="nkw-1",
                        campaign_id="cmp-other", target_bid=170)
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})):
+    with patch.object(auto_operator, "AD_BID_CONFIRM_ONLY_CAMPAIGNS", frozenset({CAMP})):
         briefing = expert_briefing_builder.build(db, as_of=TODAY)
     ids = {p["id"] for p in briefing["pending_proposals"]}
     assert other_p.id in ids
