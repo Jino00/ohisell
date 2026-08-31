@@ -698,6 +698,15 @@ export interface SchedulerHealthCostDrift {
   undetermined: number;                 // ★«정상»에 합치지 않는다 — 합치면 드리프트가 묻힌다
   source: string;                       // 어느 원가표로 판정했나 (파일명 + sha)
 }
+// cost_guard: 위 드리프트 «검사기가 켜져 있나»(계약 D-CPP-64 §4 S1-③, 2026-08-31 배선).
+//   업로드 경로의 가드는 정본 스냅샷을 못 찾으면 **조용히 통과한다**(fail-open, ref 119 §3-2).
+//   ★`active:false`면 바로 위 `cost_drift`를 **믿으면 안 된다** — 검사기가 꺼진 채 낸 0건이고,
+//     그건 「어긋남이 없다」와 화면에서 똑같이 생겼다. 그 둘을 가르는 것이 이 필드의 전부다.
+export interface SchedulerHealthCostGuard {
+  active: boolean;
+  reason: string | null;        // active=false일 때 «왜 꺼졌나»(사람이 읽는 문장)
+  snapshot_path: string | null; // 어느 파일을 찾다 실패했나
+}
 // disk_low: 디스크 여유 감시. ★백엔드는 2026-08-03 ENOSPC 사고 후 이걸 내내 주고 있었는데
 //   **프론트에 타입도 배너 분기도 없었다** — healthy=false를 만들면서 화면은 조용했다
 //   (2026-08-10 prod 실측: 93.8%로 unhealthy인데 배너 0건). 그래서 타입부터 세운다.
@@ -805,6 +814,8 @@ export interface SchedulerHealth {
   data_stale?: SchedulerHealthDataStale[]; // 구백엔드 안전을 위해 optional
   disk_low?: SchedulerHealthDiskLow[];          // 구백엔드 안전을 위해 optional
   cost_drift?: SchedulerHealthCostDrift | null; // 구백엔드 안전을 위해 optional · 정상이면 null
+  // 구백엔드 안전을 위해 optional · 가드가 켜져 있으면 active=true(정상)
+  cost_guard?: SchedulerHealthCostGuard | null;
   // 구백엔드 안전을 위해 optional · 대조 불가면 null · 정상이면 mismatch=[]
   vendor_item_conservation?: SchedulerHealthConservation | null;
   // 구백엔드 안전을 위해 optional · monitored=0(대상 없음)이어도 healthy=true로 온다
@@ -6258,6 +6269,48 @@ export interface CostSettingHistoryRow {
 
 export function fetchCostSettingHistory(): Promise<{ items: CostSettingHistoryRow[] }> {
   return fetchApi("/api/cost/settings/history");
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 원가 메뉴 — `product_master.cost_price` 변경 이력 (계약 D-CPP-64 §4 S1-①)
+// ══════════════════════════════════════════════════════════════════
+
+/** `cost_price`가 움직인 사건 한 줄. **어느 문으로** 들어왔는지가 이 표의 요점이다. */
+export interface CostPriceHistoryRow {
+  id: number;
+  internal_sku: string;
+  product_id: number | null;
+  /** 신규 등록이면 **null**이다 — 0이 아니다(「없음 ≠ 0」). */
+  old_value: string | null;
+  new_value: string;
+  /** `excel_upload` · `mapping_ingest` · `product_create` · `product_update` · `cutover` · `auto` */
+  path: string;
+  actor: string | null;
+  /** 근거 좌표를 사람이 읽는 문장으로. 비면 화면이 「근거 없음」이라고 말한다. */
+  reason: string | null;
+  created_at: string | null;
+}
+
+export interface CostPriceHistoryList {
+  items: CostPriceHistoryRow[];
+  total: number;
+  /** 이력이 시작된 시각(UTC ISO) — 소급이 불가하므로 화면이 이걸 자백한다. */
+  started_at: string | null;
+  /** 0건일 때 «왜 비었는지». null이 아니면 화면이 반드시 띄운다(0건 ≠ 이상 없음). */
+  empty_reason: string | null;
+}
+
+export function fetchCostPriceHistory(params?: {
+  limit?: number;
+  internal_sku?: string;
+  path?: string;
+}): Promise<CostPriceHistoryList> {
+  const q = new URLSearchParams();
+  if (params?.limit != null) q.set("limit", String(params.limit));
+  if (params?.internal_sku) q.set("internal_sku", params.internal_sku);
+  if (params?.path) q.set("path", params.path);
+  const qs = q.toString();
+  return fetchApi(`/api/cost/price-history${qs ? `?${qs}` : ""}`);
 }
 
 /** 설정 1건 확인·변경. **값이 그대로여도** `value_changed:false`로 그 사실을 자백한다 —

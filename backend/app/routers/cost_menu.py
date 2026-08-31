@@ -10,8 +10,14 @@
 ★요청 스키마를 `app/schemas.py`가 아니라 이 파일에 둔다 — 병행 세션이 같은 파일을 건드릴 때
 충돌하는 자리라서다(계약 B 라우터와 같은 이유). 이 라우터 밖에서 쓰이지 않는다.
 
-★**`product_master.cost_price`를 읽지도 쓰지도 않는다** — S1은 부자재 층까지고, 대조 표시는
-표준원가 보드(S2·S3) 몫이다. 쓰기는 어느 슬라이스에서도 없다(계약 §3 금지선).
+★**`product_master.cost_price`를 쓰지 않는다** — 계약 C(D-CPP-64, 2026-08-31 승인)가 A′ §3의
+이 금지선을 **조건부로** 풀었지만, 열린 것은 「컷오버 경로 한 벌 + Jino 클릭 + 이력 + 근거
+좌표」일 때뿐이고 그 경로는 **S3에서 생긴다.** S1인 지금 이 라우터의 쓰기는 여전히 0이다.
+
+★단 **이력은 읽는다**(2026-08-31, 계약 §4 S1-①): `GET /api/cost/price-history`는
+`cost_price_history` 표를 읽어 「누가·언제·어느 문으로·무엇에서 무엇으로」를 화면에 낸다.
+값 자체(`product_master.cost_price`)를 읽는 것이 아니라 **그 값이 움직인 사건**을 읽는 것이고,
+쓰기는 아니다. 그 구별이 흐려지면 이 주석이 지키던 경계가 말로만 남는다.
 """
 
 from __future__ import annotations
@@ -23,13 +29,14 @@ from typing import Literal, Optional
 from io import BytesIO
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.services import cost_price_history as CPH
 from app.services.cost_menu import auto_refresh as AR
 from app.services.cost_menu import materials as M
 from app.services.cost_menu import recipes as R
@@ -263,6 +270,33 @@ class SettingUpdateIn(BaseModel):
 def setting_history(limit: int = 50, db: Session = Depends(get_db)):
     """설정 변경 이력. 비어 있으면 「아직 바꾼 적 없음」이고 그건 사실이다."""
     return {"items": M.list_setting_history(db, limit=limit)}
+
+
+# ──────────────────────────────────────────────
+# `product_master.cost_price` 변경 이력 (계약 D-CPP-64 §4 S1-①)
+#
+# ★읽기 전용이다. 이 라우터는 `cost_price`를 쓰지 않는다(모듈 헤더) — 쓰는 문은 S3의 컷오버
+#   경로 한 벌뿐이고 아직 없다. 여기 있는 이유는 **Jino가 원가를 보는 자리가 원가 메뉴**이기
+#   때문이다(계약 §2-0). 이력이 products API 밑에 있으면 원가를 보러 온 사람이 못 찾는다.
+# ──────────────────────────────────────────────
+@router.get("/price-history")
+def cost_price_history(
+    # ★`ge=1`이 필수다: 검증이 없으면 `limit=-1`이 SQLite에서 **무제한**이 되고, `limit=0`은
+    #   0건을 주면서 「이 조건에 맞는 이력이 없다」로 **오도**한다(적대 리뷰 P2-7).
+    limit: int = Query(default=100, ge=1, le=1000),
+    internal_sku: Optional[str] = None,
+    path: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """`cost_price`가 움직인 사건 목록.
+
+    ★0건은 「원가가 안 바뀌었다」가 **아니다** — 이 표는 배포 시점부터 쌓이므로 대개
+      「아직 시작 안 됐다」다. 응답이 `empty_reason`·`started_at`으로 그 둘을 갈라 말하고
+      화면은 그 문장을 그대로 띄운다(교훈 #123 — 발견 0건과 실행 안 됨은 같은 숫자로 보인다).
+    """
+    return CPH.list_cost_price_history(
+        db, limit=limit, internal_sku=internal_sku, path=path
+    )
 
 
 @router.post("/settings/{key}")

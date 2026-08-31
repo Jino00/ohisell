@@ -240,6 +240,48 @@ def test_ingest_master_sheet_end_to_end(db):
     assert all(m.mapping_source == "excel_master" for m in mappings)
 
 
+def test_ingest_records_cost_price_history_for_both_branches(db):
+    """★매핑 시트 경로도 `cost_price` 이력을 남긴다 (계약 D-CPP-64 §4 S1-①).
+
+    ★적대 리뷰 P1-3(2026-08-31)이 잡은 자리다. `upsert_product_by_name`의 기록 호출
+      **둘 다**를 지워도 백엔드 전건이 초록이었다 — 배선은 옳은데 지키는 것이 없었다.
+      계약 원문은 「**4경로 어느 것으로 값이 바뀌어도** … 1행이 남으며」인데, 짝이 있는 건
+      엑셀 업로드 경로뿐이었다(`test_cost_price_gate_and_history.py`).
+
+    두 분기를 다 잰다: ①신규 등록(옛 값 **없음**) ②기존 상품 갱신(옛 값 → 새 값).
+    """
+    from app.models import CostPriceHistory
+    from app.services.cost_price_history import PATH_MAPPING_INGEST
+
+    _seed_channels(db)
+    ingest_master_sheet(db, _build_master_ws())
+    db.commit()
+
+    rows = db.query(CostPriceHistory).order_by(CostPriceHistory.id).all()
+    assert len(rows) == 2, "신규 2건이 들어왔는데 이력이 없다"
+    assert {r.path for r in rows} == {PATH_MAPPING_INGEST}
+    # ★신규는 옛 값이 **없다** — 0이 아니다(「없음 ≠ 0」, 계약 §3-B).
+    assert all(r.old_value is None for r in rows)
+    assert {r.new_value for r in rows} == {Decimal("1000"), Decimal("2000")}
+    # 근거는 **좌표**여야 한다 — 「업로드됨」 같은 말은 나중에 되짚을 수 없다.
+    assert all("행" in (r.reason or "") for r in rows)
+
+    # ② 같은 시트를 원가만 바꿔 다시 올리면 «옛 값 → 새 값»이 남는다.
+    ws2 = _build_master_ws()
+    ws2.cell(row=2, column=2, value=1500)
+    ingest_master_sheet(db, ws2)
+    db.commit()
+
+    changed = (
+        db.query(CostPriceHistory).filter(CostPriceHistory.old_value.isnot(None)).all()
+    )
+    assert len(changed) == 1, "값이 바뀌었는데 이력이 안 남았다"
+    assert changed[0].old_value == Decimal("1000.00")
+    assert changed[0].new_value == Decimal("1500.00")
+    # ★값이 안 바뀐 「필름 B」는 행이 안 생긴다 — 시끄러운 이력은 아무도 안 읽는다.
+    assert db.query(CostPriceHistory).count() == 3
+
+
 def test_ingest_master_sheet_idempotent_rerun(db):
     _seed_channels(db)
     ws = _build_master_ws()

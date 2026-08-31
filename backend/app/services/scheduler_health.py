@@ -244,6 +244,7 @@ def build_health(
     data_snapshots: Iterable[dict] = (),
     disk_snapshots: Iterable[dict] = (),
     cost_drift: dict | None = None,
+    cost_guard: dict | None = None,
     vendor_item_conservation: dict | None = None,
     exclusion_survival: dict | None = None,
     exclusion_slots: dict | None = None,
@@ -370,6 +371,14 @@ def build_health(
     # ★이건 «없음»이 아니라 «못 받음»이다 — 둘을 같은 숫자로 보이게 두는 것이 교훈 #123이다.
     partial_sync_rows = list(partial_sync or [])
 
+    # 원가 가드가 꺼져 있나 — 「어긋남을 못 찾았다」가 아니라 **「찾을 수가 없었다」**
+    # (계약 D-CPP-64 §4 S1-③ · ref 119 §3-2 fail-open).
+    # ★`cost_guard`가 None이면(구백엔드·미주입) **비정상으로 세지 않는다.** 이 신호를 모르는
+    #   호출자까지 빨갛게 만들면 하위호환이 깨지고, 그건 이 신호가 막으려는 종류의 사고가
+    #   아니다. 「모른다」를 비정상으로 세는 것은 위 dict를 **만든 쪽**의 몫이고, 만든 쪽은
+    #   조회 실패 시 `active: False`를 명시적으로 넣는다.
+    cost_guard_off = bool(cost_guard) and not cost_guard.get("active", True)
+
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
         scheduler_running
@@ -383,6 +392,11 @@ def build_health(
         # ★드리프트가 있으면 healthy=False다. 「값이 틀렸다」도 파이프라인 고장으로 센다 —
         #   조용히 이익이 줄어드는 쪽이 잡 하나 죽는 것보다 늦게 발견된다(177건 × 여러 달).
         and not cost_drift
+        # ★가드가 꺼져 있어도 healthy=False다. 「어긋남을 못 찾았다」가 아니라 **「찾을 수가
+        #   없었다」**이기 때문이다 — 그 상태로 초록을 내면 바로 위 줄의 감시가 통째로 거짓이
+        #   된다. 배너는 healthy=false일 때만 뜨므로, 여기 안 넣으면 화면이 영영 침묵한다
+        #   (2026-08-10 `disk_low`가 판정에만 있고 표시가 없어 통째로 숨었던 것의 거울상).
+        and not cost_guard_off
         # ★보존식 어긋남도 cost_drift와 같은 종류다 — 파이프라인은 살아 있는데 «값»이 틀렸다.
         and not conservation_mismatch
         # ★조치 생존 — 파이프라인도 값도 정상인데 **우리가 한 조치만** 사라질 수 있다.
@@ -411,6 +425,9 @@ def build_health(
         # 드리프트가 없으면 None(키는 항상 있다 — 없는 키와 0건을 프론트가 구분 못 하면
         # «판정 안 함»이 «이상 없음»으로 읽힌다).
         "cost_drift": cost_drift,
+        # 원가 가드 작동 여부. 키는 항상 있다(위 cost_drift와 같은 이유). `active:false`면
+        # **바로 위 `cost_drift`의 값을 믿으면 안 된다** — 검사기가 꺼진 채 낸 0건이다.
+        "cost_guard": cost_guard,
         # 판매분석 두 축의 보존식 대조. 어긋남이 없으면 mismatch=[]이고, 대조 자체를 못 했으면
         # None이다(키는 항상 있다 — cost_drift와 같은 이유: 없는 키와 0건이 같아 보이면
         # «판정 안 함»이 «이상 없음»으로 읽힌다).
@@ -633,6 +650,36 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 원가 정본 대조 실패 — cost_drift 감시만 생략(헬스 API는 유지)")
         cost_drift = None
 
+    # ★가드가 «작동 중인가» — 위 주석이 자백한 ⚠️의 처분이다 (계약 D-CPP-64 §4 S1-③).
+    #   업로드 경로의 드리프트 가드는 정본 스냅샷을 못 찾으면 **조용히 통과한다**
+    #   (`products.py`의 `try_load_truth()` → None, ref 119 §3-2 fail-open). 그때
+    #   `cost_drift`도 None이 되는데, 그건 「어긋남 0건」과 **겉모습이 같다.**
+    #   ⇒ 「검사기가 꺼져 있다」를 별도 신호로 낸다. 없는 키와 0건이 같아 보이면 «판정 안 함»이
+    #     «이상 없음»으로 읽힌다 — 이 파일이 다른 넷에서 이미 배운 규율의 다섯 번째 적용이다.
+    cost_guard: dict | None = None
+    try:
+        from app.services import cost_truth_audit as _cta2
+
+        _snapshot = _cta2.try_load_truth()
+        cost_guard = {
+            "active": _snapshot is not None,
+            "reason": (
+                None
+                if _snapshot is not None
+                else "정본 스냅샷을 못 읽는다 — 업로드 경로의 원가 검사가 통째로 건너뛰어진다"
+            ),
+            "snapshot_path": str(_cta2.DEFAULT_TRUTH_PATH),
+        }
+    except Exception:
+        # 이 조회 자체가 실패하면 «모른다»다. **`active: True`로 접지 않는다** — 모름을
+        # 정상으로 세는 것이 정확히 이 신호가 막으려는 실패다.
+        log.exception("[워치독] 원가 가드 상태 조회 실패 — cost_guard=unknown")
+        cost_guard = {
+            "active": False,
+            "reason": "가드 상태를 조회하지 못했다 — 작동 여부를 모른다(모름을 정상으로 세지 않는다)",
+            "snapshot_path": None,
+        }
+
     # 판매분석 보존식 — Σ옵션 GMV == 요약축 GMV (D-CPP-36).
     # ★try/except: 위 셋(데이터 나이·디스크·원가)과 같은 이유 — 이 조회가 실패해도 헬스 API
     #   전체를 죽이면 안 된다(워치독 침묵 = 이 계열 사고가 막으려는 바로 그 실패).
@@ -748,6 +795,7 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         WATCHDOG_JOBS, states, registered, running, now,
         cookies=cookies, data_snapshots=data_snapshots, disk_snapshots=disk_snapshots,
         cost_drift=cost_drift,
+        cost_guard=cost_guard,
         vendor_item_conservation=vendor_item_conservation,
         exclusion_survival=exclusion_survival,
         exclusion_slots=exclusion_slots,

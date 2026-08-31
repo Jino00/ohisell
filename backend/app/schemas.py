@@ -605,6 +605,12 @@ class SchedulerHealthOut(BaseModel):
     #   dict로 두는 이유: 배너가 쓰는 모양이 바뀌어도 스키마를 따라 고칠 필요가 없고,
     #   구조를 못 박는 일은 프론트 타입과 배선 테스트가 한다.
     cost_drift: dict | None = None
+    # 원가 가드 작동 여부 — 업로드 경로의 드리프트 검사가 정본 스냅샷을 못 찾아 **조용히
+    # 건너뛰어지고 있나**(계약 D-CPP-64 §4 S1-③ · fail-open은 `products.py`의 `try_load_truth`).
+    # ★`active:false`면 **바로 위 `cost_drift`를 믿으면 안 된다** — 검사기가 꺼진 채 낸 0건이다.
+    #   그 둘이 겉으로 같아 보이는 것이 이 필드를 만든 이유고, 그래서 여기 선언이 필수다
+    #   (위 세 필드와 같은 사고: 선언이 없으면 response_model이 판정을 응답에서 지운다).
+    cost_guard: dict | None = None
     # 쿠팡 판매분석 보존식(Σ옵션 GMV == 요약축 GMV) 대조 결과. 정상이면 mismatch=[], 대조 자체를
     # 못 했으면 None. ★위 cost_drift 주석의 사고를 그대로 되풀이하지 않으려고 **먼저** 넣었다 —
     # 서비스층이 판정을 내도 이 줄이 없으면 response_model이 응답에서 지운다. 짝이 되는 테스트는
