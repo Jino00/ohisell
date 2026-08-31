@@ -330,14 +330,18 @@ def test_confirm_records_the_callers_own_words_as_provenance(db):
     mk_sku(db, "S1", "일미리 케이스, 아이폰15", r)
 
     PP.confirm_group(db, internal_skus=["S1"], price=D("922"), source_file="08-07판",
+                     source_names={"S1": "일미리 케이스, 아이폰15"},
                      note="원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭")
     db.flush()
 
     row = db.scalars(select(CostPurchasedPrice)).one()
     assert row.note == "원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭"
-    # 근거의 나머지(어느 파일·어느 행)는 여전히 값과 함께 남는다
+    # 근거의 나머지(어느 파일·어느 행)는 여전히 값과 함께 남는다.
+    # ★`or ... is None`을 달지 않는다 — 이 테스트는 `source_names`를 넘기므로 좌항이
+    #   참이어야 하고, `or` 절을 달면 **어떤 코드에도 실패할 수 없는 줄**이 된다
+    #   (적대 리뷰가 직전 PR에 이어 «두 번째»로 잡은 모양이다).
     assert row.source == "file" and row.source_file == "08-07판"
-    assert row.source_product_name == "일미리 케이스, 아이폰15" or row.source_product_name is None
+    assert row.source_product_name == "일미리 케이스, 아이폰15"
 
 
 def test_film_draft_with_no_lines_still_reaches_the_human_not_auto_written(db):
