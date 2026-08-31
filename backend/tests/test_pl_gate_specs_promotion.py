@@ -397,12 +397,23 @@ def test_실행_재검증_창도_같은_DB값을_읽는다(db):
     assert conv == 0
 
 
-def test_SPECS_인구조사_현재_7종(db):
-    """키가 늘면 이 줄이 빨개진다 — 「무엇이 학습 가능한가」가 조용히 안 바뀌도록."""
+def test_SPECS_인구조사_현재_9종(db):
+    """키가 늘면 이 줄이 빨개진다 — 「무엇이 학습 가능한가」가 조용히 안 바뀌도록.
+
+    ★2026-08-31(D-NAO-281·계약 P2-ⓑ): 7 -> 9. 는 둘은 봉투가 아니라 **킬스위치**다
+    (`ad_bid_routing_enabled`·`naver_cs_dry_run`). 종전엔 배포·재시작으로만 바뀌었고
+    «지금 켜져 있는지»가 화면 어디에도 없었다.
+    """
     assert set(guardrail_params.SPECS) == {
         "cooldown_hours", "max_daily_auto_bid_downs", "max_auto_up_multiple",
         "pl_min_click", "pl_window_days",
         "ss_min_click", "ss_window_days",
+        "ad_bid_routing_enabled", "naver_cs_dry_run",
+    }
+    # ★스위치 2종만 kind='bool'이다 — 봉투가 실수로 bool이 되면(=범위 검사가 0/1로 좁아지면)
+    #   여기가 빨개진다.
+    assert {k for k, sp in guardrail_params.SPECS.items() if sp.kind == "bool"} == {
+        "ad_bid_routing_enabled", "naver_cs_dry_run",
     }
 
 

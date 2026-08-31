@@ -367,7 +367,9 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
             proposal.target_type == "ad"
             and proposal.proposal_type in _auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES
             and is_auto_exec(proposal)  # ★codex 2R[P1]: 사람 console 승인은 스위치와 무관
-            and not _auto_operator.AD_BID_ROUTING_ENABLED
+            # ★D-NAO-281: 모듈 상수가 아니라 «판정 그 순간의» 런타임 값을 읽는다.
+            #   상수를 읽던 종전 코드는 화면에서 스위치를 내려도 배포 전까지 몰랐다.
+            and not _auto_operator.ad_bid_routing_enabled(db)
         ):
             proposal.status = "approved"  # 클레임 원복(미실행 정직 상태)
             db.commit()
@@ -378,7 +380,7 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
             )
             raise KillSwitchEngagedError(
                 f"proposal_id={proposal.id} target={proposal.target_id} — "
-                "AD_BID_ROUTING_ENABLED=False(소재 자동 실행 킬스위치 OFF)"
+                "ad_bid_routing_enabled=False(소재 자동 실행 킬스위치 OFF)"
             )
 
         if proposal.approval_source in (
@@ -1708,7 +1710,8 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
 
     # BX2(D-NAO-70·71) — 소재(ad) 실쓰기 **최종 경계**(codex 소급[P2] 2026-07-20 이중화 계승,
     # D-NAO-13 optimizer 쓰기 직전 하드 체크 동형). B3 개정:
-    #   ① 카나리 1호(맥세이프) 캠페인 제한 **해제** — 전 캠페인 개방(D-NAO-70②). AD_BID_CANARY_CAMPAIGNS
+    #   ① 카나리 1호(맥세이프) 캠페인 제한 **해제** — 전 캠페인 개방(D-NAO-70②). 옛 AD_BID_CANARY_CAMPAIGNS
+#      (D-NAO-281로 AD_BID_ROUTING_FALLBACK_CAMPAIGNS / AD_BID_CONFIRM_ONLY_CAMPAIGNS로 분리)
     #      게이트 제거(그 상수는 auto_operator 레인 라우팅·delegation 봉쇄에서 계속 사용 — 여기선 미사용).
     #   ② 방향: 하향(bid_down)은 기존 B3 Confirm 경로(승인원 무관·전 캠페인) 유지 / 상향은 탐색
     #      자동 경로 전용 — approval_source='explore_op' ∧ 탐색 스텝 타입(EXPLORATION_STEP_TYPES)일
@@ -2585,7 +2588,9 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             proposal.target_type == "ad"
             and proposal.proposal_type in _auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES
             and is_auto_exec(proposal)  # ★codex 2R[P1]: 사람 console 승인은 스위치와 무관
-            and not _auto_operator.AD_BID_ROUTING_ENABLED
+            # ★D-NAO-281: 모듈 상수가 아니라 «판정 그 순간의» 런타임 값을 읽는다.
+            #   상수를 읽던 종전 코드는 화면에서 스위치를 내려도 배포 전까지 몰랐다.
+            and not _auto_operator.ad_bid_routing_enabled(db)
         ):
             log.warning(
                 "naver_execution_harness: 소재 자동 실행 킬스위치 OFF(진입) — proposal_id=%s "
@@ -2594,7 +2599,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             )
             raise KillSwitchEngagedError(
                 f"proposal_id={proposal.id} target={proposal.target_id} — "
-                "AD_BID_ROUTING_ENABLED=False(소재 자동 실행 킬스위치 OFF)"
+                "ad_bid_routing_enabled=False(소재 자동 실행 킬스위치 OFF)"
             )
 
         if proposal.approval_source in (

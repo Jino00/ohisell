@@ -108,11 +108,14 @@ def _eligible(db: Session, proposal: NaverProposal, delegated: set[str], skipped
     # 전체가 사람 감독(Confirm-only) 기간이라는 정책 그대로. target_type 마커(위 'ad' 검사)만
     # 으로는 B4 lever-resume의 resume(target_type='adgroup')처럼 카나리 흐름이 만드는 비-ad
     # 제안이 위임으로 자동발사될 수 있어(취약한 마커 의존) 원리적 게이트로 막는다. 카나리
-    # 졸업 = AD_BID_CANARY_CAMPAIGNS에서 상수 제거 시 자동 해제. 함수 레벨 import —
+    # 졸업 = AD_BID_CONFIRM_ONLY_CAMPAIGNS에서 상수 제거 시 자동 해제. 함수 레벨 import —
     # auto_operator ↔ (harness·diagnosis) 모듈 로드 체인과의 순환 리스크 회피
     # (proposal_writer의 동일 상수 함수 레벨 import 관례).
-    from app.services.naver_ad.auto_operator import AD_BID_CANARY_CAMPAIGNS
-    if proposal.campaign_id in AD_BID_CANARY_CAMPAIGNS:
+    # ★D-NAO-281: 옛 이름 AD_BID_CANARY_CAMPAIGNS는 정반대 두 의미를 겸했다. 여기가 쓰는 건
+    #   «제한»(Confirm-only 제외) 쪽이고, «개방(allowlist)» 쪽은
+    #   AD_BID_ROUTING_FALLBACK_CAMPAIGNS다. 값은 같아도 두 이름이 각자 산다.
+    from app.services.naver_ad.auto_operator import AD_BID_CONFIRM_ONLY_CAMPAIGNS
+    if proposal.campaign_id in AD_BID_CONFIRM_ONLY_CAMPAIGNS:
         skipped["canary_confirm_only"] += 1
         return False
     if proposal.status != "pending":

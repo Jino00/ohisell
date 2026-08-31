@@ -305,10 +305,16 @@ def test_every_param_actually_wins_over_code_constant(db):
     ★2026-08-28(D-NAO-265·S4-a 잔여): SPECS가 5 → 7로 늘며 이 테스트가 **또 먼저 빨개졌다.**
     두 번 연속으로 새 키를 잡았다 — 인구조사 가드가 「등재만 하고 배선은 안 한」 상태를 통과시키지
     않는다는 뜻이고, 이 파일이 지키려던 claimed↔wired 간극이 실제로 닫혀 있다는 실증이다.
+
+    ★2026-08-31(D-NAO-281·계약 P2-ⓑ): SPECS가 7 -> 9로 늘며 **세 번째로** 먼저 빨개졌다.
+    이번에 는 둘은 봉투가 아니라 **킬스위치**(bool)다 — True/False라 「DB가 이긴다」의 반례가
+    더 조용하다(1과 True가 화면에서 같아 보인다). 그래서 코드 기본값과 **반대 값**을 넣어
+    이긴다는 것을 못박는다.
     """
     _kv(db, '{"cooldown_hours": 5, "max_daily_auto_bid_downs": 6, "max_auto_up_multiple": "2.5",'
             ' "pl_min_click": 7, "pl_window_days": 21,'
-            ' "ss_min_click": 15, "ss_window_days": 9}')
+            ' "ss_min_click": 15, "ss_window_days": 9,'
+            ' "ad_bid_routing_enabled": 0, "naver_cs_dry_run": 0}')
     p = guardrail_params.get_params(db)
     assert p["cooldown_hours"] == 5
     assert p["max_daily_auto_bid_downs"] == 6
@@ -317,6 +323,11 @@ def test_every_param_actually_wins_over_code_constant(db):
     assert p["pl_window_days"] == 21
     assert p["ss_min_click"] == 15
     assert p["ss_window_days"] == 9
+    # 코드 기본값은 둘 다 True다 — 반대 값이 실제로 이겨야 한다.
+    assert guardrail_params.SPECS["ad_bid_routing_enabled"].default is True
+    assert guardrail_params.SPECS["naver_cs_dry_run"].default is True
+    assert p["ad_bid_routing_enabled"] is False
+    assert p["naver_cs_dry_run"] is False
     assert {r["key"]: r["source"] for r in guardrail_params.describe(db)} == {
         k: "db" for k in guardrail_params.SPECS
     }

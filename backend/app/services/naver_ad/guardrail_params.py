@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.models import NaverAccountSettings, NaverChangeLog
-from app.services.naver_ad import guardrail_gate, search_term_judge
+from app.services.naver_ad import guardrail_gate, runtime_switches, search_term_judge
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ SETTINGS_KEY = "guardrail_params"
 TARGET_TYPE = "guardrail_param"
 
 # ★되돌림 스위치 — False면 DB를 아예 읽지 않고 전부 코드 상수로 돈다(D-NAO-172).
-#   `AD_BID_ROUTING_ENABLED`·`_GROUP_STEP_ALL_ADS`와 같은 관례: 사고 났을 때 한 줄로
+#   `_GROUP_STEP_ALL_ADS`와 같은 관례: 사고 났을 때 한 줄로
 #   원복된다는 믿음이 이런 스위치의 존재 이유다.
 _PARAMS_FROM_DB: bool = True
 
@@ -60,20 +61,33 @@ class ParamSpec:
 
     Attributes:
         key: KV JSON의 키.
-        default: 코드 상수(최후 폴백). guardrail_gate에서 가져온다 — 두 곳에 숫자를 적지 않는다.
-        kind: 'decimal' | 'int'.
-        lo/hi: **배포로만 바뀌는** 허용 범위. DB는 이 밖으로 못 나간다.
+        default: 코드 상수(최후 폴백). guardrail_gate·runtime_switches에서 가져온다 — 두 곳에
+            값을 적지 않는다.
+        kind: 'decimal' | 'int' | 'bool'. ★'bool'은 D-NAO-281(계약 P2-ⓑ)이 킬스위치 2종을
+            런타임화하며 추가했다. 저장은 종전과 같은 문자열(`str(True)`=='True')이고 화면·API
+            로는 1.0/0.0으로 나간다 — **수치 계약은 불변**이고, 프론트가 `kind`를 보고 토글로
+            그린다.
+        lo/hi: **배포로만 바뀌는** 허용 범위. DB는 이 밖으로 못 나간다. bool은 (False, True).
         label: 화면 표기.
         why: 이 값이 왜 이 값인가(현황판에 그대로 노출 — 「근거를 만들자」는 지시의 이행부).
         direction: 'tighten_down' = 값이 **작아지면** 조이는 것 / 'tighten_up' = 커지면 조이는 것.
             풀기/조이기 판정에 쓴다(P2·P3). 사람이 헷갈리는 축이라 데이터로 박아 둔다.
+        env: 이 파라미터의 **환경변수 폴백** 이름(없으면 None). 우선순위 **DB > env > default**.
+            ★env 층을 남긴 이유: prod `.env`에 `NAVER_CS_DRY_RUN=0`이 **실재한다**(2026-08-31
+            실측). 기본값만 SPECS로 옮기고 env를 무시하면 그 순간 prod가 dry-run으로 조용히
+            뒤집힌다 — 「값을 옮기는 것」이 「동작을 바꾸는 것」이 되는 자리다.
+        warn: **접지 않고 항상 보이는** 경고 1줄(없으면 None). `why`는 「근거 보기」 안에 접혀
+            있어서, 「이 스위치를 내리면 무슨 일이 벌어지는가」처럼 **끄기 직전에 봐야 하는
+            사실**을 담기엔 자리가 틀렸다 — 접힌 곳에 적은 사실은 없는 사실과 같다.
     """
 
     def __init__(self, key: str, default: Any, kind: str, lo: Any, hi: Any,
-                 label: str, why: str, direction: str) -> None:
+                 label: str, why: str, direction: str,
+                 env: str | None = None, warn: str | None = None) -> None:
         self.key, self.default, self.kind = key, default, kind
         self.lo, self.hi = lo, hi
         self.label, self.why, self.direction = label, why, direction
+        self.env, self.warn = env, warn
 
 
 # ★default는 guardrail_gate 상수를 **참조**한다(복사 금지) — 상수가 바뀌면 여기도 따라온다.
@@ -172,14 +186,81 @@ SPECS: dict[str, ParamSpec] = {
         "다시 재므로 방향이 단조롭다고 단정하지 않는다.",
         "tighten_up",
     ),
+    # ── 킬스위치 2종 (D-NAO-281 · 계약 P2-ⓑ) ──────────────────────────────────
+    # ★이 둘은 «봉투»가 아니라 «스위치»다. 같은 레지스트리에 넣는 이유는 하나 —
+    #   「지금 무슨 값으로 돌고 있고 그게 어디서 왔나」를 한 화면에서 보게 하는 것이
+    #   이 레지스트리의 존재 이유이고, 배포로만 바뀌던 스위치야말로 그게 안 보였다.
+    "ad_bid_routing_enabled": ParamSpec(
+        "ad_bid_routing_enabled", runtime_switches.AD_BID_ROUTING_ENABLED_DEFAULT,
+        "bool", False, True,
+        "소재(ad) 입찰 라우팅",
+        "True(D-NAO-125). 소재-레벨 제안 «생성»과 «자동 실행»을 함께 여는 스위치다 — 두 게이트가 "
+        "같은 값을 봐야 「되돌리는 스위치가 완전히 되돌린다」(종전엔 배포로만 바뀌어, 사고가 나도 "
+        "한 줄 원복에 배포 한 번이 필요했다). ★**끄는 것이 조이는 쪽**이라 direction은 "
+        "tighten_down이다. ★단 OFF는 「전면 정지」가 아니다 — 아래 경고 참조.",
+        "tighten_down",
+        warn=(
+            "OFF = 전면 정지가 아니라 **카나리 allowlist로 복귀**입니다"
+            "(AD_BID_ROUTING_FALLBACK_CAMPAIGNS에 남은 캠페인에는 소재 제안이 계속 생성됩니다). "
+            "현재 그 집합은 2026-07-30에 optimizer='none'으로 꺼진 캠페인 1개를 가리킵니다."
+        ),
+    ),
+    "naver_cs_dry_run": ParamSpec(
+        "naver_cs_dry_run", runtime_switches.NAVER_CS_DRY_RUN_DEFAULT,
+        "bool", False, True,
+        "콜드스타트 레인 dry-run",
+        "코드 기본값 True(관측만·네이버 쓰기 0). 종전엔 `os.getenv(\"NAVER_CS_DRY_RUN\")` 한 "
+        "줄이 유일한 판정이라 바꾸려면 .env 수정 + **재시작**이 필요했고, 무엇보다 «지금 켜져 "
+        "있는지»가 화면 어디에도 안 보였다. ★**켜는 것(dry-run=True)이 조이는 쪽**이라 "
+        "direction은 tighten_up이다. ★env는 폐기하지 않았다 — 우선순위 DB > env > 코드 상수. "
+        "출처 칸이 셋 중 어디서 온 값인지 그대로 말한다.",
+        "tighten_up",
+        env=runtime_switches.NAVER_CS_DRY_RUN_ENV,
+        warn=(
+            "OFF(dry-run 해제)면 콜드스타트 레인이 **네이버에 실제로 입찰을 씁니다.** "
+            "prod .env에 NAVER_CS_DRY_RUN=0이 실재하므로, DB에 값을 넣지 않으면 현재값은 "
+            "env가 정합니다(출처 칸 확인)."
+        ),
+    ),
 }
+
+
+# ★bool의 «받아들이는 모양»을 한 곳에 모은다 — 세 경로가 서로 다른 모양을 보내기 때문이다:
+#   ①프론트 입력칸 → JSON 숫자 1/0  ②JSON 리터럴 true/false  ③**저장 왕복** → 문자열
+#   'True'/'False'(`apply_params`가 `str(val)`로 저장한다 — 종전 int·decimal과 같은 관례).
+#   ③을 빠뜨리면 «저장은 되는데 다음 읽기에서 코드 상수로 폴백»하는 조용한 실패가 된다
+#   (화면엔 저장 성공으로 뜨고 값만 안 바뀐다 — 이 저장소가 반복해 데인 모양).
+_BOOL_TRUE = {"true", "1"}
+_BOOL_FALSE = {"false", "0"}
+
+
+def _coerce_bool(raw: Any) -> bool | None:
+    """bool 파라미터의 원값 → True/False. 모르는 모양이면 None(호출부가 폴백)."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):  # bool은 위에서 이미 걸렀다
+        return True if raw == 1 else (False if raw == 0 else None)
+    if isinstance(raw, float):
+        return True if raw == 1.0 else (False if raw == 0.0 else None)
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in _BOOL_TRUE:
+            return True
+        if s in _BOOL_FALSE:
+            return False
+    return None
 
 
 def _coerce(spec: ParamSpec, raw: Any) -> Any | None:
     """DB 원값 → 타입·범위 검증. 실패하면 None(호출부가 코드 상수로 폴백)."""
     try:
-        if spec.kind == "decimal":
-            val: Any = Decimal(str(raw))
+        if spec.kind == "bool":
+            val: Any = _coerce_bool(raw)
+            if val is None:
+                log.error("guardrail_params: %s=%r는 bool로 못 읽는다 — 폴백", spec.key, raw)
+                return None
+        elif spec.kind == "decimal":
+            val = Decimal(str(raw))
         else:
             if isinstance(raw, bool):  # bool은 int의 하위형이라 먼저 걸러낸다
                 return None
@@ -221,18 +302,63 @@ def _raw_overrides(db: Session) -> tuple[dict, Any]:
         return {}, None
 
 
+def _resolve(spec: ParamSpec, overrides: dict) -> tuple[Any, str, bool, bool]:
+    """한 파라미터의 (실효값, 출처, db_rejected, env_rejected). **단일 출처**.
+
+    ★`get_params`(실행 경로)와 `describe`(화면)가 **이 함수 하나**를 본다. 종전엔 두 함수가
+    같은 폴백 규칙을 각자 재현했고, env 층이 붙으면서 규칙이 셋으로 늘었다 — 재현하면
+    갈라지고, 갈라지면 **화면이 말하는 값과 엔진이 쓰는 값이 달라진다.** 이 저장소가 이미 값을
+    치른 병이다(D-NAO-265: 승인 카드의 판정창 ≠ 실행 재검증창).
+
+    우선순위 **DB > env > 코드 상수**. 각 층은 «있는데 못 읽힌» 경우 다음 층으로 내려가되,
+    거부됐다는 사실은 조용히 삼키지 않고 플래그로 올려 보낸다.
+    """
+    db_rejected = False
+    if spec.key in overrides:
+        val = _coerce(spec, overrides[spec.key])
+        if val is not None:
+            return val, "db", False, False
+        db_rejected = True  # DB에 값이 있는데 거부됨 — 화면이 이 사실을 말해야 한다
+
+    env_rejected = False
+    if spec.env:
+        raw_env = os.getenv(spec.env)
+        if raw_env is not None and raw_env.strip() != "":
+            val = _coerce(spec, raw_env)
+            if val is not None:
+                return val, "env", db_rejected, False
+            env_rejected = True
+
+    return spec.default, "code", db_rejected, env_rejected
+
+
 def get_params(db: Session) -> dict[str, Any]:
     """실행 경로가 쓰는 유효 파라미터 {key: 값}. **항상 전 키가 채워져 나온다.**
 
-    개별 항목이 잘못돼도 그 항목만 코드 상수로 떨어지고 나머지는 DB 값을 쓴다 — 한 칸이
+    개별 항목이 잘못돼도 그 항목만 아래 층으로 떨어지고 나머지는 DB 값을 쓴다 — 한 칸이
     깨졌다고 전부 되돌리면 «부분 실패가 전체 롤백»이 되어 오히려 예측이 어렵다.
     """
     overrides, _ = _raw_overrides(db)
-    out: dict[str, Any] = {}
-    for key, spec in SPECS.items():
-        val = _coerce(spec, overrides[key]) if key in overrides else None
-        out[key] = spec.default if val is None else val
-    return out
+    return {key: _resolve(spec, overrides)[0] for key, spec in SPECS.items()}
+
+
+def get_switch(db: Session, key: str) -> bool:
+    """bool 파라미터(킬스위치) 하나의 실효값. **폴백 규칙을 한 곳에 둔다** (D-NAO-281).
+
+    ★왜 도메인 모듈이 각자 try/except를 쓰지 않고 여기를 부르는가: 폴백 규칙(「조회가 실패하면
+    코드 기본값으로 — 설정 한 줄이 광고 집행 경로를 죽이면 안 된다」)을 두 곳에 적으면 두 곳이
+    갈라지고, 갈라진 쪽은 사고가 나야 드러난다. 규칙은 한 곳, 호출은 도메인 모듈에서.
+
+    ★조회 실패 = 「모르면 지금까지 하던 대로」(fail-to-current). fail-closed도 fail-open도
+    아니다 — 이 파일 헤더 §3층 구조의 규율 그대로다.
+    """
+    spec = SPECS[key]  # 없는 키는 오타이므로 KeyError로 «시끄럽게» 죽는 게 맞다
+    try:
+        return bool(get_params(db)[key])
+    except Exception as e:  # noqa: BLE001 — 설정 조회 실패가 집행 경로를 죽이지 않는다
+        log.warning("guardrail_params: 스위치 %s 조회 실패 — 코드 기본값 %s로 폴백(%s: %s)",
+                    key, spec.default, type(e).__name__, e)
+        return bool(spec.default)
 
 
 def describe(db: Session) -> list[dict]:
@@ -245,22 +371,27 @@ def describe(db: Session) -> list[dict]:
     overrides, updated_at = _raw_overrides(db)
     rows: list[dict] = []
     for key, spec in SPECS.items():
-        raw = overrides.get(key)
-        val = _coerce(spec, raw) if key in overrides else None
-        from_db = val is not None
+        val, source, db_rejected, env_rejected = _resolve(spec, overrides)
         rows.append({
             "key": key,
             "label": spec.label,
-            "value": float(spec.default if val is None else val),
-            "source": "db" if from_db else "code",
+            # ★bool도 숫자로 나간다(True→1.0) — 응답의 수치 계약을 바꾸지 않기 위해서다.
+            #   모양은 `kind`가 말하고, 프론트가 그걸 보고 토글로 그린다.
+            "value": float(val),
+            "source": source,
             "code_default": float(spec.default),
             "min": float(spec.lo),
             "max": float(spec.hi),
             "why": spec.why,
             "direction": spec.direction,
-            # DB에 값이 있는데 source가 code면 «거부됨»이다 — 조용히 무시하지 않고 표면화한다.
-            "rejected": key in overrides and not from_db,
-            "updated_at": updated_at.isoformat() if (from_db and updated_at) else None,
+            "kind": spec.kind,
+            "warn": spec.warn,
+            "env": spec.env,
+            # DB에 값이 있는데 source가 db가 아니면 «거부됨»이다 — 조용히 무시하지 않고 표면화한다.
+            "rejected": db_rejected,
+            # env에 값이 있는데 그것도 거부됐다 — 같은 이유로 표면화한다(조용한 폴백 금지).
+            "env_rejected": env_rejected,
+            "updated_at": updated_at.isoformat() if (source == "db" and updated_at) else None,
         })
     return rows
 

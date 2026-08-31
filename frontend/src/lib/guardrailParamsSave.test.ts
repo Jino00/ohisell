@@ -10,7 +10,7 @@ import { buildGuardrailSaveBody, type GuardrailParamRow } from "./guardrailParam
 const row = (
   key: string,
   value: number,
-  source: "db" | "code",
+  source: "db" | "env" | "code",
   rejected = false,
 ): GuardrailParamRow => ({ key, label: key, value, source, rejected });
 
@@ -28,6 +28,23 @@ describe("buildGuardrailSaveBody", () => {
     const params = [row("cooldown_hours", 2, "code"), row("max_auto_up_multiple", 2.0, "code")];
     const res = buildGuardrailSaveBody(params, {}, {});
     expect(res).toEqual({ ok: true, body: {} });
+  });
+
+  it("★env에서 온 값은 안 건드렸으면 보내지 않는다 — env 값이 조용히 DB로 «승격»되면 안 된다", () => {
+    // D-NAO-281: 보내면 출처가 env→db로 바뀌어, 사람이 만진 적 없는 값이 만진 값으로 둔갑한다.
+    // 안 보내면 서버가 다시 env로 내려가므로 **실효값은 그대로**다(사람이 잃는 값 0).
+    const params = [
+      row("naver_cs_dry_run", 0, "env"),   // 서버 .env가 정한 값 — 안 건드림
+      row("cooldown_hours", 3, "db"),
+    ];
+    const res = buildGuardrailSaveBody(params, {}, {});
+    expect(res).toEqual({ ok: true, body: { cooldown_hours: 3 } });
+  });
+
+  it("env 값이라도 사람이 직접 바꿨으면 그 값은 보낸다 — 덮어쓰기는 사람의 명시적 선택이다", () => {
+    const params = [row("naver_cs_dry_run", 0, "env")];
+    const res = buildGuardrailSaveBody(params, { naver_cs_dry_run: "1" }, { naver_cs_dry_run: true });
+    expect(res).toEqual({ ok: true, body: { naver_cs_dry_run: 1 } });
   });
 
   it("rejected 행은 되돌려 보내지 않는다 — 범위 밖이라 폴백된 값은 저장 때 정리되는 게 맞다", () => {

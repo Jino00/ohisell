@@ -8,12 +8,18 @@
 //
 // 규칙: 보낼 본문 = (사람이 손댄 키의 새 값) ∪ (안 손댔지만 이미 `source==="db"`인 키의 현재 값)
 // `rejected` 행은 일부러 뺀다 — DB에 있지만 범위 밖이라 폴백된 값이므로, 저장 시 정리되는 게 맞다.
+//
+// ★D-NAO-281 — `source`에 `"env"`가 생겼다(우선순위 DB > env > 코드 상수). **env 행은 `"code"`와
+// 같이 취급한다 = 안 건드렸으면 안 보낸다.** 보내면 서버 환경변수 값이 조용히 DB로 «승격»되어
+// 출처가 env→db로 바뀐다 — 사람이 만진 적 없는 값이 만진 값으로 둔갑하는 것이고, 이 파일이
+// 애초에 막으려던 사고(봉투가 아무도 모르게 바뀌는 것)와 같은 종류다. 안 보내면 DB에 값이 없어
+// 서버가 다시 env로 내려가므로 **실효값은 그대로**다.
 
 export type GuardrailParamRow = {
   key: string;
   label: string;
   value: number;
-  source: "db" | "code";
+  source: "db" | "env" | "code";
   rejected: boolean;
 };
 

@@ -1059,7 +1059,7 @@ def build(
         if target_id in disconnected_adgroups:
             # B2 GATE P2-2② → B3 라우팅: 미연결 그룹의 그룹입찰 bid_down은 무효 —
             # 카나리면 실효 레버(max 소재) ad-레벨 제안, 비카나리는 hold(B2 억제).
-            if _ad_bid_canary(cid):
+            if _ad_bid_canary(db, cid):
                 ad_p = _band_ad_route(row, band_effs, cid, "shopping_group_bep", bid_sims)
                 ad_p = _tag_gave(ad_p, "shopping_group_bep", row, gave_correction_factor)
                 if ad_p:
@@ -1084,7 +1084,7 @@ def build(
         if target_id in disconnected_adgroups:
             # B2 GATE P2-2② → B3 라우팅(대칭): 미연결 그룹의 그룹입찰 bid_up 무효 —
             # 카나리면 실효 레버(max 소재) ad-레벨 up 제안, 비카나리는 hold.
-            if _ad_bid_canary(cid):
+            if _ad_bid_canary(db, cid):
                 ad_p = _band_ad_route(row, band_effs, cid, "shopping_group_growth", bid_sims)
                 ad_p = _tag_gave(ad_p, "shopping_group_growth", row, gave_correction_factor)
                 if ad_p:
@@ -1141,7 +1141,7 @@ def build(
         # UI1(D-NAO-65): 캠페인 정책 주입 — stoploss_pause면 수동입찰이어도 고삐 대신 즉시
         # 하드 정지(ML은 정책 무관 기존 예외① pause 그대로, _stop_loss_proposal 내부 분기).
         p = _stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid,
-                                ad_bid_canary=_ad_bid_canary(cid),
+                                ad_bid_canary=_ad_bid_canary(db, cid),
                                 loss_policy=loss_policies.get(cid))
         p = _tag_gave(p, "shopping_pause_candidates", row, gave_correction_factor)
         if p is not None:
@@ -1174,7 +1174,7 @@ def build(
             # UI1(D-NAO-65): 이 캠페인의 정책이 pause인데 재개(resume·bid_down_first) 제안은
             # 자기모순 — 정책이 유지하려는 정지를 스스로 되돌리게 된다. 제외(재개 미생성).
             continue
-        if not _ad_bid_canary(cid):
+        if not _ad_bid_canary(db, cid):
             continue  # B4 = 카나리 한정(B3 스코프 계승)
         if _adgroup_is_manual_bid(row["adgroup_id"]) is not True:
             continue  # GATE P2-3②: ML/판정불가 — 소재 leash 불가, 재개 미제안(fail-closed)

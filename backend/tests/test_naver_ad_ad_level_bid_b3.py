@@ -281,7 +281,7 @@ def test_harness_ad_bid_down_dispatches_to_update_ad_bid(db):
     change_log entity_type='ad'·action='update_bid'·before/after 기록."""
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)
     _settings(db, optimizer="ours")
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp1"})), \
          patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
          patch.object(harness.guardrail_gate, "check", return_value=None) as mgate, \
          patch.object(harness.naver_sa_writer, "update_ad_bid", return_value=_ad_write_result()) as mad, \
@@ -305,7 +305,7 @@ def test_harness_ad_bid_down_guardrail_block_no_write(db):
     """가드레일 차단(쿨다운 등) → update_ad_bid 미호출·failed·[실행 불가] 감사(우회 금지)."""
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)
     _settings(db, optimizer="ours")
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp1"})), \
          patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
          patch.object(harness.guardrail_gate, "check", return_value="쿨다운 중"), \
          patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
@@ -333,7 +333,7 @@ def test_harness_ad_bid_up_blocked_when_bep_context_incomplete(db):
     _settings(db, optimizer="ours")
     # 카나리 2단계(up 개방) 가정 — 방향 게이트를 열어야 BEP 완전성 가드 자체를 검증 가능
     # (codex 소급[P2] 최종 경계 가드가 방향을 먼저 막으면 이 가드에 도달 못 함).
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp1"})), \
          patch.object(auto_operator, "_AD_BID_CANARY_PROPOSAL_TYPES", frozenset({"bid_down", "bid_up"})), \
          patch.object(harness, "_build_guardrail_context",
                       return_value={"current_bid": 800, "roas_corrected": None, "target_roas": 2.0}), \
@@ -367,7 +367,7 @@ def test_harness_ad_bid_up_explore_success_when_gates_pass(db):
 
 def test_real_write_blocker_ad_executable(db):
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})):
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp1"})):
         assert harness.real_write_blocker(p) is None
 
 
@@ -398,7 +398,7 @@ def test_harness_ad_blocks_undirectional_bid_up(db):
     """카나리 캠페인이어도 ad bid_up은 1단계 미개방 방향 → 최종 경계 차단(개방은 상수 확장)."""
     p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)
     _settings(db, optimizer="ours")
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp1"})), \
          patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False)
@@ -410,7 +410,7 @@ def test_harness_ad_blocks_undirectional_bid_up(db):
 def test_harness_ad_blocks_missing_adgroup_id(db):
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680, adgroup_id=None)
     _settings(db, optimizer="ours")
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp1"})), \
          patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False)
@@ -518,7 +518,7 @@ def test_hourly_lane_canary_routes_disconnected_to_ad_pending_only(db):
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
@@ -542,7 +542,7 @@ def test_hourly_lane_canary_probe_up_holds_no_ad_routing(db):
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(auto_operator, "_judge_hourly", return_value={"direction": "hold", "reason": "판단보류"}), \
          patch.object(auto_operator, "_probe_trigger", return_value=(True, "imp 있음·클릭0")), \
          patch.object(auto_operator, "_learned_optimal_skip", return_value=(False, "학습밴드 미도달")), \
@@ -611,7 +611,7 @@ def test_hourly_lane_non_canary_holds_disconnected(db):
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid") as mget_ad, \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
@@ -627,7 +627,7 @@ def test_hourly_lane_canary_connected_group_uses_group_path(db):
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=None, use_group=True)
     db.commit()
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
@@ -718,7 +718,7 @@ def test_build_band_bep_canary_routes_disconnected_to_ad(db):
     _ad(db, "grp-d", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False, campaign_id="cmp-ours")
     db.commit()
     diagnosis = _diagnosis(shopping_group_bep=[_bep_board_row()])
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp-ours"})):
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp-ours"})):
         out = proposal_writer.build(
             db, diagnosis, bid_sims={("adgroup", "grp-d"): _sim(direction="down", current_bid=200)},
             as_of=TODAY,
@@ -739,7 +739,7 @@ def test_build_band_bep_non_canary_skips_disconnected(db):
     _ad(db, "grp-d", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False, campaign_id="cmp-ours")
     db.commit()
     diagnosis = _diagnosis(shopping_group_bep=[_bep_board_row()])
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False):
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False):
         out = proposal_writer.build(
             db, diagnosis, bid_sims={("adgroup", "grp-d"): _sim(direction="down", current_bid=200)},
             as_of=TODAY,
@@ -755,7 +755,7 @@ def test_build_band_growth_routes_up_to_ad(db):
     diagnosis = _diagnosis(shopping_group_growth=[
         _bep_board_row(adgroup_id="grp-g", conv_amt=40000, roas_naver=5.0, roas_corrected=5.0),
     ])
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp-ours"})):
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({"cmp-ours"})):
         out = proposal_writer.build(
             db, diagnosis,
             bid_sims={("adgroup", "grp-g"): _sim(direction="up", recommended=1300, ceiling=1300,
@@ -770,18 +770,25 @@ def test_build_band_growth_routes_up_to_ad(db):
 # ══════════════════════════════════════════════════════════════════
 # (5) 카나리 빈 집합 기본값 = 전면 hold(배포 즉시 행위 변화 0) + DOWN 한정 상수
 # ══════════════════════════════════════════════════════════════════
-def test_canary_default_empty_set():
-    # 카나리 1호 개방(Jino 2026-07-20): 맥세이프만 — 상수 자체는 D-NAO-125에서도 불변
-    # (delegation_gate·expert_briefing_builder가 이 상수로 Confirm-only 제외 판별을 그대로
-    # 한다 — 건드리면 계정 전체 위임이 죽는다). 다른 캠페인이 상수에 소리 없이 추가되면
+def test_canary_default_empty_set(db):
+    # 카나리 1호 개방(Jino 2026-07-20): 맥세이프만. 다른 캠페인이 상수에 소리 없이 추가되면
     # 이 테스트가 잡는다.
-    assert auto_operator.AD_BID_CANARY_CAMPAIGNS == frozenset({"cmp-a001-02-000000010769985"})
-    # D-NAO-125(2026-07-29): _ad_bid_canary는 이제 스코프(=위 상수)가 아니라 킬스위치
-    # (AD_BID_ROUTING_ENABLED)만 본다 — 기본(킬스위치 on) 상태에서는 상수 무관 True다.
-    assert auto_operator._ad_bid_canary("any-campaign") is True
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False):
+    # ★D-NAO-281: 한 이름이 겸하던 **정반대 두 의미**를 각자 이름으로 갈랐다. 값은 같지만
+    #   가리키는 것이 다르므로 **둘 다** 못박는다 — 한쪽만 검사하면 다른 쪽이 조용히 바뀐다.
+    #   · FALLBACK  = 킬스위치 OFF 시 되돌아갈 «개방(allowlist)» 집합
+    #   · CONFIRM_ONLY = delegation_gate·expert_briefing_builder의 «제한» 집합
+    #     (건드리면 계정 전체 위임이 죽는다)
+    assert auto_operator.AD_BID_ROUTING_FALLBACK_CAMPAIGNS == frozenset({"cmp-a001-02-000000010769985"})
+    assert auto_operator.AD_BID_CONFIRM_ONLY_CAMPAIGNS == frozenset({"cmp-a001-02-000000010769985"})
+    # D-NAO-125(2026-07-29): _ad_bid_canary는 이제 스코프(=위 상수)가 아니라 킬스위치만 본다 —
+    # 기본(킬스위치 on) 상태에서는 상수 무관 True다.
+    assert auto_operator._ad_bid_canary(db, "any-campaign") is True
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False):
         # 킬스위치 off → 종전처럼 상수 멤버십으로 폴백(회귀 보존).
-        assert auto_operator._ad_bid_canary("any-campaign") is False
+        assert auto_operator._ad_bid_canary(db, "any-campaign") is False
+        # ★OFF는 «전면 정지»가 아니다 — FALLBACK 집합에 든 캠페인은 계속 열린다.
+        #   화면 경고문(`warn`)이 말하는 그 사실을 코드로도 못박는다.
+        assert auto_operator._ad_bid_canary(db, "cmp-a001-02-000000010769985") is True
 
 
 def test_canary_generation_and_autofire_both_directions():
@@ -867,7 +874,7 @@ def test_hourly_lane_ad_pending_dedup_across_runs(db):
         _get_adgroup={"bidAmt": 200},
         get_ad_bid=800,
     )
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(auto_operator, "_AD_AUTO_EXEC_PROPOSAL_TYPES", frozenset()), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value=patches["_get_adgroup"]), \
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=patches["get_ad_bid"]), \
@@ -960,7 +967,7 @@ def test_hourly_lane_ad_bid_down_opens_for_non_canary_campaign(db):
     AD_BID_CANARY_CAMPAIGNS 상수 누락으로 죽어 있던 사고의 회귀 방지: CAMP("cmp-shop")는
     AD_BID_CANARY_CAMPAIGNS(맥세이프 전용)에 한 번도 없었던 캠페인인데도, 상수를 전혀
     건드리지 않고(패치 없이) (a)와 동일하게 인라인 자동 실행된다."""
-    assert CAMP not in auto_operator.AD_BID_CANARY_CAMPAIGNS  # 전제 확인 — 진짜 비카나리
+    assert CAMP not in auto_operator.AD_BID_ROUTING_FALLBACK_CAMPAIGNS  # 전제 확인 — 진짜 비카나리
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
@@ -981,7 +988,7 @@ def test_hourly_lane_kill_switch_off_restores_full_hold(db):
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid") as mget_ad, \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
@@ -1007,8 +1014,8 @@ def test_kill_switch_off_also_stops_auto_exec_on_canary_campaign(db):
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
-         patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False), \
+         patch.object(auto_operator, "AD_BID_ROUTING_FALLBACK_CAMPAIGNS", frozenset({CAMP})), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
@@ -1197,7 +1204,7 @@ def test_kill_switch_blocks_residual_approved_ad_proposal(db):
     )
     db.add(p)
     db.commit()
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False), \
          patch.object(writer, "get_ad_bid") as mock_get, \
          patch.object(writer, "update_ad_bid") as mock_write:
         with pytest.raises(harness.KillSwitchEngagedError):
@@ -1272,7 +1279,7 @@ def test_kill_switch_does_not_block_human_console_approval(db):
     db.add(p)
     db.commit()
     after = {"nccAdId": "nad-1", "adAttr": {"bidAmt": 760, "useGroupBidAmt": False}}
-    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+    with patch.object(auto_operator, "ad_bid_routing_enabled", lambda db: False), \
          patch.object(writer, "get_ad_bid", return_value=800), \
          patch.object(writer, "update_ad_bid",
                       return_value=WriteResult(action="update_ad_bid", before={"bidAmt": 800},
