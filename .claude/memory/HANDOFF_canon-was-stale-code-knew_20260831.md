@@ -145,6 +145,12 @@ git show "origin/main:.claude/memory/chains/<slug>.jsonl" | tail -1
 
 ---
 
-## §6. 착지
+## §6. 착지 — 완주
 
-(아래는 세션 종료 시 갱신)
+`976fc709`(P1 본체) + `c870573d`(QA·HANDOFF) → push → PR **#596** → ⚠️**리뷰 생략: 기록물만**(diff 7파일 전부 `docs/`+`.claude/memory/`, 앱 코드 0파일 — 하네스 §6 기록물 예외) → **CI 3/3 실통과**(backend py3.10 9m3s · py3.14 9m45s · frontend 1m30s) → 머지 **`fadf873f`** · **`--force` 미사용**.
+
+- **멈춘 단계: 없음.**
+- ★`safe_merge.sh` 기본 600초로는 **또 모자랐다** — 실대기 약 590초 + 큐 시간. `MERGE_WAIT=900`으로 통과. n=73의 실측이 **재확인**됐다(소관: 하네스 — 이월 5번).
+- **L5로 「main에 세워둔다」 생략** — 로컬 `main`이 공유 메인 폴더에 체크아웃돼 있다. 다음 세션은 `git switch -c <새> origin/main`으로 갈라야 한다.
+- 정정 경로: `git revert -m 1 fadf873f` · PR close. **force-push 금지**(유일하게 정정 경로를 파괴한다).
+- 착지 전제 검사: L1 살아 있는 세션 2건(승인배선 n=2·발주예측 n=8) 전부 **다른 소관** · L2 소관 밖 경로 없음(커밋은 항상 경로 지정) · L4 `origin/main` 앞섬 0 · L5 생략 사유 위.
