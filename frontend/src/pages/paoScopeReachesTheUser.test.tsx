@@ -23,13 +23,33 @@ import type { PaoScopeRoster } from "../lib/api";
 // ★적대 리뷰 P2-3 채택 — 「클릭이 서버에 닿는가」를 재려면 이 함수들 «자신»을 vi.fn()으로
 //   잡아야 한다(아래 vi.mock 팩토리가 오버라이드한다). 리뷰어의 표면 변이 SUR-5(호출 제거)가
 //   생존했던 이유가 정확히 이것 — 읽기 표면만 재고 쓰기 표면은 아무도 안 봤다.
-import { putPaoScopeAdgroup } from "../lib/api";
+import { putPaoScopeAdgroup, putNaverCampaignAutoOperate } from "../lib/api";
 
 // ★로스터를 테스트마다 갈아끼운다 (D-NAO-267). vi.mock 팩토리는 호이스팅돼서 바깥 변수를
 //   그냥 참조하면 초기화 전 접근이 된다 — vi.hoisted가 그 순서 문제의 공식 해법이다.
 //   램프업 그룹을 공용 ROSTER에 «더하면» 기존 SUR-3·쓰기 표면 테스트의 findByTitle 단수
 //   조회가 중복 매치로 깨진다(토글 버튼이 하나 더 생긴다). 그래서 더하지 않고 갈아끼운다.
-const hoisted = vi.hoisted(() => ({ roster: null as unknown }));
+const hoisted = vi.hoisted(() => ({ roster: null as unknown, preflight: null as unknown }));
+
+/** ★H1 픽스처 — 「켜면 네이버 실쓰기가 나간다」는 그 경고. `optimizer='none'`이 아니라
+ *  'ours'인데도 경고가 뜨는 게 아니라, **'none'이어도 떠야 한다**는 게 백엔드 회귀의 몫이고
+ *  여기서 재는 것은 「그 문장이 화면 픽셀이 되나」다. */
+const PREFLIGHT_WITH_REOPEN = {
+  campaign_id: "cmp-tpu",
+  auto_operate: false,
+  optimizer: "ours" as const,
+  safe_to_ignite: false,
+  warnings: [{
+    code: "reopen_due",
+    message: "켜면 재심사 개방이 **1건** 대기 중이다 — 다음 08:50 레인이 네이버에서 제외키워드를 실제로 삭제한다.",
+    detail: { terms: [{ search_term: "아이패드종이필름" }] },
+  }],
+};
+
+const PREFLIGHT_CLEAN = {
+  campaign_id: "cmp-tpu", auto_operate: false, optimizer: "ours" as const,
+  safe_to_ignite: true, warnings: [] as { code: string; message: string }[],
+};
 
 const ROSTER: PaoScopeRoster = {
   window: { date_from: "2026-08-03", date_to: "2026-08-23", days: 21 },
@@ -123,6 +143,13 @@ vi.mock("../lib/api", async () => {
     deletePaoScopeAdgroup: vi.fn(async () => ({
       deleted: true, remaining_rows: 0, campaign_now_unrestricted: true,
     })),
+    // ★H1(계약 P2) — 쓰기 표면을 재려면 함수 «자신»을 vi.fn()으로 잡아야 한다(SUR-5의 교훈).
+    putNaverCampaignAutoOperate: vi.fn(async () => ({
+      campaign_id: "cmp-tpu", optimizer: "ours" as const, auto_operate: true,
+      mode: null, target_roas_override: null, memo: null, loss_policy: null,
+      updated_at: "2026-08-31T16:00:00",
+    })),
+    fetchNaverCampaignIgnitionPreflight: vi.fn(async () => hoisted.preflight),
     // 레이아웃이 부르는 헬스/스케줄러류는 조용히 실패시켜도 이 화면 판정과 무관하다.
     fetchHealth: vi.fn(async () => { throw new Error("not needed"); }),
     fetchSchedulerStatus: vi.fn(async () => { throw new Error("not needed"); }),
@@ -131,6 +158,7 @@ vi.mock("../lib/api", async () => {
 
 beforeEach(() => {
   hoisted.roster = ROSTER; // 테스트마다 기본값으로 되돌린다 — 갈아끼운 게 새지 않게
+  hoisted.preflight = PREFLIGHT_WITH_REOPEN;
   window.history.pushState({}, "", "/naver-ad/scope");
 });
 
@@ -403,5 +431,79 @@ describe("★SUR-11: 광고그룹 표의 헤더와 본문이 같은 열 그리�
     }
     // ★0건 통과 금지 — 「검사했는데 깨끗하다」와 「검사가 아무것도 안 봤다」는 같은 초록이다(교훈 #123)
     expect(checked).toBeGreaterThan(0);
+  });
+});
+
+// ── ★H1(계약 P2) 엔진 스위치가 사람에게 닿는가 ──────────────────────────────
+//
+// 죽여야 할 표면 변이:
+//   SUR-11 스위치 버튼 자체를 안 그림 — 「API는 생겼는데 누를 손이 없다」의 재발
+//   SUR-12 확인창을 건너뛰고 바로 켬 — preflight가 만들어지지만 아무도 안 본다
+//   SUR-13 경고 문구를 화면에 안 실음 — 「1건 대기 중」이 백엔드에만 있고 사람은 모른다
+//   SUR-14 「그래도 켠다」가 putNaverCampaignAutoOperate를 안 부름 — 눌러도 아무 일도 안 남
+//   SUR-15 끄기에도 확인창을 끼움 — 킬스위치에 마찰을 두면 급할 때 못 끈다
+describe("★H1 엔진 스위치 — 켜는 손·끄는 손이 실제로 있고, 켜기 전에 무엇이 열리는지 말한다", () => {
+  it("SUR-11: 엔진이 꺼진 캠페인엔 「엔진 켜기」 버튼이 화면에 있다", async () => {
+    await renderApp();
+    expect(await screen.findByRole("button", { name: "엔진 켜기" })).toBeTruthy();
+  });
+
+  it("SUR-12·13: 켜기를 누르면 «먼저» 확인창이 뜨고 경고 문구가 화면 픽셀이 된다", async () => {
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "엔진 켜기" }));
+    // ★확인 단계에선 아직 쓰기가 나가면 안 된다
+    expect(vi.mocked(putNaverCampaignAutoOperate)).not.toHaveBeenCalled();
+    expect(await screen.findByText(/재심사 개방이/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "그래도 켠다" })).toBeTruthy();
+  });
+
+  it("SUR-14: 「그래도 켠다」를 눌러야 실제로 켜진다", async () => {
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "엔진 켜기" }));
+    fireEvent.click(await screen.findByRole("button", { name: "그래도 켠다" }));
+    await waitFor(() => {
+      expect(vi.mocked(putNaverCampaignAutoOperate)).toHaveBeenCalledWith({
+        campaignId: "cmp-tpu", autoOperate: true,
+      });
+    });
+  });
+
+  it("경고 0건이어도 확인창은 뜬다 — 「안 했다」와 「깨끗하다」가 같아 보이면 안 된다(교훈 #123)", async () => {
+    hoisted.preflight = PREFLIGHT_CLEAN;
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "엔진 켜기" }));
+    expect(await screen.findByText(/경고 0건/)).toBeTruthy();
+  });
+
+  it("SUR-15: 켜져 있으면 「엔진 끄기」이고, 끄기는 확인창 없이 즉시 나간다", async () => {
+    hoisted.roster = {
+      ...ROSTER,
+      campaigns: [{ ...ROSTER.campaigns[0], auto_operate: true }],
+    };
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "엔진 끄기" }));
+    await waitFor(() => {
+      expect(vi.mocked(putNaverCampaignAutoOperate)).toHaveBeenCalledWith({
+        campaignId: "cmp-tpu", autoOperate: false,
+      });
+    });
+  });
+
+  it("★안내 문구가 「켜는 것은 이 화면이 아니다」라고 말하지 않는다 — 화면이 자기 기능을 부정하면 안 된다", async () => {
+    await renderApp();
+    await screen.findByRole("button", { name: "엔진 켜기" });
+    expect(screen.queryByText(/켜는 것은 이 화면이 아니라 별도 결정입니다/)).toBeNull();
+  });
+
+  it("★중첩 버튼이 없다 — `<button>` 안의 `<button>`은 유효하지 않은 HTML인데 jsdom은 안 막는다", async () => {
+    // ★이 회귀의 유래: H1 초판이 EngineSwitch를 캠페인 행 «전체»인 `<button>` 안에 넣었다.
+    //   테스트 27건이 전부 초록이었고 vitest도 조용했다 — jsdom이 HTML 중첩 규칙을 강제하지
+    //   않기 때문이다. 「테스트가 통과한다」가 「구조가 옳다」를 뜻하지 않는 자리라 명시적으로 센다.
+    const { container } = await renderApp();
+    await screen.findByRole("button", { name: "엔진 켜기" });
+    const nested = container.querySelectorAll("button button");
+    expect(
+      Array.from(nested).map((b) => b.textContent?.slice(0, 40)),
+    ).toEqual([]);
   });
 });

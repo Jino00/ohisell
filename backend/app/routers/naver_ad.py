@@ -777,6 +777,11 @@ def _serialize_settings(s: NaverCampaignSettings) -> dict:
     return {
         "campaign_id": s.campaign_id,
         "optimizer": s.optimizer,
+        # ★H1(P2): `auto_operate`를 응답에 싣는다 — 종전엔 이 직렬화기가 optimizer만 실어서
+        #   **캠페인 설정 API로는 킬스위치의 현재값을 아예 볼 수 없었다**(화면 배지는 별도
+        #   로스터에서 읽는다). 끄고 켜는 손을 다는 마당에 「지금 켜져 있나」를 같은 응답에서
+        #   못 읽으면, 누른 뒤 결과를 확인할 표면이 갈라진다. additive라 기존 소비처 무영향.
+        "auto_operate": bool(s.auto_operate),
         "mode": s.mode,
         "target_roas_override": _num(s.target_roas_override),
         "gamma": _num(s.gamma),
@@ -897,6 +902,91 @@ def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get
     out = _serialize_settings(settings)
     # ★키를 «항상» 싣지 않는다 — 켜는 요청에만 붙인다. 다만 붙일 땐 경고 0건이어도 붙여서
     #   「검사를 안 했다」와 「검사했는데 깨끗하다」가 같아 보이지 않게 한다(교훈 #123).
+    if preflight is not None:
+        out["ignition_preflight"] = preflight
+    return out
+
+
+class AutoOperateSwitchIn(BaseModel):
+    """킬스위치(`auto_operate`)만 바꾼다 — optimizer 스위치와 동형.
+
+    ★`optimizer`를 **받지 않는다**(extra='forbid'로 422). 두 스위치는 «층이 다르다»:
+    optimizer = 「이 캠페인의 관리주체가 누구인가」, auto_operate = 「그 주체의 자동 레인이
+    지금 도는가」. 한 요청으로 둘을 바꿀 수 있게 하면 «켜는 결정»과 «맡기는 결정»이 한
+    클릭에 묶여, 어느 쪽을 의도했는지 감사 로그에서 갈라낼 수 없다.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    campaign_id: str
+    auto_operate: bool
+
+
+@router.put("/campaign-settings/auto-operate")
+def campaign_auto_operate_switch(body: AutoOperateSwitchIn, db: Session = Depends(get_db)):
+    """킬스위치 쓰기 경로(H1 · 계약 P2 첫째). **이 저장소 최초의 `auto_operate` 쓰기 API다.**
+
+    ★왜 이제야 생기나: 종전엔 라우터에 쓰기가 **전무**했고(`ignition_preflight` 모듈 머리주석이
+    2026-08-27 전수 확인으로 기록), 점화는 **prod DB 직접 UPDATE**였다. 그래서 ①감사 행이 앱
+    코드 밖에서 생겨 `improvement_events`가 「writer가 없는데 prod엔 행이 있다」를 주석으로
+    남겨야 했고 ②끄는 손이 사람 손에 없어, 제외 재개방이 **10일째 밀려도 아무도 못 열었다**
+    (2026-08-31 실측: due 1건 — `next_review_at=2026-08-21`, 그 캠페인 `auto_operate=0`).
+
+    ⚠️★**이 스위치는 optimizer 스위치보다 «무겁다» — 같은 문장으로 안심시키면 안 된다.**
+    optimizer 스위치 독스트링은 *"우리 시스템 내부 설정이지 광고 API 쓰기가 아니다"*라고
+    적을 수 있다. 실행 harness가 `optimizer=='ours'`를 하드체크(D-NAO-13, :2564)하기 때문이다.
+    그런데 **제외 재개방 레인은 그 harness를 안 탄다** — `_open_exclusion`
+    (`search_term_ss_lane.py`) 독스트링이 스스로 *"harness.execute()를 안 거치고
+    naver_sa_writer를 직접 부르는 예외 경로"*라고 밝힌다. 그 경로의 게이트는 셋뿐이다:
+    일일 복귀 캡 · `_auto_operate_now`(=이 플래그) · `blocked_by_scope`.
+    ⇒ **`optimizer='none'`인 캠페인이라도 이 플래그를 켜면 다음 08:50 레인이 네이버에서
+    제외키워드를 실제로 삭제한다.** 「내부 설정」이 아니라 **외부 쓰기의 방아쇠**다.
+    그래서 켜는 요청엔 `ignition_preflight`를 반드시 실어 보낸다(경고 0건이어도 — 교훈 #123).
+
+    ★차단하지 않는다(전역 §1 — 새 게이트를 세우지 않는다). 경고를 붙여 돌려줄 뿐이고,
+    켜는 결정은 사람의 것이다. 끄는 방향엔 경고를 달지 않는다 — 닫는 데 안전 경고는 소음이다.
+    """
+    settings = (
+        db.query(NaverCampaignSettings)
+        .filter(NaverCampaignSettings.campaign_id == body.campaign_id)
+        .first()
+    )
+    # ★행 부재의 뜻은 `_auto_operate_now`가 이미 정해 뒀다 — **행이 없으면 False**(fail-closed).
+    #   그러니 before는 「모름」이 아니라 「꺼짐」이다. 여기서 다르게 읽으면 감사 로그의
+    #   before_value가 엔진의 실제 판정과 어긋난다.
+    before = bool(settings.auto_operate) if settings else False
+
+    # ★켜기 «전»에 재고 응답에 싣는다(optimizer 스위치와 같은 관례·같은 판정기).
+    preflight = ignition_preflight.check(db, body.campaign_id) if body.auto_operate else None
+
+    if settings is None:
+        # 없던 행은 이 플래그만 세팅 — optimizer·mode 기본값을 임의로 지어내지 않는다.
+        # (모델 기본값 optimizer=None/'none'이 그대로 남아, 켜도 harness 경로는 안 열린다.
+        #  단 위 ⚠️의 재개방 경로는 열린다 — 그 비대칭이 preflight 경고의 대상이다.)
+        settings = NaverCampaignSettings(
+            campaign_id=body.campaign_id, auto_operate=body.auto_operate
+        )
+        db.add(settings)
+    else:
+        settings.auto_operate = body.auto_operate  # ★다른 필드는 손대지 않는다
+
+    if before != body.auto_operate:
+        db.add(NaverChangeLog(
+            entity_type="campaign", entity_id=body.campaign_id, campaign_id=body.campaign_id,
+            action="auto_operate_change",
+            # ★"1"/"0"이 아니라 "on"/"off"로 적는다 — 이 원장의 before/after는 사람이 읽는
+            #   자리이고, optimizer_change가 'none'/'ours'라는 «말»을 적는 것과 결을 맞춘다.
+            before_value="on" if before else "off",
+            after_value="on" if body.auto_operate else "off",
+            rationale="커맨드 센터 킬스위치(H1 · 계약 P2)",
+            # ★changed_at 명시: 안 넘기면 server_default=func.now()가 먹어 **UTC**로 박힌다
+            #   (memory: sqlite-server-default-now-is-utc — 이 라우터에서 같은 함정 네 번째).
+            changed_at=kst_now(),
+        ))
+
+    db.commit()
+    db.refresh(settings)
+    out = _serialize_settings(settings)
     if preflight is not None:
         out["ignition_preflight"] = preflight
     return out

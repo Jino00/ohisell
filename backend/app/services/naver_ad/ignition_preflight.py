@@ -29,6 +29,8 @@ log = logging.getLogger(__name__)
 
 WARN_SCOPE_EMPTY = "scope_empty"
 WARN_SLOTS_EXHAUSTED = "slots_exhausted"
+# ★H1(계약 P2): 켜는 순간 예약된 «네이버 실쓰기»가 있는가 — 이 경로만 harness를 안 탄다.
+WARN_REOPEN_DUE = "reopen_due"
 
 
 def check(db: Session, campaign_id: str) -> dict:
@@ -85,6 +87,79 @@ def check(db: Session, campaign_id: str) -> dict:
             })
     except Exception:  # noqa: BLE001 — 이 경고가 실패해도 W1은 그대로 서야 한다
         log.exception("[점화선행] 제외 슬롯 경고 생략 — 스코프 검사는 유지")
+
+    # ── W3. 켜는 즉시 «네이버 실쓰기»가 나가는 재개방 건수 (H1 · 계약 P2) ──
+    #
+    # ★★**이 모듈이 「지금 켜면 무엇이 열리는가」를 말하는 자리인데, 정작 가장 무거운 경로가
+    #   빠져 있었다.** W1·W2는 「열린 뒤 무엇이 위험한가」를 말하지만, 재개방은 그와 층이
+    #   다르다 — **켜는 순간 예약된 외부 삭제가 대기 중일 수 있다.**
+    #
+    # ★왜 이것만 따로 세는가: 다른 자동 조치는 전부 실행 harness를 타고 거기서
+    #   `optimizer=='ours'` 하드체크(D-NAO-13)에 걸린다. 그런데 제외 재개방
+    #   (`search_term_ss_lane._open_exclusion`)은 **harness를 안 거치는 명시적 예외 경로**이고
+    #   (그 함수 독스트링이 스스로 밝힌다), 게이트가 셋뿐이다: 일일 복귀 캡 ·
+    #   `_auto_operate_now`(=지금 켜려는 이 플래그) · `blocked_by_scope`(스코프 0행이면 **안 막음**).
+    #   ⇒ `optimizer='none'`인 캠페인이라도 이 플래그만 켜면 다음 레인이 네이버에서 실제로
+    #   제외키워드를 지운다. **켜기 전에 그 건수를 말하지 않으면 아무도 모른다.**
+    #
+    # ★후보 쿼리는 `_run_reexamination`의 것을 **그대로** 쓴다(직접 재현 — 조건을 새로 쓰면
+    #   레인과 갈라져 「경고는 0인데 실제로는 열리는」 상태가 만들어진다).
+    try:
+        from datetime import date  # noqa: PLC0415
+
+        from app.models import NaverSearchTermExclusion  # noqa: PLC0415
+        from app.services.naver_ad import adgroup_scope as _scope  # noqa: PLC0415
+        from app.utils.kst import kst_today  # noqa: PLC0415
+
+        today: date = kst_today()
+        due_rows = (
+            db.query(NaverSearchTermExclusion)
+            .filter(
+                NaverSearchTermExclusion.campaign_id == campaign_id,
+                NaverSearchTermExclusion.status == "excluded",
+                NaverSearchTermExclusion.next_review_at.isnot(None),
+                NaverSearchTermExclusion.next_review_at <= today,
+            )
+            .order_by(NaverSearchTermExclusion.next_review_at)
+            .all()
+        )
+        # 스코프가 막는 행은 실제로 안 열리므로 세지 않는다 — 「열린다」고 말해 놓고 안 열리면
+        # 다음부터 이 경고를 아무도 안 믿는다.
+        openable = [
+            r for r in due_rows
+            if not _scope.blocked_by_scope(db, r.campaign_id, r.adgroup_id)
+        ]
+        if openable:
+            warnings.append({
+                "code": WARN_REOPEN_DUE,
+                "message": (
+                    f"켜면 재심사 개방이 **{len(openable)}건** 대기 중이다 — 다음 08:50 레인이 "
+                    "네이버에서 제외키워드를 **실제로 삭제**한다. 이 경로는 실행 harness를 "
+                    "안 거쳐 `optimizer='ours'` 하드체크가 **적용되지 않는다**."
+                ),
+                "detail": {
+                    "terms": [
+                        {
+                            "exclusion_id": r.id,
+                            "adgroup_id": r.adgroup_id,
+                            "search_term": r.search_term,
+                            "next_review_at": r.next_review_at.isoformat() if r.next_review_at else None,
+                            "live_state": r.live_state,
+                            # ★`source`가 우리 것이 아닌 행은 계약 §5 금지선상 재개방 대상이
+                            #   아니다 — 그런데 레인의 후보 쿼리엔 source 필터가 «없다».
+                            #   그 사실을 숨기지 않고 행마다 실어 보낸다.
+                            "source": r.source,
+                        }
+                        for r in openable
+                    ],
+                    "gate_note": (
+                        "게이트 셋: 일일 복귀 캡 · auto_operate(이 플래그) · 스코프. "
+                        "optimizer는 이 경로의 게이트가 아니다."
+                    ),
+                },
+            })
+    except Exception:  # noqa: BLE001 — 이 경고가 실패해도 W1·W2는 그대로 서야 한다
+        log.exception("[점화선행] 재개방 경고 생략 — 스코프·슬롯 검사는 유지")
 
     return {
         "campaign_id": campaign_id,

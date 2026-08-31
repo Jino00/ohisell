@@ -9,7 +9,13 @@
 //     크게 말한다. 「맡겼다」와 「돌고 있다」를 화면이 뭉치면 n=45의 사고가 화면에서 재발한다.
 //   ③스코프 «해제»와 «끄기»는 결과가 정반대다(해제=전 그룹 복귀 / 끄기=그 그룹만 제외).
 //     확인창이 그 차이를 말한다.
-// ★조회 + 스코프 설정만 한다. 이 화면에 **엔진을 켜는 버튼은 없다**(auto_operate는 별도 결정).
+// ★H1(계약 P2, 2026-08-31): **이 화면에 엔진 스위치가 생겼다.** 종전 이 자리엔 「엔진을 켜는
+//   버튼은 없다(auto_operate는 별도 결정)」라고 적혀 있었고, 실제로 켜는 API가 저장소에 없어
+//   점화가 prod DB 직접 UPDATE였다. 그래서 ①감사 행이 앱 코드 밖에서 생기고 ②끄는 손이 사람에게
+//   없어 제외 재개방이 10일째 밀려 있었다(2026-08-31 실측: due 1건).
+//   ⚠️★이 스위치는 optimizer 스위치보다 **무겁다** — 제외 재개방 레인은 실행 harness를 안 타서
+//   `optimizer='none'`이라도 켜면 네이버 실쓰기가 나간다. 그래서 켜기 전 preflight를 «보여준 뒤»
+//   누르게 한다(차단이 아니라 고지 — 켜는 결정은 사람의 것이다).
 import { useState } from "react";
 import {
   Card, Table, Th, Td, Badge, Loading, EmptyState, LayerNav,
@@ -18,8 +24,9 @@ import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
 import {
   fetchPaoScopeRoster, putPaoScopeAdgroup, deletePaoScopeAdgroup,
+  putNaverCampaignAutoOperate, fetchNaverCampaignIgnitionPreflight,
   type PaoScopeCampaign, type PaoScopeAdgroup, type PaoScopeRole,
-  type PaoScopeDayClassSplit,
+  type PaoScopeDayClassSplit, type NaverAdIgnitionPreflight,
 } from "../lib/api";
 
 const ROLE_LABEL: Record<PaoScopeRole, string> = {
@@ -222,7 +229,124 @@ function EngineStateNotice({ campaigns }: { campaigns: PaoScopeCampaign[] }) {
       <b>스코프는 지정돼 있지만 엔진은 이 캠페인에서 돌지 않습니다</b> —{" "}
       {stopped.map((c) => c.name).join(", ")}. 스코프는 캠페인 스위치{" "}
       <span className="font-mono">auto_operate</span> «아래»의 축이라, 캠페인이 꺼져 있으면 실행은 0입니다.
-      켜는 것은 이 화면이 아니라 별도 결정입니다.
+      {/* ★H1: 종전 문구는 「켜는 것은 이 화면이 아니라 별도 결정입니다」였다. 이제 이 화면에
+          스위치가 있으므로 그 문장은 거짓이 됐다 — 화면이 자기 기능을 부정하면 사람은 버튼을
+          보고도 안 누른다. 「어디서 켜는가」를 실제 자리로 바꾼다. */}
+      {" "}각 캠페인 줄의 <b>엔진 스위치</b>로 켜고 끕니다.
+    </div>
+  );
+}
+
+/** 킬스위치 토글 (H1 · 계약 P2) — 이 저장소 최초의 `auto_operate` 쓰기 손.
+ *
+ *  ⚠️★**끄기는 즉시, 켜기는 고지 후.** 비대칭인 이유: 끄는 것은 언제나 안전 방향이라 마찰을
+ *  두면 급할 때 못 끈다(킬스위치의 존재 이유). 켜는 것은 그 순간 예약된 네이버 실쓰기를
+ *  풀 수 있으므로 preflight를 «보여준 뒤» 한 번 더 누르게 한다.
+ *  ★차단이 아니다 — 경고가 있어도 누를 수 있다(전역 §1: 새 게이트를 세우지 않는다). */
+function EngineSwitch({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [preflight, setPreflight] = useState<NaverAdIgnitionPreflight | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function apply(next: boolean) {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await putNaverCampaignAutoOperate({ campaignId: c.campaign_id, autoOperate: next });
+      // ★켜는 요청에만 preflight가 실린다. 경고가 있으면 «누른 뒤에도» 계속 보여준다 —
+      //   끄기 전까지 그 캠페인이 무엇을 열어 뒀는지가 화면에 남아 있어야 한다.
+      setPreflight(next ? (res.ignition_preflight ?? null) : null);
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 켜기 확인 단계: preflight를 먼저 받아 보여주고, 그 화면에서 한 번 더 눌러야 실제로 켜진다.
+  const [confirming, setConfirming] = useState(false);
+
+  return (
+    /* ★`stopPropagation`을 쓰지 않는다 — 이 스위치는 접기 버튼의 «형제»이지 자식이 아니다
+       (CampaignBlock 주석 참조). 전파를 막아야 한다면 그건 구조가 틀렸다는 신호다. */
+    <span className="inline-flex flex-col items-end gap-1">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => (c.auto_operate ? apply(false) : setConfirming(true))}
+        className={
+          "rounded px-2 py-0.5 text-xs font-medium border disabled:opacity-50 " +
+          (c.auto_operate
+            ? "border-red-300 text-red-700 hover:bg-red-50"
+            : "border-emerald-300 text-emerald-700 hover:bg-emerald-50")
+        }
+        title={c.auto_operate
+          ? "엔진을 끕니다 — 이 캠페인의 자동 조치·제외 재개방이 즉시 멈춥니다"
+          : "엔진을 켭니다 — 무엇이 열리는지 먼저 보여드립니다"}
+      >
+        {busy ? "…" : c.auto_operate ? "엔진 끄기" : "엔진 켜기"}
+      </button>
+
+      {confirming && !c.auto_operate && (
+        <IgnitionConfirm
+          campaignId={c.campaign_id}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => { setConfirming(false); void apply(true); }}
+        />
+      )}
+      {err && <span className="text-[11px] text-red-600">{err}</span>}
+      {preflight && preflight.warnings.length > 0 && (
+        <span className="text-[11px] text-amber-700">
+          켜짐 — 경고 {preflight.warnings.length}건
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** 켜기 확인창 — preflight를 «먼저 보여주고» 그 위에서 한 번 더 누르게 한다.
+ *
+ *  ★경고 0건이어도 이 창을 띄운다(교훈 #123 — 「검사를 안 했다」와 「검사했는데 깨끗하다」가
+ *  같아 보이면 안 된다). `safe_to_ignite`는 «경고가 없다»는 뜻이지 «켜도 좋다»는 승인이 아니다.
+ *  ★차단하지 않는다 — 경고가 몇 건이든 「그래도 켠다」를 누를 수 있다. */
+function IgnitionConfirm({
+  campaignId, onCancel, onConfirm,
+}: { campaignId: string; onCancel: () => void; onConfirm: () => void }) {
+  const { data, error } = useAsyncData(
+    () => fetchNaverCampaignIgnitionPreflight(campaignId),
+    [campaignId],
+  );
+  // ★이 훅은 일부러 `loading`을 안 준다 — 3상태(로딩/실패/데이터)를 «구조적으로» 가르게 하려고
+  //   그렇게 만들어졌다(모듈 머리주석). 그러니 여기서도 셋을 따로 그린다: 실패를 «경고 0건»으로
+  //   위장하지 않는 것이 이 확인창의 존재 이유다.
+  const loading = data === null && error === null;
+  return (
+    <div className="w-96 rounded-md border border-amber-300 bg-amber-50 p-3 text-left text-xs text-amber-900 shadow-sm">
+      <b className="block mb-1">엔진을 켜면 무엇이 열리는가</b>
+      {loading && <span className="text-gray-600">검사 중…</span>}
+      {/* ★검사가 실패하면 «깨끗하다»고 그리지 않는다 — 실패를 실패로 말하고 켜기는 계속 허용한다. */}
+      {error && <span className="text-red-700">선행 검사 실패: {String(error)} — 검사 결과 없이 켭니다.</span>}
+      {data && data.warnings.length === 0 && (
+        <span className="text-emerald-800">검사했고 경고 0건입니다(«안 했다»가 아니라 «깨끗하다»).</span>
+      )}
+      {data && data.warnings.length > 0 && (
+        <ul className="list-disc pl-4 space-y-1">
+          {data.warnings.map((w) => (
+            <li key={w.code}>{w.message}</li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-2 flex gap-2 justify-end">
+        <button type="button" onClick={onCancel}
+          className="rounded border border-gray-300 bg-white px-2 py-0.5 hover:bg-gray-50">
+          취소
+        </button>
+        <button type="button" onClick={onConfirm} disabled={loading}
+          className="rounded border border-emerald-400 bg-emerald-600 px-2 py-0.5 text-white hover:bg-emerald-700 disabled:opacity-50">
+          그래도 켠다
+        </button>
+      </div>
     </div>
   );
 }
@@ -231,31 +355,40 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
   const [open, setOpen] = useState(c.has_scope);
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50"
-      >
-        <span className="text-gray-400 text-xs w-3">{open ? "▾" : "▸"}</span>
-        <span className="text-sm font-medium text-gray-900 flex-1 min-w-0 truncate">{c.name}</span>
-        {c.has_scope ? (
-          <Badge tone="owner">스코프 {c.scoped_count}/{c.adgroup_count}</Badge>
-        ) : (
-          <Badge tone="neutral">전 그룹</Badge>
-        )}
-        <Badge tone={c.auto_operate && c.optimizer === "ours" ? "good" : "neutral"}>
-          {c.optimizer === "ours" ? (c.auto_operate ? "가동" : "우리·정지") : c.optimizer === "mop" ? "MOP" : "수동"}
-        </Badge>
-        {/* ★D-NAO-267: 램프업 그룹은 총이익 합산에서 빠진다 — 몇 개가 빠졌는지 «여기서»
-            말하지 않으면 옆의 총이익이 「그냥 그만큼인 값」으로 읽힌다. */}
-        {c.ramp_up_count > 0 && (
-          <Badge tone="neutral">램프업 {c.ramp_up_count} 제외</Badge>
-        )}
-        <span className="text-xs text-gray-500 tabular-nums w-24 text-right">{num(c.cost)}원</span>
-        <span className="text-xs tabular-nums w-24 text-right">
-          <ProfitCell value={c.gross_profit} low={c.gross_profit_low} high={c.gross_profit_high} status="ok" />
-        </span>
-      </button>
+      {/* ★H1: 종전엔 이 행 «전체»가 하나의 `<button>`(접기/펴기)이었다. 스위치를 그 안에 넣으면
+          `<button>` 안의 `<button>`이라 **유효하지 않은 HTML**이고, jsdom은 이 규칙을 강제하지
+          않아 테스트는 초록인 채로 통과한다(내 초판이 실제로 그랬다). 그래서 행을 flex 컨테이너로
+          바꾸고 접기 버튼과 스위치를 **형제**로 둔다 — `stopPropagation`으로 덮는 것은 증상 처치다. */}
+      <div className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-3 flex-1 min-w-0 text-left"
+        >
+          <span className="text-gray-400 text-xs w-3">{open ? "▾" : "▸"}</span>
+          <span className="text-sm font-medium text-gray-900 flex-1 min-w-0 truncate">{c.name}</span>
+          {c.has_scope ? (
+            <Badge tone="owner">스코프 {c.scoped_count}/{c.adgroup_count}</Badge>
+          ) : (
+            <Badge tone="neutral">전 그룹</Badge>
+          )}
+          <Badge tone={c.auto_operate && c.optimizer === "ours" ? "good" : "neutral"}>
+            {c.optimizer === "ours" ? (c.auto_operate ? "가동" : "우리·정지") : c.optimizer === "mop" ? "MOP" : "수동"}
+          </Badge>
+          {/* ★D-NAO-267: 램프업 그룹은 총이익 합산에서 빠진다 — 몇 개가 빠졌는지 «여기서»
+              말하지 않으면 옆의 총이익이 「그냥 그만큼인 값」으로 읽힌다. */}
+          {c.ramp_up_count > 0 && (
+            <Badge tone="neutral">램프업 {c.ramp_up_count} 제외</Badge>
+          )}
+          <span className="text-xs text-gray-500 tabular-nums w-24 text-right">{num(c.cost)}원</span>
+          <span className="text-xs tabular-nums w-24 text-right">
+            <ProfitCell value={c.gross_profit} low={c.gross_profit_low} high={c.gross_profit_high} status="ok" />
+          </span>
+        </button>
+        {/* ★배지 «옆»에 둔다 — 배지는 상태를 말하고 스위치는 그 상태를 바꾼다. 읽는 자리와
+            누르는 자리가 떨어져 있으면 누른 뒤 무엇이 바뀌었는지 확인이 갈라진다. */}
+        <EngineSwitch c={c} onChanged={onChanged} />
+      </div>
       {open && (
         <div className="pb-3">
           {c.has_scope && (

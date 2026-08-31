@@ -4377,12 +4377,28 @@ export type NaverLossPolicy = "leash" | "stoploss_pause";
 export interface NaverAdCampaignSettings {
   campaign_id: string;
   optimizer: NaverAdOptimizer;
+  /** ★H1(계약 P2) — 킬스위치의 현재값. 종전엔 이 응답에 없어서 캠페인 설정 API로는
+   *  「지금 켜져 있나」를 아예 못 읽었다(화면 배지는 별도 로스터에서 읽는다). */
+  auto_operate: boolean;
   mode: NaverAdCampaignMode | null;
   target_roas_override: number | null;
   memo: string | null;
   /** D-NAO-65 UI2 — loss 대응 정책. null=미설정(기본 고삐). _serialize_settings가 실어줌. */
   loss_policy: NaverLossPolicy | null;
   updated_at: string | null;
+  /** ★켜는 요청에만 실린다(끄는 요청엔 없다). 경고 0건이어도 키는 붙는다 —
+   *  「검사를 안 했다」와 「검사했는데 깨끗하다」가 같아 보이지 않게(교훈 #123). */
+  ignition_preflight?: NaverAdIgnitionPreflight;
+}
+
+/** 켜기 선행 검사 — 차단이 아니라 «지금 켜면 무엇이 열리는가»의 경고 목록. */
+export interface NaverAdIgnitionPreflight {
+  campaign_id: string;
+  auto_operate: boolean;
+  optimizer: NaverAdOptimizer;
+  /** ★«경고가 없다»는 뜻이지 «켜도 좋다»는 승인이 아니다. */
+  safe_to_ignite: boolean;
+  warnings: { code: string; message: string; detail?: unknown }[];
 }
 
 export interface NaverAdCampaignSettingsList {
@@ -4853,6 +4869,34 @@ export function putNaverCampaignOptimizer(body: {
     method: "PUT",
     body: JSON.stringify({ campaign_id: body.campaignId, optimizer: body.optimizer }),
   });
+}
+
+/** 킬스위치(`auto_operate`)만 바꾼다 — H1(계약 P2). 이 저장소 최초의 auto_operate 쓰기 경로다.
+ *
+ *  ⚠️★**optimizer 스위치보다 무겁다.** optimizer 스위치는 「우리 시스템 내부 설정」이라 말할 수
+ *  있다(실행 harness가 optimizer=='ours'를 하드체크하므로). 그런데 **제외 재개방 레인은 그
+ *  harness를 안 탄다** — 게이트가 일일 복귀 캡·이 플래그·스코프 셋뿐이라, `optimizer='none'`인
+ *  캠페인이라도 이걸 켜면 다음 08:50 레인이 네이버에서 제외키워드를 **실제로 삭제**한다.
+ *  ⇒ 켜는 응답의 `ignition_preflight`를 **반드시 사람에게 보여줄 것**(경고 0건이어도).
+ *  끄는 요청엔 preflight가 안 실린다(닫는 데 안전 경고는 소음). */
+export function putNaverCampaignAutoOperate(body: {
+  campaignId: string; autoOperate: boolean;
+}): Promise<NaverAdCampaignSettings> {
+  return fetchApi<NaverAdCampaignSettings>("/api/naver/ad/campaign-settings/auto-operate", {
+    method: "PUT",
+    body: JSON.stringify({ campaign_id: body.campaignId, auto_operate: body.autoOperate }),
+  });
+}
+
+/** 켜기 선행 검사만 «물어본다»(읽기 전용·차단 0). 켜기 «전에» 무엇이 열리는지 보여주는 용도.
+ *  ★백엔드는 이 창구를 2026-08-27에 만들어 뒀는데 프론트에 호출부가 없었다 — 검사가
+ *  엔드포인트 안에만 있으면 정작 켜는 순간엔 아무도 안 본다(그 모듈 머리주석의 경고 그대로). */
+export function fetchNaverCampaignIgnitionPreflight(
+  campaignId: string,
+): Promise<NaverAdIgnitionPreflight> {
+  return fetchApi<NaverAdIgnitionPreflight>(
+    `/api/naver/ad/campaign-settings/ignition-preflight?campaign_id=${encodeURIComponent(campaignId)}`,
+  );
 }
 
 /** loss 대응 정책만 바꾼다(D-NAO-65 UI2). optimizer 스위치와 동형의 전용 엔드포인트 —
