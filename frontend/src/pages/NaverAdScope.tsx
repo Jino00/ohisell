@@ -25,8 +25,10 @@ import { num } from "../lib/format";
 import {
   fetchPaoScopeRoster, putPaoScopeAdgroup, deletePaoScopeAdgroup,
   putNaverCampaignAutoOperate, fetchNaverCampaignIgnitionPreflight,
+  fetchNaverSearchTermExclusions, reopenNaverSearchTermExclusion,
   type PaoScopeCampaign, type PaoScopeAdgroup, type PaoScopeRole,
   type PaoScopeDayClassSplit, type NaverAdIgnitionPreflight,
+  type NaverSearchTermExclusionRow,
 } from "../lib/api";
 
 const ROLE_LABEL: Record<PaoScopeRole, string> = {
@@ -398,8 +400,96 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
             </p>
           )}
           <AdgroupTable c={c} onChanged={onChanged} />
+          <ReopenPanel campaignId={c.campaign_id} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** 제외 재개방 «손»(계약 P2 넷째). 이 캠페인이 우리가 걸어 둔 제외 중 **지금 열 수 있는/못 여는**
+ *  것을 보여 주고, 각 행에 해제 버튼을 준다.
+ *
+ *  ★**왜 여기 있나**: 재개방의 유형별 dispatch는 D-NAO-271로 이미 구현돼 있었지만 **자동 레인
+ *    안에서만** 돌았다. 레인은 `auto_operate=1`인 캠페인만 훑으므로, 스위치가 꺼진 캠페인의 제외는
+ *    재심사일이 지나도 아무도 못 열었다 — 2026-08-31 실측: due 1건이 **10일째** 밀려 있었다.
+ *    기능은 있는데 «손»이 없던 자리다. 그래서 손을 스위치 바로 아래에 둔다(켜는 자리와 여는
+ *    자리가 붙어 있어야 「켠 뒤 재개방」이라는 사유가 행동으로 이어진다).
+ *
+ *  ★**전체 제외 드릴다운(요약·페이징·4종 GET 렌더)은 여기 만들지 않는다** — 그건 계약 P3의
+ *    체크박스다. 여기 있는 것은 P2의 손이 서 있을 만큼의 표면뿐이다. */
+function ReopenPanel({ campaignId }: { campaignId: string }) {
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // ★`useAsyncData`를 쓴다(이 페이지의 관례). 손으로 `catch → setRows([])`를 쓰면 **조회 실패가
+  //   「제외 0건」으로 렌더된다** — 그 훅의 머리주석이 정확히 그 병을 막으려고 만들어졌고,
+  //   내 초판이 그 실수를 그대로 반복했다(「없다」와 「못 읽었다」는 다른 사실이다).
+  // ★`console_import`(대행사·수동 편입분)는 애초에 재개방 대상이 아니다 — 계약 §5 금지선.
+  //   ★★거르는 «자리»가 결함이었다(적대 리뷰 1R P1-1): 화면에서 거르면 `limit` 뒤라 페이지가
+  //   편입분으로 차서 정작 열 수 있는 due 행이 응답에 아예 안 온다. 그래서 SQL로 내렸다.
+  const { data, error } = useAsyncData(
+    () => fetchNaverSearchTermExclusions({
+      campaignId, status: "excluded", limit: 50, excludeConsoleImport: true,
+    }),
+    [campaignId, reloadKey],
+  );
+  // 화면 필터는 이중 방어로 남긴다 — 서버가 파라미터를 무시해도 손이 잘못 열리지 않는다.
+  const rows = data?.rows.filter((r) => r.source !== "console_import") ?? null;
+
+  async function reopen(row: NaverSearchTermExclusionRow) {
+    setBusyId(row.id);
+    setMsg(null);
+    try {
+      const res = await reopenNaverSearchTermExclusion(row.id);
+      // ★막힌 것도 «정상 응답»이다 — 사유를 그대로 보여 준다. 조용히 아무 일도 안 일어나면
+      //   사람은 버튼이 고장 났다고 읽는다.
+      setMsg(res.ok ? `열었습니다 — 「${row.search_term}」 관찰 시작(${res.probation_until}까지)` : res.reason);
+      setReloadKey((k) => k + 1);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "재개방 실패");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (error) {
+    return <p className="px-4 pt-3 text-xs text-amber-700">제외 목록을 읽지 못했습니다 — {error}</p>;
+  }
+  if (rows === null) return null;
+  if (rows.length === 0) {
+    return (
+      <p className="px-4 pt-3 text-xs text-gray-500">
+        우리가 건 검색어 제외가 없습니다 (대행사·콘솔 편입분은 재개방 대상이 아닙니다).
+      </p>
+    );
+  }
+  return (
+    <div className="px-4 pt-3">
+      <div className="text-xs font-medium text-gray-700 mb-1">검색어 제외 재개방</div>
+      {msg && <p className="text-xs text-gray-600 mb-1">{msg}</p>}
+      <ul className="space-y-1">
+        {rows.map((r) => (
+          <li key={r.id} className="flex items-center gap-2 text-xs">
+            <span className="font-medium text-gray-900">{r.search_term}</span>
+            <span className="text-gray-500">재심사 {r.next_review_at ?? "미정"} · {r.cycle}회차</span>
+            <button
+              type="button"
+              disabled={r.reopen_block_reason !== null || busyId === r.id}
+              onClick={() => void reopen(r)}
+              className="px-2 py-0.5 rounded border border-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50"
+            >
+              {busyId === r.id ? "여는 중…" : "지금 재개방"}
+            </button>
+            {/* ★비활성 사유를 «항상» 옆에 적는다 — 회색 버튼만 있으면 「왜」가 사라진다.
+                문장은 백엔드가 준 것을 그대로 쓴다(화면이 다시 쓰면 두 벌이 갈라진다). */}
+            {r.reopen_block_reason && (
+              <span className="text-gray-500">— {r.reopen_block_reason}</span>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

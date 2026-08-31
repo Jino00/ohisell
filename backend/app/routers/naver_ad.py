@@ -109,6 +109,7 @@ from app.services.naver_ad import exclusion_slot_usage, exclusion_survival, igni
 from app.services.naver_ad import search_term_exclusion_list
 from app.services.naver_ad import search_term_execution
 from app.services.naver_ad import search_term_scorecard
+from app.services.naver_ad import search_term_ss_lane
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import modification_feed
 from app.services.naver_ad import naver_execution_harness
@@ -1004,9 +1005,12 @@ def campaign_ignition_preflight(
 ) -> dict:
     """켜기 선행 검사(읽기 전용·차단 0, S6-b).
 
-    ★`auto_operate`를 켜는 API 경로는 **존재하지 않는다**(점화는 직접 UPDATE다). 그래서
-    이 창구가 필요하다 — 켜기 «전에» 「지금 켜면 무엇이 열리는가」를 물어볼 수 있어야
-    검사가 정작 켜는 순간에 쓰인다. optimizer 스위치 응답에도 같은 판정기가 실린다."""
+    ★이 독스트링은 **2026-08-31에 반증됐다** — 「`auto_operate`를 켜는 API 경로는 존재하지
+    않는다(점화는 직접 UPDATE다)」라고 적혀 있었는데, 같은 날 H1이 바로 위에
+    `PUT /campaign-settings/auto-operate`를 만들었다. 사실을 갱신해 둔다: **켜는 경로는 있다.**
+    그래도 이 창구는 남는다 — 켜기 «전에» 「지금 켜면 무엇이 열리는가」를 물어볼 수 있어야
+    검사가 정작 켜는 순간에 쓰이고, 켜기 응답에도 같은 판정기가 실린다(한 사실, 한 판정기,
+    세 표면). ★고친 이유: 낡은 정본은 다음 세션이 **없는 것을 다시 만들게** 한다."""
     return ignition_preflight.check(db, campaign_id)
 
 
@@ -2271,6 +2275,13 @@ def get_search_term_exclusions(
     # void = 무효화된 행. 조회할 수 있어야 «지운 것»이 어디로 갔는지 확인 가능하다(사후 가시성).
     status: str | None = Query(None, pattern="^(excluded|probation|restored|void)$"),
     campaign_id: str | None = Query(None),
+    # ★적대 리뷰 1R P1-1 상환. 재개방 패널은 «우리가 건 제외»만 봐야 하는데, 그 필터를 화면에서
+    #   걸면 **`limit` 뒤에** 걸린다. 이 원장은 3,990행 중 **3,987행이 `console_import`**라
+    #   (2026-08-31 실측) 한 페이지가 편입분으로 다 차고 정작 열 수 있는 due 행이 응답에서 빠진다.
+    #   그러면 화면엔 「우리가 건 검색어 제외가 없습니다」가 뜬다 — **이 손이 고치려던 병(「배지는
+    #   있는데 누를 것이 없다」)을 정상 문구로 위장해 되살리는 것**이다. 그래서 SQL로 내린다.
+    #   기본값 False: 이 창구는 드릴다운도 겸하고 「지운 것이 어디로 갔는지」는 보여야 한다.
+    exclude_console_import: bool = Query(False),
     limit: int = Query(100, ge=1, le=_MAX_BM_LIMIT),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -2311,6 +2322,9 @@ def get_search_term_exclusions(
         q = q.filter(NaverSearchTermExclusion.status == status)
     if campaign_id:
         q = q.filter(NaverSearchTermExclusion.campaign_id == campaign_id)
+    if exclude_console_import:
+        # ★`limit` «전»에 건다 — 이 한 줄의 위치가 P1-1의 전부다(위 파라미터 주석).
+        q = q.filter(search_term_execution.not_console_import())
     total = q.count()
     rows = (
         q.order_by(NaverSearchTermExclusion.last_transition_at.desc())
@@ -2318,6 +2332,9 @@ def get_search_term_exclusions(
     )
     camp_ids = {r.campaign_id for r in rows if r.campaign_id}
     _, camp_names = _batch_entity_names(db, set(), camp_ids)
+    # ★적대 리뷰 1R P2-2 상환(N+1 축소): 일일 복귀 캡은 **행에 안 딸린 값**인데 행마다 다시 세고
+    #   있었다(50행 요청에 SQL 207회 실측). 한 번 세서 게이트에 넘긴다 — 판정은 그대로다.
+    returns_today = search_term_ss_lane.count_returns_today(db, kst_now())
 
     return {
         "total": total,
@@ -2345,9 +2362,85 @@ def get_search_term_exclusions(
                 "next_review_at": r.next_review_at.isoformat() if r.next_review_at else None,
                 "probation_until": r.probation_until.isoformat() if r.probation_until else None,
                 "cost_at_exclusion": r.cost_at_exclusion,
+                # ★재개방 버튼의 «비활성 사유»(계약 P2 넷째의 손). 값의 출처는 실행 경로와 **같은
+                #   함수**다(`reopen_gate`) — 화면이 사유를 자기 말로 다시 계산하면 「무엇이 막았나」와
+                #   「무엇이라 말했나」가 갈라진다. `check_live=False`라 라이브 광고그룹 유형 GET은
+                #   건너뛴다(목록 100행에 API를 100번 때리지 않는다). 그래서 이 값은 **힌트**이고
+                #   권위는 실행 시점에 있다 — 방향이 fail-closed라 안전하다(화면이 「열림」이라 해도
+                #   실행이 다시 막지만, 그 반대는 없다).
+                "reopen_block_reason": _reopen_block_reason_of(db, r, returns_today),
             }
             for r in rows
         ],
+    }
+
+
+_CONSOLE_IMPORT_REASON = "콘솔 편입분 — 우리가 건 제외가 아니라 재개방 대상이 아님"
+
+
+def _reopen_block_reason_of(
+    db: Session, row: NaverSearchTermExclusion, returns_today: int | None = None,
+) -> str | None:
+    """행 1건의 재개방 차단 사유(사람이 읽는 문구) — 없으면 None(=지금 열 수 있음, DB 기준).
+
+    ★`console_import`는 게이트를 «묻기 전에» 걸러낸다. 의미상으로도 맞고(계약 §5 금지선 — 우리가
+      걸지 않은 제외는 우리가 풀지 않는다) 비용상으로도 그렇다: 2026-08-31 실측으로 제외 3,990행
+      중 **3,987행이 console_import**라, 안 거르면 목록 한 장이 쓸모없는 게이트 판정을 100번 돈다.
+    """
+    if row.source == "console_import":
+        return _CONSOLE_IMPORT_REASON
+    gate = search_term_ss_lane.reopen_gate(
+        db, row, kst_now(), check_live=False, returns_today=returns_today,
+    )
+    return None if gate.reason is None else search_term_ss_lane.REOPEN_BLOCK_MESSAGES[gate.reason]
+
+
+@router.post("/search-term/exclusions/{row_id}/reopen")
+def reopen_search_term_exclusion(row_id: int, db: Session = Depends(get_db)) -> dict:
+    """제외 1건을 **사람이** 지금 재개방한다(계약 P2 넷째의 «손»).
+
+    ★**왜 이 손이 필요했나**: 유형별 dispatch(D-NAO-271 — 파워링크=id 기반 / 쇼핑=키워드 기반)는
+    이미 구현돼 **자동 레인 안에서만** 돈다. 그런데 그 레인은 `auto_operate=1`인 캠페인만 훑으므로,
+    스위치가 꺼진 캠페인의 제외는 `next_review_at`이 지나도 **아무도 못 연다** — 2026-08-31 실측:
+    due 1건이 `next_review_at=2026-08-21`로 **10일째** 밀려 있었고 그 캠페인은 `auto_operate=0`이다.
+    화면엔 「재개방 대기」 **배지만** 있었지 누를 것이 없었다(기능은 있는데 손이 없다).
+
+    ★**게이트를 우회하지 않는다 — 이 손은 얇다.** 재개방 판정·실쓰기는 전부 자동 레인과 같은
+    `search_term_ss_lane._open_exclusion`이 한다(캡·킬스위치·스코프·소속·유형·클레임·change_log·
+    일기까지 그대로). 우회 경로 신설은 계약 §5 금지선이다 — **재개방도 네이버 실쓰기이고, 사람이
+    눌렀다는 사실은 게이트 면제 사유가 아니다.** 그래서 `auto_operate`가 꺼져 있으면 이 창구도
+    거부한다(계약 §5 처분 ⓐ: 「재개방하려면 그 캠페인의 auto_operate를 켠다」).
+
+    ★**조용한 no-op을 만들지 않는다**: 못 열었으면 200에 `ok=false`와 **사유**를 실어 돌려준다.
+    실패를 200으로 삼키는 게 아니라, 「막혔다」는 정상 응답이고 사유가 본문이다 — 화면이 그 문장을
+    그대로 보여 준다. 못 찾은 행만 404다.
+    """
+    row = db.get(NaverSearchTermExclusion, row_id)
+    if row is None:
+        raise HTTPException(404, f"제외 상태 행 {row_id}을 찾을 수 없습니다")
+    # ★`console_import` 행은 대상이 아니다(계약 §5 금지선 — 우리가 걸지 않은 제외는 우리가 풀지
+    #   않는다). 게이트 함수가 아니라 여기서 막는 이유: 자동 레인은 애초에 이 행들을 후보로
+    #   집지 않아 `reopen_gate`에 도달조차 안 한다 — 없는 검사를 게이트에 넣으면 「레인이 하는 일」과
+    #   「게이트가 아는 것」이 갈라진다. 손에만 있는 제약이라 손에 적는다.
+    if row.source == "console_import":
+        return {
+            "ok": False, "id": row.id, "status": row.status,
+            "reason": _CONSOLE_IMPORT_REASON, "reason_code": "console_import",
+        }
+    gate = search_term_ss_lane.reopen_gate(db, row, kst_now())
+    if gate.reason is not None:
+        return {
+            "ok": False, "id": row.id, "status": row.status,
+            "reason": search_term_ss_lane.REOPEN_BLOCK_MESSAGES[gate.reason],
+            "reason_code": gate.reason,
+        }
+    now = kst_now()
+    opened = search_term_ss_lane.open_exclusion_now(db, row, now)
+    db.refresh(row)
+    return {
+        "ok": opened, "id": row.id, "status": row.status,
+        "reason": None if opened else "네이버 쓰기 실패 — change_log에 사유 기록(상태 유지·재시도 가능)",
+        "probation_until": row.probation_until.isoformat() if row.probation_until else None,
     }
 
 

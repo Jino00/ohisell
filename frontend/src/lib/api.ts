@@ -4899,6 +4899,61 @@ export function fetchNaverCampaignIgnitionPreflight(
   );
 }
 
+/** 검색어 제외 상태기계 1행(`naver_search_term_exclusion`) — 재개방 «손»의 표면.
+ *  `reopen_block_reason`이 null이 아니면 그 문장이 곧 버튼의 비활성 사유다. 값의 출처는 실행
+ *  경로와 **같은 함수**(`search_term_ss_lane.reopen_gate`)라, 화면이 사유를 자기 말로 다시 쓰지
+ *  않는다 — 다시 쓰면 「무엇이 막았나」와 「무엇이라 말했나」가 갈라진다. */
+export interface NaverSearchTermExclusionRow {
+  id: number;
+  campaign_id: string | null;
+  campaign_name?: string | null;
+  adgroup_id: string;
+  search_term: string;
+  status: string;
+  cycle: number;
+  source: string | null;
+  next_review_at: string | null;
+  probation_until: string | null;
+  reopen_block_reason: string | null;
+}
+
+export interface NaverSearchTermExclusionList {
+  total: number;
+  summary_by_status: Record<string, number>;
+  today_excluded: number;
+  today_opened: number;
+  today_restored: number;
+  rows: NaverSearchTermExclusionRow[];
+}
+
+/** 제외 상태기계 목록. ★백엔드는 오래전부터 있었는데 **프론트 호출부가 0건**이었다 — H1의
+ *  preflight와 같은 병이다(만드는 층은 있는데 닿는 층이 없다). */
+export function fetchNaverSearchTermExclusions(params: {
+  campaignId?: string; status?: string; limit?: number; excludeConsoleImport?: boolean;
+}): Promise<NaverSearchTermExclusionList> {
+  const q = new URLSearchParams();
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  if (params.status) q.set("status", params.status);
+  if (params.limit) q.set("limit", String(params.limit));
+  // ★`limit` «전»에 걸려야 한다 — 화면에서 거르면 페이지가 콘솔 편입분으로 차서 정작 열 수 있는
+  //   행이 응답에서 빠진다(적대 리뷰 1R P1-1). 이 원장은 3,990행 중 3,987행이 편입분이다.
+  if (params.excludeConsoleImport) q.set("exclude_console_import", "true");
+  return fetchApi<NaverSearchTermExclusionList>(`/api/naver/ad/search-term/exclusions?${q}`);
+}
+
+/** 제외 1건을 **지금** 재개방한다(계약 P2 넷째의 손).
+ *
+ *  ⚠️★**네이버 실쓰기가 나간다** — 이 경로는 실행 harness를 안 타므로 `optimizer='none'`이어도
+ *  게이트만 통과하면 제외키워드가 실제로 삭제된다. 그래서 백엔드가 게이트를 다시 판정하고,
+ *  막히면 **200에 `ok:false` + 사유**로 돌려준다(실패를 조용히 삼키지 않는다). 화면은 그 사유를
+ *  그대로 보여 준다 — 「그냥 안 됨」으로 끝나면 사람이 다음에 무엇을 해야 할지 알 수 없다. */
+export function reopenNaverSearchTermExclusion(rowId: number): Promise<{
+  ok: boolean; id: number; status: string; reason: string | null;
+  reason_code?: string; probation_until?: string | null;
+}> {
+  return fetchApi(`/api/naver/ad/search-term/exclusions/${rowId}/reopen`, { method: "POST" });
+}
+
 /** loss 대응 정책만 바꾼다(D-NAO-65 UI2). optimizer 스위치와 동형의 전용 엔드포인트 —
  *  전체 치환 PUT을 쓰면 mode·override·gamma가 null로 날아간다(D-NAO-53 교훈). 이 엔드포인트는
  *  loss_policy 외 필드를 건드리지 않는다. 백엔드는 loss_policy를 leash|stoploss_pause만 받는다

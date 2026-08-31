@@ -116,7 +116,11 @@ _STATUS_WRITE_INVENTORY: dict[tuple[str, str, str], str] = {
     ("search_term_ss_lane.py", "_open_exclusion", "excluded"): "claim",
     ("search_term_ss_lane.py", "_reconcile_orphan_exclusions", "new_exclusion()"): "heal",
     ("search_term_ss_lane.py", "_reconcile_probation_orphans", "excluded"): "heal",
-    ("search_term_ss_lane.py", "_run_reexamination", "probation"): "lifecycle",
+    # ★개방 성공 후의 probation 확정이 `_run_reexamination`에서 `open_exclusion_now`로 옮겨졌다
+    #   (계약 P2 넷째 — 수동 손과 자동 레인이 «같은 완결 단위»를 부르게 하려고). 분류는 그대로
+    #   lifecycle이다: 일기는 `_open_exclusion`이 delete 성공·change_log 커밋 «후»에 남기고,
+    #   이 자리는 그 뒤 관찰창(probation_until)을 확정할 뿐이라 일기 주체가 바뀌지 않는다.
+    ("search_term_ss_lane.py", "open_exclusion_now", "probation"): "lifecycle",
     ("search_term_ss_lane.py", "_run_reexamination", "restored"): "lifecycle",
 }
 
