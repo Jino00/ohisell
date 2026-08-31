@@ -150,6 +150,14 @@ vi.mock("../lib/api", async () => {
       updated_at: "2026-08-31T16:00:00",
     })),
     fetchNaverCampaignIgnitionPreflight: vi.fn(async () => hoisted.preflight),
+    // ★P2 넷째의 손(재개방 패널)이 이 화면 «안»에 산다 — 모킹을 안 두면 실제 fetch로 새어 나간다.
+    fetchNaverSearchTermExclusions: vi.fn(async () => ({
+      total: 0, summary_by_status: {}, today_excluded: 0, today_opened: 0, today_restored: 0,
+      rows: [],
+    })),
+    reopenNaverSearchTermExclusion: vi.fn(async () => ({
+      ok: true, id: 1, status: "probation", reason: null, probation_until: "2026-09-14",
+    })),
     // 레이아웃이 부르는 헬스/스케줄러류는 조용히 실패시켜도 이 화면 판정과 무관하다.
     fetchHealth: vi.fn(async () => { throw new Error("not needed"); }),
     fetchSchedulerStatus: vi.fn(async () => { throw new Error("not needed"); }),

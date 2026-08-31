@@ -16,7 +16,7 @@
 //   ⚠️★이 스위치는 optimizer 스위치보다 **무겁다** — 제외 재개방 레인은 실행 harness를 안 타서
 //   `optimizer='none'`이라도 켜면 네이버 실쓰기가 나간다. 그래서 켜기 전 preflight를 «보여준 뒤»
 //   누르게 한다(차단이 아니라 고지 — 켜는 결정은 사람의 것이다).
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Card, Table, Th, Td, Badge, Loading, EmptyState, LayerNav,
 } from "../components/ui";
@@ -25,8 +25,10 @@ import { num } from "../lib/format";
 import {
   fetchPaoScopeRoster, putPaoScopeAdgroup, deletePaoScopeAdgroup,
   putNaverCampaignAutoOperate, fetchNaverCampaignIgnitionPreflight,
+  fetchNaverSearchTermExclusions, reopenNaverSearchTermExclusion,
   type PaoScopeCampaign, type PaoScopeAdgroup, type PaoScopeRole,
   type PaoScopeDayClassSplit, type NaverAdIgnitionPreflight,
+  type NaverSearchTermExclusionRow,
 } from "../lib/api";
 
 const ROLE_LABEL: Record<PaoScopeRole, string> = {
@@ -398,8 +400,97 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
             </p>
           )}
           <AdgroupTable c={c} onChanged={onChanged} />
+          <ReopenPanel campaignId={c.campaign_id} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** 제외 재개방 «손»(계약 P2 넷째). 이 캠페인이 우리가 걸어 둔 제외 중 **지금 열 수 있는/못 여는**
+ *  것을 보여 주고, 각 행에 해제 버튼을 준다.
+ *
+ *  ★**왜 여기 있나**: 재개방의 유형별 dispatch는 D-NAO-271로 이미 구현돼 있었지만 **자동 레인
+ *    안에서만** 돌았다. 레인은 `auto_operate=1`인 캠페인만 훑으므로, 스위치가 꺼진 캠페인의 제외는
+ *    재심사일이 지나도 아무도 못 열었다 — 2026-08-31 실측: due 1건이 **10일째** 밀려 있었다.
+ *    기능은 있는데 «손»이 없던 자리다. 그래서 손을 스위치 바로 아래에 둔다(켜는 자리와 여는
+ *    자리가 붙어 있어야 「켠 뒤 재개방」이라는 사유가 행동으로 이어진다).
+ *
+ *  ★**전체 제외 드릴다운(요약·페이징·4종 GET 렌더)은 여기 만들지 않는다** — 그건 계약 P3의
+ *    체크박스다. 여기 있는 것은 P2의 손이 서 있을 만큼의 표면뿐이다. */
+function ReopenPanel({ campaignId }: { campaignId: string }) {
+  const [rows, setRows] = useState<NaverSearchTermExclusionRow[] | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const res = await fetchNaverSearchTermExclusions({ campaignId, status: "excluded", limit: 50 });
+      // ★`console_import`(대행사·수동 편입분)는 애초에 재개방 대상이 아니다 — 계약 §5 금지선.
+      //   목록에 섞어 두면 「왜 이건 버튼이 없지」를 매번 다시 설명해야 한다.
+      setRows(res.rows.filter((r) => r.source !== "console_import"));
+    } catch (e) {
+      // ★조회 실패를 «제외 0건»으로 그리지 않는다 — 「없다」와 「못 읽었다」는 다른 사실이고,
+      //   그 둘을 같게 그리는 것이 이 저장소가 반복해 밟은 병이다(교훈 #123).
+      setRows([]);
+      setLoadErr(e instanceof Error ? e.message : "제외 목록을 읽지 못했습니다");
+    }
+  }
+  useEffect(() => { void load(); }, [campaignId]);
+
+  async function reopen(row: NaverSearchTermExclusionRow) {
+    setBusyId(row.id);
+    setMsg(null);
+    try {
+      const res = await reopenNaverSearchTermExclusion(row.id);
+      // ★막힌 것도 «정상 응답»이다 — 사유를 그대로 보여 준다. 조용히 아무 일도 안 일어나면
+      //   사람은 버튼이 고장 났다고 읽는다.
+      setMsg(res.ok ? `열었습니다 — 「${row.search_term}」 관찰 시작(${res.probation_until}까지)` : res.reason);
+      await load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "재개방 실패");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (rows === null) return null;
+  if (loadErr) {
+    return <p className="px-4 pt-3 text-xs text-amber-700">제외 목록을 읽지 못했습니다 — {loadErr}</p>;
+  }
+  if (rows.length === 0) {
+    return (
+      <p className="px-4 pt-3 text-xs text-gray-500">
+        우리가 건 검색어 제외가 없습니다 (대행사·콘솔 편입분은 재개방 대상이 아닙니다).
+      </p>
+    );
+  }
+  return (
+    <div className="px-4 pt-3">
+      <div className="text-xs font-medium text-gray-700 mb-1">검색어 제외 재개방</div>
+      {msg && <p className="text-xs text-gray-600 mb-1">{msg}</p>}
+      <ul className="space-y-1">
+        {rows.map((r) => (
+          <li key={r.id} className="flex items-center gap-2 text-xs">
+            <span className="font-medium text-gray-900">{r.search_term}</span>
+            <span className="text-gray-500">재심사 {r.next_review_at ?? "미정"} · {r.cycle}회차</span>
+            <button
+              type="button"
+              disabled={r.reopen_block_reason !== null || busyId === r.id}
+              onClick={() => void reopen(r)}
+              className="px-2 py-0.5 rounded border border-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50"
+            >
+              {busyId === r.id ? "여는 중…" : "지금 재개방"}
+            </button>
+            {/* ★비활성 사유를 «항상» 옆에 적는다 — 회색 버튼만 있으면 「왜」가 사라진다.
+                문장은 백엔드가 준 것을 그대로 쓴다(화면이 다시 쓰면 두 벌이 갈라진다). */}
+            {r.reopen_block_reason && (
+              <span className="text-gray-500">— {r.reopen_block_reason}</span>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

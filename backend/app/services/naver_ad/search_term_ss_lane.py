@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -314,6 +315,110 @@ def _count_returns_today(db: Session, now: datetime) -> int:
     ).count()
 
 
+class ReopenGate(NamedTuple):
+    """재개방 게이트 판정 1건. `reason=None`이면 통과.
+
+    `adgroup_type`은 통과했을 때 **이미 해결된** 광고그룹 유형이다 — 호출자가 이 값을
+    `rollback_exclusions`에 명시로 넘겨 라이브 GET을 두 번 하지 않게 한다(비용은 여기서 한 번).
+    """
+
+    reason: str | None
+    adgroup_type: str | None = None
+
+
+# 재개방 차단 사유 — **코드(기계)와 문구(사람)를 한 자리에서 짝짓는다.** 갈라 두면 화면이 사유를
+# 자기 말로 다시 쓰게 되고, 그 순간 「무엇이 막았나」와 「무엇이라고 말했나」가 어긋난다.
+REOPEN_BLOCK_MESSAGES: dict[str, str] = {
+    "not_excluded": "이미 개방됐거나 제외 상태가 아님",
+    "not_due": "아직 재심사일 전 — 그날부터 열 수 있다",
+    "daily_cap": "오늘 복귀 캡 소진 — 내일 레인에서 다시 열린다",
+    "auto_operate_off": "자동운영 OFF — 켠 뒤 재개방",
+    "out_of_scope": "자동운영 스코프 밖 광고그룹",
+    "adgroup_mismatch": "광고그룹 소속 미검증 — 사람 조사 대상",
+    "adgroup_type_unknown": "광고그룹 유형을 «모름» — 다음 레인 재시도",
+    "powerlink_no_key": "파워링크인데 제외키워드 id 부재 — 열 수단 없음(사람 조사 대상)",
+}
+
+
+def reopen_gate(
+    db: Session, row: NaverSearchTermExclusion, now: datetime, *,
+    check_live: bool = True, enforce_schedule: bool = True,
+) -> ReopenGate:
+    """재개방을 지금 해도 되는가 — **자동 레인과 사람 손이 공유하는 단일 판정.** 읽기 전용.
+
+    ★**왜 함수로 뽑았나** (계약 P2 넷째의 손 = 「해제 버튼(게이트 OFF 시 비활성+사유 표기)」):
+      버튼을 붙이려면 화면이 「이 건은 왜 못 여는가」를 말해야 한다. 그 사유를 화면 쪽에서 따로
+      계산하면 **«판정하는 창»과 «실제로 막는 창»이 갈라진다** — 이 저장소가 이미 값을 치른
+      병이다(승인 카드의 판정창 ≠ 실행 재검증창, D-NAO-265). 그래서 사유의 출처를 하나로 두고
+      자동 레인(`_open_exclusion`)과 수동 손(라우터)이 **같은 함수**를 부른다.
+
+    ★**게이트를 약화시키지 않는다.** 여기 있는 검사는 종전 `_open_exclusion`이 하던 것을
+      **순서까지 그대로** 옮겨 온 것이고, 수동 손도 전부 통과해야 한다 — 재개방 우회 경로 신설은
+      계약 §5 금지선이다(재개방도 네이버 실쓰기다). **사람이 눌렀다는 사실은 면제 사유가 아니다.**
+
+    `check_live=False`면 라이브 광고그룹 유형 GET을 건너뛴다(목록 화면이 수백 행의 버튼 상태를
+    그리려고 API를 수백 번 때리지 않게 하는 용도). 그때 반환은 **「DB로 알 수 있는 범위의 판정」**
+    이고, 권위는 언제나 `check_live=True`로 도는 실행 시점에 있다 — 화면은 힌트, 실행이 정본이다.
+    이 비대칭이 안전한 이유는 방향이 **fail-closed**이기 때문이다: 화면이 「열 수 있음」이라 보여도
+    실행이 다시 막지만, 그 반대(화면이 막았는데 실행이 여는 것)는 일어나지 않는다.
+    """
+    from app.services.naver_ad import adgroup_scope, auto_operator
+
+    if row.status != "excluded":
+        return ReopenGate("not_excluded")
+    # ★재심사 일정을 손으로 건너뛰지 못하게 한다 — 없으면 버튼 하나로 백오프(30→60→90일)가
+    #   무력화되고, 그건 「잘못 자른 것을 되살린다」가 아니라 **관찰창을 짧게 만드는 것**이다
+    #   (재개방은 곧 재노출이라 돈이 나간다). 잘못 자른 건을 즉시 되돌리는 일은 재개방이 아니라
+    #   void/restore의 몫이고, 다른 문으로 들어와야 한다.
+    #
+    # ★`enforce_schedule=False`는 «면제»가 아니라 **누가 그 규칙을 집행하는가**의 문제다.
+    #   자동 레인은 같은 규칙을 **후보 쿼리에서** 이미 집행한다(`next_review_at <= today`,
+    #   회귀: `test_not_yet_due_not_opened`). 그래서 레인 경로에선 여기서 다시 묻지 않는다 —
+    #   물으면 `_open_exclusion`의 계약이 바뀌어 「이 행을 지금 연다」를 부르는 **다른 호출자**
+    #   (수명주기·일기 테스트가 그렇다)가 조용히 막힌다. 한 규칙, 두 집행 지점이다.
+    if enforce_schedule and (row.next_review_at is None or row.next_review_at > now.date()):
+        return ReopenGate("not_due")
+    # 복귀 캡 재카운트 백스톱(P2-1) — 제외 캡의 harness 관례(쓰기 직전 재카운트→초과 시 중단)를
+    # 미러한다. _run_reexamination의 로컬 remaining_return은 소프트 카운트라, 동시 실행(크론+
+    # catch-up 데몬 스레드 동시 발화) 시 각 러너가 remaining=cap을 보고 최대 2배 개방할 수 있다.
+    # ★재카운트는 change_log 커밋 기준(_count_returns_today가 dry_run=False ∧ after_value 존재
+    # 행을 센다) — 러너별 트랜잭션이 커밋 후 상호 가시화되어야 반영된다.
+    if _count_returns_today(db, now) >= _SS_DAILY_RETURN_CAP:
+        return ReopenGate("daily_cap")
+    # C1①(codex 1R[P1-1]): 킬스위치 delete 직전 재확인 — TOCTOU 창 제거. _run_reexamination이
+    # 루프 진입 시 1회 스냅샷만 믿으면 여러 행 순회 도중 Jino가 OFF해도 남은 개방이 진행된다
+    # ("즉시 정지" 계약 위반). 엔진 독립 커넥션 조회라 타 프로세스 커밋이 항상 보인다.
+    if not auto_operator._auto_operate_now(db, row.campaign_id):
+        return ReopenGate("auto_operate_off")
+    # ★D-NAO-244 스코프 게이트 — 적대 리뷰 P1-1 상환(PR #422). 이 레인은 harness.execute()를
+    # 안 거치고 naver_sa_writer를 직접 부르는 예외 경로라 harness의 스코프 게이트가 안 걸린다.
+    # ★방향이 «복귀»(제외 삭제)라 더 위험하다: 재제외는 harness를 타서 이미 막히는데 개방만 안
+    # 막히면 **스코프 밖 그룹에서 우리가 검색어를 다시 열어 주는** 비대칭이 된다.
+    if adgroup_scope.blocked_by_scope(db, row.campaign_id, row.adgroup_id):
+        return ReopenGate("out_of_scope")
+    # C1②(codex 1R[P1-3]): adgroup 소속 실검증 — 상태 행 campaign_id 오염/그룹 이동 시 대행사
+    # 그룹 delete 차단(§0 3). 조회 실패/행 부재 = fail-closed skip(상태 유지).
+    if not _adgroup_belongs_to_campaign(db, row.adgroup_id, row.campaign_id):
+        return ReopenGate("adgroup_mismatch")
+    if not check_live:
+        # 라이브를 안 물었으니 유형도 «모른다» — 여기서 파워링크 열쇠 검사를 흉내 내지 않는다.
+        # 모르는 것을 아는 척하면 화면이 「열 수 있음」과 「열 수 없음」을 지어내게 된다.
+        return ReopenGate(None, None)
+    # ★D-NAO-271: 쓰기 경로용 **광고그룹 유형**을 클레임 «전»에 해결한다. 유형 판정의 축은
+    #   `adgroupType`(광고그룹 축)이지 `campaign_type`(캠페인 축)이 아니다 — 그 둘을 섞은 게이트가
+    #   D-NAO-179에서 제외 723건 중 711건을 시야 밖에 뒀다. **이 줄이 유일한 유형 판정이다.**
+    adgroup_type = naver_sa_writer.get_adgroup_type(row.adgroup_id)
+    if adgroup_type is None:
+        return ReopenGate("adgroup_type_unknown")
+    # ★파워링크인데 열쇠(id)가 없는 경우 — 그쪽 경로는 id 기반이라 열 수단이 없다.
+    #   `delete_restricted_keywords`가 빈 목록을 fail-closed로 거부하므로 실쓰기 사고는 안 나지만,
+    #   그 거부는 **클레임 뒤**라 「쓰다 실패」로 기록된다. 시도조차 못 할 일은 시도 전에 막는다.
+    #   (쇼핑은 `restrict_kwd_id` 부재가 **정상**이다 — 그쪽 열쇠는 키워드 본문이다.)
+    if adgroup_type == naver_sa_writer.WEB_SITE_ADGROUP_TYPE and not row.restrict_kwd_id:
+        return ReopenGate("powerlink_no_key", adgroup_type)
+    return ReopenGate(None, adgroup_type)
+
+
 def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -> bool:
     """재심사 개방 1건(§3) — 유형별 경로로 제외키워드를 삭제하고 change_log 전건 기록
     ([검색어제외 복귀]). 성공 시 True. delete 실패는 fail-closed로 정직히 실패 기록 후
@@ -343,87 +448,25 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
     # delete 호출 직전 재카운트가 캡 이상이면 fail-closed로 개방 중단(완전 원자 예약은 불요 —
     # 재카운트 백스톱이 최소 권고). ★재카운트는 change_log 커밋 기준(_count_returns_today가 dry_run
     # =False ∧ after_value 존재 행을 센다) — 러너별 트랜잭션이 커밋 후 상호 가시화되어야 반영된다.
-    returns_today = _count_returns_today(db, now)
-    if returns_today >= _SS_DAILY_RETURN_CAP:
-        log.info(
-            "search_term_ss_lane: 재심사 개방 중단(복귀 캡 재카운트 %d≥%d, 동시 실행 백스톱) "
-            "adgroup=%s term=%r — fail-closed(상태 유지·다음 레인 재시도)",
-            returns_today, _SS_DAILY_RETURN_CAP, row.adgroup_id, row.search_term,
+    # ★게이트는 `reopen_gate` 한 곳에 있다 — 수동 손(라우터)이 부르는 것과 **같은 함수**다.
+    #   여기서 검사를 다시 쓰면 두 벌이 갈라지고, 갈라진 순간 화면이 「왜 못 여는가」를 지어낸다.
+    #   순서·의미는 종전과 동일하다(캡 → 킬스위치 → 스코프 → 소속 → 유형 → 파워링크 열쇠).
+    # ★`enforce_schedule=False` — 일정은 이 함수가 아니라 **레인의 후보 쿼리**가 집행한다.
+    #   여기서 다시 물으면 「이 행을 지금 연다」를 부르는 다른 호출자가 조용히 막힌다(위 주석).
+    gate = reopen_gate(db, row, now, enforce_schedule=False)
+    if gate.reason is not None:
+        # 사유마다 로그 수준이 다르다: 정상 봉투에 걸린 것(캡·스위치·스코프)은 info, 사람이
+        # 들여다봐야 하는 것(소속 미검증·유형 모름·열쇠 부재)은 warning. 원인이 다르면 로그도
+        # 달라야 사후에 둘을 안 섞는다.
+        _soft = {"not_excluded", "not_due", "daily_cap", "auto_operate_off", "out_of_scope"}
+        level = log.info if gate.reason in _soft else log.warning
+        level(
+            "search_term_ss_lane: 재심사 개방 중단(%s) adgroup=%s campaign=%s term=%r "
+            "— fail-closed(상태 유지·다음 레인 재시도)",
+            REOPEN_BLOCK_MESSAGES[gate.reason], row.adgroup_id, row.campaign_id, row.search_term,
         )
         return False
-    # C1①(codex 1R[P1-1]): 킬스위치 delete 직전 재확인 — TOCTOU 창 제거. _run_reexamination이
-    # 루프 진입 시 1회 스냅샷만 믿으면 여러 행 순회 도중 Jino가 OFF해도 남은 개방이 진행된다
-    # ("즉시 정지" 계약 위반). 엔진 독립 커넥션 조회라 타 프로세스 커밋이 항상 보인다.
-    from app.services.naver_ad import auto_operator
-    if not auto_operator._auto_operate_now(db, row.campaign_id):
-        log.info(
-            "search_term_ss_lane: 재심사 개방 중단(킬스위치 delete 직전 OFF) adgroup=%s term=%r "
-            "— fail-closed(상태 유지)", row.adgroup_id, row.search_term,
-        )
-        return False
-    # ★D-NAO-244 스코프 게이트 — 적대 리뷰 P1-1 상환(PR #422).
-    #
-    # 이 레인은 **harness.execute()를 안 거치고** naver_sa_writer.delete_restricted_keywords를
-    # 직접 부르는 예외 경로다(아래 §3 주석 참조). 그래서 harness에 단 스코프 게이트가 여기엔
-    # 안 걸린다 — 리뷰가 재현했다: 스코프를 grp-A로 좁혀도 grp-B의 제외키워드 삭제가 그대로
-    # 나갔다. 「캠페인 안 일부 그룹만 맡기고 나머지는 손대지 않는 것을 **코드가 강제한다**」는
-    # 계약이 이 구멍 하나로 무너진다.
-    #
-    # ★방향이 «복귀»(제외 삭제)라 더 위험하다: 재제외(_autofire_exclude)는 harness를 타서
-    # 이미 막히는데, 개방만 안 막히면 **스코프 밖 그룹에서 우리가 검색어를 다시 열어 주는**
-    # 비대칭이 된다(브레이크는 스코프를 지키는데 그 해제는 안 지키는 꼴).
-    #
-    # 킬스위치와 «나란히» 둔다 — 원인이 다르면 로그도 달라야 사후에 둘을 안 섞는다.
-    from app.services.naver_ad import adgroup_scope
-    if adgroup_scope.blocked_by_scope(db, row.campaign_id, row.adgroup_id):
-        log.info(
-            "search_term_ss_lane: 재심사 개방 중단(자동운영 스코프 밖) adgroup=%s campaign=%s "
-            "term=%r — fail-closed(상태 유지, D-NAO-244)",
-            row.adgroup_id, row.campaign_id, row.search_term,
-        )
-        return False
-    # C1②(codex 1R[P1-3]): adgroup 소속 실검증 — 상태 행 campaign_id 오염/그룹 이동 시 대행사
-    # 그룹 delete 차단(§0 3). 조회 실패/행 부재 = fail-closed skip(상태 유지).
-    if not _adgroup_belongs_to_campaign(db, row.adgroup_id, row.campaign_id):
-        log.warning(
-            "search_term_ss_lane: 재심사 개방 중단(adgroup 소속 미검증) adgroup=%s campaign=%s "
-            "term=%r — fail-closed(상태 유지)", row.adgroup_id, row.campaign_id, row.search_term,
-        )
-        return False
-    # ★D-NAO-271: 쓰기 경로용 **광고그룹 유형**을 클레임 «전»에 해결한다.
-    #
-    # ①**유형 판정은 여기 한 곳뿐이다.** 경로 결정의 축은 `adgroupType`(광고그룹 축)이지
-    #   `campaign_type`(캠페인 축)이 아니다 — 그 둘을 섞은 게이트가 D-NAO-179에서 제외 723건 중
-    #   711건을 시야 밖에 뒀다. 초판은 함수 머리에 캠페인 축 조기 필터를 뒀다가 적대 리뷰 1R
-    #   P1-1을 맞았다(그 필터가 `return False`로 즉시 끝내 축 불일치 행이 이 판정에 도달조차
-    #   못 했다 = 같은 병의 재발). 필터를 걷어냈으니 **이 줄이 유일한 유형 판정**이다.
-    # ②순서가 중요하다: `rollback_exclusions`에 `adgroup_type=None`을 넘기면 그 함수가 라이브를
-    #   읽는데, 그 시점은 **이미 클레임(excluded→probation)을 커밋한 뒤**다. 유형을 모르면 거기서
-    #   예외가 나고 클레임 롤백 경로를 타 `failed` change_log가 남는다 — 「쓰기를 시도조차 못 한
-    #   것」이 「쓰다 실패한 것」으로 기록된다. 클레임 전에 해결하면 상태를 안 건드리고 조용히
-    #   물러난다(다음 레인 재시도).
-    # ③비용: 아래에서 유형을 명시로 넘기므로 `rollback_exclusions`는 라이브를 다시 안 읽는다.
-    #   다만 **변경 «전» 코드 기준으로는 재개방 1건당 GET 1회가 실제로 늘어난다**(적대 리뷰 1R
-    #   P2-1이 초판 주석의 「왕복은 늘지 않는다」를 과장으로 정확히 지적했다). 상한은 일일 복귀
-    #   캡(`_SS_DAILY_RETURN_CAP`)이고, 그 비용으로 축 정확성을 샀다.
-    adgroup_type = naver_sa_writer.get_adgroup_type(row.adgroup_id)
-    if adgroup_type is None:
-        log.warning(
-            "search_term_ss_lane: 재심사 개방 보류(광고그룹 유형 «모름») adgroup=%s term=%r "
-            "— fail-closed(상태 유지·다음 레인 재시도)", row.adgroup_id, row.search_term,
-        )
-        return False
-    # ★파워링크인데 열쇠(id)가 없는 경우 — 그쪽 경로는 id 기반이라 열 수단이 없다.
-    #   `delete_restricted_keywords`가 빈 목록을 fail-closed로 거부하므로 실쓰기 사고는 안 나지만,
-    #   그 거부는 **클레임 뒤**라 「쓰다 실패」로 기록된다. 시도조차 못 할 일은 시도 전에 막는다.
-    #   (초판은 이 검사를 함수 머리의 «캠페인 축» 조기 필터로도 겹쳐 뒀다가 적대 리뷰 1R P1-1을
-    #    맞았다 — 그 필터가 축 불일치 행을 이 판정에 도달조차 못 하게 했다. 지금은 겹치지 않는다.)
-    if adgroup_type == naver_sa_writer.WEB_SITE_ADGROUP_TYPE and not row.restrict_kwd_id:
-        log.warning(
-            "search_term_ss_lane: 재심사 개방 불가(파워링크인데 restrict_kwd_id 부재 — 축 불일치) "
-            "adgroup=%s term=%r — 사람 조사 대상(상태 유지)", row.adgroup_id, row.search_term,
-        )
-        return False
+    adgroup_type = gate.adgroup_type
     # C2(codex 1R[P1-2] 부분 수용): delete 직전 낙관적 클레임(excluded→probation, status 게이트).
     # 동시 실행(크론+catch-up 데몬)에서 두 러너가 같은 행을 각자 delete하면 두 번째가 404·복귀
     # 이중 카운트를 낳는다. `UPDATE ... WHERE id ∧ status='excluded'`를 커밋해 rowcount==1인
@@ -498,6 +541,24 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
     # 자리(실쓰기 확정 후)에서 기록한다. fail-open은 recorder가 진다.
     exclusion_lifecycle.record_return_opened(db, row, entry, now)
     log.info("search_term_ss_lane: 재심사 개방 성공 adgroup=%s term=%r", row.adgroup_id, row.search_term)
+    return True
+
+
+def open_exclusion_now(db: Session, row: NaverSearchTermExclusion, now: datetime) -> bool:
+    """재개방 1건을 **끝까지** 수행 — 실쓰기(`_open_exclusion`) + 성공 시 probation 전이 확정.
+
+    ★자동 레인(`_run_reexamination`)과 수동 손(콘솔 재개방 버튼)이 공유하는 «완결» 단위다.
+      `_open_exclusion`은 클레임(excluded→probation)까지만 하고 `probation_until`을 안 채운다 —
+      그 뒤 전이 확정은 호출자가 따로 하고 있었다. 손을 하나 더 붙이면서 그 확정을 **복사**하면
+      두 경로의 관찰창이 갈라진다(수동으로 연 건만 `probation_until`이 비어 재판정 쿼리에 영영
+      안 잡히는 식으로). 갈라질 수 있는 것은 갈라지기 전에 한 자리로 모은다.
+    """
+    if not _open_exclusion(db, row, now):
+        return False
+    row.status = "probation"
+    row.probation_until = now.date() + timedelta(days=_PROBATION_DAYS)
+    row.last_transition_at = now
+    db.commit()
     return True
 
 
@@ -690,11 +751,8 @@ def _run_reexamination(db: Session, powerlink: list[dict], now: datetime) -> dic
             break
         if not auto_operator._auto_operate_now(db, row.campaign_id):
             continue  # 킬스위치 OFF — 복귀 정지(미실행 정직)
-        if _open_exclusion(db, row, now):
-            row.status = "probation"
-            row.probation_until = today + timedelta(days=_PROBATION_DAYS)
-            row.last_transition_at = now
-            db.commit()
+        # ★전이 확정을 여기 복사하지 않는다 — 수동 손과 «같은 완결 단위»를 부른다(위 함수 주석).
+        if open_exclusion_now(db, row, now):
             opened += 1
             remaining_return -= 1
 
