@@ -150,6 +150,64 @@ describe("buildPipelineHealthBanner", () => {
     expect(banner!.summary).not.toContain("313");
   });
 
+  // ═══ 원가 «가드»가 꺼졌다 (계약 D-CPP-64 §4 S1-③, 2026-08-31 배선) ═══
+  //
+  // ★★위 드리프트와 짝이지 중복이 아니다: 위는 «어긋남을 찾았다», 이건 «찾을 수가 없었다».
+  //   업로드 경로의 가드는 정본 스냅샷을 못 찾으면 조용히 통과하고(fail-open), 그때
+  //   `cost_drift`도 null이 되어 **「어긋남 0건」과 화면에서 똑같이 생긴다.** 이 분기가 없으면
+  //   감시가 꺼진 채로 배너가 침묵한다 — `disk_low`가 판정에만 있고 표시가 없어 통째로 숨었던
+  //   2026-08-10 사고(아래 절)의 거울상이다.
+
+  it("★가드가 꺼져 있으면 「원가 가드 미작동 — 스냅샷 부재」를 말한다", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        cost_guard: {
+          active: false,
+          reason: "정본 스냅샷을 못 읽는다",
+          snapshot_path: "/app/data/cost_truth_20260807.json",
+        },
+      }),
+    );
+    expect(banner!.summary).toContain("원가 가드 미작동");
+    expect(banner!.summary).toContain("스냅샷 부재");
+    // ★왜 꺼졌는지도 함께 — 「미작동」만 보면 무엇을 고쳐야 할지 모른다.
+    expect(banner!.summary).toContain("정본 스냅샷을 못 읽는다");
+  });
+
+  it("★가드가 켜져 있으면 아무 말도 안 한다 — 상시 켜진 경고는 안 켜진 것과 같다", () => {
+    expect(
+      buildPipelineHealthBanner(
+        makeHealth({ cost_guard: { active: true, reason: null, snapshot_path: "/x.json" } }),
+      ),
+    ).toBeNull();
+  });
+
+  it("★cost_guard가 null/undefined면 침묵 — 구백엔드에서도 배너가 깨지지 않는다", () => {
+    expect(buildPipelineHealthBanner(makeHealth({ cost_guard: null }))).toBeNull();
+    expect(buildPipelineHealthBanner(makeHealth({ cost_guard: undefined }))).toBeNull();
+  });
+
+  it("★가드 꺼짐은 «돈이 새는» 등급이라 «멈춤» 항목보다 앞에 선다(잘려 나가지 않는다)", () => {
+    const banner = buildPipelineHealthBanner(
+      makeHealth({
+        disk_low: [
+          {
+            path: "/",
+            state: "low",
+            used_percent: 93.8,
+            warn_percent: 90,
+            free_bytes: 5_900_000_000,
+            total_bytes: 95_000_000_000,
+            impact: "수집 중단 위험",
+          },
+        ],
+        cost_guard: { active: false, reason: null, snapshot_path: null },
+      }),
+    );
+    // 등급 0(돈)이 등급 1(멈춤)보다 앞이다 — 뒤에 숨으면 한 줄 배너에서 잘린다.
+    expect(banner!.items[0]).toContain("원가 가드 미작동");
+  });
+
   // ═══ 디스크 여유 (2026-08-10 Jino 승인 후 추가) ═══
   //
   // ★★이 분기는 **없었다.** 백엔드는 `disk_low`로 healthy=false를 만드는데 배너 빌더에

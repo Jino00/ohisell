@@ -240,6 +240,11 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCostBoard: vi.fn(async () => BOARD),
     fetchCostTableCensus: vi.fn(async () => TABLE_CENSUS),
     fetchCostSettingHistory: vi.fn(async () => ({ items: [] })),
+    // ★D-CPP-64 S1 — `load()`가 이력도 부른다. 여기 없으면 `undefined`가 패널로 흘러
+    //   `data.items.length`가 던지고 이 파일 전체가 깨진다(위 주석과 같은 함정).
+    fetchCostPriceHistory: vi.fn(async () => ({
+      items: [], total: 0, started_at: null, empty_reason: "이력이 아직 한 건도 없다",
+    })),
     fetchCostAutoRefreshRuns: vi.fn(async () => ({ items: [] })),
     fetchCostAutoRefreshQueue: vi.fn(async () => ({ items: [] })),
     getSchedulerHealth: vi.fn(async () => ({ healthy: true })),

@@ -25,6 +25,7 @@ import {
   fetchCostBoard,
   fetchCostLedgerMaterialLines,
   fetchCostMaterials,
+  fetchCostPriceHistory,
   fetchCostRecipes,
   fetchCostSettingHistory,
   fetchCostSettings,
@@ -49,6 +50,8 @@ import {
   type CostLedgerMaterialLine,
   type CostMaterial,
   type CostMaterialPrice,
+  type CostPriceHistoryList,
+  type CostPriceHistoryRow,
   type CostRecipe,
   type CostRecipeMatch,
   type CostRecipePick,
@@ -511,6 +514,145 @@ export function VatBasisBadge() {
   return (
     <div className="text-xs px-3 py-1.5 rounded-md border bg-blue-50 border-blue-200 text-blue-800">
       원가 = 부가세 포함 — 사내 관리회계 기준(D-CPP-51). 제외값은 옆 칸에 함께 표시한다.
+    </div>
+  );
+}
+
+/** `cost_price` 변경 경로의 **사람이 읽는 이름**과 그 문이 지금 열려 있나.
+ *
+ * ★`open:false`는 「이 문은 계약 D-CPP-64 S1-②로 닫혔다」는 뜻이다. 닫힌 문의 이력 행이
+ *   배포 «후» 시각으로 나타나면 그건 **가드가 샜다는 신호**이므로 화면이 그렇게 말한다 —
+ *   닫았다고 선언하고 확인하지 않으면 그 선언은 주석일 뿐이다.
+ */
+export const COST_PRICE_PATH_LABELS: Record<string, { label: string; open: boolean }> = {
+  excel_upload: { label: "상품 원가표 엑셀 업로드", open: true },
+  mapping_ingest: { label: "매핑 시트 업로드", open: true },
+  product_create: { label: "상품 등록 화면", open: false },
+  product_update: { label: "상품 수정 화면", open: false },
+  cutover: { label: "원가 메뉴 컷오버", open: true },
+  auto: { label: "정본 자동 추종", open: true },
+};
+
+/** 모르는 경로 이름도 **그대로 보여 준다** — 「기타」로 접으면 새 문이 생긴 것을 못 본다. */
+export function costPricePathLabel(path: string): string {
+  return COST_PRICE_PATH_LABELS[path]?.label ?? `알 수 없는 경로 «${path}»`;
+}
+
+/** `product_master.cost_price` 변경 이력 패널 (계약 D-CPP-64 §4 S1-①).
+ *
+ * ★0건을 조용히 비워 두지 않는다. 이 표는 **소급이 불가**하므로 0건의 기본 뜻은
+ *   「원가가 안 바뀌었다」가 아니라 「아직 재기 시작 안 했다」다 — 백엔드가 보낸
+ *   `empty_reason`·`started_at`을 그대로 띄운다(교훈 #123).
+ */
+export function CostPriceHistoryPanel({
+  data,
+}: {
+  /** null = 아직 안 불렀다(로딩). `items:[]` = 불렀는데 0건. 둘은 다른 사실이다. */
+  data: CostPriceHistoryList | null;
+}) {
+  // ★응답에 목록이 없어도 **터지지 않는다.** 이 패널 하나가 던지면 원가 화면 전체가 하얗게
+  //   되고, 그러면 이력이 안 보이는 게 아니라 **원가 메뉴를 못 쓴다.** 다만 조용히 «0건»으로
+  //   접지도 않는다 — 아래 `empty_reason` 자리에서 「형식이 이상하다」고 말한다.
+  const items = data && Array.isArray(data.items) ? data.items : [];
+  const shapeBroken = data !== null && !Array.isArray(data.items);
+  return (
+    <div className="mt-6" data-testid="cost-price-history-panel">
+      <div className="flex items-baseline gap-2">
+        <h3 className="text-sm font-semibold text-gray-700">
+          <code>cost_price</code> 변경 이력
+        </h3>
+        <span className="text-[11px] text-gray-500">
+          손익 엔진이 실제로 쓰는 값이 언제·어느 문으로 움직였나
+        </span>
+      </div>
+
+      {data === null ? (
+        <div className="mt-2 text-xs text-gray-400" data-testid="cost-price-history-loading">
+          이력을 불러오는 중…
+        </div>
+      ) : (
+        <>
+          <p className="mt-1 text-[11px] text-gray-500">
+            {data.started_at
+              ? `이력 시작 ${formatKstDateTime(data.started_at)} — 그 이전의 변경은 기록이 없다(소급 불가).`
+              : "이력이 아직 시작되지 않았다 — 이 표는 배포 시점부터 쌓인다(소급 불가)."}
+            {data.total > 0 ? ` · 전체 ${data.total}건` : ""}
+          </p>
+
+          {items.length === 0 ? (
+            <div
+              className="mt-2 text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded p-2"
+              data-testid="cost-price-history-empty"
+            >
+              {/* ★백엔드가 준 문장을 그대로 쓴다 — 화면이 이유를 새로 지어내지 않는다. */}
+              {shapeBroken
+                ? "이력 응답에 목록이 없다 — 0건이 아니라 «형식이 다르다»는 뜻이다(백엔드 확인 필요)."
+                : (data.empty_reason ?? "이력 0건.")}
+            </div>
+          ) : (
+            <div className="mt-2 overflow-x-auto">
+              <table className="min-w-full text-xs" data-testid="cost-price-history-table">
+                <thead className="bg-gray-50 text-gray-600">
+                  <tr>
+                    <th className="px-2 py-1 text-left">시각(KST)</th>
+                    <th className="px-2 py-1 text-left">SKU</th>
+                    <th className="px-2 py-1 text-right">이전 → 이후</th>
+                    <th className="px-2 py-1 text-left">경로</th>
+                    <th className="px-2 py-1 text-left">근거</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((h: CostPriceHistoryRow) => {
+                    const gate = COST_PRICE_PATH_LABELS[h.path];
+                    return (
+                      <tr
+                        key={h.id}
+                        className="border-t"
+                        data-testid={`cost-price-history-row-${h.id}`}
+                      >
+                        <td className="px-2 py-1 whitespace-nowrap text-gray-600">
+                          {formatKstDateTime(h.created_at)}
+                        </td>
+                        <td className="px-2 py-1 whitespace-nowrap font-mono">
+                          {h.internal_sku}
+                        </td>
+                        <td className="px-2 py-1 text-right whitespace-nowrap">
+                          {/* 신규는 옛 값이 «없다» — 0으로 쓰지 않는다(「없음 ≠ 0」). */}
+                          <span className="text-gray-500">
+                            {h.old_value === null ? "없음(신규)" : h.old_value}
+                          </span>
+                          {" → "}
+                          <span className="font-medium">{h.new_value}</span>
+                        </td>
+                        <td className="px-2 py-1 whitespace-nowrap">
+                          {costPricePathLabel(h.path)}
+                          {h.actor ? (
+                            <span className="text-gray-400"> · {h.actor}</span>
+                          ) : null}
+                          {gate && !gate.open ? (
+                            <span
+                              className="ml-1 text-red-700"
+                              data-testid={`cost-price-history-closed-door-${h.id}`}
+                            >
+                              ⚠ 닫힌 문으로 들어왔다 — 가드 확인 필요
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="px-2 py-1 text-gray-600">
+                          {/* 근거가 비면 «근거 없음»이라고 **말한다** — 빈칸으로 두지 않는다. */}
+                          {h.reason ?? (
+                            <span className="text-amber-700">근거 없음</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -2684,6 +2826,10 @@ export default function CostPage() {
   const [settingHistory, setSettingHistory] = useState<CostSettingHistoryRow[]>([]);
   const [autoRefreshRuns, setAutoRefreshRuns] = useState<CostAutoRefreshRun[]>([]);
   const [autoRefreshQueue, setAutoRefreshQueue] = useState<CostAutoRefreshEntry[]>([]);
+  // ── D-CPP-64 S1-① — `product_master.cost_price` 변경 이력 ────────────────────
+  //   ★null은 «아직 안 불렀다»이고 `items:[]`는 «불렀는데 0건»이다. 패널이 그 둘을 다르게
+  //     말한다 — 같게 보이면 「이상 없음」으로 읽힌다.
+  const [priceHistory, setPriceHistory] = useState<CostPriceHistoryList | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [recipes, setRecipes] = useState<CostRecipe[]>([]);
   const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
@@ -2904,7 +3050,7 @@ export default function CostPage() {
 
   const load = useCallback(async () => {
     try {
-      const [m, l, s, r, b, sh, ar, aq, ct] = await Promise.all([
+      const [m, l, s, r, b, sh, ar, aq, ct, ph] = await Promise.all([
         fetchCostMaterials(),
         fetchCostLedgerMaterialLines(),
         fetchCostSettings(),
@@ -2914,6 +3060,7 @@ export default function CostPage() {
         fetchCostAutoRefreshRuns(),
         fetchCostAutoRefreshQueue(),
         fetchCostTableCensus(),
+        fetchCostPriceHistory({ limit: 100 }),
       ]);
       setMaterials(m.items);
       setLedgerLines(l.items);
@@ -2922,6 +3069,7 @@ export default function CostPage() {
       setBoard(b);
       setTableCensus(ct);
       setSettingHistory(sh.items);
+      setPriceHistory(ph);
       setAutoRefreshRuns(ar.items);
       setAutoRefreshQueue(aq.items);
       // ★부자재 선택도 여기서 건드리지 않는다(2026-08-23 N5) — 부자재 탭에도 필터가
@@ -3808,6 +3956,10 @@ export default function CostPage() {
             displayItems={boardProduct || boardOption ? filteredBoardItems : undefined}
             filterSummary={boardFilterSummary}
           />
+          {/* ★보드 아래에 둔다 — 보드는 «계산값이 얼마인가»이고 이 표는 «장부값이 어떻게
+              움직였나»다. 둘을 같은 화면에 두는 것이 계약 C의 요점(두 숫자가 이어진 적이
+              없었다, ref 119 §0)이고, S2·S3의 대조·컷오버 패널도 여기로 붙는다. */}
+          <CostPriceHistoryPanel data={priceHistory} />
         </div>
       ) : null}
     </div>

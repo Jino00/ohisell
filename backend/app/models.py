@@ -5378,6 +5378,60 @@ class CostPurchasedPrice(Base):
     )
 
 
+class CostPriceHistory(Base):
+    """`product_master.cost_price` 변경 이력 — **append 전용** (계약 D-CPP-64 §4 S1-①).
+
+    ★왜 필요한가: `cost_price`는 in-place로 갱신되는 단일 값이라 «지금 값»만 안다. 그런데
+    이 계약의 궁극 목표 세 요소 중 둘(*"수정이 있을때 실수없이 잘 수정되어서"* · *"최신
+    원가가 유지되게"*)은 **사후에 확인할 수 있어야** 성립한다. 2026-08-31 실측(ref 119 §3):
+    쓰기 경로가 22개인데 `cost_price`를 만지는 **넷 다 이력이 안 남아** 「수정이 실수 없이
+    됐나」에 답할 방법이 아예 없었다. `product_master.updated_at`은 20일째 정지해 있어
+    대체재가 못 된다(ref 118 §2-1).
+
+    ★`old_value`를 함께 담는 이유는 `CostSettingHistory`와 같다 — 새 값만 쌓으면 「무엇에서
+    무엇으로」가 행 사이 뺄셈이 되고 첫 행은 원본을 모른다. 정정 경로가 옛 값을 알아야 한다.
+
+    ★`internal_sku`가 정본 키다(`product_id`가 아니다). 상품 행이 지워져도 「그때 그 SKU의
+    원가가 이렇게 움직였다」는 사실은 남아야 하기 때문이다 — FK를 걸지 않는 것도 같은 이유다.
+
+    ★**in-place 수정·삭제 금지**(계약 §3-B). 고칠 수 있는 이력은 이력이 아니다.
+    """
+
+    __tablename__ = "cost_price_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    internal_sku: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    #: 기록 시점의 상품 행 id. 참고용이고 조회 키가 아니다(FK 없음 — 위 docstring).
+    product_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    #: 신규 생성이면 **옛 값이 없다** — 0이 아니라 NULL이다(「없음 ≠ 0」, 계약 §3-B).
+    old_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    new_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+
+    #: **어느 문으로 들어왔나.** ref 119 §3의 경로 목록과 같은 어휘를 쓴다. 「값이 바뀌었나」
+    #: 보다 «어디로 바뀌었나»가 이 계약의 질문이라(안 잠긴 문 찾기) 이 칸은 nullable이 아니다.
+    #: 현재 어휘: `excel_upload` · `mapping_ingest` · `product_create` · `product_update`
+    #: · `cutover`(S3에서 생긴다) · `auto`(S4 자동 추종).
+    path: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+
+    #: 누가. 이 앱엔 로그인이 없으므로 화면·경로가 보내는 문자열이다(자동 경로는 `system`).
+    actor: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    #: **근거 좌표를 사람이 읽는 문장으로.** 「파일명·행」·「레시피 45 계산값」처럼 나중에
+    #: 되짚을 수 있는 것을 적는다. 비면 화면이 「근거 없음」이라고 **말한다** — 빈칸으로
+    #: 두지 않는다(계약 §3-B 「없음 ≠ 0」의 문장판).
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    #: ★서버 기본값은 **UTC**로 저장된다(SQLite `now()`). 화면이 KST로 환산한다 — 저장을
+    #: KST로 바꾸지 않는 이유는 기존 이력 테이블 전부가 같은 규약이라서다(두 규약 금지).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), index=True
+    )
+
+    __table_args__ = (
+        Index("ix_cost_price_history_sku_created", "internal_sku", "created_at"),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # OTAO 발주 원장 (계약 `CONTRACT_inventory_unified.md` §4 S1 · 트랙 D-INV-1·3)
 #

@@ -29,6 +29,11 @@ from app.schemas import (
     ConnectionMapOut,
 )
 from app.services.cost_truth_audit import screen_cost, screen_reason, try_load_truth
+from app.services.cost_price_history import (
+    PATH_EXCEL_UPLOAD,
+    REJECTION_SENTENCE,
+    record_cost_price_change,
+)
 from app.services.product_mapping_ingest import ingest_master_sheet
 from app.services.mapping_coverage import compute_mapping_coverage
 from app.services.product_connection_map import build_connection_map
@@ -82,11 +87,44 @@ def list_products(db: Session = Depends(get_db)):
     return [_product_to_out(p) for p in products]
 
 
+# ──────────────────────────────────────────────
+# ★안 잠긴 문을 닫는다 (계약 D-CPP-64 §4 S1-②)
+#
+# 2026-08-31 실측(ref 119 §3): `cost_price`를 만지는 문이 넷인데 업로드 둘만 드리프트 가드가
+# 걸려 있고, 이 두 CRUD 경로는 **무검사**였다 — `create_product`는 `ProductMaster(**dump)`로,
+# `update_product`는 `setattr(p, k, v)` 루프로 값을 그대로 받았다. **같은 칸에 「잠긴 문」과
+# 「안 잠긴 문」이 공존**했고, 안 잠긴 쪽으로 들어온 값은 아무 데도 안 남았다.
+#
+# Jino가 정한 원칙이 이 문을 닫는 근거다(계약 §2-0, 2026-08-31):
+#   *"원가는 무조건 sellC의 원가 메뉴를 참고해"*
+# ⇒ `product_master.cost_price`는 원가 메뉴 정본의 **사본**이지 독립 사실이 아니다. 그러니
+#   이 두 경로는 원가를 «받을 자격»이 없다. 거부하고 **어디로 가야 하는지 문장으로** 말한다.
+#
+# ★값이 같아도 거부한다 — 「같은 값이면 통과」는 문이 열려 있는지를 값에 따라 바꾸는 것이고,
+#   그러면 이 문의 상태를 아무도 한 줄로 말할 수 없다.
+# ★필드를 «안 보냈으면» 통과다(`model_fields_set`). 상품명·메모만 고치는 정상 조작을 막지
+#   않기 위해서다 — 닫는 것은 원가 칸 하나지 이 API 전체가 아니다.
+# ──────────────────────────────────────────────
+def _reject_cost_price_if_sent(data, *, what: str) -> None:
+    """요청이 `cost_price`를 실어 보냈으면 400으로 거부하고 사유를 문장으로 돌려준다."""
+    if "cost_price" not in data.model_fields_set:
+        return
+    raise HTTPException(
+        400,
+        f"{REJECTION_SENTENCE} · {what}에서는 원가를 바꿀 수 없다"
+        " — 원가 메뉴(/cost)에서 정정하면 이력과 함께 반영된다.",
+    )
+
+
 @router.post("", response_model=ProductOut, status_code=201)
 def create_product(data: ProductCreate, db: Session = Depends(get_db)):
     exists = db.query(ProductMaster).filter_by(internal_sku=data.internal_sku).first()
     if exists:
         raise HTTPException(400, f"SKU '{data.internal_sku}' 이미 존재합니다")
+    # ★신규 등록도 원가를 못 싣는다. 새 상품의 원가는 원가 메뉴가 정한다 — 여기서 받으면
+    #   「등록할 때 한 번은 아무 값이나 넣을 수 있다」는 구멍이 남는다(그 값이 곧 정본 행세를
+    #   한다). 원가는 스키마 기본값 0으로 시작하고, 원가 메뉴 컷오버(S3)가 채운다.
+    _reject_cost_price_if_sent(data, what="상품 등록")
     p = ProductMaster(**data.model_dump())
     db.add(p)
     db.commit()
@@ -101,7 +139,11 @@ def update_product(
     p = db.query(ProductMaster).get(product_id)
     if not p:
         raise HTTPException(404, "상품을 찾을 수 없습니다")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    _reject_cost_price_if_sent(data, what="상품 수정")
+    # ★`cost_price`는 위에서 이미 걸러졌지만 `exclude`로 **한 번 더** 뺀다. 무검사 setattr
+    #   루프가 이 파일의 원래 결함이었고, 위 가드가 언젠가 리팩터로 사라져도 이 줄이 남으면
+    #   값은 안 새기 때문이다(가드 하나가 유일한 방어면 그 하나가 곧 단일 실패점이다).
+    for k, v in data.model_dump(exclude_unset=True, exclude={"cost_price"}).items():
         setattr(p, k, v)
     db.commit()
     db.refresh(p)
@@ -464,6 +506,18 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
 
             existing = db.query(ProductMaster).filter_by(internal_sku=sku).first()
             if existing:
+                # ★이력을 «값을 바꾸기 전에» 만든다 — 옛 값이 필요하기 때문이다. 같은 커밋에
+                #   들어가므로 「값은 바뀌었는데 이력은 없다」가 원리적으로 불가능하다.
+                record_cost_price_change(
+                    db,
+                    internal_sku=sku,
+                    old_value=existing.cost_price,
+                    new_value=cost_decimal,
+                    path=PATH_EXCEL_UPLOAD,
+                    actor="excel",
+                    reason=f"엑셀 업로드 「{file.filename}」 「상품 원가표」 시트 행 {row_idx}",
+                    product_id=existing.id,
+                )
                 existing.product_name = name
                 existing.cost_price = cost_decimal
                 existing.category = category
@@ -477,6 +531,17 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                     category=category,
                     memo=memo,
                 ))
+                # 신규는 옛 값이 **없다** — 0이 아니라 None이다(「없음 ≠ 0」).
+                # `product_id`는 아직 없다(flush 전) — 조회 키가 `internal_sku`인 이유다.
+                record_cost_price_change(
+                    db,
+                    internal_sku=sku,
+                    old_value=None,
+                    new_value=cost_decimal,
+                    path=PATH_EXCEL_UPLOAD,
+                    actor="excel",
+                    reason=f"엑셀 업로드 「{file.filename}」 신규 등록 행 {row_idx}",
+                )
                 results["created"] += 1
 
     # 시트2: 채널 매핑

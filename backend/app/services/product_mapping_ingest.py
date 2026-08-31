@@ -13,6 +13,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy.orm import Session
 
 from app.models import Channel, ProductChannelMapping, ProductMaster
+from app.services.cost_price_history import (
+    PATH_MAPPING_INGEST,
+    record_cost_price_change,
+)
 from app.services.cost_truth_audit import screen_cost, screen_reason, try_load_truth
 
 # 라이브 실측(2026-07-03, ohisell_mapping_template.xlsx "원가 매핑" 시트) 라벨→account_key 대조.
@@ -164,6 +168,7 @@ def upsert_product_by_name(
     cost_price: Decimal,
     next_sku_num: list[int],
     cost_blocked: bool = False,
+    cost_reason: str | None = None,
 ) -> tuple[ProductMaster, Literal["created", "updated"]]:
     """상품명으로 product_master를 upsert한다(기존 upload-by-name 로직 추출·재사용).
 
@@ -174,20 +179,51 @@ def upsert_product_by_name(
     상품 원가표 시트(`/upload`)가 행 전체를 건너뛰는 것과 처분이 다른 이유가 이것이다.
     ★신규 상품이면 **0(미입력)으로 만든다.** 버퍼 값을 넣으면 «틀린 값»이고, 0은 «모르는 값»이라
       손익 엔진이 이미 미상으로 다룬다. 틀린 값보다 모르는 값이 낫다.
+
+    ★`cost_price`가 실제로 움직이면 이력 1행을 같은 트랜잭션에 남긴다(계약 D-CPP-64 §4 S1-①).
+      `cost_reason`은 그 행의 근거 좌표다 — 안 주면 「근거 없음」이 화면에 그대로 뜬다.
     """
     product = db.query(ProductMaster).filter_by(product_name=name).first()
     if product:
         if cost_price and not cost_blocked:
+            # ★값을 바꾸기 «전에» 기록한다 — 옛 값이 필요하고, 같은 커밋이라 이력만 남고
+            #   값이 안 바뀌는(또는 그 반대) 상태가 원리적으로 없다.
+            record_cost_price_change(
+                db,
+                internal_sku=product.internal_sku,
+                old_value=product.cost_price,
+                new_value=cost_price,
+                path=PATH_MAPPING_INGEST,
+                actor="excel",
+                reason=cost_reason or f"매핑 시트 업로드 — 상품명 「{name}」",
+                product_id=product.id,
+            )
             product.cost_price = cost_price
         return product, "updated"
 
+    new_cost = Decimal("0") if cost_blocked else cost_price
     product = ProductMaster(
         internal_sku=_allocate_sku(db, next_sku_num),
         product_name=name,
-        cost_price=Decimal("0") if cost_blocked else cost_price,
+        cost_price=new_cost,
     )
     db.add(product)
     db.flush()
+    # 신규는 옛 값이 **없다**(0이 아니라 None). 0으로 만든 경우도 사건이다 —
+    # 「0으로 태어났다」는 것 자체가 나중에 「왜 이 SKU만 원가가 없나」의 답이 된다.
+    record_cost_price_change(
+        db,
+        internal_sku=product.internal_sku,
+        old_value=None,
+        new_value=new_cost,
+        path=PATH_MAPPING_INGEST,
+        actor="excel",
+        reason=(
+            cost_reason or f"매핑 시트 업로드 — 신규 등록 「{name}」"
+        )
+        + ("" if not cost_blocked else " · 버퍼 차단으로 0(미입력)에서 시작"),
+        product_id=product.id,
+    )
     return product, "created"
 
 
@@ -285,7 +321,13 @@ def ingest_master_sheet(db: Session, ws: Worksheet) -> IngestResult:
         if hit:
             integrity.cost_buffers.append(screen_reason(f"행{r.row_idx}", hit))
         product, action = upsert_product_by_name(
-            db, r.product_name, r.cost_price, next_sku_num, cost_blocked=bool(hit)
+            db,
+            r.product_name,
+            r.cost_price,
+            next_sku_num,
+            cost_blocked=bool(hit),
+            # 근거 좌표 — 「어느 시트 몇 행이 이 값을 넣었나」. 이력 패널이 이 문장을 그대로 쓴다.
+            cost_reason=f"매핑 시트 업로드 「원가 매핑」 행 {r.row_idx} — 상품명 「{r.product_name}」",
         )
         if action == "created":
             result.products_created += 1
