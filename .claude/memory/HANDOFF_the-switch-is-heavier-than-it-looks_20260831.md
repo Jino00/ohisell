@@ -188,6 +188,19 @@ cd frontend && npx vitest run src/pages/paoScopeReachesTheUser.test.tsx  # 28건
 
 ---
 
-## §9. 착지
+## §9. 착지 — 완주
 
-(아래 「착지」 절은 자동 착지 실행 후 채운다)
+커밋 4개(`270736cd` H1 본체 · `929af233` 리뷰 P2 처분·트랙 · QA 판정·HANDOFF · `0f99ba5a` origin/main 병합)
+→ push → PR **#603** → 적대 리뷰 **PASS(P1=0)** → **CI 3/3 실통과**(py3.10 9m27s · py3.14 9m40s · frontend 1m42s)
+→ 머지 **`3ba3e64c`** · `--force` **미사용**.
+
+- **멈춘 단계: 없음.**
+- ★**L4 갱신을 머지 «전»에 했다** — `origin/main`이 12커밋 앞서 있어 병합 후 전건을 다시 돌렸다
+  (**7,406 → 7,409 passed**, 실패 0). 직전 세션이 이 순서를 틀려 CI 3건이 깨진 전례가 있다.
+- ★`safe_merge.sh` 기본 600초가 **세 번째로** 모자랐다 — 처음부터 `MERGE_WAIT=900`으로 갔다.
+  n=73·n=74에 이어 3연속 실측이므로 **기본값 자체가 이 저장소 backend CI에 안 맞는다**(소관: 하네스).
+- **L5로 「main에 세워둔다」 생략** — 로컬 `main`이 공유 메인 폴더에 체크아웃돼 있다.
+  다음 세션은 `git switch -c <새> origin/main`으로 갈라야 한다.
+- 정정 경로: `git revert -m 1 3ba3e64c` · PR close. **force-push 금지**.
+- **prod 배포 0 · 광고계정 쓰기 0 · 스위치 미점화** — 배포는 다음 세션 몫이 아니라 «켜기 결정» 뒤의 일이다.
+
