@@ -95,7 +95,7 @@ def _classify_param_suggestion(suggestion: dict) -> str:
     if scope != "unconditional":
         return GATE_CONDITIONAL
     param = (suggestion.get("param") or "").strip()
-    # ★D-NAO-281: 「SPECS에 있다」가 아니라 「판사가 제안해도 되는 키인가」다. 킬스위치는
+    # ★D-NAO-282: 「SPECS에 있다」가 아니라 「판사가 제안해도 되는 키인가」다. 킬스위치는
     #   등재돼 있어도 여기서 UNMAPPED로 떨어진다 — 프롬프트에서 뺐어도 클램프가 통과시키면
     #   두 층이 갈라진 채 조용히 열린다(막는 층은 프롬프트가 아니라 이 코드다).
     if param not in guardrail_params.llm_proposable_keys():

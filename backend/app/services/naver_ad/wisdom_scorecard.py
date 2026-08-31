@@ -704,7 +704,7 @@ def _param_direction_events(before: dict, after: dict) -> dict[str, str]:
     for key, spec in guardrail_params.SPECS.items():
         if key not in before or key not in after:
             continue
-        # ★D-NAO-281 — bool(킬스위치)은 change_log에 `str(True)`='True'로 저장된다.
+        # ★D-NAO-282 — bool(킬스위치)은 change_log에 `str(True)`='True'로 저장된다.
         #   Decimal("True")는 InvalidOperation이라 종전 코드는 **킬스위치 변경을 통째로 흘렸다.**
         #   SPECS에 direction을 명시해 놓고(=「이 값은 대칭 판정에 참여한다」고 선언해 놓고)
         #   소비층이 못 읽으면, **가장 큰 브레이크를 내려도 브레이크 0건으로 세어진다** —

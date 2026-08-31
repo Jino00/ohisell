@@ -79,7 +79,7 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
     # B4 GATE P2-2(D-NAO-65): 카나리 캠페인 전면 제외(아래 filter) — delegation_gate의
     # canary_confirm_only 게이트와 대칭. 함수 레벨 import(순환 리스크 회피, delegation_gate와
     # 동일 관례).
-    # ★D-NAO-281: «제한»(Confirm-only) 의미의 집합이다 — 개방 allowlist가 아니다.
+    # ★D-NAO-282: «제한»(Confirm-only) 의미의 집합이다 — 개방 allowlist가 아니다.
     from app.services.naver_ad.auto_operator import AD_BID_CONFIRM_ONLY_CAMPAIGNS
 
     rows = db.query(NaverProposal).filter(
