@@ -22,7 +22,9 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, NaverAccountSettings, NaverCampaignSettings, NaverProposal
+from app.models import (
+    Base, NaverAccountSettings, NaverCampaignSettings, NaverChangeLog, NaverProposal,
+)
 from app.services.naver_ad import (
     auto_operator, cold_start_bid_lane, delegation_gate, guardrail_params, runtime_switches,
 )
@@ -252,14 +254,68 @@ def test_DB_예외는_세션을_되돌린_뒤_폴백한다(db):
 
     「설정 조회 실패가 집행 경로를 죽이지 않는다」가 이 함수의 계약인데, 종전 구현은 예외
     «종류»에 따라 그 계약을 못 지켰다(DB 예외면 다음 query가 PendingRollbackError).
-    """
-    from sqlalchemy.exc import OperationalError
 
-    boom = OperationalError("SELECT 1", {}, Exception("DB 죽음"))
-    with patch.object(guardrail_params, "get_params", side_effect=boom):
+    ★★**2R 지적 상환 — 초판 픽스처가 공허했다.** 초판은 `patch.object(get_params,
+    side_effect=OperationalError(...))`로 예외 «객체»만 던졌다. 그러면 세션은 멀쩡하므로
+    `db.rollback()`을 통째로 지워도 전건 초록이었다(2R 변이 M9 생존). **무엇을 재는지는
+    픽스처의 «모양»이 정한다** — 그래서 여기서는 세션을 **실제로 실패 상태로 만든다**:
+    미커밋 행을 쌓아 두고 그 테이블을 지워 다음 autoflush가 터지게 한다.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.exc import PendingRollbackError
+
+    with db.no_autoflush:
+        db.add(NaverChangeLog(entity_type="account", entity_id="", campaign_id="",
+                              action="테스트", dry_run=False))
+        db.execute(text("DROP TABLE naver_change_log"))  # 이 미커밋 행의 flush는 이제 실패한다
+
+    # get_switch 안의 query가 autoflush를 부르고 → 터지고 → SQLAlchemyError 분기로 들어간다.
+    assert guardrail_params.get_switch(db, "ad_bid_routing_enabled") is True
+
+    # ★핵심 단언: 폴백 «뒤에도» 같은 세션이 멀쩡히 쓰인다(집행 경로가 이어진다).
+    #   rollback을 지우면 여기가 PendingRollbackError로 죽는다 — 그게 이 테스트의 전부다.
+    try:
+        db.query(NaverAccountSettings).count()
+    except PendingRollbackError as e:  # pragma: no cover - 회귀 시에만 도달
+        raise AssertionError(
+            "get_switch가 DB 예외를 삼키기만 하고 세션을 안 되돌렸다 — "
+            f"호출부가 이어서 죽는다: {e}",
+        ) from e
+
+
+def test_비DB_예외에선_rollback_하지_않는다(db):
+    """★대조 — 아무 예외에나 rollback 하면 **멀쩡한 미커밋 작업을 지운다.**
+
+    DB 예외는 트랜잭션이 이미 돌이킬 수 없어 rollback이 버리는 게 없지만, KeyError 같은 것은
+    다르다. 위 테스트만 있으면 「전부 rollback」으로 넓히는 변이가 안 잡힌다.
+    """
+    db.add(NaverChangeLog(entity_type="account", entity_id="", campaign_id="",
+                          action="살아남아야 함", dry_run=False))
+    db.flush()
+    with patch.object(guardrail_params, "get_params", side_effect=KeyError("DB 아님")):
         assert guardrail_params.get_switch(db, "ad_bid_routing_enabled") is True
-    # ★핵심: 폴백 «뒤에도» 같은 세션이 멀쩡히 쓰인다(집행 경로가 이어진다).
-    assert db.query(NaverAccountSettings).count() >= 0
+    assert db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "살아남아야 함").count() == 1
+
+
+def test_판사_프롬프트의_카운트가_실제_나열과_일치한다():
+    """★적대 리뷰 2R P1 — 이 커밋이 **넷째 자리**에서 자기 원리를 어겼다.
+
+    「필터를 세 곳에 각자 적으면 갈라진다」고 써 놓고 프롬프트 목록만 좁히고 **카운트 문구를
+    안 고쳐** 「9종이라 말하고 7개를 나열」했다. 판사에게는 「2개가 더 있는데 안 보인다」는
+    신호라 이름을 지어내라고 부추기는 모양이다. 실행 안전은 클램프가 지키지만, 산출물이
+    사실과 다른 것 자체가 결함이다.
+    """
+    import re
+
+    from app.services.naver_ad import wisdom_judge
+
+    listed = [ln for ln in wisdom_judge._PARAM_KEYS_DESC.strip().split("\n") if ln.strip()]
+    m = re.search(r"화이트리스트\((\d+)종", wisdom_judge._SYSTEM)
+    assert m, "프롬프트에서 화이트리스트 카운트 문구를 못 찾았다"
+    assert int(m.group(1)) == len(listed) == len(guardrail_params.llm_proposable_keys())
+    # ★낡은 숫자가 프롬프트 어디에도 남아 있지 않다(이 커밋 이전부터 「3종」이 stale이었다).
+    assert "3종" not in wisdom_judge._SYSTEM
 
 
 def test_스위치_경고문은_접히지_않는_자리에_있다():
