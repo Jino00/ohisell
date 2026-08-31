@@ -70,6 +70,7 @@ import {
   sweepSummaryText,
   triggerLabel,
 } from "../lib/costMenuSurface";
+import { COST_PRICE_PATH_LABELS, costPricePathLabel } from "../lib/costPriceGate";
 import {
   isImportedGoodsMaterial,
   pickableProductLines,
@@ -516,26 +517,6 @@ export function VatBasisBadge() {
       원가 = 부가세 포함 — 사내 관리회계 기준(D-CPP-51). 제외값은 옆 칸에 함께 표시한다.
     </div>
   );
-}
-
-/** `cost_price` 변경 경로의 **사람이 읽는 이름**과 그 문이 지금 열려 있나.
- *
- * ★`open:false`는 「이 문은 계약 D-CPP-64 S1-②로 닫혔다」는 뜻이다. 닫힌 문의 이력 행이
- *   배포 «후» 시각으로 나타나면 그건 **가드가 샜다는 신호**이므로 화면이 그렇게 말한다 —
- *   닫았다고 선언하고 확인하지 않으면 그 선언은 주석일 뿐이다.
- */
-export const COST_PRICE_PATH_LABELS: Record<string, { label: string; open: boolean }> = {
-  excel_upload: { label: "상품 원가표 엑셀 업로드", open: true },
-  mapping_ingest: { label: "매핑 시트 업로드", open: true },
-  product_create: { label: "상품 등록 화면", open: false },
-  product_update: { label: "상품 수정 화면", open: false },
-  cutover: { label: "원가 메뉴 컷오버", open: true },
-  auto: { label: "정본 자동 추종", open: true },
-};
-
-/** 모르는 경로 이름도 **그대로 보여 준다** — 「기타」로 접으면 새 문이 생긴 것을 못 본다. */
-export function costPricePathLabel(path: string): string {
-  return COST_PRICE_PATH_LABELS[path]?.label ?? `알 수 없는 경로 «${path}»`;
 }
 
 /** `product_master.cost_price` 변경 이력 패널 (계약 D-CPP-64 §4 S1-①).
