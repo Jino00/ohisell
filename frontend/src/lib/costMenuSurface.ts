@@ -137,6 +137,8 @@ export function sweepSummaryText(runs: CostAutoRefreshRun[]): string {
  * 의존이 생기므로(이 파일이 `formatCostWon`을 로컬 사본으로 둔 것과 같은 이유) 여기서는
  * 유니온을 그대로 적는다 — 값이 갈라지면 `costPageWidthClass`를 부르는 쪽에서 타입이 걸린다.
  */
-export function costPageWidthClass(tab: "home" | "materials" | "recipes" | "board"): string {
+export function costPageWidthClass(
+  tab: "home" | "materials" | "recipes" | "board" | "purchased",
+): string {
   return tab === "recipes" ? "p-6 max-w-[96rem]" : "p-6";
 }

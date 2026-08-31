@@ -90,10 +90,16 @@ import {
   type CostInboxTarget,
   type RoundTripFilter,
 } from "../lib/costHome";
+import CostPurchasedPricePanel from "./costPurchasedPricePanel";
 
 /** ★`"home"`이 **기본 탭**이다(D-CPP-62 S2). 나머지 셋은 지우지 않는다 — 홈은 새 입구지
  *  기존 탭의 대체가 아니고, 인박스·왕복 표가 결국 그 탭들의 기존 패널로 «데려간다». */
-export type CostTab = "home" | "materials" | "recipes" | "board";
+export type CostTab =
+  | "home"
+  | "materials"
+  | "recipes"
+  | "board"
+  | "purchased";
 
 // ══════════════════════════════════════════════════════════════════
 // 순수 표시 규칙 (테스트가 이 함수들을 직접 잡는다)
@@ -3229,6 +3235,7 @@ export default function CostPage() {
             ["materials", "부자재"],
             ["recipes", "레시피"],
             ["board", "표준원가 보드"],
+            ["purchased", "매입품 단가"],
           ] as [CostTab, string][]
         ).map(([k, label]) => (
           <button
@@ -3774,6 +3781,13 @@ export default function CostPage() {
           </div>
         </div>
       ) : null}
+      {/* ══════════════════════════════════════════════════════════════
+          매입품 단가 — 파일 근거 붙이기 (계약 D-CPP-63 S1 3/3)
+          ★패널을 별도 파일로 둔 이유: 이 파일은 이미 3,800줄이고, 새 축은 기존 탭 어느
+            것과도 상태를 공유하지 않는다(자기 업로드·자기 보드). 섞으면 둘 다 못 읽는다.
+          ══════════════════════════════════════════════════════════════ */}
+      {tab === "purchased" ? <CostPurchasedPricePanel /> : null}
+
       {tab === "board" ? (
         <div className="mt-4">
           <div className="mb-3">

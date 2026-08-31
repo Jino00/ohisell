@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Literal, Optional
 
 from io import BytesIO
@@ -33,7 +33,12 @@ from app.database import get_db
 from app.services.cost_menu import auto_refresh as AR
 from app.services.cost_menu import materials as M
 from app.services.cost_menu import recipes as R
+from app.services.cost_menu import purchased_price as PP
 from app.services.cost_menu import round_trip as RT
+from app.services.cost_menu.purchased_price_parser import (
+    PriceSheetError,
+    parse_price_sheet,
+)
 
 router = APIRouter(prefix="/api/cost", tags=["cost-menu"])
 
@@ -559,3 +564,137 @@ def roundtrip_download(db: Session = Depends(get_db)):
             "Access-Control-Expose-Headers": "X-Snapshot-Id, X-Snapshot-Rows",
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 매입 완제품 단가 — 제안(쓰기 없음) → 묶음 확인 → 보드 (계약 D-CPP-63 S1 3/3)
+#
+# ★엔드포인트를 «미리보기»와 «확인» 둘로 가르는 것이 계약 §4 S1 첫 항목
+#   (*"확인 전까지 아무 값도 안 써진다"*)의 집행이다. 하나로 합치면 업로드가 곧 적재가
+#   되고, 그 순간 「사람의 확인 클릭이 곧 분류」라는 이 계약의 축이 사라진다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class PurchasedConfirmIn(BaseModel):
+    """묶음 한 클릭. 화면은 «무엇을 눌렀는지»만 보내고 대상 여부는 서버가 다시 판정한다."""
+
+    internal_skus: list[str]
+    price: Decimal
+    source_file: str
+    source_names: Optional[dict[str, str]] = None
+    note: Optional[str] = None
+
+
+def _money(v) -> Optional[str]:
+    """Decimal → 문자열. **float로 내보내지 않는다.**
+
+    ★적대 리뷰 P2-7이 잡은 자리: 이 라우터는 Pydantic 모델이 아니라 raw dict를 돌려주므로
+    `jsonable_encoder`가 `Decimal`을 **float**로 바꾼다(실측: `2694.5` number). 원가 시스템에서
+    돈을 float로 내보내는 것은 그 자체로 결함이고, 이 저장소의 다른 원가 엔드포인트는 전부
+    문자열이다(`CostMaterial.latest_price_ex_vat` 등) — 축마다 타입이 다르면 프론트가
+    「어느 축은 string, 어느 축은 number」를 외워야 한다.
+    """
+
+    if v is None:
+        return None
+    # ★2자리로 못 박는다 — 저장 컬럼이 `Numeric(14,2)`라 표시와 저장이 갈리면 안 된다
+    #   (파일에서 온 `Decimal("922")`가 화면엔 「922」, DB엔 「922.00」으로 서는 상태).
+    try:
+        return str(Decimal(v).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except InvalidOperation:
+        # ★★자릿수가 Decimal 컨텍스트를 넘는 비정상 값(예: 1e30)에서 `quantize`가 던진다.
+        #   **표시 한 칸 때문에 업로드 전체를 500으로 죽이지 않는다** — 적대 리뷰 2R가 잡은
+        #   자리이고, 그 500은 「원가 칸 하나가 이상하다」가 아니라 **이유 없는 실패**로 보인다.
+        #   원문을 그대로 보여주고 판단은 사람에게 남긴다(계약 §2 「없음 ≠ 0」과 같은 결).
+        return str(v)
+
+
+def _sku_out(s: PP.SkuProposal) -> dict:
+    return {
+        "internal_sku": s.internal_sku,
+        "product_name": s.product_name,
+        "source_product_name": s.source_product_name,
+        "file_price": _money(s.file_price),
+        "is_placeholder": s.is_placeholder,
+        "current_cost_price": _money(s.current_cost_price),
+        "diff": _money(s.diff),
+        "recipe_id": s.recipe_id,
+        "recipe_name": s.recipe_name,
+        "excluded_reason": s.excluded_reason,
+        "approved_price": _money(s.approved_price),
+    }
+
+
+@router.post("/purchased-prices/preview")
+def preview_purchased_prices(
+    price_file: UploadFile = File(..., description="원가 열을 가진 매핑 파일(08-07판 계열)"),
+    db: Session = Depends(get_db),
+):
+    """업로드 → 제안. **DB를 한 글자도 바꾸지 않는다.**
+
+    ★`원가` 열이 없는 판(08-22판)은 파서가 `PriceSheetError`로 거부한다 — 400으로
+    그대로 올린다. 「0건 파싱됨」으로 조용히 성공하지 않는 것이 요지다(교훈 #123).
+    """
+
+    rows = _sheet_rows(price_file, "원가 매핑", "단가 파일")
+    try:
+        parsed = parse_price_sheet(rows)
+    except PriceSheetError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+    p = PP.build_proposal(db, parsed, price_file.filename or "(이름 없는 파일)")
+    return {
+        "source_file": p.source_file,
+        # 어느 열을 읽었는지를 화면이 보여준다 — 계약 §3 「위치로 읽지 않는다」의 표면.
+        "read_columns": {"name": p.name_label, "price": p.price_label},
+        "counts": p.counts(),
+        "groups": [
+            {
+                "recipe_id": g.recipe_id,
+                "recipe_name": g.recipe_name,
+                "price": _money(g.price),
+                "sku_count": g.sku_count,
+                "already_approved": g.already_approved,
+                "skus": [_sku_out(s) for s in g.skus],
+            }
+            for g in p.groups
+        ],
+        "blanks": [_sku_out(s) for s in p.blanks],
+        "excluded": [_sku_out(s) for s in p.excluded],
+        "unmatched": p.unmatched,
+        "anomalies": p.anomalies,
+    }
+
+
+@router.post("/purchased-prices/confirm")
+def confirm_purchased_prices(body: PurchasedConfirmIn, db: Session = Depends(get_db)):
+    """묶음 확인 — 대상에만 쓴다. 거부는 **세어서 돌려준다.**
+
+    ★`written`과 `skipped`를 함께 돌려주는 이유: 「10건 눌렀는데 7건만 써졌다」가 화면에
+    보여야 사람이 금지선이 작동했음을 안다. 조용히 성공으로 응답하면 막은 것과 안 막은 것이
+    구분되지 않는다(계약 §3의 표면).
+    """
+
+    if not body.internal_skus:
+        raise HTTPException(400, detail="확인할 SKU가 비었다")
+    res = PP.confirm_group(
+        db,
+        internal_skus=body.internal_skus,
+        price=body.price,
+        source_file=body.source_file,
+        source_names=body.source_names,
+        note=body.note,
+    )
+    db.commit()
+    return {
+        "written": res.written,
+        "skipped": [{"internal_sku": s, "reason": r} for s, r in res.skipped],
+        "board": PP.board_counts(db),
+    }
+
+
+@router.get("/purchased-prices/board")
+def purchased_prices_board(db: Session = Depends(get_db)):
+    """첫 화면 카운트 — 계약 §4 S1 넷째 항목(「어디까지 왔나」를 세션 없이 읽는다)."""
+
+    return PP.board_counts(db)

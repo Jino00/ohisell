@@ -7147,3 +7147,97 @@ export function fetchNaverOwnershipCampaigns(
     `/api/naver/ad/performance/ownership-campaigns${date ? `?date=${date}` : ""}`,
   );
 }
+
+// ── 매입 완제품 단가 — 제안 → 묶음 확인 → 보드 (계약 D-CPP-63 S1 3/3) ────────
+// ★`preview`와 `confirm`이 갈려 있는 것이 계약 §4 S1의 *"확인 전까지 아무 값도 안
+//   써진다"*를 화면 쪽에서 지키는 방법이다. 하나로 합치면 업로드가 곧 적재가 된다.
+
+export interface PurchasedSkuRow {
+  internal_sku: string;
+  product_name: string;
+  source_product_name: string;
+  file_price: string | null;
+  is_placeholder: boolean;
+  current_cost_price: string | null;
+  diff: string | null;
+  recipe_id: number | null;
+  recipe_name: string | null;
+  excluded_reason: string | null;
+  approved_price: string | null;
+}
+
+export interface PurchasedGroup {
+  recipe_id: number;
+  recipe_name: string;
+  price: string;
+  sku_count: number;
+  already_approved: number;
+  skus: PurchasedSkuRow[];
+}
+
+export interface PurchasedBoard {
+  candidates: number;
+  grounded: number;
+  held_blank: number;
+  unconfirmed: number;
+}
+
+export interface PurchasedPreview {
+  source_file: string;
+  /** 어느 열을 «이름으로» 읽었는지 — 계약 §3 「위치로 읽지 않는다」의 표면. */
+  read_columns: { name: string; price: string };
+  counts: {
+    groups: number;
+    target_skus: number;
+    blank_skus: number;
+    excluded_skus: number;
+    unmatched_rows: number;
+  };
+  groups: PurchasedGroup[];
+  blanks: PurchasedSkuRow[];
+  excluded: PurchasedSkuRow[];
+  unmatched: string[];
+  anomalies: string[];
+}
+
+export interface PurchasedConfirmResult {
+  written: number;
+  skipped: { internal_sku: string; reason: string }[];
+  board: PurchasedBoard;
+}
+
+export async function previewPurchasedPrices(
+  file: File,
+): Promise<PurchasedPreview> {
+  const form = new FormData();
+  form.append("price_file", file);
+  const res = await fetch(`${API_BASE}/api/cost/purchased-prices/preview`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    // ★400의 본문이 「원가 열이 없다」 같은 «사유»다. 삼키면 화면에 「실패」만 남고
+    //   사람은 다른 판을 올려야 한다는 것을 모른다.
+    const detail = await res.text();
+    throw new Error(detail || `Upload error ${res.status}`);
+  }
+  return res.json();
+}
+
+export function confirmPurchasedPrices(body: {
+  internal_skus: string[];
+  price: string;
+  source_file: string;
+  source_names?: Record<string, string>;
+  note?: string;
+}): Promise<PurchasedConfirmResult> {
+  return fetchApi("/api/cost/purchased-prices/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function fetchPurchasedBoard(): Promise<PurchasedBoard> {
+  return fetchApi("/api/cost/purchased-prices/board");
+}
