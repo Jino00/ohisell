@@ -311,6 +311,32 @@ def test_active_guard_does_not_make_it_unhealthy():
     # healthy 자체는 빈 DB의 다른 사유로도 갈리므로 여기서 단언하지 않는다(교훈 #181).
 
 
+def test_history_rolls_back_with_its_transaction(client):
+    """★★이력은 **부르는 쪽 트랜잭션에 얹힌다** — 모듈 헤더가 못 박은 불변식을 잰다.
+
+    ★적대 리뷰 2R P2-13(2026-08-31): `record_cost_price_change`에 `db.commit()` 한 줄을
+      넣어도 관련 58개가 전건 초록이었다 — 「commit 하지 않는다」는 주석의 주장을 아무도
+      안 재고 있었다. 1R P2-8·9·10과 **같은 결의 네 번째**다(주석이 주장만 하는 자리).
+
+    ★왜 이 불변식이 중요한가: 기록이 스스로 commit 하면 **값 변경이 나중에 롤백돼도 이력만
+      남는다.** 그러면 이력이 「일어나지 않은 변경」을 증언한다 — 사후에 「수정이 실수 없이
+      됐나」를 묻는 이 계약의 목적이 정확히 그 지점에서 거짓이 된다.
+    """
+    with client.testing_session() as s:
+        CPH.record_cost_price_change(
+            s, internal_sku="OHI-0001", old_value=D("100"), new_value=D("200"),
+            path=CPH.PATH_CUTOVER, actor="jino", reason="롤백 시험",
+        )
+        # 아직 commit 전 — 같은 세션에선 보이고(flush), 롤백하면 사라져야 한다.
+        s.rollback()
+        assert s.query(CostPriceHistory).count() == 0, (
+            "기록 모듈이 스스로 commit 했다 — 롤백된 변경의 이력만 남는다"
+        )
+
+    # 다른 세션(=HTTP)에서도 0건이다. 남아 있으면 이미 커밋된 것이다.
+    assert client.get("/api/cost/price-history").json()["total"] == 0
+
+
 def test_health_route_actually_returns_cost_guard(client):
     """★★스키마가 지우지 않는가 — dict가 아니라 **HTTP body**에 있는지 본다.
 
