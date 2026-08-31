@@ -704,10 +704,23 @@ def _param_direction_events(before: dict, after: dict) -> dict[str, str]:
     for key, spec in guardrail_params.SPECS.items():
         if key not in before or key not in after:
             continue
-        try:
-            b, a = Decimal(str(before[key])), Decimal(str(after[key]))
-        except (InvalidOperation, TypeError, ValueError):
-            continue
+        # ★D-NAO-281 — bool(킬스위치)은 change_log에 `str(True)`='True'로 저장된다.
+        #   Decimal("True")는 InvalidOperation이라 종전 코드는 **킬스위치 변경을 통째로 흘렸다.**
+        #   SPECS에 direction을 명시해 놓고(=「이 값은 대칭 판정에 참여한다」고 선언해 놓고)
+        #   소비층이 못 읽으면, **가장 큰 브레이크를 내려도 브레이크 0건으로 세어진다** —
+        #   그리고 그 숫자가 북극성 §7 「액셀·브레이크 대칭」 검사와 D-NAO-85 표류 경보가
+        #   보는 바로 그 값이다. 파싱은 `_coerce_bool` 재사용(모양 정의를 두 곳에 적지 않는다).
+        if spec.kind == "bool":
+            b_raw = guardrail_params._coerce_bool(before[key])
+            a_raw = guardrail_params._coerce_bool(after[key])
+            if b_raw is None or a_raw is None:
+                continue
+            b, a = Decimal(int(b_raw)), Decimal(int(a_raw))
+        else:
+            try:
+                b, a = Decimal(str(before[key])), Decimal(str(after[key]))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
         if a == b:
             continue
         if spec.direction == "tighten_up":

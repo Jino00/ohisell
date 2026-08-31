@@ -1033,9 +1033,28 @@ export default function NaverAdOptimizationConsole() {
 
         {guardrailError && <div className="text-sm text-red-600 mb-3">{guardrailError}</div>}
 
+        {/* ★D-NAO-281 적대 리뷰 P1-1 — 종전 문구는 「모든 값이 코드 기본값으로 돕니다」였는데
+            **거짓이 될 수 있었다**: 되돌림 스위치가 끄는 것은 DB 층뿐이고, env 폴백이 있는
+            항목(prod `.env`의 NAVER_CS_DRY_RUN=0)은 여전히 그 값으로 돈다. 사고 중에 레버를
+            내린 사람이 「= 코드 기본값 = dry-run = 안전」으로 읽으면 정반대다.
+            ⇒ 문장을 하드코딩하지 않고 **응답 데이터에서 계산**한다 — env 층이 언젠가 사라지면
+            목록이 비고 문장이 저절로 「전부 코드 기본값」으로 돌아온다(문구가 코드보다 오래
+            살아남아 거짓이 되는 것을 구조로 막는다). */}
         {guardrail && !guardrail.from_db_enabled && (
           <div className="bg-gray-50 border border-gray-200 text-gray-600 text-xs rounded-lg p-3 mb-3">
-            되돌림 스위치가 내려가 있어 모든 값이 코드 기본값으로 돕니다.
+            {guardrail.params.some((p) => p.source === "env") ? (
+              <>
+                되돌림 스위치가 내려가 있어 DB 값을 읽지 않습니다. 단 서버 환경변수가 설정된 항목은
+                코드 기본값이 아니라 <strong>그 환경변수 값으로 돕니다</strong> —{" "}
+                {guardrail.params
+                  .filter((p) => p.source === "env")
+                  .map((p) => `${p.label}(${p.env})`)
+                  .join(" · ")}
+                . 되돌리려면 서버 .env를 고치고 재시작해야 합니다.
+              </>
+            ) : (
+              <>되돌림 스위치가 내려가 있어 모든 값이 코드 기본값으로 돕니다.</>
+            )}
           </div>
         )}
 

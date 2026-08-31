@@ -165,3 +165,38 @@ describe("킬스위치 런타임화 — 화면 표면(D-NAO-281 P2-ⓑ)", () => 
     expect(screen.queryByText("켜짐 (ON)")).toBeNull();
   });
 });
+
+describe("되돌림 스위치 배너 — 문구가 사실인가(적대 리뷰 1R P1-1 상환)", () => {
+  it("★★env 폴백 항목이 있으면 「모든 값이 코드 기본값」이라고 말하지 않는다", async () => {
+    // 종전 문구는 하드코딩 「되돌림 스위치가 내려가 있어 모든 값이 코드 기본값으로 돕니다」였다.
+    // 되돌림 스위치가 끄는 것은 DB 층뿐이라, prod `.env`의 NAVER_CS_DRY_RUN=0이 살아 있는
+    // 상태에서 그 문장은 **거짓**이고, 거짓의 방향이 「안전」쪽이라 더 나쁘다 — 사고 중에
+    // 레버를 내린 사람이 「= dry-run = 안전」으로 읽는데 레인은 네이버에 계속 쓴다.
+    h.guardrail = {
+      ...RESPONSE_BASE,
+      from_db_enabled: false,
+      params: [ROUTING_ON, CS_DRY_RUN_FROM_ENV],
+    };
+    renderPage();
+    expect(await screen.findByText(/DB 값을 읽지 않습니다/)).toBeTruthy();
+    expect(screen.queryByText(/모든 값이 코드 기본값으로 돕니다/)).toBeNull();
+    // 어느 항목이 예외인지 «이름으로» 말해야 한다 — 「예외가 있을 수 있습니다」는 안내가 아니다.
+    expect(screen.getByText(/콜드스타트 레인 dry-run\(NAVER_CS_DRY_RUN\)/)).toBeTruthy();
+    expect(screen.getByText(/서버 \.env를 고치고 재시작/)).toBeTruthy();
+  });
+
+  it("env 폴백 항목이 하나도 없으면 종전 문구 그대로다 — 문구가 데이터에서 계산된다", async () => {
+    // env 층이 언젠가 사라지면 목록이 비고 문장이 저절로 돌아온다. 문구가 코드보다 오래
+    // 살아남아 거짓이 되는 것을 구조로 막는다는 것이 이 설계의 요점이다.
+    h.guardrail = { ...RESPONSE_BASE, from_db_enabled: false, params: [ROUTING_ON] };
+    renderPage();
+    expect(await screen.findByText(/모든 값이 코드 기본값으로 돕니다/)).toBeTruthy();
+  });
+
+  it("되돌림 스위치가 켜져 있으면(평상시) 배너 자체가 없다", async () => {
+    h.guardrail = { ...RESPONSE_BASE, params: [ROUTING_ON, CS_DRY_RUN_FROM_ENV] };
+    renderPage();
+    expect(await screen.findByText(/소재\(ad\) 입찰 라우팅/)).toBeTruthy();
+    expect(screen.queryByText(/되돌림 스위치가 내려가 있어/)).toBeNull();
+  });
+});

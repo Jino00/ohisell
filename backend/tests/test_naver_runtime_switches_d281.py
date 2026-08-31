@@ -174,6 +174,94 @@ def test_콜드스타트_dry_run이_DB를_본다(db, monkeypatch):
     assert cold_start_bid_lane.cold_start_dry_run(db) is True   # DB가 이긴다
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R 상환 — 「값을 만드는 층」과 「사람이 보는 층」을 «잇는» 계약
+#
+# 1R에서 표면 절단 변이 2종이 **전건 초록으로 생존**했다(P1-3):
+#   · `describe()`의 "warn"을 항상 None으로  → 경고가 응답에서 소멸 → 화면에서 사라짐
+#   · `describe()`의 "kind"를 항상 "int"로   → 토글이 숫자칸으로, 값이 1/0으로
+# 원인은 한 문장이다: 백엔드 테스트는 `SPECS[key].warn`(**상수**)만 봤고, 프론트 테스트는
+# **손으로 쓴 fixture**를 먹었다. 각 층은 지켜지는데 **둘을 잇는 한 줄만 아무도 안 지켰다.**
+# ⇒ 아래는 「응답에 그 값이 실려 나가는가」를 재는 계약이다. 상수가 아니라 `describe()` 출력을
+#    읽는다는 것이 이 테스트의 전부다.
+# ══════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize("key,warn_snippet", [
+    ("ad_bid_routing_enabled", "allowlist"),
+    ("naver_cs_dry_run", "실제로 입찰을 씁니다"),
+])
+def test_describe_응답이_kind와_warn을_실어_보낸다(db, key, warn_snippet):
+    """★화면이 토글·경고를 그리는 «재료»가 응답에 실제로 실리는가.
+
+    SPECS 상수에 있는 것과 응답에 실려 나가는 것은 다른 사실이다 — 그 사이가 비면 화면은
+    조용히 숫자칸으로 돌아가고 경고는 사라지는데, 두 층의 테스트는 각자 초록이다.
+    """
+    row = [r for r in guardrail_params.describe(db) if r["key"] == key][0]
+    assert row["kind"] == "bool"
+    assert row["warn"] and warn_snippet in row["warn"]
+
+
+def test_bool이_아닌_봉투는_kind가_bool이_아니고_warn도_없다(db):
+    """대조 — 위 단언이 「전 행에 warn이 있다」로 느슨해지면 여기서 걸린다."""
+    row = [r for r in guardrail_params.describe(db) if r["key"] == "cooldown_hours"][0]
+    assert row["kind"] == "int"
+    assert row["warn"] is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R P1-1 상환 — 되돌림 스위치의 «약속»이 사실인가
+# ══════════════════════════════════════════════════════════════════════════
+def test_되돌림_스위치를_내려도_env_폴백_키는_env가_이긴다(db, monkeypatch):
+    """★`_PARAMS_FROM_DB=False`는 「전부 코드 기본값」이 **아니다** — DB 층만 끈다.
+
+    이 동작 자체는 옳다(env는 D-NAO-172 이전부터 그 키의 정본이었고, 레버를 내리는 순간 CS
+    레인 동작이 바뀌면 그건 원복이 아니라 새 사고다). 위험했던 것은 **문구**였다: 화면·API가
+    「모든 값이 코드 기본값으로 돕니다」라고 약속하면, 사고 중에 레버를 내린 사람이
+    「= dry-run = 안전」으로 읽는다. **prod `.env`엔 `NAVER_CS_DRY_RUN=0`이 실재한다.**
+    ⇒ 동작을 사실로 못박고, 문구는 이 사실에 맞춰 고쳤다(라우터 from_db_help·콘솔 배너).
+    """
+    monkeypatch.setenv(runtime_switches.NAVER_CS_DRY_RUN_ENV, "0")
+    _kv(db, {"naver_cs_dry_run": 1, "ad_bid_routing_enabled": 0})
+    with patch.object(guardrail_params, "_PARAMS_FROM_DB", False):
+        rows = {r["key"]: r for r in guardrail_params.describe(db)}
+        # env 폴백이 «있는» 키 — DB 값(1)은 무시되지만 코드 기본값(True)도 아니다.
+        assert rows["naver_cs_dry_run"]["source"] == "env"
+        assert guardrail_params.get_params(db)["naver_cs_dry_run"] is False
+        assert cold_start_bid_lane.cold_start_dry_run(db) is False  # 네이버 실쓰기 허용
+        # env 폴백이 «없는» 키 — 여기서는 약속대로 코드 기본값으로 돌아간다.
+        assert rows["ad_bid_routing_enabled"]["source"] == "code"
+        assert auto_operator.ad_bid_routing_enabled(db) is True
+
+
+def test_되돌림_문구가_사실과_어긋나지_않는다(db, monkeypatch):
+    """★문구는 코드보다 오래 살아남아 거짓이 된다 — 그 조합을 여기서 금지한다.
+
+    라우터가 내려보내는 `from_db_help`가 「전 파라미터가 코드 상수로 돈다」고 말하는데
+    env 폴백 키가 SPECS에 존재하면, 그 문장은 그 순간 거짓이다.
+    """
+    from app.routers.naver_ad import guardrail_params_get
+
+    help_text = guardrail_params_get(db=db)["from_db_help"]
+    has_env_key = any(sp.env for sp in guardrail_params.SPECS.values())
+    assert has_env_key, "env 폴백 키가 사라졌으면 이 테스트와 문구를 같이 단순화할 것"
+    assert "전 파라미터가 코드 상수로 돈다" not in help_text
+    assert "DB 층" in help_text and "환경변수" in help_text
+
+
+def test_DB_예외는_세션을_되돌린_뒤_폴백한다(db):
+    """★적대 리뷰 P2-2 — 삼키기만 하면 세션이 rollback 대기로 남아 **호출부가 이어서 죽는다.**
+
+    「설정 조회 실패가 집행 경로를 죽이지 않는다」가 이 함수의 계약인데, 종전 구현은 예외
+    «종류»에 따라 그 계약을 못 지켰다(DB 예외면 다음 query가 PendingRollbackError).
+    """
+    from sqlalchemy.exc import OperationalError
+
+    boom = OperationalError("SELECT 1", {}, Exception("DB 죽음"))
+    with patch.object(guardrail_params, "get_params", side_effect=boom):
+        assert guardrail_params.get_switch(db, "ad_bid_routing_enabled") is True
+    # ★핵심: 폴백 «뒤에도» 같은 세션이 멀쩡히 쓰인다(집행 경로가 이어진다).
+    assert db.query(NaverAccountSettings).count() >= 0
+
+
 def test_스위치_경고문은_접히지_않는_자리에_있다():
     """★`why`는 「근거 보기」 안에 접혀 있다 — 끄기 직전에 봐야 하는 사실은 거기 있으면 안 된다.
 
@@ -254,3 +342,90 @@ def test_옛_이름은_남아_있지_않다():
     """
     assert not hasattr(auto_operator, "AD_BID_CANARY_CAMPAIGNS")
     assert not hasattr(auto_operator, "AD_BID_ROUTING_ENABLED")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R 상환(2) — 응답 «키 인구조사» + env 진리표 + 판사 화이트리스트
+# ══════════════════════════════════════════════════════════════════════════
+def test_describe_응답의_키_인구조사(db):
+    """★키가 늘거나 «빠지면» 이 줄이 빨개진다.
+
+    앞의 kind/warn 단언은 그 두 키만 지킨다. 화면이 쓰는 필드가 하나 더 조용히 빠지는 것을
+    막으려면 **집합 자체**를 못박아야 한다 — SPECS 인구조사 가드와 같은 관례다.
+    """
+    rows = guardrail_params.describe(db)
+    assert rows, "describe가 빈 목록이면 화면이 통째로 빈다"
+    for row in rows:
+        assert set(row) == {
+            "key", "label", "value", "source", "code_default", "min", "max",
+            "why", "direction", "kind", "warn", "env", "rejected", "env_rejected",
+            "updated_at",
+        }, row["key"]
+
+
+@pytest.mark.parametrize("literal,old_dry_run,new_dry_run", [
+    ("0", False, False),    # prod 실측값 — 여기서 갈리면 안 된다
+    ("1", True, True),
+    ("false", True, False),  # ★갈린다: 옛 코드는 '0이 아니면 dry-run'이라 사람 의도와 반대로 읽었다
+    ("", True, True),        # 빈 값 = 미설정 취급(둘 다 코드 기본값)
+    ("아무말", True, True),   # 모르는 값 → 옛: dry-run / 새: env_rejected → 코드 기본값(True)
+])
+def test_env_진리표가_옛_해석과_어디서_갈리는지_못박는다(db, monkeypatch, literal, old_dry_run, new_dry_run):
+    """★적대 리뷰 P2-5 — 「행위 변화 0」은 **prod 리터럴이 `0`일 때만** 성립한다.
+
+    옛 판정은 `os.getenv("NAVER_CS_DRY_RUN", "1") != "0"` 한 줄이라 **'0'이 아닌 모든 문자열이
+    dry-run ON**이었다. 새 `_coerce_bool`은 'false'를 사람 의도대로 «dry-run 아님»으로 읽는다 —
+    더 옳지만 **다른 해석**이다. prod는 리터럴 `0`이라 라이브 동작은 그대로다(2026-08-31 실측).
+    갈리는 지점을 지우지 말고 여기 적어 둔다: 나중에 누가 `.env`를 `false`로 바꾸면 옛 진리표를
+    기억하는 사람은 「안전 쪽」이라 믿는데 실제로는 **네이버 실쓰기**다.
+    """
+    monkeypatch.setenv(runtime_switches.NAVER_CS_DRY_RUN_ENV, literal)
+    assert (literal != "0") is old_dry_run          # 옛 한 줄의 진리표를 그대로 재현
+    assert cold_start_bid_lane.cold_start_dry_run(db) is new_dry_run
+
+
+def test_킬스위치는_지혜_판사의_제안_목록에_없다():
+    """★적대 리뷰가 잡은 자리 — SPECS 등재만으로 판사 화이트리스트가 조용히 넓어졌었다.
+
+    자동 발사는 없었지만(사람이 값을 입력해 승인) 「엔진이 자기 킬스위치 해제를 제안하는 카드」가
+    콘솔에 뜨는 것은 계약 §5 「킬스위치 약화 금지」가 보는 방향과 반대다.
+    ★막는 층은 프롬프트가 아니라 **코드 클램프**다 — 둘 다 검사한다(한쪽만 막으면 갈라진다).
+    """
+    from app.services.naver_ad import wisdom_apply, wisdom_judge
+
+    proposable = set(guardrail_params.llm_proposable_keys())
+    assert "ad_bid_routing_enabled" not in proposable
+    assert "naver_cs_dry_run" not in proposable
+    assert "cooldown_hours" in proposable, "봉투는 종전대로 제안 가능해야 한다"
+
+    # ①프롬프트·스키마에서 빠졌나
+    assert "ad_bid_routing_enabled" not in wisdom_judge._PARAM_KEYS_DESC
+    assert "naver_cs_dry_run" not in wisdom_judge._SCHEMA["param_suggestion?"]["param"]
+    # ②코드 클램프가 막나 (이쪽이 실제 방어층)
+    for key in ("ad_bid_routing_enabled", "naver_cs_dry_run"):
+        assert wisdom_apply._classify_param_suggestion(
+            {"scope": "unconditional", "param": key},
+        ) == wisdom_apply.GATE_UNMAPPED
+    assert wisdom_apply._classify_param_suggestion(
+        {"scope": "unconditional", "param": "cooldown_hours"},
+    ) == wisdom_apply.GATE_UNCONDITIONAL_MAPPED
+
+
+def test_킬스위치_변경이_브레이크로_세어진다(db):
+    """★적대 리뷰 P1(양쪽 리뷰어가 독립적으로 잡은 것) — bool은 change_log에 'True'로 저장돼
+    `Decimal("True")`가 InvalidOperation을 내고 **방향 판정에서 통째로 흘렀다.**
+
+    그 숫자는 콘솔의 「브레이크 N·액셀 M」과 D-NAO-85 표류 경보(`isBrakeOnlyDrift`), 그리고
+    북극성 §7 「액셀·브레이크 대칭」 검토가 읽는 바로 그 값이다 — 가장 큰 브레이크를 내려도
+    「아무것도 안 바뀜」으로 세어졌다.
+    """
+    from app.services.naver_ad import wisdom_scorecard
+
+    before = {"ad_bid_routing_enabled": "True", "naver_cs_dry_run": "False", "cooldown_hours": "2"}
+    after = {"ad_bid_routing_enabled": "False", "naver_cs_dry_run": "True", "cooldown_hours": "3"}
+    events = wisdom_scorecard._param_direction_events(before, after)
+    # 라우팅 스위치는 tighten_down(작아지면 조임) → True→False = brake
+    assert events["ad_bid_routing_enabled"] == "brake"
+    # CS dry-run은 tighten_up(커지면 조임) → False→True = brake
+    assert events["naver_cs_dry_run"] == "brake"
+    assert events["cooldown_hours"] == "brake"  # 대조군(숫자) — 종전대로

@@ -1273,12 +1273,17 @@ def guardrail_params_get(db: Session = Depends(get_db)):
         "from_db_enabled": guardrail_params._PARAMS_FROM_DB,
         # B3 되돌림 절차 — 스위치의 존재·용법을 응답에 실어 화면이 자기 설명을 하게 한다.
         "from_db_help": (
-            "from_db_enabled=false면 DB를 아예 읽지 않고 전 파라미터가 코드 상수로 돈다"
+            "from_db_enabled=false면 DB를 아예 읽지 않는다"
             "(사고 시 되돌림 스위치, guardrail_params._PARAMS_FROM_DB). "
-            "되돌리는 절차: ①즉시 원복 — 배포로 _PARAMS_FROM_DB=False로 바꾼다(모든 params가 "
-            "source='code'로 복귀, DB 값은 지우지 않고 보존됨) ②항목별 원복 — "
+            "★이 스위치가 끄는 것은 **DB 층뿐**이다(D-NAO-281 적대 리뷰 P1-1) — "
+            "환경변수 폴백이 있는 항목(env 칸에 이름이 있는 키)은 내려도 **여전히 그 환경변수 "
+            "값으로 돈다.** 각 항목의 실제 출처는 params[].source가 말한다(db/env/code): "
+            "「되돌렸으니 전부 코드 기본값일 것」이라고 읽지 말고 그 칸을 볼 것. "
+            "되돌리는 절차: ①즉시 원복 — 배포로 _PARAMS_FROM_DB=False로 바꾼다(DB 값은 지우지 "
+            "않고 보존됨. env 폴백이 없는 키는 source='code'로 복귀) ②항목별 원복 — "
             "PUT /settings/guardrail-params에서 그 키를 넘기지 않거나(전체 치환이므로 키를 빼면 "
-            "그 항목은 코드 상수로 복귀) DB의 naver_account_settings.guardrail_params 행을 삭제한다."
+            "그 항목은 아래 층으로 복귀) DB의 naver_account_settings.guardrail_params 행을 삭제한다. "
+            "③환경변수 항목까지 되돌리려면 서버 .env를 고치고 재시작해야 한다."
         ),
         "retro_freshness": guardrail_params_retro_freshness(db),
         # ★D-NAO-262(#14) — 창을 끝까지 늘렸을 때 그만큼의 재료가 있나. 값 옆에 같이 보여야 한다.

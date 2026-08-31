@@ -31,6 +31,7 @@ import os
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models import NaverAccountSettings, NaverChangeLog
@@ -50,9 +51,17 @@ SETTINGS_KEY = "guardrail_params"
 # "max_daily_auto_bid_downs"=25자(target_id String(50) 안).
 TARGET_TYPE = "guardrail_param"
 
-# ★되돌림 스위치 — False면 DB를 아예 읽지 않고 전부 코드 상수로 돈다(D-NAO-172).
-#   `_GROUP_STEP_ALL_ADS`와 같은 관례: 사고 났을 때 한 줄로
-#   원복된다는 믿음이 이런 스위치의 존재 이유다.
+# ★되돌림 스위치 — False면 DB를 아예 읽지 않는다(D-NAO-172).
+#   `_GROUP_STEP_ALL_ADS`와 같은 관례: 사고 났을 때 한 줄로 원복된다는 믿음이 이런 스위치의
+#   존재 이유다.
+# ★★**끄는 것은 «DB 층»뿐이다 — 「전부 코드 상수」가 아니다**(D-NAO-281 적대 리뷰 P1-1).
+#   `env` 폴백을 가진 키(`naver_cs_dry_run`)는 이 스위치를 내려도 **여전히 환경변수 값으로
+#   돈다.** 그게 옳다 — 이 레버가 끄려는 것은 D-NAO-172가 «새로 들인» DB 층이고, env는 그
+#   이전부터 그 키의 정본이었다(끄는 순간 CS 레인 동작이 바뀌면 그건 원복이 아니라 새 사고다).
+#   위험한 것은 동작이 아니라 **문구**였다: 화면·API가 「전부 코드 기본값」이라고 약속하면
+#   사고 중에 레버를 내린 사람이 「= dry-run = 안전」으로 읽는데, prod `.env`엔
+#   `NAVER_CS_DRY_RUN=0`이 실재한다. 그래서 문구를 사실로 고쳤고(라우터 from_db_help·콘솔
+#   배너) `describe()`의 `source` 칸이 항목별 진실을 말한다.
 _PARAMS_FROM_DB: bool = True
 
 
@@ -79,15 +88,24 @@ class ParamSpec:
         warn: **접지 않고 항상 보이는** 경고 1줄(없으면 None). `why`는 「근거 보기」 안에 접혀
             있어서, 「이 스위치를 내리면 무슨 일이 벌어지는가」처럼 **끄기 직전에 봐야 하는
             사실**을 담기엔 자리가 틀렸다 — 접힌 곳에 적은 사실은 없는 사실과 같다.
+        llm_proposable: 지혜 승격 판사(LLM)가 이 키의 변경을 «제안»할 수 있는가. 기본 True.
+            ★D-NAO-281 적대 리뷰가 잡은 자리: `wisdom_judge`·`wisdom_apply`가 화이트리스트를
+            `SPECS` **전건**으로 만들었기 때문에, SPECS에 키를 등재하는 것만으로 **엔진이 자기
+            킬스위치 해제를 제안하는 카드**가 콘솔에 뜰 수 있게 됐다. 자동 발사는 없지만
+            (사람이 값을 직접 입력해 승인), 계약 §5 「지출 백스톱·킬스위치 약화 금지」가 보는
+            방향과 반대라 **킬스위치는 판사 목록에서 뺀다.** 봉투는 종전대로 제안 가능하다 —
+            이 축이 없었다면 「등재 = 제안 가능」이 영원히 암묵 규칙으로 남았다.
     """
 
     def __init__(self, key: str, default: Any, kind: str, lo: Any, hi: Any,
                  label: str, why: str, direction: str,
-                 env: str | None = None, warn: str | None = None) -> None:
+                 env: str | None = None, warn: str | None = None,
+                 llm_proposable: bool = True) -> None:
         self.key, self.default, self.kind = key, default, kind
         self.lo, self.hi = lo, hi
         self.label, self.why, self.direction = label, why, direction
         self.env, self.warn = env, warn
+        self.llm_proposable = llm_proposable
 
 
 # ★default는 guardrail_gate 상수를 **참조**한다(복사 금지) — 상수가 바뀌면 여기도 따라온다.
@@ -204,6 +222,7 @@ SPECS: dict[str, ParamSpec] = {
             "(AD_BID_ROUTING_FALLBACK_CAMPAIGNS에 남은 캠페인에는 소재 제안이 계속 생성됩니다). "
             "현재 그 집합은 2026-07-30에 optimizer='none'으로 꺼진 캠페인 1개를 가리킵니다."
         ),
+        llm_proposable=False,  # 킬스위치는 판사가 제안하지 않는다(계약 §5)
     ),
     "naver_cs_dry_run": ParamSpec(
         "naver_cs_dry_run", runtime_switches.NAVER_CS_DRY_RUN_DEFAULT,
@@ -221,6 +240,7 @@ SPECS: dict[str, ParamSpec] = {
             "prod .env에 NAVER_CS_DRY_RUN=0이 실재하므로, DB에 값을 넣지 않으면 현재값은 "
             "env가 정합니다(출처 칸 확인)."
         ),
+        llm_proposable=False,  # 킬스위치는 판사가 제안하지 않는다(계약 §5)
     ),
 }
 
@@ -342,6 +362,15 @@ def get_params(db: Session) -> dict[str, Any]:
     return {key: _resolve(spec, overrides)[0] for key, spec in SPECS.items()}
 
 
+def llm_proposable_keys() -> list[str]:
+    """지혜 승격 판사가 «제안»할 수 있는 SPECS 키. 소비층이 각자 필터를 재현하지 않게 한 곳.
+
+    필터를 세 곳(프롬프트 목록·스키마 enum·코드 클램프)에 각자 적으면 갈라지고, 갈라지면
+    **프롬프트는 못 고르게 해 놓고 클램프는 통과시키는** 조합이 생긴다.
+    """
+    return [k for k, sp in SPECS.items() if sp.llm_proposable]
+
+
 def get_switch(db: Session, key: str) -> bool:
     """bool 파라미터(킬스위치) 하나의 실효값. **폴백 규칙을 한 곳에 둔다** (D-NAO-281).
 
@@ -355,6 +384,20 @@ def get_switch(db: Session, key: str) -> bool:
     spec = SPECS[key]  # 없는 키는 오타이므로 KeyError로 «시끄럽게» 죽는 게 맞다
     try:
         return bool(get_params(db)[key])
+    except SQLAlchemyError as e:
+        # ★적대 리뷰 P2-2(D-NAO-281): DB 예외를 «삼키기만» 하면 세션이 rollback 대기 상태로
+        #   남아, 호출부가 이어서 쓰다 PendingRollbackError로 죽는다 — 즉 「설정 조회 실패가
+        #   집행 경로를 죽이지 않는다」는 이 함수의 계약이 예외 «종류»에 따라 안 지켜졌다.
+        #   DB 예외면 트랜잭션은 이미 돌이킬 수 없으므로(그 안의 미커밋 작업도 어차피 커밋
+        #   불가) rollback이 버리는 것은 없다. ★반대로 DB 예외가 «아닌» 것(KeyError 등)까지
+        #   rollback 하면 멀쩡한 미커밋 작업을 지우게 되므로 분기를 나눈다.
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001 — 원복 시도 실패가 집행 경로를 죽이지 않는다
+            log.exception("guardrail_params: 스위치 %s 조회 실패 후 rollback도 실패", key)
+        log.warning("guardrail_params: 스위치 %s DB 조회 실패 — rollback 후 코드 기본값 %s로 "
+                    "폴백(%s: %s)", key, spec.default, type(e).__name__, e)
+        return bool(spec.default)
     except Exception as e:  # noqa: BLE001 — 설정 조회 실패가 집행 경로를 죽이지 않는다
         log.warning("guardrail_params: 스위치 %s 조회 실패 — 코드 기본값 %s로 폴백(%s: %s)",
                     key, spec.default, type(e).__name__, e)

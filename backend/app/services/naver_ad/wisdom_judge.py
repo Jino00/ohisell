@@ -49,9 +49,14 @@ _MAX_OTHER_TYPES = 4     # other_campaign_types 상한
 #   판사가 무엇을 고를 수 있는지(키·이름·근거·범위)를 프롬프트에 그대로 실어 보낸다 — 코드
 #   쪽 클램프(wisdom_apply._classify_param_suggestion)가 최종 판정이지만, 애초에 판사가
 #   화이트리스트 밖을 고를 이유를 없앤다.
+# ★D-NAO-281 — `SPECS.items()` 전건이 아니라 `llm_proposable_keys()`다. SPECS에 킬스위치가
+#   등재되면서 「등재 = 판사가 제안 가능」이 되면, 엔진이 자기 킬스위치 해제를 제안하는 카드가
+#   뜬다(계약 §5 「킬스위치 약화 금지」가 보는 방향과 반대).
 _PARAM_KEYS_DESC = "\n".join(
-    f"  - {key}: {spec.label} — 허용범위 {spec.lo}~{spec.hi}, direction={spec.direction}. {spec.why}"
-    for key, spec in guardrail_params.SPECS.items()
+    f"  - {key}: {guardrail_params.SPECS[key].label} — 허용범위 {guardrail_params.SPECS[key].lo}~"
+    f"{guardrail_params.SPECS[key].hi}, direction={guardrail_params.SPECS[key].direction}. "
+    f"{guardrail_params.SPECS[key].why}"
+    for key in guardrail_params.llm_proposable_keys()
 )
 
 _SYSTEM = (
@@ -109,7 +114,7 @@ _SCHEMA = {
     # 그대로 보존돼(파싱 dict 전체를 dump) P4 wisdom_apply가 param_change 제안 생성 여부를
     # 판정하는 재료로 쓴다(scope=='unconditional' ∧ param∈SPECS일 때만 제안 생성, B7).
     "param_suggestion?": {
-        "param": "|".join(sorted(guardrail_params.SPECS)),
+        "param": "|".join(sorted(guardrail_params.llm_proposable_keys())),
         "scope": "unconditional|conditional",
         "direction": "up|down|review",
         "note": "string",
