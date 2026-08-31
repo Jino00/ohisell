@@ -40,8 +40,11 @@ def upgrade() -> None:
         sa.Column("path", sa.String(length=40), nullable=False),
         sa.Column("actor", sa.String(length=50), nullable=True),
         sa.Column("reason", sa.Text(), nullable=True),
+        # ★`nullable=False` — 모델(`Mapped[datetime]`)과 **같아야** 한다. 어긋나면 테스트
+        #   DDL(`create_all`)과 prod DDL이 달라지고, 그러면 「테스트에선 되는데 prod에선
+        #   안 되는」 자리가 생긴다(픽스처가 prod와 다르면 결함을 못 잡는다).
         sa.Column(
-            "created_at", sa.DateTime(), server_default=sa.func.now(), nullable=True
+            "created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False
         ),
     )
     op.create_index(

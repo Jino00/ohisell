@@ -29,7 +29,7 @@ from typing import Literal, Optional
 from io import BytesIO
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from pydantic import BaseModel, Field
@@ -281,7 +281,9 @@ def setting_history(limit: int = 50, db: Session = Depends(get_db)):
 # ──────────────────────────────────────────────
 @router.get("/price-history")
 def cost_price_history(
-    limit: int = 100,
+    # ★`ge=1`이 필수다: 검증이 없으면 `limit=-1`이 SQLite에서 **무제한**이 되고, `limit=0`은
+    #   0건을 주면서 「이 조건에 맞는 이력이 없다」로 **오도**한다(적대 리뷰 P2-7).
+    limit: int = Query(default=100, ge=1, le=1000),
     internal_sku: Optional[str] = None,
     path: Optional[str] = None,
     db: Session = Depends(get_db),

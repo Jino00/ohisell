@@ -905,6 +905,26 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
     expect(screen.getAllByText("2,350.7원").length).toBeGreaterThanOrEqual(2);
   });
 
+  it("SUR-7b: ★`cost_price` 변경 이력 패널이 **원가 메뉴에 실제로 붙어 있다** (D-CPP-64 S1-①)", async () => {
+    // ★적대 리뷰 P1-2(2026-08-31)가 잡은 자리다. `costPriceHistorySurface.test.tsx`는 패널을
+    //   **직접 import 해서 직접 렌더**할 뿐이라, `<CostPriceHistoryPanel/>` 호출부를 지워도
+    //   프론트 1,261개가 전건 초록이었다 — 이력이 DB엔 쌓이는데 **원가 메뉴엔 없는** 상태를
+    //   아무도 못 본다. 계약 원문은 「**원가 메뉴 「cost_price 변경 이력」 패널에서** Jino가
+    //   그 행을 본다」이고, 「만들어지는 데까지」가 아니라 「닿는 데까지」가 합격이다.
+    // ★`load()`의 `fetchCostPriceHistory` 호출·`setPriceHistory`가 사라져도 여기서 죽는다
+    //   (그 경우 패널이 영원히 「이력을 불러오는 중…」에 머문다).
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "표준원가 보드" }));
+    const panel = await screen.findByTestId("cost-price-history-panel");
+    // 로딩에 머물러 있지 않다 = 호출부가 살아 있고 응답이 상태로 들어갔다.
+    expect(within(panel).queryByTestId("cost-price-history-loading")).toBeNull();
+    // mock이 0건을 주므로 «왜 비었는지»가 보여야 한다(빈 표는 「이상 없음」으로 읽힌다).
+    expect(within(panel).getByTestId("cost-price-history-empty").textContent).toContain(
+      "이력이 아직 한 건도 없다",
+    );
+  });
+
   it("SUR-8: 미계산 행이 «왜»와 함께 남는다 — 조용히 사라지면 커버리지 착시다", async () => {
     await renderApp();
     await screen.findByRole("heading", { name: /원가/ });

@@ -104,6 +104,42 @@ def test_put_without_cost_price_still_works(client):
     assert D(str(r.json()["cost_price"])) == D("2350.70")
 
 
+def test_post_without_cost_price_still_creates(client):
+    """★상품 «추가»의 정상 경로를 센다 (적대 리뷰 P2-1).
+
+    ★왜 이 테스트가 필요한가: 거부 판정을 `model_fields_set`이 아니라 「값이 None이 아니면」
+      으로 바꿔도 위 거부 테스트들은 전부 초록이다. 그런데 `ProductCreate.cost_price`는
+      **기본값이 `Decimal("0")`**이라 그 한 글자면 **「상품 추가」가 통째로 400**이 된다 —
+      지금 `ProductForm`이 보내는 유일한 모양이 바로 이것이다. 거부만 재고 통과를 안 재면
+      「전부 거부」로 고쳐도 초록인 짝이 된다.
+    """
+    r = client.post(
+        "/api/products", json={"internal_sku": "OHI-NEW1", "product_name": "새 상품"}
+    )
+    assert r.status_code == 201, r.text
+    # 원가는 스키마 기본값 0에서 시작한다 — 값은 원가 메뉴 컷오버(S3)가 채운다.
+    assert D(str(r.json()["cost_price"])) == D("0.00")
+
+
+def test_second_layer_holds_even_if_the_gate_is_gone(client, monkeypatch):
+    """★이중 방어의 **뒷 겹**을 잰다 (적대 리뷰 P2-9).
+
+    `update_product`는 가드 + `model_dump(exclude={"cost_price"})` 두 겹인데, 뒷 겹을
+    지워도 앞 겹이 다 막아 주므로 **아무 테스트도 안 죽었다** — 「가드가 리팩터로 사라져도
+    값은 안 샌다」는 주석의 주장을 아무도 안 재고 있었다는 뜻이다. 앞 겹을 실제로 없애고 잰다.
+    """
+    from app.routers import products as products_router
+
+    monkeypatch.setattr(products_router, "_reject_cost_price_if_sent", lambda *a, **k: None)
+
+    pid = client.get("/api/products").json()[0]["id"]
+    r = client.put(f"/api/products/{pid}", json={"cost_price": "9999", "memo": "메모만"})
+    assert r.status_code == 200, r.text
+    # 가드가 없어도 값은 안 샌다 — 그게 뒷 겹의 존재 이유다.
+    assert D(str(r.json()["cost_price"])) == D("2350.70")
+    assert r.json()["memo"] == "메모만"
+
+
 def test_rejection_even_when_value_is_unchanged(client):
     """★같은 값이어도 거부한다.
 
@@ -273,6 +309,58 @@ def test_active_guard_does_not_make_it_unhealthy():
     )
     assert h["cost_guard"]["active"] is True
     # healthy 자체는 빈 DB의 다른 사유로도 갈리므로 여기서 단언하지 않는다(교훈 #181).
+
+
+def test_health_route_actually_returns_cost_guard(client):
+    """★★스키마가 지우지 않는가 — dict가 아니라 **HTTP body**에 있는지 본다.
+
+    ★적대 리뷰 P1-1(2026-08-31)이 잡은 자리다. `schemas.SchedulerHealthOut`의
+      `cost_guard` 선언 **한 줄**을 지우면 `response_model`이 응답에서 키를 지우고,
+      `Layout.tsx`의 `health.cost_guard && …`가 영원히 거짓이 되어 **배너가 영영 침묵한다.**
+      그런데 그 변이로 백엔드 **7,441개가 전건 초록**이었다 — 위 두 순수 테스트는
+      `build_health()` dict에서 멈추기 때문이다.
+    ★이 파일 헤더가 이미 「HTTP body를 단언한다」고 적어 뒀고, 형제 신호 `cost_drift`엔
+      같은 단언이 **이미 있었다**(`test_cost_drift_wiring.py::test_health_route_actually_
+      returns_cost_drift`). 규율을 세워 두고 세 자리 중 한 곳에만 집행한 것이 결함이었다.
+    """
+    r = client.get("/api/scheduler/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert "cost_guard" in body, "response_model이 cost_guard를 지웠다 — 배너까지 안 간다"
+    # 스냅샷이 실재하는 정상 상태에서는 active=True로 실려 나간다.
+    assert body["cost_guard"] is not None
+    assert body["cost_guard"]["active"] is True
+    assert "snapshot_path" in body["cost_guard"]
+
+
+def test_health_route_carries_the_off_state_to_the_banner(monkeypatch, client):
+    """★가드가 꺼진 상태도 **HTTP까지** 간다 — 위 테스트만으론 「정상일 때만 실린다」를 못 가른다."""
+    from app.services import cost_truth_audit as cta
+
+    monkeypatch.setattr(cta, "try_load_truth", lambda *a, **k: None)
+    body = client.get("/api/scheduler/health").json()
+    assert body["cost_guard"]["active"] is False
+    # 배너가 «왜»를 쓴다 — 사유가 HTTP에서 잘리면 화면은 「미작동」만 말하고 끝난다.
+    assert body["cost_guard"]["reason"]
+    # ★가드가 꺼졌으면 healthy=false여야 배너가 뜬다(배너는 healthy=false일 때만 그려진다).
+    assert body["healthy"] is False
+
+
+def test_guard_lookup_failure_is_not_folded_into_normal(monkeypatch, client):
+    """★조회 자체가 실패해도 `active:True`로 접지 않는다 (적대 리뷰 P2-8).
+
+    「모름을 정상으로 세는 것」이 정확히 이 신호가 막으려는 실패인데, 그 주장을 아무도
+    안 재고 있었다 — 주석이 지키는 것은 아무것도 없다.
+    """
+    from app.services import cost_truth_audit as cta
+
+    def _boom(*a, **k):
+        raise RuntimeError("스냅샷 파일이 깨졌다")
+
+    monkeypatch.setattr(cta, "try_load_truth", _boom)
+    body = client.get("/api/scheduler/health").json()
+    assert body["cost_guard"]["active"] is False, "모름을 정상으로 셌다"
+    assert body["cost_guard"]["reason"]
 
 
 def test_missing_snapshot_makes_the_guard_report_itself_off(monkeypatch, client):

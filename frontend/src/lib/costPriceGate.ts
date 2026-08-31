@@ -4,7 +4,8 @@
 //   문구가 두 벌이면 한쪽만 고쳐지고, 그러면 **API는 A라 하고 화면은 B라 하는** 상태가 된다
 //   — 이 저장소가 반복해 겪은 「값이 도는 층과 사람이 읽는 층이 갈린다」의 문구판이다.
 //   백엔드 정본은 `backend/app/services/cost_price_history.py:REJECTION_SENTENCE`이고,
-//   두 문자열이 같은지는 `backend/tests/test_cost_price_gate.py`가 **파일을 읽어** 단언한다.
+//   두 문자열이 같은지는 `backend/tests/test_cost_price_gate_and_history.py`가 **이 파일을
+//   읽어** 단언한다.
 //
 // ★원칙 자체(계약 §2-0, Jino 2026-08-31): *"원가는 무조건 sellC의 원가 메뉴를 참고해"*
 //   ⇒ `cost_price`는 원가 메뉴 정본의 사본이지 독립 사실이 아니다.
@@ -15,3 +16,18 @@ export const COST_PRICE_REJECTION_SENTENCE =
 
 /** 원가 메뉴 경로 — 화면이 「어디로 가야 하나」를 링크로 준다(문장만 주면 길을 모른다). */
 export const COST_MENU_PATH = "/cost";
+
+/** 원가를 **사람이 읽는 한 가지 모양**으로. 못 읽는 값이면 원문을 그대로 보여 준다 —
+ *  「0」으로 접으면 «모르는 값»이 «0원»으로 둔갑한다(「없음 ≠ 0」).
+ *
+ *  ★`number | string`을 다 받는 이유: `ProductOut.cost_price`가 `Decimal`이라 라이브 JSON은
+ *  **문자열** `"2350.70"`을 준다. `api.ts`의 `Product.cost_price: number`는 타입 거짓말이고,
+ *  그걸 믿고 `.toLocaleString()`을 부르면 문자열에선 `Object.prototype` 판이 걸려 천단위
+ *  구분 없는 원문이 그대로 뜬다(적대 리뷰 P2-3, 2026-08-31).
+ *
+ *  ★컴포넌트 파일이 아니라 여기 사는 이유: 컴포넌트 파일이 함수를 함께 export 하면
+ *  `react-refresh/only-export-components` 경고가 뜬다(lint 경고 0 유지). */
+export function formatCost(value: number | string): string {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n.toLocaleString() : String(value);
+}

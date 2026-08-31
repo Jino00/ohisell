@@ -19,6 +19,11 @@ export default function Products() {
   const [mappingTarget, setMappingTarget] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [uploadMsg, setUploadMsg] = useState("");
+  // ★저장이 거부되면 **사유를 화면에 띄운다** (적대 리뷰 P2-2, 2026-08-31). 종전엔 `fetchApi`
+  //   예외를 아무도 안 잡아 400이 나면 모달이 그대로 있고 화면은 아무 말도 안 했다 — 사람은
+  //   저장이 된 줄 알고 닫는 «조용한 실패»다. 계약 D-CPP-64 §4 S1-②는 거부 사유가 **제품
+  //   화면에 문장으로** 보일 것을 요구하고, 폼의 정적 안내문은 «실제로 거부된 순간»을 못 말한다.
+  const [saveErr, setSaveErr] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -35,20 +40,33 @@ export default function Products() {
   }, [load]);
 
   async function handleCreate(data: Record<string, unknown>) {
-    await fetchApi("/api/products", {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
+    setSaveErr(null);
+    try {
+      await fetchApi("/api/products", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    } catch (e) {
+      // ★모달을 닫지 않는다 — 닫으면 「저장됐다」로 보인다.
+      setSaveErr(e instanceof Error ? e.message : String(e));
+      return;
+    }
     setShowCreate(false);
     load();
   }
 
   async function handleUpdate(data: Record<string, unknown>) {
     if (!editProduct) return;
-    await fetchApi(`/api/products/${editProduct.id}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    });
+    setSaveErr(null);
+    try {
+      await fetchApi(`/api/products/${editProduct.id}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    } catch (e) {
+      setSaveErr(e instanceof Error ? e.message : String(e));
+      return;
+    }
     setEditProduct(null);
     load();
   }
@@ -277,7 +295,13 @@ export default function Products() {
         <ProductForm
           title="상품 추가"
           onSubmit={handleCreate}
-          onCancel={() => setShowCreate(false)}
+          /* ★사유는 **모달 안**에 띄운다 — 모달이 `fixed inset-0` 오버레이라 페이지 본문에
+             띄우면 덮개 뒤에 숨는다(사람은 아무 말도 못 듣는다). */
+          error={saveErr}
+          onCancel={() => {
+            setSaveErr(null);
+            setShowCreate(false);
+          }}
         />
       )}
       {editProduct && (
@@ -291,7 +315,11 @@ export default function Products() {
             memo: editProduct.memo ?? "",
           }}
           onSubmit={handleUpdate}
-          onCancel={() => setEditProduct(null)}
+          error={saveErr}
+          onCancel={() => {
+            setSaveErr(null);
+            setEditProduct(null);
+          }}
         />
       )}
       {mappingTarget !== null && (
