@@ -177,6 +177,9 @@ export default function CostPurchasedPricePanel() {
         price: g.price,
         source_file: preview.source_file,
         source_names: names,
+        // ★「화면에서 사람이 눌렀다」를 «화면이» 말한다 — 백엔드는 호출자가 누구인지
+        //   모르므로 이 문장을 대신 지어낼 수 없다(백엔드 `confirm_group` 주석 참조).
+        note: "원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭",
       });
       setBoard(r.board);
       // ★거부를 «세어서» 보여준다 — 막은 것과 안 막은 것이 화면에서 갈려야 한다.

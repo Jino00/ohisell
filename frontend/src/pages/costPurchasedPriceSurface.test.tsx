@@ -246,6 +246,9 @@ describe("매입품 단가 화면", () => {
     expect(arg.source_file).toBe("ohisell_mapping_template_20260807.xlsx");
     // 근거(파일의 상품명)가 함께 간다 — 없으면 나중에 매칭을 재현 못 한다
     expect(arg.source_names?.C1).toBe("일미리 케이스, 아이폰15");
+    // ★「화면에서 사람이 눌렀다」를 «화면이» 말한다 — 백엔드는 호출자를 모르므로 이
+    //   문장을 대신 지어낼 수 없다(완료 QA가 그 지어냄을 잡았다).
+    expect(arg.note).toMatch(/화면에서 묶음 확인 클릭/);
   });
 
   it("P6b 확인 뒤 보드 숫자가 응답값으로 갱신된다", async () => {
