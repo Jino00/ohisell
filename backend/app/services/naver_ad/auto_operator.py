@@ -90,7 +90,7 @@ _CTR_ALERT_LADDER_SKIP_REASON = "CTR경보 — 소재 처방 대상, 추가 UP �
 ACTION_GHOST_VISIBILITY_BRIEFING = "ghost_visibility_briefing"  # diary observe action(관측 렌더용)
 _GHOST_VISIBILITY_BRIEFING_TOP_N = 20
 
-# ══ D-NAO-281(계약 P2-ⓐ) — 한 이름이 겸하던 «정반대 두 의미»를 각자 이름으로 가른다 ══
+# ══ D-NAO-282(계약 P2-ⓐ) — 한 이름이 겸하던 «정반대 두 의미»를 각자 이름으로 가른다 ══
 #
 # 종전 이름 `AD_BID_CANARY_CAMPAIGNS` 하나가 아래 둘을 동시에 뜻했다(값은 같은 집합):
 #   ①**개방(allowlist)** — 집합에 들면 소재 제안 생성 «허용». `_ad_bid_canary`가 본다.
@@ -200,7 +200,7 @@ def _ad_auto_exec(db: Session, proposal_type: str) -> bool:
     ad-레버 유닛이 없어 도달 불가능하지만, 롤백 보장은 도달 가능성과 무관하게 성립해야
     한다 — 사고 났을 때 한 줄로 원복된다는 믿음이 이 스위치의 존재 이유다).
 
-    ★D-NAO-281: `db`를 받는다. 스위치가 런타임 값이 됐으므로 **쓰는 시점에** 읽어야 한다 —
+    ★D-NAO-282: `db`를 받는다. 스위치가 런타임 값이 됐으므로 **쓰는 시점에** 읽어야 한다 —
     모듈 상수로 캐시하면 「사람이 화면에서 끈 것」과 「엔진이 보는 것」이 갈라진다.
     """
     return ad_bid_routing_enabled(db) and proposal_type in _AD_AUTO_EXEC_PROPOSAL_TYPES
@@ -228,7 +228,7 @@ def _ad_auto_exec(db: Session, proposal_type: str) -> bool:
 # ★Confirm-only 집합(AD_BID_CONFIRM_ONLY_CAMPAIGNS)은 **건드리지 않는다** — 그 의미
 #   (delegation_gate·expert_briefing_builder)는 그대로 유지된다.
 #
-# ══ D-NAO-281(계약 P2-ⓑ) — 이 스위치는 이제 «런타임»이다 ══
+# ══ D-NAO-282(계약 P2-ⓑ) — 이 스위치는 이제 «런타임»이다 ══
 # 종전엔 `AD_BID_ROUTING_ENABLED: bool = True` 모듈 상수라 내리려면 **배포**가 필요했다.
 # 「사고 났을 때 한 줄로 원복된다」는 이 스위치의 존재 이유가, 정작 그 한 줄을 배포로만
 # 바꿀 수 있어 반쯤 무효였다. 이제 `guardrail_params` SPECS 키 `ad_bid_routing_enabled`로

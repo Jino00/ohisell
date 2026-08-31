@@ -1275,7 +1275,7 @@ def guardrail_params_get(db: Session = Depends(get_db)):
         "from_db_help": (
             "from_db_enabled=false면 DB를 아예 읽지 않는다"
             "(사고 시 되돌림 스위치, guardrail_params._PARAMS_FROM_DB). "
-            "★이 스위치가 끄는 것은 **DB 층뿐**이다(D-NAO-281 적대 리뷰 P1-1) — "
+            "★이 스위치가 끄는 것은 **DB 층뿐**이다(D-NAO-282 적대 리뷰 P1-1) — "
             "환경변수 폴백이 있는 항목(env 칸에 이름이 있는 키)은 내려도 **여전히 그 환경변수 "
             "값으로 돈다.** 각 항목의 실제 출처는 params[].source가 말한다(db/env/code): "
             "「되돌렸으니 전부 코드 기본값일 것」이라고 읽지 말고 그 칸을 볼 것. "

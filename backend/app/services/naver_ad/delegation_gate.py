@@ -111,7 +111,7 @@ def _eligible(db: Session, proposal: NaverProposal, delegated: set[str], skipped
     # 졸업 = AD_BID_CONFIRM_ONLY_CAMPAIGNS에서 상수 제거 시 자동 해제. 함수 레벨 import —
     # auto_operator ↔ (harness·diagnosis) 모듈 로드 체인과의 순환 리스크 회피
     # (proposal_writer의 동일 상수 함수 레벨 import 관례).
-    # ★D-NAO-281: 옛 이름 AD_BID_CANARY_CAMPAIGNS는 정반대 두 의미를 겸했다. 여기가 쓰는 건
+    # ★D-NAO-282: 옛 이름 AD_BID_CANARY_CAMPAIGNS는 정반대 두 의미를 겸했다. 여기가 쓰는 건
     #   «제한»(Confirm-only 제외) 쪽이고, «개방(allowlist)» 쪽은
     #   AD_BID_ROUTING_FALLBACK_CAMPAIGNS다. 값은 같아도 두 이름이 각자 산다.
     from app.services.naver_ad.auto_operator import AD_BID_CONFIRM_ONLY_CAMPAIGNS

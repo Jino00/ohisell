@@ -55,7 +55,7 @@ MAX_PROPOSALS_PER_RUN = 5
 
 
 def cold_start_dry_run(db: Session) -> bool:
-    """이 레인의 dry-run 스위치 **실효값**. 도는 그 순간에 읽는다 (D-NAO-281 · 계약 P2-ⓑ).
+    """이 레인의 dry-run 스위치 **실효값**. 도는 그 순간에 읽는다 (D-NAO-282 · 계약 P2-ⓑ).
 
     종전엔 스케줄러가 `os.getenv("NAVER_CS_DRY_RUN", "1") != "0"` 한 줄로 판정했다. 문제는
     두 가지였다 — ①바꾸려면 `.env` 수정 + **재시작** ②«지금 켜져 있는지»가 화면 어디에도

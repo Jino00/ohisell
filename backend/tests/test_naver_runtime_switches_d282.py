@@ -1,5 +1,5 @@
-# test_naver_runtime_switches_d281.py — 킬스위치 2종 런타임화 + 카나리 상수 이름 분리
-# (D-NAO-281 · 계약 `CONTRACT_pao_purpose_and_hands.md` P2-ⓐⓑ)
+# test_naver_runtime_switches_d282.py — 킬스위치 2종 런타임화 + 카나리 상수 이름 분리
+# (D-NAO-282 · 계약 `CONTRACT_pao_purpose_and_hands.md` P2-ⓐⓑ)
 #
 # ══ 이 파일이 지키는 «주장» 넷 ══
 #  ①  bool 파라미터가 **저장 왕복**을 견딘다(apply_params가 `str(val)`로 저장하므로 'True'가

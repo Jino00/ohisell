@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // naverAdRuntimeSwitches.test.tsx — 킬스위치 2종이 «화면에 보이고 화면에서 바뀌는가»
-// (D-NAO-281 · 계약 `CONTRACT_pao_purpose_and_hands.md` P2-ⓑ)
+// (D-NAO-282 · 계약 `CONTRACT_pao_purpose_and_hands.md` P2-ⓑ)
 //
 // ## 왜 이 테스트가 있어야 하나
 // 계약이 지목한 합격 표면은 「배포·재시작 없이 바뀌고, **현재값과 「OFF = 카나리 allowlist
@@ -99,7 +99,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("킬스위치 런타임화 — 화면 표면(D-NAO-281 P2-ⓑ)", () => {
+describe("킬스위치 런타임화 — 화면 표면(D-NAO-282 P2-ⓑ)", () => {
   it("★현재값이 1/0이 아니라 «켜짐/꺼짐»으로 읽힌다", async () => {
     h.guardrail = { ...RESPONSE_BASE, params: [ROUTING_ON, CS_DRY_RUN_FROM_ENV] };
     renderPage();

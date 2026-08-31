@@ -52,7 +52,7 @@ function daysAgo(n: number): string {
 // 안전 봉투 파라미터(D-NAO-172) — 값 표기는 키별 하드코딩 분기. 소수 그대로 보이면
 // (0.15·2.0) 사람이 즉시 「이게 뭔가」를 못 읽는다 — 키가 4개뿐이라 일반화보다 이게 정직하다.
 function fmtGuardrailValue(p: NaverGuardrailParam): string {
-  // ★D-NAO-281 — 킬스위치는 1/0이 아니라 «켜짐/꺼짐»으로 읽혀야 한다. 숫자로 두면 사람이
+  // ★D-NAO-282 — 킬스위치는 1/0이 아니라 «켜짐/꺼짐»으로 읽혀야 한다. 숫자로 두면 사람이
   //   「1이 켜진 건가 꺼진 건가」를 매번 되묻고, 그 되묻기가 스위치를 안 만지게 만든다.
   if (p.kind === "bool") return p.value ? "켜짐 (ON)" : "꺼짐 (OFF)";
   switch (p.key) {
@@ -1033,7 +1033,7 @@ export default function NaverAdOptimizationConsole() {
 
         {guardrailError && <div className="text-sm text-red-600 mb-3">{guardrailError}</div>}
 
-        {/* ★D-NAO-281 적대 리뷰 P1-1 — 종전 문구는 「모든 값이 코드 기본값으로 돕니다」였는데
+        {/* ★D-NAO-282 적대 리뷰 P1-1 — 종전 문구는 「모든 값이 코드 기본값으로 돕니다」였는데
             **거짓이 될 수 있었다**: 되돌림 스위치가 끄는 것은 DB 층뿐이고, env 폴백이 있는
             항목(prod `.env`의 NAVER_CS_DRY_RUN=0)은 여전히 그 값으로 돈다. 사고 중에 레버를
             내린 사람이 「= 코드 기본값 = dry-run = 안전」으로 읽으면 정반대다.
@@ -1147,7 +1147,7 @@ export default function NaverAdOptimizationConsole() {
                   <tr key={p.key} className="border-b border-gray-50 align-top">
                     <td className="py-2 pr-3 text-gray-700 min-w-[160px]">
                       {p.label}
-                      {/* ★D-NAO-281 — 접히지 않는 경고. 「이 스위치를 내리면 무슨 일이
+                      {/* ★D-NAO-282 — 접히지 않는 경고. 「이 스위치를 내리면 무슨 일이
                           벌어지는가」는 「근거 보기」 안에 있으면 안 된다: 접힌 곳에 적은
                           사실은 없는 사실과 같다. */}
                       {p.warn && (
@@ -1177,7 +1177,7 @@ export default function NaverAdOptimizationConsole() {
                       >
                         {p.source === "db" ? "설정값" : p.source === "env" ? "서버 환경변수" : "기본값"}
                       </span>
-                      {/* ★D-NAO-281: env에서 온 값은 «화면에서 못 바꾼 값»이다. 그 사실을 말해
+                      {/* ★D-NAO-282: env에서 온 값은 «화면에서 못 바꾼 값»이다. 그 사실을 말해
                           주지 않으면 사람은 화면 숫자를 자기가 정한 값으로 오해한다. */}
                       {p.source === "env" && p.env && (
                         <div className="text-[11px] text-amber-700 mt-1 max-w-[180px]">

@@ -773,7 +773,7 @@ def test_build_band_growth_routes_up_to_ad(db):
 def test_canary_default_empty_set(db):
     # 카나리 1호 개방(Jino 2026-07-20): 맥세이프만. 다른 캠페인이 상수에 소리 없이 추가되면
     # 이 테스트가 잡는다.
-    # ★D-NAO-281: 한 이름이 겸하던 **정반대 두 의미**를 각자 이름으로 갈랐다. 값은 같지만
+    # ★D-NAO-282: 한 이름이 겸하던 **정반대 두 의미**를 각자 이름으로 갈랐다. 값은 같지만
     #   가리키는 것이 다르므로 **둘 다** 못박는다 — 한쪽만 검사하면 다른 쪽이 조용히 바뀐다.
     #   · FALLBACK  = 킬스위치 OFF 시 되돌아갈 «개방(allowlist)» 집합
     #   · CONFIRM_ONLY = delegation_gate·expert_briefing_builder의 «제한» 집합
