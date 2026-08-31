@@ -253,3 +253,48 @@ def test_confirm_response_carries_the_board_so_the_screen_updates(client):
         "internal_skus": ["C1"], "price": "922", "source_file": "f",
     }).json()
     assert body["board"]["grounded"] == 1
+
+
+# ── 적대 리뷰 2R 회귀 — 표시 한 칸이 업로드 전체를 죽이면 안 된다 ────────────
+
+
+def test_absurd_price_cell_does_not_500_the_whole_upload(client):
+    """★2R가 잡은 자리 — 내가 P2-7을 고치며 «새로 만든» 결함이다.
+
+    `Decimal("1e30").quantize(Decimal("0.01"))`은 컨텍스트 정밀도를 넘어 `InvalidOperation`을
+    던진다. 초판(float 직렬화)에서는 「이상한 숫자가 화면에 뜬다」였는데, 2자리 문자열로
+    바꾸면서 **이유 없는 500**이 됐다 — 같은 파일의 «정상 행»들까지 함께 죽는다.
+    """
+    r = upload(client, xlsx([
+        ("일미리 케이스, 아이폰15", 922, "카페24"),
+        ("일미리 케이스, 아이폰16", 1e30, "카페24"),
+    ]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # 정상 행은 살아 있다
+    assert body["counts"]["target_skus"] >= 1
+    # 비정상 값도 «보이긴» 한다 — 조용히 사라지면 사람이 원인을 못 찾는다
+    shown = [s["file_price"] for g in body["groups"] for s in g["skus"]]
+    assert any(v is not None and "1" in v for v in shown)
+
+
+def test_out_of_range_price_is_refused_so_it_cannot_poison_later_previews(client):
+    """★독을 원장에 들이지 않는다.
+
+    초판은 `confirm`이 `1e30`을 **200으로 받아** 저장했고, 그 값이 `approved_price` 경로로
+    되살아나 **이후 모든 `/preview`를 영구히 죽였다**(보드는 `_money`를 안 지나 200이라
+    「보드는 멀쩡한데 업로드만 죽는」 모양이 된다). 컬럼이 `Numeric(14,2)`니 담을 수 없는
+    값은 애초에 확정하지 않는다.
+    """
+    r = client.post("/api/cost/purchased-prices/confirm", json={
+        "internal_skus": ["C1"], "price": "1e30", "source_file": "f",
+    })
+    assert r.status_code == 200
+    assert r.json()["written"] == 0
+    assert "저장 한도" in r.json()["skipped"][0]["reason"]
+
+    with client.testing_session() as s:
+        assert s.scalars(select(CostPurchasedPrice)).all() == []
+
+    # 그리고 그 뒤 정상 업로드가 여전히 산다
+    assert upload(client, xlsx([("일미리 케이스, 아이폰15", 922, "카페24")])).status_code == 200

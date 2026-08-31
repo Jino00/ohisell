@@ -64,6 +64,10 @@ from .purchased_price_parser import PriceRow, PriceParseResult
 #: 포함되는」 자리를 막기 위해서다 — 화이트리스트가 블랙리스트보다 안전하다.
 LIVE_LINK_STATUSES: frozenset[str] = frozenset({"draft", "approved"})
 
+#: `cost_purchased_price.unit_price_inc_vat`은 `Numeric(14,2)` — 정수부 12자리가 상한이다.
+#: 임의로 고른 수가 아니라 **스키마가 정한 경계**를 코드로 옮긴 것뿐이다.
+MAX_UNIT_PRICE: Decimal = Decimal("1000000000000")
+
 #: 대상이 «아닌» 이유들. 화면이 이 문자열을 그대로 보여준다 — 「대상 아님」이 몇 건인지가
 #: 계약 §4 S1의 합격 항목이라, 이유를 뭉뚱그리면 사람이 왜 빠졌는지 못 읽는다.
 REASON_ASSEMBLY = "조립품 — 구성이 있는 레시피다(우리 계산이 정본, 파일 값 금지)"
@@ -511,6 +515,16 @@ def confirm_group(
     if price is None or Decimal(price) <= PLACEHOLDER_MAX:
         for sku in internal_skus:
             result.skipped.append((sku, "자리표시자·0원 이하는 단가로 저장하지 않는다"))
+        return result
+    # ★★저장 컬럼이 `Numeric(14,2)`라 정수부는 12자리가 상한이다. SQLite가 정밀도를
+    #   강제하지 않아 초판은 `1e30`을 «받아» 넣었고, 그 값이 원장에 남으면 이후 모든
+    #   `/preview`가 표시 단계에서 죽었다(적대 리뷰 2R). 컬럼이 담을 수 없는 값은
+    #   애초에 확정하지 않는다 — 임의 상한이 아니라 **스키마가 정한 경계**다.
+    if Decimal(price) >= MAX_UNIT_PRICE:
+        for sku in internal_skus:
+            result.skipped.append(
+                (sku, f"단가가 저장 한도({MAX_UNIT_PRICE:,})를 넘는다 — 파일 값을 확인해야 한다")
+            )
         return result
 
     stamp = now or datetime.now()

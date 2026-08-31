@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Literal, Optional
 
 from io import BytesIO
@@ -599,7 +599,14 @@ def _money(v) -> Optional[str]:
         return None
     # ★2자리로 못 박는다 — 저장 컬럼이 `Numeric(14,2)`라 표시와 저장이 갈리면 안 된다
     #   (파일에서 온 `Decimal("922")`가 화면엔 「922」, DB엔 「922.00」으로 서는 상태).
-    return str(Decimal(v).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    try:
+        return str(Decimal(v).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except InvalidOperation:
+        # ★★자릿수가 Decimal 컨텍스트를 넘는 비정상 값(예: 1e30)에서 `quantize`가 던진다.
+        #   **표시 한 칸 때문에 업로드 전체를 500으로 죽이지 않는다** — 적대 리뷰 2R가 잡은
+        #   자리이고, 그 500은 「원가 칸 하나가 이상하다」가 아니라 **이유 없는 실패**로 보인다.
+        #   원문을 그대로 보여주고 판단은 사람에게 남긴다(계약 §2 「없음 ≠ 0」과 같은 결).
+        return str(v)
 
 
 def _sku_out(s: PP.SkuProposal) -> dict:
