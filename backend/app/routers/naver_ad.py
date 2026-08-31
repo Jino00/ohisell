@@ -2275,6 +2275,13 @@ def get_search_term_exclusions(
     # void = 무효화된 행. 조회할 수 있어야 «지운 것»이 어디로 갔는지 확인 가능하다(사후 가시성).
     status: str | None = Query(None, pattern="^(excluded|probation|restored|void)$"),
     campaign_id: str | None = Query(None),
+    # ★적대 리뷰 1R P1-1 상환. 재개방 패널은 «우리가 건 제외»만 봐야 하는데, 그 필터를 화면에서
+    #   걸면 **`limit` 뒤에** 걸린다. 이 원장은 3,990행 중 **3,987행이 `console_import`**라
+    #   (2026-08-31 실측) 한 페이지가 편입분으로 다 차고 정작 열 수 있는 due 행이 응답에서 빠진다.
+    #   그러면 화면엔 「우리가 건 검색어 제외가 없습니다」가 뜬다 — **이 손이 고치려던 병(「배지는
+    #   있는데 누를 것이 없다」)을 정상 문구로 위장해 되살리는 것**이다. 그래서 SQL로 내린다.
+    #   기본값 False: 이 창구는 드릴다운도 겸하고 「지운 것이 어디로 갔는지」는 보여야 한다.
+    exclude_console_import: bool = Query(False),
     limit: int = Query(100, ge=1, le=_MAX_BM_LIMIT),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -2315,6 +2322,9 @@ def get_search_term_exclusions(
         q = q.filter(NaverSearchTermExclusion.status == status)
     if campaign_id:
         q = q.filter(NaverSearchTermExclusion.campaign_id == campaign_id)
+    if exclude_console_import:
+        # ★`limit` «전»에 건다 — 이 한 줄의 위치가 P1-1의 전부다(위 파라미터 주석).
+        q = q.filter(search_term_execution.not_console_import())
     total = q.count()
     rows = (
         q.order_by(NaverSearchTermExclusion.last_transition_at.desc())
@@ -2322,6 +2332,9 @@ def get_search_term_exclusions(
     )
     camp_ids = {r.campaign_id for r in rows if r.campaign_id}
     _, camp_names = _batch_entity_names(db, set(), camp_ids)
+    # ★적대 리뷰 1R P2-2 상환(N+1 축소): 일일 복귀 캡은 **행에 안 딸린 값**인데 행마다 다시 세고
+    #   있었다(50행 요청에 SQL 207회 실측). 한 번 세서 게이트에 넘긴다 — 판정은 그대로다.
+    returns_today = search_term_ss_lane.count_returns_today(db, kst_now())
 
     return {
         "total": total,
@@ -2355,7 +2368,7 @@ def get_search_term_exclusions(
                 #   건너뛴다(목록 100행에 API를 100번 때리지 않는다). 그래서 이 값은 **힌트**이고
                 #   권위는 실행 시점에 있다 — 방향이 fail-closed라 안전하다(화면이 「열림」이라 해도
                 #   실행이 다시 막지만, 그 반대는 없다).
-                "reopen_block_reason": _reopen_block_reason_of(db, r),
+                "reopen_block_reason": _reopen_block_reason_of(db, r, returns_today),
             }
             for r in rows
         ],
@@ -2365,7 +2378,9 @@ def get_search_term_exclusions(
 _CONSOLE_IMPORT_REASON = "콘솔 편입분 — 우리가 건 제외가 아니라 재개방 대상이 아님"
 
 
-def _reopen_block_reason_of(db: Session, row: NaverSearchTermExclusion) -> str | None:
+def _reopen_block_reason_of(
+    db: Session, row: NaverSearchTermExclusion, returns_today: int | None = None,
+) -> str | None:
     """행 1건의 재개방 차단 사유(사람이 읽는 문구) — 없으면 None(=지금 열 수 있음, DB 기준).
 
     ★`console_import`는 게이트를 «묻기 전에» 걸러낸다. 의미상으로도 맞고(계약 §5 금지선 — 우리가
@@ -2374,7 +2389,9 @@ def _reopen_block_reason_of(db: Session, row: NaverSearchTermExclusion) -> str |
     """
     if row.source == "console_import":
         return _CONSOLE_IMPORT_REASON
-    gate = search_term_ss_lane.reopen_gate(db, row, kst_now(), check_live=False)
+    gate = search_term_ss_lane.reopen_gate(
+        db, row, kst_now(), check_live=False, returns_today=returns_today,
+    )
     return None if gate.reason is None else search_term_ss_lane.REOPEN_BLOCK_MESSAGES[gate.reason]
 
 

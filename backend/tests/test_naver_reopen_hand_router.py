@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
@@ -230,6 +231,90 @@ def test_list_does_not_call_live_api(client, db):
 
 
 # ── ④ 게이트 단일 출처 — 손과 레인이 같은 함수를 본다 ────────────────────────────────
+def test_console_import_is_filtered_before_the_limit(client, db):
+    """★적대 리뷰 1R **P1-1** 회귀 — 필터가 걸리는 «자리»가 결함이었다.
+
+    화면에서 거르면 `limit` **뒤**라, 한 페이지가 콘솔 편입분으로 차면 정작 열 수 있는 due 행이
+    응답에서 통째로 빠진다. 그러면 화면엔 「우리가 건 검색어 제외가 없습니다」가 뜬다 — **이 손이
+    고치려던 병(「배지는 있는데 누를 것이 없다」)을 정상 문구로 위장해 되살리는 것**이다.
+    실측 분포가 이 조건을 예외가 아니라 상시로 만든다: 3,990행 중 **3,987행이 console_import**.
+
+    행 1개짜리 테스트는 이 결함을 **원리적으로** 못 잡는다 — 그래서 정렬·페이지 경계를 만든다.
+    """
+    db.add(NaverCampaignSettings(campaign_id=CID, optimizer="ours", auto_operate=True))
+    db.add(NaverEntity(entity_type="adgroup", entity_id=AGID, parent_id=CID,
+                       campaign_id=CID, campaign_type="WEB_SITE", name="grp", status="on"))
+    # 우리 실행분 1건 — 가장 «오래된» 전이라 정렬(last_transition_at DESC)에서 맨 뒤로 밀린다.
+    ours = NaverSearchTermExclusion(
+        campaign_id=CID, adgroup_id=AGID, search_term="아이패드종이필름", status="excluded",
+        cycle=1, restrict_kwd_id="rkw-1", source=None,
+        excluded_at=kst_now() - timedelta(days=40), last_transition_at=kst_now() - timedelta(days=40),
+        next_review_at=kst_today() - timedelta(days=10),
+    )
+    db.add(ours)
+    # 콘솔 편입분 60건 — 최근 전이라 앞자리를 전부 차지한다.
+    for i in range(60):
+        db.add(NaverSearchTermExclusion(
+            campaign_id=CID, adgroup_id=AGID, search_term=f"편입{i}", status="excluded",
+            cycle=1, restrict_kwd_id=None, source="console_import",
+            excluded_at=kst_now(), last_transition_at=kst_now() - timedelta(minutes=i),
+            next_review_at=kst_today() - timedelta(days=1),
+        ))
+    db.commit()
+
+    # 종전 동작(화면에서 거르기)의 재현 — 우리 행이 응답에 «없다»는 것이 결함의 증거다.
+    unfiltered = client.get(f"{URL}?campaign_id={CID}&status=excluded&limit=50").json()["rows"]
+    assert len(unfiltered) == 50
+    assert not any(r["search_term"] == "아이패드종이필름" for r in unfiltered), (
+        "픽스처가 결함 조건을 못 만들었다 — 이 테스트는 그 조건 위에서만 의미가 있다"
+    )
+
+    # 수정된 동작: SQL로 내려서 `limit` 전에 거른다 ⇒ 우리 행이 «반드시» 온다.
+    filtered = client.get(
+        f"{URL}?campaign_id={CID}&status=excluded&limit=50&exclude_console_import=true"
+    ).json()["rows"]
+    assert [r["search_term"] for r in filtered] == ["아이패드종이필름"]
+    assert filtered[0]["reopen_block_reason"] is None  # 지금 열 수 있다
+
+
+def test_claim_race_is_guarded(client, db):
+    """★적대 리뷰 1R **P2-1**(생존 변이 M4) 상환 — 낙관적 클레임의 `status='excluded'` 조건.
+
+    두 러너(08:50 크론과 사람 손)가 같은 행을 거의 동시에 열면, 그 조건이 없는 쪽은 **둘 다**
+    delete를 쏘고 복귀가 이중 카운트된다. 이 PR이 그 함수의 호출 경로를 «레인 하나»에서
+    «레인 + 사람 손» 둘로 늘렸으므로 경합 창이 실제로 넓어진 자리인데, 회귀망이 비어 있었다
+    (변이 M4가 86건 전건 초록으로 생존했다).
+
+    ★재현에 요령이 필요하다 — 「DB를 probation으로 바꾸고 손을 누른다」로는 **이 가드를 못 잰다**.
+    게이트의 `not_excluded` 검사가 먼저 걸려 클레임까지 도달조차 안 하기 때문이다(초판이 그렇게
+    썼고, 변이 M4를 넣어도 통과했다 — 「통과하는데 아무것도 안 지키는 테스트」의 표본이다).
+
+    실제 경합의 모양은 **메모리와 DB가 어긋난 상태**다: 이 러너는 행을 `excluded`로 읽어 두었고
+    (그래서 게이트를 통과한다) 그 사이 다른 러너가 DB에서 선점했다. `synchronize_session=False`로
+    갱신하고 **커밋하지 않으면** ORM 객체는 `excluded`인 채 DB만 `probation`이 된다 — 그 어긋남이
+    정확히 클레임 `WHERE status='excluded'`가 막아야 할 창이다.
+    """
+    row = _seed(db)
+    # 다른 러너가 선점하고 **커밋**했다.
+    db.query(NaverSearchTermExclusion).filter(
+        NaverSearchTermExclusion.id == row.id,
+    ).update({"status": "probation"}, synchronize_session=False)
+    db.commit()
+    # ★그런데 이 러너는 그 «전»에 행을 읽어 뒀다 — 그 낡은 읽기를 명시적으로 만든다.
+    #   (커밋 없이 두는 방법은 안 통한다: 게이트가 쓰는 엔진 레벨 독립 커넥션이 StaticPool에선
+    #    같은 DBAPI 커넥션이고, 그 close가 rollback을 걸어 미커밋 UPDATE를 날린다.)
+    set_committed_value(row, "status", "excluded")
+    assert row.status == "excluded", "픽스처 전제: 게이트가 통과해야 클레임을 잴 수 있다"
+
+    with patch.object(lane.naver_sa_writer, "get_adgroup_type", return_value="WEB_SITE"), \
+         patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+                      return_value=_del_result()) as mock_del:
+        assert lane._open_exclusion(db, row, kst_now()) is False
+    # ★쓰기가 «안 나갔다»는 것이 이 테스트의 전부다 — 가드가 없으면 두 러너가 각자 delete를 쏘고
+    #   복귀가 이중 카운트된다(일일 복귀 캡이 조용히 2배가 된다).
+    mock_del.assert_not_called()
+
+
 def test_gate_is_shared_with_the_auto_lane(db):
     """`reopen_gate`가 «단일 판정»이라는 구조 회귀.
 

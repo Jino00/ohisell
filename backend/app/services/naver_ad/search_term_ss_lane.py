@@ -340,9 +340,19 @@ REOPEN_BLOCK_MESSAGES: dict[str, str] = {
 }
 
 
+def count_returns_today(db: Session, now: datetime) -> int:
+    """오늘 성공한 복귀(재개방) 건수 — 일일 복귀 캡의 분자. `_count_returns_today`의 공개 이름.
+
+    ★라우터가 밑줄 이름을 넘어 부르지 않게 여기 둔다. 목록 화면이 여러 행의 버튼 상태를 그릴 때
+      **한 번만 세서** `reopen_gate(returns_today=...)`로 넘기는 용도다(적대 리뷰 1R P2-2).
+    """
+    return _count_returns_today(db, now)
+
+
 def reopen_gate(
     db: Session, row: NaverSearchTermExclusion, now: datetime, *,
     check_live: bool = True, enforce_schedule: bool = True,
+    returns_today: int | None = None,
 ) -> ReopenGate:
     """재개방을 지금 해도 되는가 — **자동 레인과 사람 손이 공유하는 단일 판정.** 읽기 전용.
 
@@ -383,7 +393,10 @@ def reopen_gate(
     # catch-up 데몬 스레드 동시 발화) 시 각 러너가 remaining=cap을 보고 최대 2배 개방할 수 있다.
     # ★재카운트는 change_log 커밋 기준(_count_returns_today가 dry_run=False ∧ after_value 존재
     # 행을 센다) — 러너별 트랜잭션이 커밋 후 상호 가시화되어야 반영된다.
-    if _count_returns_today(db, now) >= _SS_DAILY_RETURN_CAP:
+    # ★`returns_today`는 **행에 안 딸린 값**이라 목록처럼 여러 행을 판정할 땐 한 번만 세서
+    #   넘긴다(적대 리뷰 1R P2-2 — 50행 요청에 SQL 207회였다). 실행 경로는 넘기지 않는다:
+    #   쓰기 직전 재카운트가 이 검사의 존재 이유이므로 캐시된 값을 쓰면 백스톱이 무의미해진다.
+    if (returns_today if returns_today is not None else _count_returns_today(db, now)) >= _SS_DAILY_RETURN_CAP:
         return ReopenGate("daily_cap")
     # C1①(codex 1R[P1-1]): 킬스위치 delete 직전 재확인 — TOCTOU 창 제거. _run_reexamination이
     # 루프 진입 시 1회 스냅샷만 믿으면 여러 행 순회 도중 Jino가 OFF해도 남은 개방이 진행된다

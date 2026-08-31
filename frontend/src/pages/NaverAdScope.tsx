@@ -426,9 +426,13 @@ function ReopenPanel({ campaignId }: { campaignId: string }) {
 
   async function load() {
     try {
-      const res = await fetchNaverSearchTermExclusions({ campaignId, status: "excluded", limit: 50 });
       // ★`console_import`(대행사·수동 편입분)는 애초에 재개방 대상이 아니다 — 계약 §5 금지선.
-      //   목록에 섞어 두면 「왜 이건 버튼이 없지」를 매번 다시 설명해야 한다.
+      //   ★★거르는 «자리»가 결함이었다(적대 리뷰 1R P1-1): 화면에서 거르면 `limit` 뒤라
+      //   페이지가 편입분으로 차서 정작 열 수 있는 due 행이 응답에 아예 안 온다. SQL로 내렸다.
+      const res = await fetchNaverSearchTermExclusions({
+        campaignId, status: "excluded", limit: 50, excludeConsoleImport: true,
+      });
+      // 화면 필터는 남겨 둔다 — 이중 방어이고, 서버가 파라미터를 무시해도 손이 잘못 열리지 않는다.
       setRows(res.rows.filter((r) => r.source !== "console_import"));
     } catch (e) {
       // ★조회 실패를 «제외 0건»으로 그리지 않는다 — 「없다」와 「못 읽었다」는 다른 사실이고,

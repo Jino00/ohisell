@@ -4929,12 +4929,15 @@ export interface NaverSearchTermExclusionList {
 /** 제외 상태기계 목록. ★백엔드는 오래전부터 있었는데 **프론트 호출부가 0건**이었다 — H1의
  *  preflight와 같은 병이다(만드는 층은 있는데 닿는 층이 없다). */
 export function fetchNaverSearchTermExclusions(params: {
-  campaignId?: string; status?: string; limit?: number;
+  campaignId?: string; status?: string; limit?: number; excludeConsoleImport?: boolean;
 }): Promise<NaverSearchTermExclusionList> {
   const q = new URLSearchParams();
   if (params.campaignId) q.set("campaign_id", params.campaignId);
   if (params.status) q.set("status", params.status);
   if (params.limit) q.set("limit", String(params.limit));
+  // ★`limit` «전»에 걸려야 한다 — 화면에서 거르면 페이지가 콘솔 편입분으로 차서 정작 열 수 있는
+  //   행이 응답에서 빠진다(적대 리뷰 1R P1-1). 이 원장은 3,990행 중 3,987행이 편입분이다.
+  if (params.excludeConsoleImport) q.set("exclude_console_import", "true");
   return fetchApi<NaverSearchTermExclusionList>(`/api/naver/ad/search-term/exclusions?${q}`);
 }
 
