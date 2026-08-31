@@ -318,21 +318,30 @@ def test_unapproved_proposal_row_does_not_count_as_grounded(db):
     assert PP.board_counts(db)["unconfirmed"] == 1
 
 
-def test_confirm_records_that_a_human_did_the_classification(db):
-    """★대상 판별을 시스템이 못 한다는 사실이 근거의 일부다.
+def test_confirm_records_the_callers_own_words_as_provenance(db):
+    """★대상 판별을 시스템이 못 한다는 사실이 근거의 일부다 — 단 «누가 눌렀나»는
+    호출자가 말한다.
 
-    prod 실측(2026-08-31): 구성 0줄 레시피에는 매입품과 조립품 필름이 섞여 있고
-    `form_factor`가 둘 다 `bar`라 **가르는 DB 신호가 없다**. 그래서 값 옆에 「사람이
-    분류했다」가 남아야 한다 — 남지 않으면 나중에 이 값이 시스템 판정처럼 읽힌다.
+    초판의 이 테스트는 백엔드가 지어낸 문구("사람이 화면에서…")를 단언했다 — 즉
+    **테스트가 그 잘못된 생각을 굳히고 있었다.** 완료 QA가 「이 문구는 클릭 주체를
+    증명하지 않는다」로 잡았고, 그래서 주장의 «출처»를 바꿨다: 아는 층(화면)이 말한다.
     """
     r = mk_recipe(db, "일미리 케이스", lines=0)
     mk_sku(db, "S1", "일미리 케이스, 아이폰15", r)
 
-    PP.confirm_group(db, internal_skus=["S1"], price=D("922"), source_file="08-07판")
+    PP.confirm_group(db, internal_skus=["S1"], price=D("922"), source_file="08-07판",
+                     source_names={"S1": "일미리 케이스, 아이폰15"},
+                     note="원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭")
     db.flush()
 
     row = db.scalars(select(CostPurchasedPrice)).one()
-    assert row.note and "사람" in row.note and "매입품" in row.note
+    assert row.note == "원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭"
+    # 근거의 나머지(어느 파일·어느 행)는 여전히 값과 함께 남는다.
+    # ★`or ... is None`을 달지 않는다 — 이 테스트는 `source_names`를 넘기므로 좌항이
+    #   참이어야 하고, `or` 절을 달면 **어떤 코드에도 실패할 수 없는 줄**이 된다
+    #   (적대 리뷰가 직전 PR에 이어 «두 번째»로 잡은 모양이다).
+    assert row.source == "file" and row.source_file == "08-07판"
+    assert row.source_product_name == "일미리 케이스, 아이폰15"
 
 
 def test_film_draft_with_no_lines_still_reaches_the_human_not_auto_written(db):
@@ -478,3 +487,27 @@ def test_p2_1_board_and_badge_read_the_same_latest_price_logic(db):
     assert PP._load_approved_prices(db) == {}
     assert PP.board_counts(db)["held_blank"] == 1
     assert PP.board_counts(db)["grounded"] == 0
+
+
+def test_confirm_does_not_fabricate_who_clicked(db):
+    """★완료 QA가 잡은 자리 — 아는 층이 아니면 주장하지 않는다.
+
+    초판은 `note`가 비면 "사람이 화면에서 매입품으로 분류하고 확정"을 박았다. 그런데
+    프론트는 `note`를 보내지도 않았고 API 직접 호출도 같은 문구를 받았다 — **백엔드는
+    누가 눌렀는지 알 수 없으면서 그것을 원장에 적고 있었다.** n=16이 `cost_recipe.note`
+    138행에서 고친 것과 같은 모양이다([[same-defect-three-times-fix-the-shape]]).
+    """
+    r = mk_recipe(db, "케이스", lines=0)
+    mk_sku(db, "C1", "케이스, 아이폰16", r)
+
+    PP.confirm_group(db, internal_skus=["C1"], price=D("922"), source_file="f")
+    db.flush()
+    row = db.scalars(select(CostPurchasedPrice)).one()
+    assert row.note is None, "호출자가 안 준 문구를 백엔드가 지어내면 안 된다"
+
+    # 호출자가 준 것은 그대로 실린다
+    PP.confirm_group(db, internal_skus=["C1"], price=D("922"), source_file="f",
+                     note="화면에서 묶음 확인 클릭")
+    db.flush()
+    notes = [x.note for x in db.scalars(select(CostPurchasedPrice)).all()]
+    assert "화면에서 묶음 확인 클릭" in notes

@@ -7,7 +7,7 @@
 //   (n=17이 `parseContentDispositionFilename`에서 밟은 것과 정확히 같은 모양이다.)
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import { previewPurchasedPrices } from "./api";
+import { confirmPurchasedPrices, previewPurchasedPrices } from "./api";
 
 function file() {
   return new File(["x"], "ohisell_mapping_template_20260822.xlsx");
@@ -61,4 +61,35 @@ it("성공하면 payload를 그대로 돌려준다", async () => {
   );
 
   await expect(previewPurchasedPrices(file())).resolves.toEqual(payload);
+});
+
+it("confirm이 note를 HTTP 본문에 실제로 실어 보낸다 (적대 리뷰 N9)", async () => {
+  // ★화면 테스트는 `confirmPurchasedPrices`를 mock 하므로 **이 층을 안 지난다** — 이
+  //   함수가 본문에서 `note`를 떨어뜨려도 프론트 1,234개가 전건 초록이었다(N9 SURVIVED).
+  //   화면 → HTTP → 원장 이음매의 «가운데 칸»이라 여기서 따로 잡는다.
+  const calls: RequestInit[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push(init);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "{}",
+        json: async () => ({ written: 1, skipped: [], board: {} }),
+      };
+    }) as unknown as typeof fetch,
+  );
+
+  await confirmPurchasedPrices({
+    internal_skus: ["C1"],
+    price: "922.00",
+    source_file: "08-07판",
+    note: "원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭",
+  });
+
+  const body = JSON.parse(String(calls[0].body));
+  expect(body.note).toBe("원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭");
+  expect(body.internal_skus).toEqual(["C1"]);
+  expect(body.source_file).toBe("08-07판");
 });

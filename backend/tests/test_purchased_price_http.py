@@ -298,3 +298,36 @@ def test_out_of_range_price_is_refused_so_it_cannot_poison_later_previews(client
 
     # 그리고 그 뒤 정상 업로드가 여전히 산다
     assert upload(client, xlsx([("일미리 케이스, 아이폰15", 922, "카페24")])).status_code == 200
+
+
+def test_note_travels_from_the_screen_through_http_into_the_ledger(client):
+    """★이음매 자체를 지킨다 — 적대 리뷰 P2-1.
+
+    이 PR이 닫은 결함은 「화면 → HTTP → 원장」 이음매가 «안 이어져 있었다»는 것이었다.
+    그런데 이어 놓고도 그 이음매를 지키는 테스트가 없어서, 라우터가 `note`를 버리거나
+    (`note=None`) wire 필드명을 바꿔도 백엔드 37개·프론트 1,234개가 전건 초록이었다.
+    값을 만드는 층과 사람이 읽는 층 «사이»도 따로 지켜야 한다.
+    """
+    sent = "원가 메뉴 「매입품 단가」 화면에서 묶음 확인 클릭"
+    r = client.post("/api/cost/purchased-prices/confirm", json={
+        "internal_skus": ["C1"], "price": "922", "source_file": "08-07판",
+        "source_names": {"C1": "일미리 케이스, 아이폰15"},
+        "note": sent,
+    })
+    assert r.status_code == 200 and r.json()["written"] == 1
+
+    with client.testing_session() as s:
+        row = s.scalars(select(CostPurchasedPrice)).one()
+        assert row.note == sent, "화면이 보낸 문구가 원장까지 그대로 닿아야 한다"
+        assert row.source_product_name == "일미리 케이스, 아이폰15"
+        assert row.source_file == "08-07판"
+
+
+def test_ledger_note_is_null_when_the_caller_says_nothing(client):
+    """호출자가 말 안 하면 원장도 말하지 않는다 — 백엔드가 대신 지어내지 않는다."""
+    r = client.post("/api/cost/purchased-prices/confirm", json={
+        "internal_skus": ["C1"], "price": "922", "source_file": "f",
+    })
+    assert r.status_code == 200 and r.json()["written"] == 1
+    with client.testing_session() as s:
+        assert s.scalars(select(CostPurchasedPrice)).one().note is None
