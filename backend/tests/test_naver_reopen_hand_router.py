@@ -315,6 +315,35 @@ def test_claim_race_is_guarded(client, db):
     mock_del.assert_not_called()
 
 
+def test_one_response_shares_one_cap_verdict(client, db):
+    """★적대 리뷰 2R가 내 주장을 반증해 생긴 테스트.
+
+    나는 「캡 주입값을 무시하고 매 행 재조회」하는 변이(N2)가 **판정이 동일하므로 동작 테스트로
+    원리적으로 못 잡는다**고 적었다. 과장이었다 — 반례가 있다: `_count_returns_today`가 호출마다
+    다른 값을 내는 순간(캡 경계에서 다른 러너가 커밋하면 실제로 그렇다) 캐시판은 전 행이 같은
+    판정을 받고, 재조회판은 **같은 응답 안에서 행마다 판정이 갈린다**. 앞 행은 「열 수 있음」,
+    뒷 행은 「캡 소진」인 화면은 사람이 읽을 수 없다.
+
+    ⇒ 불변식은 「한 응답의 모든 행은 **같은 캡 판정**을 공유한다」이다. 일일 캡은 계정 단위 값이지
+      행 단위 값이 아니므로, 행마다 달라지는 것 자체가 틀린 것이다.
+    """
+    for i in range(3):
+        _seed(db, adgroup_id=f"{AGID}-{i}", campaign_id=f"{CID}-{i}")
+    # 캡 경계가 **행 사이**에 떨어지게 만든다(다른 러너가 그 사이 복귀를 커밋한 상황).
+    #   캐시판: 라우터가 한 번만 세므로 cap-1 → 전 행 「열 수 있음」.
+    #   재조회판: 첫 행은 cap-1이라 열리고 둘째 행부터 cap이라 막힌다 ⇒ 같은 응답이 자기모순.
+    # ★경계를 맨 앞에 두면 두 판이 «둘 다 전 행 동일»이 되어 변이가 살아난다 — 처음에 그렇게
+    #   써서 N2가 또 생존했다. 무엇을 재는 테스트인지는 side_effect의 «모양»이 정한다.
+    with patch.object(lane, "_count_returns_today",
+                      side_effect=[lane._SS_DAILY_RETURN_CAP - 1] * 2 + [lane._SS_DAILY_RETURN_CAP] * 20):
+        rows = client.get(f"{URL}?status=excluded").json()["rows"]
+    assert len(rows) == 3
+    verdicts = {r["reopen_block_reason"] for r in rows}
+    assert len(verdicts) == 1, (
+        f"한 응답 안에서 캡 판정이 갈렸다 — 행마다 다시 세고 있다는 뜻이다: {verdicts}"
+    )
+
+
 def test_gate_is_shared_with_the_auto_lane(db):
     """`reopen_gate`가 «단일 판정»이라는 구조 회귀.
 

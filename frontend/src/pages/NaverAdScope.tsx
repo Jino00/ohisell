@@ -16,7 +16,7 @@
 //   ⚠️★이 스위치는 optimizer 스위치보다 **무겁다** — 제외 재개방 레인은 실행 harness를 안 타서
 //   `optimizer='none'`이라도 켜면 네이버 실쓰기가 나간다. 그래서 켜기 전 preflight를 «보여준 뒤»
 //   누르게 한다(차단이 아니라 고지 — 켜는 결정은 사람의 것이다).
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Card, Table, Th, Td, Badge, Loading, EmptyState, LayerNav,
 } from "../components/ui";
@@ -419,29 +419,24 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
  *  ★**전체 제외 드릴다운(요약·페이징·4종 GET 렌더)은 여기 만들지 않는다** — 그건 계약 P3의
  *    체크박스다. 여기 있는 것은 P2의 손이 서 있을 만큼의 표면뿐이다. */
 function ReopenPanel({ campaignId }: { campaignId: string }) {
-  const [rows, setRows] = useState<NaverSearchTermExclusionRow[] | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
-  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
-  async function load() {
-    try {
-      // ★`console_import`(대행사·수동 편입분)는 애초에 재개방 대상이 아니다 — 계약 §5 금지선.
-      //   ★★거르는 «자리»가 결함이었다(적대 리뷰 1R P1-1): 화면에서 거르면 `limit` 뒤라
-      //   페이지가 편입분으로 차서 정작 열 수 있는 due 행이 응답에 아예 안 온다. SQL로 내렸다.
-      const res = await fetchNaverSearchTermExclusions({
-        campaignId, status: "excluded", limit: 50, excludeConsoleImport: true,
-      });
-      // 화면 필터는 남겨 둔다 — 이중 방어이고, 서버가 파라미터를 무시해도 손이 잘못 열리지 않는다.
-      setRows(res.rows.filter((r) => r.source !== "console_import"));
-    } catch (e) {
-      // ★조회 실패를 «제외 0건»으로 그리지 않는다 — 「없다」와 「못 읽었다」는 다른 사실이고,
-      //   그 둘을 같게 그리는 것이 이 저장소가 반복해 밟은 병이다(교훈 #123).
-      setRows([]);
-      setLoadErr(e instanceof Error ? e.message : "제외 목록을 읽지 못했습니다");
-    }
-  }
-  useEffect(() => { void load(); }, [campaignId]);
+  // ★`useAsyncData`를 쓴다(이 페이지의 관례). 손으로 `catch → setRows([])`를 쓰면 **조회 실패가
+  //   「제외 0건」으로 렌더된다** — 그 훅의 머리주석이 정확히 그 병을 막으려고 만들어졌고,
+  //   내 초판이 그 실수를 그대로 반복했다(「없다」와 「못 읽었다」는 다른 사실이다).
+  // ★`console_import`(대행사·수동 편입분)는 애초에 재개방 대상이 아니다 — 계약 §5 금지선.
+  //   ★★거르는 «자리»가 결함이었다(적대 리뷰 1R P1-1): 화면에서 거르면 `limit` 뒤라 페이지가
+  //   편입분으로 차서 정작 열 수 있는 due 행이 응답에 아예 안 온다. 그래서 SQL로 내렸다.
+  const { data, error } = useAsyncData(
+    () => fetchNaverSearchTermExclusions({
+      campaignId, status: "excluded", limit: 50, excludeConsoleImport: true,
+    }),
+    [campaignId, reloadKey],
+  );
+  // 화면 필터는 이중 방어로 남긴다 — 서버가 파라미터를 무시해도 손이 잘못 열리지 않는다.
+  const rows = data?.rows.filter((r) => r.source !== "console_import") ?? null;
 
   async function reopen(row: NaverSearchTermExclusionRow) {
     setBusyId(row.id);
@@ -451,7 +446,7 @@ function ReopenPanel({ campaignId }: { campaignId: string }) {
       // ★막힌 것도 «정상 응답»이다 — 사유를 그대로 보여 준다. 조용히 아무 일도 안 일어나면
       //   사람은 버튼이 고장 났다고 읽는다.
       setMsg(res.ok ? `열었습니다 — 「${row.search_term}」 관찰 시작(${res.probation_until}까지)` : res.reason);
-      await load();
+      setReloadKey((k) => k + 1);
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "재개방 실패");
     } finally {
@@ -459,10 +454,10 @@ function ReopenPanel({ campaignId }: { campaignId: string }) {
     }
   }
 
-  if (rows === null) return null;
-  if (loadErr) {
-    return <p className="px-4 pt-3 text-xs text-amber-700">제외 목록을 읽지 못했습니다 — {loadErr}</p>;
+  if (error) {
+    return <p className="px-4 pt-3 text-xs text-amber-700">제외 목록을 읽지 못했습니다 — {error}</p>;
   }
+  if (rows === null) return null;
   if (rows.length === 0) {
     return (
       <p className="px-4 pt-3 text-xs text-gray-500">

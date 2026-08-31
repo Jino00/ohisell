@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { PaoScopeRoster } from "../lib/api";
-import { reopenNaverSearchTermExclusion } from "../lib/api";
+import { fetchNaverSearchTermExclusions, reopenNaverSearchTermExclusion } from "../lib/api";
 
 const hoisted = vi.hoisted(() => ({ rows: [] as unknown[], reopenResult: null as unknown }));
 
@@ -159,6 +159,19 @@ describe("★재개방의 손이 사람에게 닿는 경로", () => {
     await openCampaign();
     fireEvent.click(await screen.findByRole("button", { name: "지금 재개방" }));
     expect(await screen.findByText(/열었습니다.*아이패드종이필름.*2026-09-14/)).toBeTruthy();
+  });
+
+  it("RSUR-6: 화면이 «SQL 필터를 요청»한다 — 이 인자가 빠지면 P1-1이 그대로 되살아난다", async () => {
+    // ★적대 리뷰 1R P1-1의 프론트 쪽 회귀. 백엔드는 `exclude_console_import`를 지원하지만,
+    //   **화면이 그걸 안 넘기면** 필터가 다시 `limit` 뒤(프론트)에서만 걸린다 — 그리고 그때
+    //   백엔드 테스트는 여전히 초록이다(엔드포인트 자체는 멀쩡하므로). 그 조합이 정확히
+    //   「고쳤는데 안 고쳐진」 상태다. 변이 RSUR-6이 이 테스트 없이 생존했다.
+    await openCampaign();
+    await waitFor(() => {
+      expect(vi.mocked(fetchNaverSearchTermExclusions)).toHaveBeenCalledWith(
+        expect.objectContaining({ excludeConsoleImport: true, status: "excluded" }),
+      );
+    });
   });
 
   it("콘솔 편입분(console_import)은 목록에 아예 안 나온다 — 우리가 건 제외가 아니다", async () => {
