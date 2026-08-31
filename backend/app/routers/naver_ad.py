@@ -957,6 +957,11 @@ def campaign_auto_operate_switch(body: AutoOperateSwitchIn, db: Session = Depend
     before = bool(settings.auto_operate) if settings else False
 
     # ★켜기 «전»에 재고 응답에 싣는다(optimizer 스위치와 같은 관례·같은 판정기).
+    # ⚠️적대 리뷰 P2 기록: 그래서 `out["ignition_preflight"]["auto_operate"]`는 **켜기 «전» 값**
+    #   (=False)이고 같은 응답 최상위의 `out["auto_operate"]`는 **켠 «뒤» 값**(=True)이다. 한
+    #   응답에 같은 이름 두 값이라 헷갈릴 수 있어 적어 둔다. 지금 프론트는 preflight의
+    #   `warnings`·`safe_to_ignite`만 읽으므로 무해하고, 검사는 「켜기 전 상태에 대한 판정」이
+    #   맞으므로 값을 사후로 바꾸지 않는다 — 바꾸면 「무엇을 보고 경고했나」가 어긋난다.
     preflight = ignition_preflight.check(db, body.campaign_id) if body.auto_operate else None
 
     if settings is None:

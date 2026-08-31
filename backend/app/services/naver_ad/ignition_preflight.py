@@ -133,7 +133,7 @@ def check(db: Session, campaign_id: str) -> dict:
             warnings.append({
                 "code": WARN_REOPEN_DUE,
                 "message": (
-                    f"켜면 재심사 개방이 **{len(openable)}건** 대기 중이다 — 다음 08:50 레인이 "
+                    f"켜면 재심사 개방이 **{len(openable)}건** 대기 중이다 — 다음 08:50 레인«부터» "
                     "네이버에서 제외키워드를 **실제로 삭제**한다. 이 경로는 실행 harness를 "
                     "안 거쳐 `optimizer='ours'` 하드체크가 **적용되지 않는다**."
                 ),
@@ -149,6 +149,12 @@ def check(db: Session, campaign_id: str) -> dict:
                             #   아니다 — 그런데 레인의 후보 쿼리엔 source 필터가 «없다».
                             #   그 사실을 숨기지 않고 행마다 실어 보낸다.
                             "source": r.source,
+                            # ★적대 리뷰 P2 채택: 이 수는 «대기 중»이지 «다음 한 번에 다 열린다»가
+                            #   아니다. 레인은 일일 복귀 캡(_SS_DAILY_RETURN_CAP)만큼만 열고 나머지는
+                            #   다음 날로 밀린다. 캡을 여기서 다시 계산하지 않는 이유: 이 함수는
+                            #   «켜면 무엇이 열리는가»의 총량을 말하는 자리이고, 캡을 반영하면
+                            #   「오늘 안 열리니 없는 셈」으로 읽혀 **누락 방향으로 틀린다**.
+                            #   과다는 안전하고 누락은 안 안전하다 — 그래서 총량 쪽을 고른다.
                         }
                         for r in openable
                     ],
