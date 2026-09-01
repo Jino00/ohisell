@@ -15,7 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
-from app.models import NaverCampaignSettings, NaverProposal
+from app.models import NaverAdgroupScope, NaverCampaignSettings, NaverProposal
 from app.services.naver_ad import naver_execution_harness as harness
 from app.services.naver_ad.bid_step_types import (
     CHANGE_PCT_EXEMPT_TYPES,
@@ -214,15 +214,84 @@ def test_create_rejects_every_lane_only_type(client, db, engine_only_type):
     assert db.query(NaverProposal).count() == 0
 
 
-def test_create_rejects_budget_types(client, db):
-    """예산 변경 개방은 계약 §1 「안 하는 것」 — 발의 입구로 우회되지 않는다."""
+@pytest.mark.parametrize("t", ["budget_up", "budget_down", "pause", "resume"])
+def test_create_rejects_types_outside_the_opened_set_by_type_gate(client, db, t):
+    """예산·정지/재개는 이 계약이 여는 집합 밖이다 — 발의 입구로 우회되지 않는다.
+
+    ★★사유까지 검사하는 이유(변이 BM12·BM13이 잡은 공허성): 이 유형들은 `target_budget`·
+    `target_lock`을 필요로 하는데 발의 스키마가 그 칸을 **애초에 안 받는다.** 그래서 유형
+    게이트를 통째로 열어도 「필드 없음」으로 400이 나 **테스트가 초록인 채 게이트만 사라진다.**
+    거부가 «유형 때문»임을 문구로 못 박아야 그 변이가 죽는다 —
+    n=77의 「픽스처가 재는 대상을 안 만들었다」와 같은 종류의 공허성이다.
+    """
     _settings(db)
-    for t in ("budget_up", "budget_down"):
-        resp = client.post(CREATE_URL, json=_body(
-            proposal_type=t, target_type="campaign", target_id="cmp-1", adgroup_id=None,
-        ))
-        assert resp.status_code == 400, f"{t}가 발의를 통과했다"
+    resp = client.post(CREATE_URL, json=_body(
+        proposal_type=t, target_type="campaign", target_id="cmp-1", adgroup_id=None,
+    ))
+    assert resp.status_code == 400, f"{t}가 발의를 통과했다"
+    assert "엔진만 발의합니다" in resp.json()["detail"], (
+        f"{t}가 «유형 게이트»가 아니라 다른 이유로 거부됐다 — 게이트가 사라져도 안 잡힌다: "
+        f"{resp.json()['detail']}"
+    )
     assert db.query(NaverProposal).count() == 0
+
+
+def test_create_rejects_out_of_scope_adgroup(client, db):
+    """★스코프 밖 광고그룹(D-NAO-244)이면 **발의 단계에서** 막힌다.
+
+    ★★왜 이 테스트가 필요한가(변이 BM6이 잡은 구멍): `real_write_blocker`의 스코프 판정은
+    `approval_source is not None`일 때만 발동한다. 그래서 라우터가 판정용 `'console'`을
+    안 실으면 스코프 밖 그룹이 **입구를 통과**하고, 사람이 승인한 뒤 실행에서
+    ScopeGuardError로 죽는다 — 이 입구가 만들지 않으려던 죽은 카드가 정확히 그 모양이다.
+    """
+    _settings(db)
+    # 스코프 행이 «있고» 대상 그룹이 그 안에 없다 → blocked_by_scope=True
+    db.add(NaverAdgroupScope(campaign_id="cmp-1", adgroup_id="grp-허용", enabled=True))
+    db.commit()
+
+    resp = client.post(CREATE_URL, json=_body(adgroup_id="grp-스코프밖"))
+    assert resp.status_code == 400
+    assert "스코프 밖 광고그룹" in resp.json()["detail"], resp.json()["detail"]
+    assert db.query(NaverProposal).count() == 0
+
+
+def test_create_allows_in_scope_adgroup(client, db):
+    """반대 방향 — 스코프 «안»이면 통과한다(위 테스트가 전부를 막는 것으로 통과하지 않게)."""
+    _settings(db)
+    db.add(NaverAdgroupScope(campaign_id="cmp-1", adgroup_id="grp-1", enabled=True))
+    db.commit()
+
+    resp = client.post(CREATE_URL, json=_body(adgroup_id="grp-1"))
+    assert resp.status_code == 200, resp.text
+    assert db.query(NaverProposal).count() == 1
+
+
+def test_proposable_set_shrinks_when_an_action_closes(client, db, monkeypatch):
+    """★액션이 닫히면 그 유형은 발의 목록에서 «빠진다»(이중 방벽의 발의판).
+
+    ★★왜 필요한가(변이 BM4가 잡은 구멍): 지금은 네 유형의 액션이 전부 개방돼 있어
+    `human_proposable_types()`의 개방 교집합을 **지워도 결과가 같다** — 오늘의 값만 보는
+    테스트로는 그 필터가 사라진 걸 알 수 없다. 액션 하나를 닫아 봐야 필터가 실재함이 증명된다.
+    """
+    monkeypatch.setattr(
+        harness, "OPEN_ACTIONS", harness.OPEN_ACTIONS - {"update_bid"}, raising=True,
+    )
+    assert "bid_up" not in harness.human_proposable_types()
+    assert "bid_down" not in harness.human_proposable_types()
+    assert "negative_keyword" in harness.human_proposable_types()
+
+    # 화면 목록도 같이 줄어야 한다(백엔드 상수만 줄고 응답이 그대로면 화면이 거짓말한다).
+    body = client.get(TYPES_URL).json()
+    assert "bid_up" not in [r["proposal_type"] for r in body["proposable"]]
+
+    # 그리고 그 유형의 발의는 거부된다 — 사유는 「발의 대상이나 실쓰기 미개방」.
+    _settings(db)
+    resp = client.post(CREATE_URL, json=_body(
+        proposal_type="bid_up", target_type="keyword", target_id="nkw-9",
+        adgroup_id=None, target_bid=1400,
+    ))
+    assert resp.status_code == 400
+    assert "미개방" in resp.json()["detail"], resp.json()["detail"]
 
 
 def test_create_rejects_non_ours_campaign(client, db):
