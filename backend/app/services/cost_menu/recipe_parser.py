@@ -87,11 +87,30 @@ NO_FORM_FACTOR_SECTIONS: frozenset[str] = frozenset(
         "오픽스 맥세이프 거치대",
         "셀카봉",
         "카드케이스",
+        # ★실제 시트의 섹션 이름은 「기타」다(셀카봉·맥탭 카드케이스가 그 아래 있다).
+        #   위 두 줄은 «품목 이름»을 섹션으로 착각해 넣은 것이고 실제로는 한 번도 안 걸렸다
+        #   (2026-09-01 엑셀 원본 대조 — 남겨 두되 「기타」를 더한다).
+        "기타",
     }
 )
 
-#: 이 섹션들은 조립형이 아니다 — 원장/매입가에서 단가가 직접 온다(계약 §5-1 ★매입품 결정).
+#: 이 섹션들은 조립형이 아니다 — **통관 원장**에서 단가가 직접 온다(계약 §5-1 ★매입품 결정).
 IMPORTED_SECTIONS: frozenset[str] = frozenset({"오타오_강화유리필름"})
+
+#: ★국내 매입 완제품 섹션 — 우리가 만들지 않고 **사 오는** 것들 (Jino 확정 2026-09-01 20:0x).
+#:
+#: 수입품과 다른 점은 **단가의 출처뿐**이다: 이쪽은 통관 원장이 아니라 **원가표의 「상품원가」**가
+#: 정본이다. 초판은 이 섹션들을 `assembly`로 찍었고, 그래서 구성이 0줄인 「조립품」이 되어
+#: 165개 케이스 SKU가 「정본 없음」에 갇혀 있었다(2026-09-01 실측).
+#: 값의 뜻은 `materials.PURCHASED_KIND` 주석이 정본이다.
+PURCHASED_SECTIONS: frozenset[str] = frozenset(
+    {
+        "오타오_기타 액세서리",   # 맥세이프 그립톡
+        "케이스",                # 일미리·소다 포유 계열 6종
+        "오픽스 맥세이프 거치대",
+        "기타",                  # 셀카봉 · 맥탭 카드케이스
+    }
+)
 
 #: ★구성 라인을 «뽑는» 섹션은 이것뿐이다 — 폼팩터가 있는 조립형.
 #:
@@ -279,7 +298,119 @@ def _classify_columns(header: Sequence[Any], start: int) -> list[_ColumnSpec]:
 
 
 def _is_header_row(row: Sequence[Any]) -> bool:
-    return len(row) > 3 and _HEADER_MARK in _norm(row[3])
+    """헤더 행인가 — 「제품원가」가 **C 또는 D**에 있으면 헤더다.
+
+    ★초판은 D(index 3)만 봤다. 그런데 「오타오_기타 액세서리」 섹션은 헤더가 C에 있어
+    (`C3 = 제품원가 (KRW)`) 섹션 자체가 안 잡혔고 그 아래 「맥세이프 그립톡」 5,240원이
+    통째로 사라졌다(2026-09-01 엑셀 원본 대조에서 발견).
+    """
+
+    return any(
+        len(row) > idx and _HEADER_MARK in _norm(row[idx]) for idx in (2, 3)
+    )
+
+
+#: 총액을 어느 열에서 읽는가 — 섹션 헤더마다 다르다(2026-09-01 엑셀 원본 실측).
+#:
+#:   필름 섹션    D 「제품원가 (+VAT)」 = 부자재·부가세 포함 총액        → 그대로 총액
+#:   수입 섹션    D 「제품원가 (CNY/USD)」 · E 「(KRW)」 · I 「상품원가」  → **I가 최종**
+#:   국내 케이스  E 「제품원가 (KRW)」 · I 「상품원가」(본체) · J 「부자재」 → **(I+J)×1.1**
+#:   액세서리     C 「제품원가 (KRW)」만                                → 그대로 총액
+#:
+#: ★초판은 언제나 D를 읽었다. 그래서 수입·케이스 섹션에서 **외화 단가**(12.2·0.99·11·4.5)를
+#:   원가로 저장했고, D가 빈 국내 케이스 6행은 «데이터 행이 아니다»로 판정돼 통째로 버려졌다.
+#:   국내 케이스 총액을 (I+J)×1.1로 정한 것은 Jino 확정이다(2026-09-01 19:5x) —
+#:   엑셀 E와 어긋나는 행(「일미리 케이스」 922 vs 1,014.2)은 **계산값이 맞다**고 답하셨다.
+@dataclass(frozen=True)
+class _TotalSpec:
+    film_idx: Optional[int] = None      # 「제품원가 (+VAT)」
+    foreign_idx: Optional[int] = None   # 「제품원가 (CNY/USD/US$)」
+    krw_idx: Optional[int] = None       # 「제품원가 (KRW)」
+    landed_idx: Optional[int] = None    # 「상품원가」
+    parts_idx: Optional[int] = None     # 「부자재」
+
+    @property
+    def value_indices(self) -> tuple[int, ...]:
+        return tuple(
+            i
+            for i in (
+                self.film_idx,
+                self.foreign_idx,
+                self.krw_idx,
+                self.landed_idx,
+                self.parts_idx,
+            )
+            if i is not None
+        )
+
+
+_FOREIGN_MARKS = ("cny", "usd", "us$")
+
+
+def _total_spec(header: Sequence[Any]) -> _TotalSpec:
+    """헤더 행 → 총액을 읽을 열들. **라벨로 찾는다** — 열 «위치»를 박아 두지 않는다."""
+
+    film = foreign = krw = landed = parts = None
+    for idx in range(len(header)):
+        label = _norm(header[idx])
+        if not label:
+            continue
+        low = label.lower().replace(" ", "")
+        if _HEADER_MARK in label:
+            if "vat" in low:
+                film = idx if film is None else film
+            elif any(m in low for m in _FOREIGN_MARKS):
+                foreign = idx if foreign is None else foreign
+            elif "krw" in low:
+                krw = idx if krw is None else krw
+        elif label == "상품원가":
+            landed = idx if landed is None else landed
+        elif label == "부자재":
+            parts = idx if parts is None else parts
+    return _TotalSpec(film, foreign, krw, landed, parts)
+
+
+def _row_total(
+    row: Sequence[Any], spec: _TotalSpec
+) -> tuple[Optional[Decimal], list[str]]:
+    """행 → (총액, 이상 목록). **총액을 «지어내지» 않는다** — 못 정하면 None + 자백."""
+
+    def at(idx: Optional[int]) -> Optional[Decimal]:
+        if idx is None or idx >= len(row):
+            return None
+        return _dec(row[idx])
+
+    if spec.film_idx is not None:
+        return at(spec.film_idx), []
+
+    foreign = at(spec.foreign_idx)
+    krw = at(spec.krw_idx)
+    landed = at(spec.landed_idx)
+    parts = at(spec.parts_idx)
+
+    if foreign is not None:
+        # 수입형 — 최종은 「상품원가」다. 외화·환산가는 중간값이라 원가로 쓰면 안 된다.
+        if landed is None:
+            # 엑셀이 아직 환산·부대비를 안 계산한 행(예: 오타오_갤럭시 투명 강화유리 CNY 19.3).
+            # 외화값을 «원가처럼» 싣지 않는다 — 그게 12.2원짜리 강화유리를 만든 원인이다.
+            return None, [f"foreign_only_no_landed:{foreign}"]
+        return landed, []
+
+    if landed is not None and parts is not None:
+        # 국내 매입형 — (본체 + 부자재) × 1.1. 엑셀 총액과 어긋나면 자백하고 계산값을 쓴다.
+        computed = (landed + parts) * VAT_MULTIPLIER
+        if krw is not None and abs(computed - krw) > TOTAL_TOLERANCE:
+            return computed, [f"excel_total_mismatch:{computed:.2f}≠{krw}"]
+        return computed, []
+
+    if landed is not None:
+        # 「상품원가」만 있는 행 — 부가세 포함 여부를 모른다. 값은 싣되 그 사실을 남긴다.
+        return landed, ["landed_only_vat_unknown"]
+
+    if krw is not None:
+        return krw, []
+
+    return None, []
 
 
 # ──────────────────────────────────────────────
@@ -295,11 +426,30 @@ def parse_cost_table(rows: Iterable[Sequence[Any]]) -> ParseResult:
     section: Optional[str] = None
     last_label: Optional[str] = None
     specs: list[_ColumnSpec] = []
+    tspec = _TotalSpec()
     seen_keys: dict[MaterialKey, Decimal] = {}
     seen_items: dict[tuple[str, str], tuple] = {}
 
-    for row_number, raw in enumerate(rows, start=1):
-        row = list(raw)
+    # ★섹션 제목 행은 **구조**로 가른다 — 「품목」 헤더 바로 앞 행이 그 섹션의 제목이다.
+    #
+    #   값의 «유무»로 가르면 안 된다(2026-09-01 자기 테스트가 잡았다): 제목 행에도 숫자가
+    #   있을 수 있고(`오타오_강화유리필름 | 환율 | 200`), 그때 «앞 섹션의 열 배치»로 읽히면
+    #   200을 원가로 들고 데이터 행이 되어 버린다. 그러면 뒤따르는 「품목」 헤더가 섹션
+    #   이름을 못 찾아 **그 섹션 전체가 앞 섹션 소속이 된다**(수입 강화유리 5건이 통째로
+    #   케이스로 분류됐다). 반대로 「직전 행 = 제목」만으로 가르면 섹션 끝 상품 행이
+    #   먹힌다(행 26 자가복원 EPU 바로 뒤가 플립 헤더다) — 그래서 **「품목」 헤더일 때만**이다.
+    materialized = [list(raw) for raw in rows]
+    title_rows: set[int] = set()
+    for i, row in enumerate(materialized):
+        for nxt in materialized[i + 1 :]:
+            if not any(c is not None and _norm(c) for c in nxt):
+                continue  # 빈 행은 건너뛴다
+            if _is_header_row(nxt) and _norm(nxt[1] if len(nxt) > 1 else "") == _ITEM_HEADER:
+                title_rows.add(i)
+            break
+
+    for row_number, row in enumerate(materialized, start=1):
+        is_title = (row_number - 1) in title_rows
         col1 = _norm(row[1]) if len(row) > 1 else ""
 
         if _is_header_row(row):
@@ -310,21 +460,31 @@ def parse_cost_table(rows: Iterable[Sequence[Any]]) -> ParseResult:
             if section and section not in result.sections_seen:
                 result.sections_seen.append(section)
             specs = _classify_columns(row, start=4)
+            tspec = _total_spec(row)
             continue
 
-        total = _dec(row[3]) if len(row) > 3 else None
-        if col1 and total is None:
-            last_label = col1          # 섹션 제목 후보(데이터가 아닌 이름 행)
+        # ★«데이터 행인가»와 «총액이 얼마인가»는 다른 질문이다(2026-09-01).
+        #   초판은 둘을 D열 하나로 물어봐서, D가 빈 국내 케이스 6행을 «행이 아니다»로
+        #   판정해 통째로 버렸다. 이제 스펙이 아는 «값 열» 중 하나라도 차 있으면 데이터 행이고,
+        #   총액은 따로 정한다(못 정하면 None이고 그 사실이 이상으로 올라간다).
+        has_value = any(
+            idx < len(row) and _dec(row[idx]) is not None for idx in tspec.value_indices
+        )
+        if col1 and (is_title or not has_value):
+            last_label = col1          # 섹션 제목(위 구조 판별) 또는 값 없는 이름 행
             continue
 
-        if not col1 or total is None or section is None:
+        if not col1 or not has_value or section is None:
             continue
+
+        total, total_anomalies = _row_total(row, tspec)
 
         result.recipes.append(
             _build_recipe(
                 section=section,
                 item_name=col1,
                 total=total,
+                total_anomalies=total_anomalies,
                 row=row,
                 specs=specs,
                 row_number=row_number,
@@ -349,20 +509,28 @@ def _build_recipe(
     *,
     section: str,
     item_name: str,
-    total: Decimal,
+    total: Optional[Decimal],
     row: list[Any],
     specs: list[_ColumnSpec],
     row_number: int,
     seen_keys: dict[MaterialKey, Decimal],
     seen_items: dict[tuple[str, str], tuple],
     result: ParseResult,
+    total_anomalies: Sequence[str] = (),
 ) -> RecipeDraft:
-    anomalies: list[str] = []
+    # ★총액 해석에서 나온 이상(외화만 있음·엑셀 총액 불일치…)을 여기서 «먼저» 싣는다 —
+    #   나중에 붙이면 조립형 조기 반환 경로에서 통째로 사라진다.
+    anomalies: list[str] = list(total_anomalies)
 
     form_factor = SECTION_FORM_FACTOR.get(section)
     if form_factor is None and section not in NO_FORM_FACTOR_SECTIONS:
         anomalies.append(f"unknown_section:{section}")
-    recipe_kind = "imported_goods" if section in IMPORTED_SECTIONS else "assembly"
+    if section in IMPORTED_SECTIONS:
+        recipe_kind = "imported_goods"   # 통관 원장에서 단가가 온다
+    elif section in PURCHASED_SECTIONS:
+        recipe_kind = "purchased"        # 원가표의 「상품원가」가 단가다
+    else:
+        recipe_kind = "assembly"
 
     if section not in ASSEMBLY_SECTIONS:
         # 조립형이 아니다 — 열이 부자재가 아니라 계수다. 헤더만 만들고 라인은 비운다.
@@ -470,7 +638,9 @@ def _build_recipe(
 
     if not lines:
         anomalies.append("empty_lines")
-    elif computed is None:
+    elif computed is None or total is None:
+        # ★`total is None`도 검산 불능이다 — 초판은 total이 항상 있다고 가정했는데,
+        #   이제 「외화만 있고 상품원가가 없는」 행이 None을 들고 여기까지 온다.
         anomalies.append("total_unverifiable")
     elif abs(computed * VAT_MULTIPLIER - total) > TOTAL_TOLERANCE:
         anomalies.append(f"total_mismatch:{computed * VAT_MULTIPLIER:.2f}≠{total}")

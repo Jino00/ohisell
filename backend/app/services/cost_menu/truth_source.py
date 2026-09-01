@@ -44,6 +44,9 @@ from ...models import (
     ProductMaster,
 )
 from . import price_rule as PR
+# ★리터럴 "purchased"를 여기 다시 적지 않는다 — 같은 값이 두 벌이면 한쪽만 고쳐지고
+#   그 자리만 조용히 틀린다(이 저장소의 반복 실패 모드). 단일 출처는 `materials.py`다.
+from .materials import PURCHASED_KIND
 from .purchased_price import load_approved_prices
 
 # ──────────────────────────────────────────────
@@ -91,6 +94,11 @@ CAUSE_RESIDUAL = "g3_residual"
 CAUSE_NO_STANDARD = "no_standard"
 CAUSE_TWO_GROUNDS = "two_grounds"
 CAUSE_PURCHASED_APPROVED = "purchased_approved"
+#: ★국내 매입 완제품의 «Σ의 퇴화형 1줄» — `imported_goods`와 같은 모양이되 원천이 다르다
+#: (원장 로트가 아니라 원가표의 상품원가). 이 코드가 없으면 아래 일반 `line_count == 1`
+#: 분기가 「부자재 보강이 선행이다」라는 **틀린 지시**를 화면에 낸다 — 매입품은 1줄이
+#: 정상 모양이라 보강할 부자재가 원리적으로 없다(적대 리뷰 1R P1-4, 2026-09-01).
+CAUSE_PURCHASED_SINGLE_LINE = "g3_1_purchased_single_line"
 CAUSE_DRAFT_LINK = "draft_link"
 CAUSE_NO_LINK_DUPE = "no_link_dupe"
 CAUSE_NO_LINK_APPAREL = "no_link_apparel"
@@ -241,6 +249,20 @@ def classify_group(
             "수입 완제품 — 구성이 1줄인 것은 결함이 아니라 종류다(원장 로트 단가가 그 한 줄이다). "
             f"격차 {gap:+.1f}원이지만 이 묶음은 레시피마다 격차 방향이 달라 계약이 판정을 보류했다. "
             + G31_CONTRACT_NOTE,
+            OWNER_DCPP63,
+        )
+
+    if group.line_count == 1 and (group.recipe_kind or "") == PURCHASED_KIND:
+        # ★순서가 곧 규칙이다 — 이 분기가 아래 일반 `line_count == 1`보다 **먼저**여야 한다.
+        #   뒤로 가면 매입품이 「부자재 보강이 선행이다」로 읽히고, 그건 있지도 않은 작업을
+        #   사람에게 시키는 말이다. 이 순서를 지키는 테스트가
+        #   `test_cost_purchased_kind_wiring.py`에 있다(적대 리뷰 1R P1-4).
+        return (
+            CAUSE_PURCHASED_SINGLE_LINE,
+            TRUTH_PURCHASED,
+            "국내 매입 완제품 — 구성이 1줄인 것은 결함이 아니라 종류다"
+            "(원가표의 상품원가가 그 한 줄이다). 부자재 보강 대상이 아니고, "
+            f"정본은 계산값이 아니라 매입가다(현재 원가와의 격차 {gap:+.1f}원은 참고값)",
             OWNER_DCPP63,
         )
 

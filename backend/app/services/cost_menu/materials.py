@@ -65,6 +65,25 @@ IMPORTED_GOODS_KIND = "imported_goods"
 #: 수입 완제품이다」라고 고른 순간이고, 그 앞엔 아무 문도 안 열려 있다.
 IMPORTED_GOODS_CATEGORY = "수입 완제품"
 
+#: ★`cost_recipe.recipe_kind`의 **세 번째 값** — 국내 매입 완제품 (Jino 확정 2026-09-01 20:0x).
+#:
+#: 왜 필요했나: 원가표에는 케이스·거치대·셀카봉·그립톡·카드케이스처럼 **우리가 만들지 않고
+#: 사 오는** 물건이 있는데 값이 둘(`assembly`/`imported_goods`)뿐이라 갈 곳이 없었다.
+#: `assembly`로 두면 「구성이 0줄인 조립품」이 되어 영영 「정본 없음」에 남고, `imported_goods`로
+#: 두면 **통관 원장에서 단가가 온다**는 뜻이 되어(위 카테고리 주석) 있지도 않은 원장 라인을
+#: 기다린다. 둘 다 틀렸다. Jino 원문: *"매입품이라 매입가로"*.
+#:
+#: `imported_goods`와 다른 것은 **단가의 출처뿐**이다:
+#:   `imported_goods` → 통관 원장 로트 단가 (환율·로트로 변한다)
+#:   `purchased`      → **원가표의 상품원가** (사람이 파일에서 채택한다)
+#: 모양은 같다 — 둘 다 「Σ의 퇴화형 1줄」이고 산술 분기를 늘리지 않는다.
+PURCHASED_KIND = "purchased"
+
+#: 국내 매입 완제품 종의 `cost_material.category`.
+#: ★`IMPORTED_GOODS_CATEGORY`와 **반드시 달라야 한다** — 그 값은 「원장 `product` 라인을
+#: 붙일 수 있다」의 표지라(위 주석), 국내 매입품에 붙이면 원장 150줄이 이쪽으로 새어 든다.
+PURCHASED_CATEGORY = "매입 완제품"
+
 
 class CostMenuError(ValueError):
     """호출자 잘못(입력 오류). 라우터가 4xx로 옮긴다."""
