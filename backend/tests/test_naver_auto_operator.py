@@ -3849,3 +3849,43 @@ def test_bleeding_still_detected_in_the_pre_cron_window(db):
     with patch.object(auto_operator, "kst_now", lambda: datetime(2026, 9, 1, 5, 20)):
         reason = auto_operator._bleeding_hold_reason(db, "adgroup", "grp-x", date(2026, 9, 1))
     assert reason == "④최신 소급채점에서 bleeding으로 판정됨"
+
+
+# ── 적대 리뷰 1R P1 상환 — 레인이 확정한 now가 게이트까지 관통하는가 ──
+#
+# ★이 diff가 «처음으로» 신선도 판정에 라이브 시계 의존성을 넣었다. 종전 `today - lag`는
+#   today 인자만의 순수 함수라 100% 결정적이었다. 그런데 _expected_retro_asof(today)를
+#   now 없이 부르면 내부에서 kst_now()를 «다시» 읽어, 레인이 08:50을 주입해도 게이트는
+#   진짜 벽시계를 본다. 리뷰어가 재현했다: kst_now를 05:00으로 patch하자 **진짜 stale인
+#   데이터가 통과하고 bid_up이 집행**됐다(approved=1). 즉 codex 4R[P1] 안전 회귀 테스트가
+#   **실행 시각에 따라 뒤집히는 비결정 테스트**가 돼 있었다.
+# ⇒ now를 _check_bid_up_conditions → _bleeding_hold_reason → _expected_retro_asof까지,
+#   그리고 탐색 경로(_exploration_daily_loss_reason)까지 관통시켰다.
+
+def test_gate_uses_the_lane_clock_not_the_wall_clock(db):
+    """★레인이 08:50을 주입했으면 벽시계가 05:00이어도 «08:50 기준»으로 판정해야 한다.
+
+    이 테스트가 「now를 안 넘기는」 배선 회귀를 잡는다 — 안 넘기면 벽시계 05:00이 이겨
+    today-2가 기대값이 되고, 진짜 stale이 통과한다."""
+    _retro_signal(db, asof_date=date(2026, 9, 1) - timedelta(days=2), board="shopping_group_bep",
+                  target_id="other", grain="adgroup")
+    lane_now = datetime(2026, 9, 1, 8, 50)
+    with patch.object(auto_operator, "kst_now", lambda: datetime(2026, 9, 1, 5, 0)):
+        reason = auto_operator._bleeding_hold_reason(
+            db, "adgroup", "grp-x", date(2026, 9, 1), lane_now)
+    assert reason is not None and "stale" in reason, (
+        "레인 시각(08:50) 대신 벽시계(05:00)를 읽어 진짜 stale을 통과시켰다")
+
+
+def test_stale_reason_carries_the_diagnosis_values(db):
+    """★적대 리뷰 1R P2-1 — 표면 절단 상환.
+
+    이 작업의 «표면»은 화면이 아니라 `ops_diary_entries`의 차단 사유 문자열이다 — Jino가
+    「PAO가 왜 안 도나」를 그걸로 읽는다. 종전 테스트는 `"stale" in reason`만 봐서, 사유를
+    「hold」로 뭉뚱그리는 변이가 **생존했다**(리뷰어 변이 D). 값이 실제로 실리는지 지킨다."""
+    _retro_signal(db, asof_date=date(2026, 8, 30), board="shopping_group_bep", target_id="other",
+                  grain="adgroup")
+    reason = auto_operator._bleeding_hold_reason(
+        db, "adgroup", "grp-x", date(2026, 9, 1), datetime(2026, 9, 1, 14, 20))
+    assert "latest_asof=2026-08-30" in reason, "언제 것이 최신인지가 사유에 없다"
+    assert "2026-08-31" in reason, "무엇을 기대했는지가 사유에 없다"

@@ -727,7 +727,8 @@ def format_held_by_reason(counts: dict[str, int]) -> str:
     return " ".join(f"{k}={v}" for k, v in counts.items())
 
 
-def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date) -> str | None:
+def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date,
+                          now: datetime | None = None) -> str | None:
     """D-NAO-48 조건④(최신 소급채점에서 bleeding 아님) 판정 — 미충족 시 hold 사유, 통과 시
     None. retro_snapshotter._BOARDS가 매일 08:30 board별로 스냅샷하는 NaverRetroSignal의
     최신 asof_date 행에 이 target_id가 해당 bleeding 보드(board)로 존재하면 bleeding.
@@ -751,7 +752,7 @@ def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: 
     latest_asof = db.query(sqlfunc.max(NaverRetroSignal.asof_date)).scalar()
     if latest_asof is None:
         return "④소급채점 데이터 없음 — bleeding 검증 불가(fail-closed)"
-    expected_asof = _expected_retro_asof(today)
+    expected_asof = _expected_retro_asof(today, now)
     if latest_asof < expected_asof:
         return (
             f"④소급채점 stale — latest_asof={latest_asof.isoformat()} < 기대 "
@@ -835,6 +836,7 @@ def _ex_allocation_adgroups(
 
 def _check_bid_up_conditions(
     db: Session, p: NaverProposal, today: date, *, ex_ctx: dict | None = None,
+    now: datetime | None = None,
 ) -> str | None:
     """D-NAO-48 bid_up 4조건(PLAN §3) — 하나라도 미충족이면 hold 사유 문자열, 전부
     충족이면 None(승인 가능).
@@ -913,7 +915,7 @@ def _check_bid_up_conditions(
             return f"EX 멤버십 재검증 실패 — 배분 목록에 없음(target={p.target_id}, clk={clk})"
 
     # ④최신 소급채점에서 bleeding 아님(asof 신선도 포함 — codex 4R[P1]). ★폴백 없음.
-    bleeding_reason = _bleeding_hold_reason(db, p.target_type, p.target_id, today)
+    bleeding_reason = _bleeding_hold_reason(db, p.target_type, p.target_id, today, now)
     if bleeding_reason:
         return bleeding_reason
 
@@ -1225,7 +1227,7 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             continue
 
         if p.proposal_type == "bid_up":
-            hold_reason = _check_bid_up_conditions(db, p, today, ex_ctx=ex_ctx)
+            hold_reason = _check_bid_up_conditions(db, p, today, ex_ctx=ex_ctx, now=now)
             if hold_reason:
                 result["held"].append({"id": p.id, "reason": hold_reason})
                 _record_blocked(
@@ -2390,7 +2392,8 @@ def _learned_optimal_skip(
 _ADGROUP_DAILY_LOSS_BOARDS = ("shopping_group_bep", "shopping_pause_candidates")
 
 
-def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date) -> str | None:
+def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date,
+                                   now: datetime | None = None) -> str | None:
     """탐색 후보 그룹이 **활성 daily 손실 상태**면 제외 사유(문자열), 아니면 None(PLAN §1 가드5,
     GATE P2-risk6). DL이 읽는 것과 **동일 보드/신선도**를 재사용한다:
     - shopping_group_bep + asof 신선도 = 일 레인 bid_up 게이트(_bleeding_hold_reason, D-NAO-48 조건④)
@@ -2399,7 +2402,7 @@ def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date) ->
       제외(같은 최신 asof — group_bep 통과 시 신선함이 보장됨).
     ★탐색은 표본-기반 UP인데 daily 손실 조치는 비용-기반 백스톱이라, 후자가 조인 그룹을 전자가
       역전하면 어제 조치가 무의미해진다(가드5: 손실 조치 그룹 UP 금지)."""
-    bep_reason = _bleeding_hold_reason(db, "adgroup", adgroup_id, today)
+    bep_reason = _bleeding_hold_reason(db, "adgroup", adgroup_id, today, now)
     if bep_reason is not None:
         return bep_reason  # shopping_group_bep bleeding OR asof stale/missing(fail-closed)
     # group_bep 통과 = 신선 asof 확정 → 같은 최신 asof에서 스톱로스 보드도 확인.
@@ -2739,7 +2742,7 @@ def _run_exploration_for_campaign(
 
         # GATE P2-risk6(가드5 완성): 활성 daily 손실 상태(스톱로스/floored/바닥손실) 그룹 제외 —
         # 어제 daily 고삐가 조인 그룹을 오늘 탐색 UP으로 역전하지 않는다(DL과 동일 보드·신선도).
-        loss_reason = _exploration_daily_loss_reason(db, adgroup_id, today)
+        loss_reason = _exploration_daily_loss_reason(db, adgroup_id, today, now)
         if loss_reason is not None:
             result["held"].append({"target_id": adgroup_id, "reason": f"[탐색] daily 손실상태 제외 — {loss_reason}"})
             _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
