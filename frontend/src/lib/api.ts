@@ -6313,6 +6313,61 @@ export function fetchCostPriceHistory(params?: {
   return fetchApi(`/api/cost/price-history${qs ? `?${qs}` : ""}`);
 }
 
+// ──────────────────────────────────────────────
+// 정본 판별 (계약 D-CPP-64 §4 S2)
+// ──────────────────────────────────────────────
+
+/** `computed` 계산값 · `purchased` 매입가 · `held` 보류 · `none` 정본 없음. */
+export type CostTruthType = "computed" | "purchased" | "held" | "none";
+
+export interface CostTruthRow {
+  internal_sku: string;
+  product_name: string;
+  truth_type: CostTruthType;
+  truth_label: string;
+  /** ★보류·정본 없음이면 **null**이다 — 0이 아니다(「없음 ≠ 0」). */
+  truth_value: string | null;
+  current_cost_price: string | null;
+  /** 정본이 서 있을 때만 값이 있다. G1(그레인 불일치)은 뺄셈이 성립하지 않아 null. */
+  gap: string | null;
+  cause: string;
+  /** ref 118 §3 표의 원인 이름표(G1·G2·G3-1…) — 없으면 그 표에 없는 갈래다. */
+  cause_ref118: string | null;
+  /** 왜 이 판정인가 — 문장. 화면은 이걸 그대로 띄운다(빈 칸도 0도 아니다). */
+  reason: string;
+  /** 이 행을 움직일 수 있는 곳. 「소관 없음」도 유효한 답이다. */
+  owner: string;
+  recipe_id: number | null;
+  recipe_product_name: string | null;
+  form_factor: string | null;
+  recipe_kind: string | null;
+  computed_value: string | null;
+}
+
+export interface CostTruthCensus {
+  by_truth_type: Record<string, number>;
+  by_cause: Record<string, number>;
+  cause_ref118: Record<string, string>;
+  cutover_ready_count: number;
+  cutover_gap_sum: string;
+  matched_count: number;
+  held_count: number;
+  none_count: number;
+}
+
+export interface CostTruthBoard {
+  items: CostTruthRow[];
+  sku_count: number;
+  price_rule: string;
+  census: CostTruthCensus;
+  /** 이 층이 답하지 못하는 것 — 화면이 반드시 띄운다(집계가 조용히 완전해 보이면 안 된다). */
+  caveats: string[];
+}
+
+export function fetchCostTruthBoard(): Promise<CostTruthBoard> {
+  return fetchApi("/api/cost/truth-board");
+}
+
 /** 설정 1건 확인·변경. **값이 그대로여도** `value_changed:false`로 그 사실을 자백한다 —
  *  화면은 「값은 그대로 · 확인 기록 1건 추가」라고 말해야 한다(§2-6 침묵 금지). */
 export function updateCostSetting(

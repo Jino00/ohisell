@@ -133,12 +133,24 @@ export function sweepSummaryText(runs: CostAutoRefreshRun[]): string {
  *   순수 export를 하나 더 얹으면 `react-refresh/only-export-components` 경고가 1건 늘고
  *   CI의 warning 래칫이 그 자리에서 빨간불이 된다(2026-08-28 실측 — 96→97로 실제로 터졌다).
  *
- * 탭 이름은 `CostPage.tsx`의 `CostTab`과 같은 값이다. 타입을 import하면 lib→pages 방향의
- * 의존이 생기므로(이 파일이 `formatCostWon`을 로컬 사본으로 둔 것과 같은 이유) 여기서는
- * 유니온을 그대로 적는다 — 값이 갈라지면 `costPageWidthClass`를 부르는 쪽에서 타입이 걸린다.
+ * 탭 이름은 아래 `CostTab`이 **단일 출처**다.
+ *
+ * ★2026-09-01(D-CPP-64 S2): 종전엔 이 시그니처에 유니온을 **손으로 한 번 더** 적어 두고
+ *   *"값이 갈라지면 부르는 쪽에서 타입이 걸린다"*고 설명했다. 실제로 걸렸다 — 「정본 판별」
+ *   탭을 늘리자 `tsc -b`가 여기서 멈췄다(설계대로 작동한 것이다). 다만 **걸리는 것과 안
+ *   갈라지는 것은 다르다**: 손복사는 탭이 늘 때마다 두 곳을 고치게 하고, 그게 이 저장소가
+ *   반복해 밟은 「로직 두 벌」의 타입판이다. 그래서 유니온을 **이 파일로 옮겼다** —
+ *   `CostPage.tsx`가 이미 이 파일에서 `costPageWidthClass`를 가져오므로 방향은 pages→lib
+ *   그대로이고(lib→pages 의존은 안 생긴다), `CostPage.tsx`는 이 타입을 re-export만 한다.
  */
-export function costPageWidthClass(
-  tab: "home" | "materials" | "recipes" | "board" | "purchased",
-): string {
+export type CostTab =
+  | "home"
+  | "materials"
+  | "recipes"
+  | "board"
+  | "purchased"
+  | "truth";
+
+export function costPageWidthClass(tab: CostTab): string {
   return tab === "recipes" ? "p-6 max-w-[96rem]" : "p-6";
 }
