@@ -250,3 +250,37 @@ Jino가 범위를 **「배송비 계산 전체」**로 택함(2026-08-31 22:0x, 
 - **반대로 진짜 살아 있는 세션은 등록부로 안 보였다** — `pao-논의` **n=78 (c322b41f)**은 09:05 시작·09:41 커밋인데 **브랜치 미push**라 `origin/main` 등록부에 행이 없다. 워크트리 `~/.claude-worktrees/ohisell/pao-n78`이 **이미 존재**하는 것으로 발각됐다.
   ⇒ **「origin/main 등록부만 보면 미탐이 난다.」** 생존 판정에 `git worktree list` + 로컬 브랜치 확인을 같이 넣어야 한다. [[chain-liveness-must-be-read-from-origin-main]]의 반대 방향 실패.
 - 그래서 `pao-논의`에 append하지 않고 **`배송비-자` 체인을 신설**했다.
+
+---
+
+## 착지
+
+```
+커밋 8dbc1e0b → PR #621 → ⚠️ --force 병합 60f8c05c
+멈춘 단계: 없음 (완주)
+```
+
+- **⚠️ 리뷰 생략: 기록물만** — `HANDOFF_shipping-yardstick-recon_20260901.md` · `chains/배송비-자.jsonl` (코드 0파일)
+- **⚠️ 자백: PR #621 `--force` 병합** (verdict=FAIL) 2026-09-01 11:41:03 KST · 기록 `$TMPDIR/safe_merge.log`
+  - 사유 = **내 것이 아닌 저장소 전체 차단.** `backend/tests/test_rg_sales_date_fees.py` 2건이
+    정산주기 `dto=date(2026, 8, 31)`을 하드코딩하고 **「오늘 ≤ 08-31」에 의존**한다. 자정을 넘기며
+    「진행 중 주기(완결 0개 → rate=None)」가 「완결 주기」가 되어 `rate_unknown` → `settled_rate`로 뒤집혔다.
+    - `test_falls_back_to_ledger_axis_when_rate_unknown`
+    - `test_commission_axis_requires_known_rate_even_with_full_fee_coverage`
+  - **내 PR이 새 실패를 추가하지 않음을 증명함**: 로컬 전체 회귀 **2 failed / 7,494 passed**,
+    CI py3.10 **2 failed / 7,494 passed** · py3.14 **2 failed / 7,493 passed / 1 skipped** — 3경로 동일.
+    diff는 `.claude/memory/` 아래 2파일(253줄 추가)뿐이라 코드 경로에 원리적으로 못 닿는다.
+  - prod 위험 **0** (코드 0줄 · 배포 0)
+- **정정 경로**: `git revert -m 1 60f8c05c` (force-push 미사용 — 정정 경로 보존)
+- **L5로 「main에 세워둔다」 생략** — 로컬 `main`이 공유 메인 폴더에 체크아웃돼 있다.
+  다음 세션은 `git switch -c <새> origin/main`으로 딸 것.
+
+### ⛔ 저장소 전체 차단 — 다음 세션이 먼저 볼 것
+
+`origin/main` CI가 **지금 빨갛다. 내 것이 아니다.** 08-31 22:0x에 7,448 전건 통과했던 동일 트리가
+09-01 04:0x에 2건 실패로 바뀌었다(#619도 같은 이유로 `--force` 병합됨 — 나로 **2회 연속**).
+**모든 트랙의 PR 머지가 이걸로 막힌다.**
+
+- 소관: **RG 판매일 축 트랙** (내 스코프 밖 — 기록만)
+- 고칠 자리: 두 테스트가 `date(2026, 8, 31)`을 하드코딩하는 대신 **오늘 기준 상대 날짜**를 쓰게 할 것
+- 재현: `cd backend && python3 -m pytest tests/test_rg_sales_date_fees.py -q`
