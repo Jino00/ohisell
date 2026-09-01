@@ -5033,6 +5033,39 @@ export function reopenNaverSearchTermExclusion(rowId: number): Promise<{
   return fetchApi(`/api/naver/ad/search-term/exclusions/${rowId}/reopen`, { method: "POST" });
 }
 
+export interface NaverSearchTermVoidResult {
+  result: string;
+  exclusion_id: number;
+  status: string;
+  previous_status?: string;
+  diary_voided: number;
+  /** ★**3상이다** — true(셌을 수 있음) / false(아직 아님) / **null(확인 못 함)**.
+   *  null을 false로 접으면 「확인 안 함」이 「안 셌음」으로 둔갑한다(교훈 #123). 화면은
+   *  셋을 다르게 말해야 한다. */
+  wisdom_may_have_counted: boolean | null;
+  diary_note: string | null;
+}
+
+/** 잘못 들어온 원장 행 1건을 **무효화**한다(계약 P2 「원장 무효화(void) 버튼」의 손).
+ *
+ *  ★하드 삭제가 아니다 — 행은 감사용으로 남고 소비자(성적표·생존 감시 배너·SS레인·자동
+ *  발견·학습 사슬)에서 빠진다. 되돌릴 수 있으므로 승인 게이트가 아니지만, **사유가 필수**다
+ *  (왜 지웠는지 없는 삭제는 감사 불가).
+ *
+ *  ★**네이버 쓰기가 없다** — 우리 장부만 고친다. 이미 계정에 걸린 제외를 «푸는» 것은
+ *  재개방(`reopenNaverSearchTermExclusion`)이고 그건 실쓰기다. 둘을 섞으면 안 된다.
+ *
+ *  ⚠️이미 학습에 반영된 몫은 되돌리지 못한다 — 그 사실이 `wisdom_may_have_counted`로 온다. */
+export function voidNaverSearchTermExecution(
+  exclusionId: number, reason: string,
+): Promise<NaverSearchTermVoidResult> {
+  return fetchApi(`/api/naver/ad/search-term/executions/${exclusionId}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
 /** loss 대응 정책만 바꾼다(D-NAO-65 UI2). optimizer 스위치와 동형의 전용 엔드포인트 —
  *  전체 치환 PUT을 쓰면 mode·override·gamma가 null로 날아간다(D-NAO-53 교훈). 이 엔드포인트는
  *  loss_policy 외 필드를 건드리지 않는다. 백엔드는 loss_policy를 leash|stoploss_pause만 받는다
@@ -7080,6 +7113,39 @@ export function putPaoScopeAdgroup(body: {
   memo?: string | null;
 }): Promise<{ campaign_id: string; adgroup_id: string; role: PaoScopeRole | null; enabled: boolean; memo: string | null }> {
   return fetchApi(`/api/naver/ad/scope/adgroup`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface PaoScopeBulkResult {
+  campaign_id: string;
+  requested: number;
+  /** ★실제로 바뀐 수. `requested`와 다르다 — 이미 같은 값이던 행은 «했다»고 세지 않는다.
+   *  화면이 「N건 맡김」이라 말할 때 그 N은 이 값이어야 감사 원장의 줄 수와 일치한다. */
+  changed: number;
+  counts: { created: number; updated: number; unchanged: number };
+  rows: { adgroup_id: string; outcome: "created" | "updated" | "unchanged";
+          role: PaoScopeRole | null; enabled: boolean }[];
+}
+
+/** H5 — 캠페인의 여러 광고그룹을 한 번에 맡긴다/뺀다(계약 P2).
+ *
+ *  ★`adgroup_ids`를 **명시**로 보낸다 — 「이 캠페인의 전부」라는 뜻으로 부르지 않는다.
+ *  「전부」는 부르는 시점마다 뜻이 달라져서(그룹은 늘고 줄고, 화면은 특정 창의 목록을
+ *  보여준다) 사람이 «본 것»과 서버가 «손댄 것»이 조용히 어긋날 수 있다. 화면에 보이는
+ *  목록을 그대로 보내면 그 창이 닫힌다.
+ *
+ *  ★이 호출도 **엔진을 켜지 않는다**(단건과 동일 — auto_operate는 별도 스위치). */
+export function putPaoScopeCampaignBulk(body: {
+  campaign_id: string;
+  adgroup_ids: string[];
+  role: PaoScopeRole | null;
+  enabled: boolean;
+  memo?: string | null;
+}): Promise<PaoScopeBulkResult> {
+  return fetchApi(`/api/naver/ad/scope/campaign`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

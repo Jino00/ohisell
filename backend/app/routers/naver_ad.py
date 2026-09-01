@@ -1193,40 +1193,111 @@ def pao_scope_adgroup_put(body: AdgroupScopeIn, db: Session = Depends(get_db)):
     ⚠️ 첫 행이 들어가는 순간 그 캠페인은 「일부 그룹만 맡긴 상태」가 되어 **캠페인 레벨
     액션(예산)이 hold**된다 — 예산은 광고그룹으로 귀속이 불가능해 열어두면 스코프 «밖»
     그룹의 노출까지 같이 움직이기 때문이다.
+
+    ★H5(계약 P2)에서 일괄 경로가 생기면서 **upsert·감사 규칙을 `adgroup_scope`로 뽑았다** —
+    단건과 일괄이 같은 `action`을 서로 다른 관례로 적으면 원장을 읽는 쪽이 두 규칙을
+    재현해야 한다. 그 과정에서 종전 동작 두 가지가 바뀌었다(의도된 변경):
+      ① `before_value`가 항상 `None`이던 것 → **실제 이전 상태**(행이 없었으면 그대로 None).
+      ② 값이 그대로인 PUT도 감사 줄을 쓰던 것 → **바뀐 행만** 쓴다. 일괄에서 이게 없으면
+         버튼 한 번에 no-op 수십 줄이 원장을 덮어 「무엇이 실제로 바뀌었나」가 사라진다.
     """
     if body.role is not None and body.role not in adgroup_scope.VALID_ROLES:
         raise HTTPException(
             422, f"role은 {sorted(adgroup_scope.VALID_ROLES)} 중 하나이거나 null이어야 합니다"
         )
 
-    row = db.query(NaverAdgroupScope).filter(
-        NaverAdgroupScope.campaign_id == body.campaign_id,
-        NaverAdgroupScope.adgroup_id == body.adgroup_id,
-    ).first()
-    if row is None:
-        row = NaverAdgroupScope(
-            campaign_id=body.campaign_id, adgroup_id=body.adgroup_id,
+    res = adgroup_scope.apply_scope_row(
+        db, campaign_id=body.campaign_id, adgroup_id=body.adgroup_id,
+        role=body.role, enabled=body.enabled, memo=body.memo,
+    )
+    if res["outcome"] != "unchanged":
+        db.add(NaverChangeLog(
+            entity_type="adgroup", entity_id=body.adgroup_id, campaign_id=body.campaign_id,
+            action="adgroup_scope_change",
+            before_value=res["before"], after_value=res["after"],
+            rationale="PAO 스코프 설정(D-NAO-244)",
+            # changed_at 명시 — 안 넘기면 server_default가 UTC로 박힌다(교훈: 같은 함정 세 번).
+            changed_at=kst_now(),
+        ))
+    db.commit()
+    return {
+        "campaign_id": body.campaign_id, "adgroup_id": res["adgroup_id"],
+        "role": res["role"], "enabled": res["enabled"], "memo": res["memo"],
+        "outcome": res["outcome"],
+    }
+
+
+class CampaignScopeBulkIn(BaseModel):
+    """스코프 캠페인 단위 일괄 지정(H5 · 계약 P2). `extra='forbid'` — 단건과 같은 규격.
+
+    ★**대상 광고그룹을 «명시»로 받는다 — 「이 캠페인의 전부」로 받지 않는다.** 「전부」는
+      부르는 시점마다 뜻이 달라지는 말이라(그룹은 늘고 줄고, 화면은 특정 창의 목록을
+      보여준다), 사람이 화면에서 본 것과 서버가 실제로 손댄 것이 조용히 어긋날 수 있다.
+      본 것을 그대로 보내면 그 창이 닫힌다.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    campaign_id: str = Field(min_length=1, max_length=50)
+    # 상한 500 — 한 캠페인의 실제 그룹 수는 수십 규모다(prod 최대 58). 무제한이면 한 번의
+    # 잘못된 호출이 원장을 통째로 덮는다(`ConsoleExclusionImportIn`의 상한과 같은 이유).
+    adgroup_ids: list[str] = Field(min_length=1, max_length=500)
+    role: str | None = None
+    enabled: bool = True
+    memo: str | None = None
+
+
+@router.put("/scope/campaign")
+def pao_scope_campaign_bulk_put(body: CampaignScopeBulkIn, db: Session = Depends(get_db)):
+    """H5 — 캠페인의 여러 광고그룹을 한 번에 맡긴다/뺀다.
+
+    ★이 엔드포인트도 **엔진을 켜지 않는다**(단건과 동일). 스코프는 `auto_operate` «아래»의
+    축이라, 캠페인이 꺼져 있으면 행을 넣어도 실행은 0이다.
+
+    ★**N건이 한 트랜잭션이다.** 부분 커밋이 되면 「58개 중 40개만 맡겨진」 상태가 남는데
+    그건 사람이 의도한 적 없는 상태고, 화면은 그걸 「일괄 완료」로 읽는다.
+
+    ★중복 `adgroup_ids`는 **422로 거부**한다 — 조용히 dedupe 하면 「보낸 수」와 「손댄 수」가
+    달라지고, 그 차이는 응답의 카운트가 아니라 사람의 기대에서 어긋난다.
+    """
+    if body.role is not None and body.role not in adgroup_scope.VALID_ROLES:
+        raise HTTPException(
+            422, f"role은 {sorted(adgroup_scope.VALID_ROLES)} 중 하나이거나 null이어야 합니다"
+        )
+    if len(set(body.adgroup_ids)) != len(body.adgroup_ids):
+        raise HTTPException(422, "adgroup_ids에 중복이 있습니다")
+
+    now = kst_now()
+    results = []
+    for adgroup_id in body.adgroup_ids:
+        res = adgroup_scope.apply_scope_row(
+            db, campaign_id=body.campaign_id, adgroup_id=adgroup_id,
             role=body.role, enabled=body.enabled, memo=body.memo,
         )
-        db.add(row)
-    else:
-        row.role = body.role
-        row.enabled = body.enabled
-        row.memo = body.memo
-
-    db.add(NaverChangeLog(
-        entity_type="adgroup", entity_id=body.adgroup_id, campaign_id=body.campaign_id,
-        action="adgroup_scope_change",
-        before_value=None, after_value=f"role={body.role} enabled={body.enabled}",
-        rationale="PAO 스코프 설정(D-NAO-244)",
-        # changed_at 명시 — 안 넘기면 server_default가 UTC로 박힌다(교훈: 같은 함정 세 번).
-        changed_at=kst_now(),
-    ))
+        results.append(res)
+        if res["outcome"] != "unchanged":
+            db.add(NaverChangeLog(
+                entity_type="adgroup", entity_id=adgroup_id, campaign_id=body.campaign_id,
+                action="adgroup_scope_change",
+                before_value=res["before"], after_value=res["after"],
+                # ★일괄이었다는 사실을 원장에 남긴다 — 같은 초에 N줄이 선 이유를 나중에
+                #   읽는 쪽이 「폭주」로 오해하지 않게(수정 사항 화면의 피드 재적용과 같은 결).
+                rationale=f"PAO 스코프 일괄 지정(H5 · 계약 P2, {len(body.adgroup_ids)}건 중 1)",
+                changed_at=now,
+            ))
     db.commit()
-    db.refresh(row)
+
+    counts = {k: sum(1 for r in results if r["outcome"] == k)
+              for k in ("created", "updated", "unchanged")}
     return {
-        "campaign_id": row.campaign_id, "adgroup_id": row.adgroup_id,
-        "role": row.role, "enabled": bool(row.enabled), "memo": row.memo,
+        "campaign_id": body.campaign_id,
+        "requested": len(body.adgroup_ids),
+        # ★`changed`를 따로 준다 — 화면이 「N건 맡김」이라 말할 때 그 N이 «감사 줄이 선 수»와
+        #   같아야 한다. requested를 그대로 쓰면 no-op까지 「했다」로 표시된다.
+        "changed": counts["created"] + counts["updated"],
+        "counts": counts,
+        "rows": [{"adgroup_id": r["adgroup_id"], "outcome": r["outcome"],
+                  "role": r["role"], "enabled": r["enabled"]} for r in results],
     }
 
 

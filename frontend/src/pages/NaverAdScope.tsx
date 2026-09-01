@@ -26,6 +26,7 @@ import {
   fetchPaoScopeRoster, putPaoScopeAdgroup, deletePaoScopeAdgroup,
   putNaverCampaignAutoOperate, fetchNaverCampaignIgnitionPreflight,
   fetchNaverSearchTermExclusions, reopenNaverSearchTermExclusion,
+  putPaoScopeCampaignBulk, voidNaverSearchTermExecution,
   type PaoScopeCampaign, type PaoScopeAdgroup, type PaoScopeRole,
   type PaoScopeDayClassSplit, type NaverAdIgnitionPreflight,
   type NaverSearchTermExclusionRow,
@@ -487,10 +488,69 @@ function ReopenPanel({ campaignId }: { campaignId: string }) {
             {r.reopen_block_reason && (
               <span className="text-gray-500">— {r.reopen_block_reason}</span>
             )}
+            <VoidButton row={r} onDone={(m) => { setMsg(m); setReloadKey((k) => k + 1); }} />
           </li>
         ))}
       </ul>
     </div>
+  );
+}
+
+/** 원장 무효화(void) — 계약 P2 「원장 무효화(void) 버튼」의 손.
+ *
+ *  ★**재개방과 다른 일이다.** 재개방은 계정에 걸린 제외를 «푸는» 네이버 실쓰기이고, 무효화는
+ *    「이 행이 애초에 잘못 들어왔다」고 **우리 장부만** 고치는 것이다(네이버 쓰기 0). 둘을
+ *    나란히 두되 말로 갈라 놓는다 — 섞이면 사람이 계정을 건드릴 생각으로 장부를 지운다.
+ *
+ *  ★사유가 **필수**다(백엔드가 강제한다). 왜 지웠는지 없는 삭제는 감사 불가라서다.
+ *  ★★결과의 `wisdom_may_have_counted`는 **3상**이라 셋을 다르게 말한다 — 특히 `null`을
+ *    「아니오」로 접으면 «확인 안 함»이 «안 셌음»으로 둔갑한다(교훈 #123). */
+function VoidButton({
+  row, onDone,
+}: { row: NaverSearchTermExclusionRow; onDone: (msg: string) => void }) {
+  const [busy, setBusy] = useState(false);
+
+  async function run() {
+    const reason = window.prompt(
+      `「${row.search_term}」 원장 행을 무효화합니다.\n\n` +
+        "· 네이버 계정은 건드리지 않습니다(우리 장부만 고칩니다).\n" +
+        "· 행은 감사용으로 남고, 성적표·생존 감시·학습 사슬에서 빠집니다.\n\n" +
+        "사유를 적어 주세요(필수):",
+      "",
+    );
+    if (reason === null) return;               // 취소
+    if (!reason.trim()) {                      // 빈 사유는 보내지 않는다(백엔드도 422로 막는다)
+      onDone("사유가 비어 무효화하지 않았습니다.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await voidNaverSearchTermExecution(row.id, reason.trim());
+      const wisdom =
+        res.wisdom_may_have_counted === true
+          ? " ⚠️ 이미 학습에 셈이 들어갔을 수 있습니다(그건 되돌리지 못합니다)."
+          : res.wisdom_may_have_counted === false
+            ? " 학습에는 아직 안 들어갔습니다."
+            : " ⚠️ 학습 반영 여부는 **확인하지 못했습니다**(«아니오»가 아닙니다).";
+      const head = res.result === "already_void" ? "이미 무효화된 행입니다." : "무효화했습니다.";
+      onDone(`${head} 일기 ${res.diary_voided}건 중화.${wisdom}`);
+    } catch (e) {
+      onDone(e instanceof Error ? `무효화 실패: ${e.message}` : "무효화 실패");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => void run()}
+      className="px-2 py-0.5 rounded border border-gray-300 text-gray-600 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
+      title="이 행이 잘못 들어왔을 때 — 우리 장부만 고칩니다(네이버 쓰기 없음)"
+    >
+      {busy ? "…" : "무효화"}
+    </button>
   );
 }
 
@@ -499,6 +559,8 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
     return <EmptyState reason="이 창에 집행된 광고그룹이 없습니다." />;
   }
   return (
+    <>
+    <BulkScopeBar campaignId={c.campaign_id} adgroups={c.adgroups} onChanged={onChanged} />
     <Table
       head={
         // ★`<tr>`로 감싸지 않는다 — `Table`이 이미 `<thead><tr>{head}</tr></thead>`로 감싼다
@@ -531,6 +593,91 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
         <AdgroupRow key={g.adgroup_id} campaignId={c.campaign_id} g={g} onChanged={onChanged} />
       ))}
     </Table>
+    </>
+  );
+}
+
+/** H5 — 캠페인 단위 일괄 지정(계약 P2). 표 «위»에 둔다: 사람이 아래 목록을 보고 나서
+ *  「이거 전부」라고 누르는 순서이기 때문이다.
+ *
+ *  ★**보이는 목록을 그대로 보낸다** — 「이 캠페인의 전부」라는 뜻으로 서버에 맡기지 않는다.
+ *    그러면 화면의 창(기간 탭)이 거른 목록과 서버가 손댄 집합이 조용히 어긋난다.
+ *  ★**엔진을 켜지 않는다** — 스코프는 `auto_operate` «아래»의 축이다. 그 사실을 버튼 옆에
+ *    적어 둔다(누르는 사람이 「이걸로 돌기 시작한다」고 읽으면 안 된다). */
+function BulkScopeBar({
+  campaignId, adgroups, onChanged,
+}: { campaignId: string; adgroups: PaoScopeAdgroup[]; onChanged: () => void }) {
+  const [role, setRole] = useState<PaoScopeRole | "">("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const ids = adgroups.map((g) => g.adgroup_id);
+
+  async function apply(enabled: boolean) {
+    const verb = enabled ? "맡깁니다" : "끕니다";
+    const ok = window.confirm(
+      `보이는 광고그룹 ${ids.length}개를 한 번에 ${verb}.\n\n` +
+        (enabled
+          ? "⚠️ 이 캠페인이 「일부 그룹만 맡긴 상태」가 되면 캠페인 레벨 액션(예산)이 hold됩니다.\n"
+          : "행은 남고 꺼지기만 합니다(스코프에서 빼는 «해제»와 결과가 다릅니다).\n") +
+        "\n이 동작은 엔진을 켜지 않습니다 — 켜는 것은 별도 스위치입니다.",
+    );
+    if (!ok) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await putPaoScopeCampaignBulk({
+        campaign_id: campaignId, adgroup_ids: ids, role: role || null, enabled,
+      });
+      // ★`requested`가 아니라 `changed`를 말한다 — 이미 같은 값이던 행까지 「했다」고 세면
+      //   화면의 숫자가 감사 원장의 줄 수와 어긋난다.
+      setMsg(
+        `${r.changed}건 바뀜` +
+          (r.counts.unchanged > 0 ? ` · ${r.counts.unchanged}건은 이미 같은 값` : ""),
+      );
+      onChanged();
+    } catch (e) {
+      setMsg(e instanceof Error ? `실패: ${e.message}` : "실패");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (ids.length === 0) return null;
+  return (
+    <div className="px-4 py-2 flex flex-wrap items-center gap-2 text-xs border-b border-gray-100">
+      <span className="text-gray-600">보이는 {ids.length}개 일괄</span>
+      <select
+        className="text-xs border border-gray-200 rounded px-1 py-0.5"
+        value={role}
+        disabled={busy}
+        onChange={(e) => setRole(e.target.value as PaoScopeRole | "")}
+        aria-label="일괄 역할"
+      >
+        <option value="">역할 없음</option>
+        <option value="accel">액셀</option>
+        <option value="boundary">경계</option>
+        <option value="brake">브레이크</option>
+      </select>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void apply(true)}
+        className="px-2 py-0.5 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40"
+      >
+        {busy ? "…" : "전부 맡김"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void apply(false)}
+        className="px-2 py-0.5 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40"
+      >
+        전부 끄기
+      </button>
+      <span className="text-gray-400">엔진을 켜지는 않습니다</span>
+      {msg && <span className="text-gray-600">— {msg}</span>}
+    </div>
   );
 }
 

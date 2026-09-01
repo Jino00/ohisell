@@ -202,3 +202,59 @@ def scope_rows_for_campaigns(db: Session, campaign_ids) -> dict[str, list[dict]]
             {"adgroup_id": r.adgroup_id, "role": r.role, "enabled": bool(r.enabled), "memo": r.memo}
         )
     return out
+
+
+# ── 쓰기 ───────────────────────────────────────────────────────────────────
+# ★단건과 일괄이 **같은 함수**를 쓴다(H5 · 계약 P2). 이 저장소의 반복 실패 유형이
+#   「같은 뜻을 두 곳에 각자 적어 두면 갈라지고, 갈라진 쪽은 사고가 나야 드러난다」이고,
+#   감사 원장은 특히 그렇다 — 단건과 일괄이 같은 `action`을 서로 다른 `before_value`
+#   관례로 적으면 나중에 그 원장을 읽는 쪽이 두 규칙을 재현해야 한다.
+#   (직전 사례: 시뮬레이터가 dedupe 규칙을 «베껴 적어» 본체와 어긋난 것 — 처방은 같다.)
+
+def scope_state_text(role: str | None, enabled: bool) -> str:
+    """감사 원장에 적는 스코프 상태 1줄. **표기 규칙도 한 곳에만 둔다.**"""
+    return f"role={role} enabled={enabled}"
+
+
+def apply_scope_row(
+    db: Session, *, campaign_id: str, adgroup_id: str, role: str | None,
+    enabled: bool, memo: str | None,
+) -> dict:
+    """스코프 행 1개 upsert. **행만 건드리고 캠페인 설정(auto_operate)은 손대지 않는다.**
+
+    ★이 함수는 커밋하지 않는다 — 일괄 경로가 N건을 **한 트랜잭션**으로 묶어야 하기 때문이다.
+      커밋은 호출자(라우터) 몫이다. 부분 커밋이 되면 「58개 중 40개만 맡겨진」 상태가 화면과
+      원장에 남는데, 그건 사람이 의도한 적 없는 상태다.
+
+    ★`outcome`을 돌려주는 이유(일괄에서 특히 중요): 이미 같은 값인 행에 감사 줄을 또 쓰면
+      일괄 버튼을 두 번 누른 것만으로 원장이 no-op 수십 줄로 덮인다 — 그러면 원장이
+      「무엇이 실제로 바뀌었나」에 답하지 못하게 된다. 그래서 **바뀐 행만** 감사 줄을 쓴다.
+      단건 경로도 같은 규칙을 쓴다(둘이 갈라지지 않게 하는 것이 이 함수의 존재 이유다).
+
+    반환: {adgroup_id, outcome: "created"|"updated"|"unchanged", before, after, role, enabled, memo}
+      · before는 **행이 없었으면 None**이다(빈 문자열이 아니다 — 「없었다」와 「비어 있었다」는
+        다른 사실이고, 원장을 읽는 쪽이 그 둘을 구분할 수 있어야 한다).
+    """
+    row = db.query(NaverAdgroupScope).filter(
+        NaverAdgroupScope.campaign_id == campaign_id,
+        NaverAdgroupScope.adgroup_id == adgroup_id,
+    ).first()
+    after = scope_state_text(role, enabled)
+
+    if row is None:
+        db.add(NaverAdgroupScope(
+            campaign_id=campaign_id, adgroup_id=adgroup_id,
+            role=role, enabled=enabled, memo=memo,
+        ))
+        return {"adgroup_id": adgroup_id, "outcome": "created", "before": None, "after": after,
+                "role": role, "enabled": enabled, "memo": memo}
+
+    before = scope_state_text(row.role, bool(row.enabled))
+    # ★memo도 «바뀜»에 센다 — memo만 고친 것을 unchanged로 적으면 원장이 그 편집을 잃는다.
+    same = (row.role == role) and (bool(row.enabled) == enabled) and (row.memo == memo)
+    row.role = role
+    row.enabled = enabled
+    row.memo = memo
+    return {"adgroup_id": adgroup_id, "outcome": "unchanged" if same else "updated",
+            "before": before, "after": after,
+            "role": role, "enabled": enabled, "memo": memo}
