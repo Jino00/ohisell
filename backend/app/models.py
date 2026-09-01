@@ -2840,6 +2840,7 @@ KNOWN_CHANGE_LOG_ACTIONS: frozenset[str] = frozenset({
     "optimizer_change", "auto_operate_change", "add_negative_keyword",
     "update_expert_delegation", "system_status_change", "set_loss_policy",
     "update_guardrail_params",  # D-NAO-172 P1 — 봉투 파라미터 콘솔 PUT
+    "adgroup_scope_change",  # D-NAO-244 — PAO 스코프 행 upsert/삭제(단건·H5 일괄 공통)
     # 외부 변경 «탐지»(우리 쓰기가 아니다 — 주체 판정에서 agency 쪽으로 간다)
     "external_bid_change", "external_status_change", "external_qi_change",
     "external_keyword_added", "external_keyword_removed",
