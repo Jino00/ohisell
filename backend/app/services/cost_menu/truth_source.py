@@ -33,10 +33,12 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ...models import (
     CostRecipe,
+    CostRecipeLine,
     CostRecipeLink,
     CostStandard,
     ProductMaster,
@@ -330,15 +332,20 @@ def classify_ungrounded(
 # ──────────────────────────────────────────────
 
 
-def _breakdown_line_count(std: Optional[CostStandard], fallback: int) -> int:
-    """계산값이 몇 줄로 이루어졌나. ref 118 §6이 쓴 `json_each(breakdown)`와 같은 수."""
+def _breakdown_line_count(std: Optional[CostStandard]) -> Optional[int]:
+    """계산값이 몇 줄로 이루어졌나. ref 118 §6이 쓴 `json_each(breakdown)`와 같은 수.
+
+    `None`은 «breakdown으로는 못 센다»는 뜻이다 — 그때만 `cost_recipe_line`을 세는
+    폴백으로 넘어간다. 0을 돌려주면 「줄이 없다」와 「못 셌다」가 같은 값이 되고,
+    `line_count == 1`이 G3-1의 판별식이라 그 혼동이 곧 오분류다.
+    """
     if std is None or not std.breakdown:
-        return fallback
+        return None
     try:
         parsed = json.loads(std.breakdown)
     except (ValueError, TypeError):
-        return fallback
-    return len(parsed) if isinstance(parsed, list) else fallback
+        return None
+    return len(parsed) if isinstance(parsed, list) else None
 
 
 def _dec(v) -> Optional[Decimal]:
@@ -373,10 +380,6 @@ def truth_board(db: Session) -> dict:
     # ★단일 출처 — 여기서 `approved_at`을 다시 해석하지 않는다(§2-2).
     approved_purchase = load_approved_prices(db)
 
-    line_counts: dict[int, int] = {}
-    for rid, recipe in recipes.items():
-        line_counts[rid] = len(recipe.lines or [])
-
     by_sku_links: dict[str, list[CostRecipeLink]] = {}
     for l in links:
         by_sku_links.setdefault(l.internal_sku, []).append(l)
@@ -397,6 +400,25 @@ def truth_board(db: Session) -> dict:
             grounded_skus.setdefault(l.recipe_id, []).append(sku)
             break
 
+    # ★줄 수는 `breakdown`으로 세고, 못 세는 레시피만 «한 번의 묶음 질의»로 폴백한다
+    #   (적대 리뷰 P2-2). 종전엔 레시피 100건 전부에 lazy `recipe.lines`를 건드려
+    #   호출당 106개 SQL이 나갔는데, 그 폴백은 breakdown이 없을 때만 쓰는 값이었다.
+    #   `/api/cost/truth-board`는 원가 화면을 열 때마다 불리므로 레시피가 늘면 그대로 는다.
+    fallback_needed = [
+        rid
+        for rid in grounded_skus
+        if _breakdown_line_count(standards.get(rid)) is None
+    ]
+    fallback_counts: dict[int, int] = {}
+    if fallback_needed:
+        rows = (
+            db.query(CostRecipeLine.recipe_id, func.count(CostRecipeLine.id))
+            .filter(CostRecipeLine.recipe_id.in_(fallback_needed))
+            .group_by(CostRecipeLine.recipe_id)
+            .all()
+        )
+        fallback_counts = {rid: int(n) for rid, n in rows}
+
     groups: dict[int, RecipeGroup] = {}
     for rid, skus in grounded_skus.items():
         r = recipes[rid]
@@ -416,7 +438,11 @@ def truth_board(db: Session) -> dict:
             cost_price_kinds=len(distinct),
             cost_price_min=min(distinct) if distinct else None,
             std_cost_inc_vat=_dec(std.std_cost_inc_vat) if std else None,
-            line_count=_breakdown_line_count(std, line_counts.get(rid, 0)),
+            line_count=(
+                _breakdown_line_count(std)
+                if _breakdown_line_count(std) is not None
+                else fallback_counts.get(rid, 0)
+            ),
         )
 
     families: dict[str, list[RecipeGroup]] = {}

@@ -28,6 +28,7 @@ from app.main import app
 from app.models import (
     CostPurchasedPrice,
     CostRecipe,
+    CostRecipeLine,
     CostRecipeLink,
     CostStandard,
     ProductMaster,
@@ -135,9 +136,29 @@ def client():
         # G3-1 — 승인 imported_goods · 구성 1줄.
         _seed(s, recipe_id=40, name="EZ툴 강화유리 2매", form="bar", kind="imported_goods",
               status="approved", calc="3201.0", lines=1, skus=[("OHI-G31-1", "3500.0")])
+        # ★`breakdown`이 없어서 «줄 수를 breakdown으로 못 세는» 레시피 — 폴백 경로.
+        #   적대 리뷰 P2-2 수리(레시피 100건 lazy 순회 → 못 세는 것만 묶음 질의) 뒤,
+        #   이 모양이 없으면 폴백이 통째로 죽어도 전건 초록이다(실측: 변이 생존).
+        #   구성 줄이 1개이므로 G3-1로 판정돼야 한다 — 폴백이 0을 주면 잔여로 샌다.
+        _seed(s, recipe_id=38, name="EZ툴 강화유리 3매", form="bar", kind="imported_goods",
+              status="approved", calc="4100.0", lines=0, skus=[("OHI-FALLBACK", "3900.0")])
+        s.flush()
+        s.query(CostStandard).filter(CostStandard.recipe_id == 38).update(
+            {"breakdown": None}, synchronize_session=False
+        )
+        s.add(CostRecipeLine(
+            recipe_id=38, ledger_item_name="오타오_투명 강화유리 (New Ver.)", quantity=1,
+            note="수입 완제품 — 원장 로트 단가가 이 종에 붙는다",
+        ))
         # 일치 — 격차 0.4원.
         _seed(s, recipe_id=97, name="저반사 필름", form="fold", kind="assembly",
               status="approved", calc="3823.4", lines=8, skus=[("OHI-MATCH", "3823.0")])
+        # ★MATCH_EPSILON(0.5원) «바로 바깥» — 격차 2.0원. 일치가 아니라 잔여여야 한다.
+        #   적대 리뷰 P2-1: 이 모양이 없으면 임계를 0.5→5.0으로 흔들어도 전건 초록이다
+        #   (0.5와 5.0 사이에 픽스처가 한 건도 없었다). 판정을 지배하는 상수는 경계에
+        #   반례가 있어야 지켜진다 — 교훈 #381과 같은 결.
+        _seed(s, recipe_id=95, name="임계 경계 필름", form="bar", kind="assembly",
+              status="approved", calc="1002.0", lines=7, skus=[("OHI-EPS", "1000.0")])
         # draft 링크만 — 정본 없음(미분류).
         _seed(s, recipe_id=80, name="초안 레시피", form="bar", kind="assembly",
               status="draft", calc=None, lines=0, skus=[("OHI-DRAFT", "1000.0")])
@@ -207,9 +228,9 @@ def test_census_is_comparable_to_ref118_buckets(client):
     assert by_cause[TS.CAUSE_PARTS_299] == 2          # G2  — r50의 SKU 2건
     assert by_cause[TS.CAUSE_FAMILY_NOT_SPLIT] == 1   # G3-2 — r52
     assert by_cause[TS.CAUSE_GRAIN_MISMATCH] == 2     # G1  — r69의 SKU 2건
-    assert by_cause[TS.CAUSE_IMPORTED_SINGLE_LINE] == 1
+    assert by_cause[TS.CAUSE_IMPORTED_SINGLE_LINE] == 2   # r40(breakdown) + r38(폴백)
     assert by_cause[TS.CAUSE_MATCH] == 1
-    assert by_cause[TS.CAUSE_RESIDUAL] == 4           # r44·r45·r34·r35
+    assert by_cause[TS.CAUSE_RESIDUAL] == 5           # r44·r45·r34·r35·r95
     assert body["census"]["cause_ref118"][TS.CAUSE_PARTS_299] == "G2"
     assert body["census"]["cause_ref118"][TS.CAUSE_GRAIN_MISMATCH] == "G1"
 
@@ -353,6 +374,41 @@ def test_family_rule_needs_different_calc_not_just_same_form_factor(client):
     for sku in ("OHI-R44", "OHI-R45", "OHI-R34", "OHI-R35"):
         assert _row(body, sku)["cause"] == TS.CAUSE_RESIDUAL, sku
         assert _row(body, sku)["truth_type"] == TS.TRUTH_HELD, sku
+
+
+def test_line_count_falls_back_to_recipe_lines_when_breakdown_is_missing(client):
+    """★`breakdown`으로 줄 수를 못 세는 레시피는 `cost_recipe_line`으로 센다 — 적대 리뷰 P2-2.
+
+    P2-2 수리로 「레시피 전건 lazy 순회」를 「못 세는 것만 묶음 질의」로 바꿨다. 그 폴백이
+    통째로 죽어도(빈 dict) 종전 픽스처는 전건 초록이었다 — 모든 픽스처가 breakdown을
+    갖고 있어 폴백 경로를 한 번도 안 밟았기 때문이다(교훈 #381과 같은 모양).
+    """
+    row = _row(_body(client), "OHI-FALLBACK")
+    assert row["cause"] == TS.CAUSE_IMPORTED_SINGLE_LINE, (
+        "breakdown이 없는 1줄 레시피가 G3-1로 안 잡혔다 — 폴백이 0을 줬다는 뜻이다"
+    )
+    assert row["truth_type"] == TS.TRUTH_HELD
+
+
+def test_match_epsilon_boundary_is_pinned(client):
+    """★일치 임계(0.5원)가 «값»으로 고정돼 있다 — 적대 리뷰 P2-1.
+
+    격차 2.0원은 일치가 **아니다.** 이 픽스처가 없으면 `MATCH_EPSILON`을 0.5→5.0으로
+    흔들어도 전건 초록이었다(리뷰어 실측) — 0.5와 5.0 사이에 반례가 한 건도 없었기 때문이다.
+    임계는 두 곳에서 쓰인다(분류의 「일치」 · 컷오버 대상의 하한). 둘 다 여기서 지켜진다.
+    """
+    body = _body(client)
+    row = _row(body, "OHI-EPS")
+    assert row["cause"] == TS.CAUSE_RESIDUAL, "격차 2.0원이 「일치」로 판정됐다 — 임계가 넓어졌다"
+    assert row["truth_type"] == TS.TRUTH_HELD
+    assert row["truth_value"] is None
+    # 컷오버 대상에도 안 들어간다(보류이므로). 임계가 넓어지면 여기서도 갈린다.
+    assert all(
+        r["internal_sku"] != "OHI-EPS"
+        for r in body["items"]
+        if r["truth_type"] in (TS.TRUTH_COMPUTED, TS.TRUTH_PURCHASED)
+    )
+    assert body["census"]["matched_count"] == 1, "일치는 r97 하나뿐이어야 한다"
 
 
 def test_grain_mismatch_wins_over_the_299_rule(client):
