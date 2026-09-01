@@ -409,10 +409,13 @@ def order_shipping_cost(order_row: Any = None) -> Decimal:
 
 
 def net_shipping_burden(paid: Any, collected: Any) -> Decimal:
-    """실부담 배송비 = 우리 지불 − 고객 수취(clamp 없음, 조회·리포트용).
+    """실부담 배송비 = 우리 지불 − 고객 수취(clamp 없음 — 음수 = 배송 마진이 남는 것).
 
-    ★BEP 계산은 별도로 max(0,·) 보수 클램프를 적용한다(배송 마진을 이익으로 인정하지 않음).
-      리포트는 사실 그대로(음수 가능)를 보여준다 — 두 목적이 다르다."""
+    ★2026-09-01(D-NAO-283)부터 **BEP도 이 함수를 쓴다.** 종전엔 BEP만 별도로 max(0,·)
+      클램프를 걸어 배송 마진을 이익으로 인정하지 않았고, 이 docstring이 그 대조를 설명했다.
+      그 클램프는 실제 배송 구조와 어긋났다 — 내일배송은 1,900 지불/3,000 수취로 **1,100원이
+      남고** N배송은 3,377/3,000으로 377원 부담이라 부호가 애초에 다르다(Jino 원문 2026-08-31).
+      이제 조회·리포트와 BEP가 **같은 계약**을 쓴다. 소비처: bep_calculator._avg_qty_and_logistics."""
     p = Decimal(str(paid)) if paid is not None else Decimal("0")
     c = Decimal(str(collected)) if collected is not None else Decimal("0")
     return p - c

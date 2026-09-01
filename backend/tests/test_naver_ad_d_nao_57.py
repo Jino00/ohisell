@@ -16,8 +16,8 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import (
     Channel, NaverAdDaily, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity,
-    NaverProductBep, NaverSettlementCase, NaverSettlementDaily, Order, ProductChannelMapping,
-    ProductMaster,
+    NaverProductBep, NaverProductMetaCurrent, NaverSettlementCase, NaverSettlementDaily, Order,
+    ProductChannelMapping, ProductMaster,
 )
 from app.services.naver_ad import bep_calculator, campaign_target_resolver, shopping_ad_product_sync
 from app.utils.kst import kst_today
@@ -407,15 +407,40 @@ def test_avg_logistics_nets_collected_shipping(db):
     assert out["p1"]["logistics"] == Decimal("400.00")
 
 
-def test_avg_logistics_clamps_net_at_zero(db):
-    """리뷰 P2-1 보수 클램프: 수취가 지불(1900)을 초과해도 배송 마진을 이익으로 잡지 않는다."""
+def test_avg_logistics_credits_delivery_margin(db):
+    """★D-NAO-283: 수취가 지불을 넘으면 **배송 마진을 이익으로 인정**한다(클램프 폐지).
+
+    종전엔 max(0, 지불−수취)로 이 경우를 0으로 지웠고 그것을 "보수 클램프"라 불렀다.
+    그러나 그 「보수」는 실제 구조와 어긋난다 — Jino 원문(2026-08-31): 내일배송은 한진택배에
+    1,900원을 내고 고객에게 3,000원을 받아 **"1100원이 남는"** 구조다. 클램프는 부호가 다른
+    두 배송방식 중 **이익 쪽만 골라 0으로** 만들어, 한 방향으로만 틀렸다.
+    여기 수취 5,000은 그 구조의 과장판이다: net = 1,900 − 5,000 = **−3,100**."""
     db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
                  shipping_cost=Decimal("5000"), order_date=date(2026, 7, 1), order_number="o1"))
     db.commit()
     out = bep_calculator._avg_qty_and_logistics(db)
     assert out["p1"]["collected"] == Decimal("5000")
-    assert out["p1"]["net_ship"] == Decimal("0")   # max(0, 1900-5000)
-    assert out["p1"]["logistics"] == Decimal("0.00")
+    assert out["p1"]["net_ship"] == Decimal("-3100")   # 클램프가 되살아나면 0이 되어 여기서 죽는다
+    assert out["p1"]["logistics"] == Decimal("-3100.00")
+    assert out["p1"]["basis"] == "orders"
+
+
+def test_avg_logistics_matches_jino_tomorrow_delivery_structure(db):
+    """★Jino가 말한 구조 그대로가 숫자로 나오는가 — 내일배송 한 건당 +1,100원이 남는다.
+
+    지불 1,900(한진) · 수취 3,000(고객) ⇒ net_ship = −1,100. 수량 1이므로 logistics도 −1,100.
+    이 테스트가 «계약의 원문»이다 — 상수가 바뀌어도 「1,100원이 남는다」는 관계가 남아야 한다."""
+    for i in range(3):
+        db.add(Order(channel_id=6, platform_product_id="tmr", selling_price=Decimal("10000"),
+                     quantity=1, shipping_cost=Decimal("3000"),
+                     order_date=date(2026, 7, 1 + i), order_number=f"tmr{i}"))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)["tmr"]
+    assert out["nb_share"] == Decimal("0")                          # 전부 일반(내일)배송
+    assert out["shipping"] == bep_calculator.SHIPPING_COST_NORMAL   # 1,900 지불
+    assert out["collected"] == Decimal("3000")                      # 3,000 수취
+    assert out["net_ship"] == Decimal("-1100")                      # ★"1100원이 남는 거야"
+    assert out["logistics"] == Decimal("-1100.00")
 
 
 def _bep_fixture(db, *, cost="5000", price="10000", qty=1):
@@ -645,11 +670,13 @@ def test_avg_qty_still_uses_wide_window(db):
     assert out["avg_qty"] == Decimal("3")   # (5×10 + 1×10)/20 — 넓은 창
 
 
-def test_net_ship_clamped_at_zero_when_collected_exceeds_paid(db):
-    """★보수 클램프 — 수취가 지불을 넘어도 배송마진을 «이익»(음수 물류비)으로 잡지 않는다.
+def test_net_ship_is_negative_when_collected_exceeds_paid(db):
+    """★D-NAO-283 — 수취가 지불을 넘으면 물류비가 **음수**가 된다(클램프 되살리는 변이를 잡는다).
 
-    클램프를 지우는 변이를 잡는다(2026-08-10 변이 주입에서 생존했던 것). 클램프가 없으면
-    logistics가 음수가 되어 공헌이익이 부풀고 BEP가 낙관 쪽으로 틀어진다."""
+    이 테스트는 원래 반대 방향이었다(`test_net_ship_clamped_at_zero_...`, 2026-08-10 변이 주입에서
+    클램프를 지키기 위해 세운 것). 계약이 뒤집혔으므로 **지키는 방향도 뒤집는다** — 테스트를
+    지우기만 하면 다음 사람이 「보수적으로」 클램프를 되살려도 아무도 안 잡는다.
+    여기서 −3,100이 0이 되면 그 순간 죽는다."""
     for i in range(10):
         db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("10000"),
                      quantity=1, shipping_cost=Decimal("5000"),      # 지불 1,900보다 큼
@@ -659,6 +686,178 @@ def test_net_ship_clamped_at_zero_when_collected_exceeds_paid(db):
     out = bep_calculator._avg_qty_and_logistics(db)["p1"]
     assert out["shipping"] == Decimal("1900")
     assert out["collected"] == Decimal("5000")
-    assert out["net_ship"] == Decimal("0")      # −3,100이 아니라 0
-    assert out["logistics"] == Decimal("0.00")
-    assert out["logistics"] >= 0                # 음수 물류비 금지
+    assert out["net_ship"] == Decimal("-3100")   # 0이 아니라 −3,100
+    assert out["logistics"] == Decimal("-3100.00")
+    assert out["logistics"] < 0                  # 배송 마진이 이익으로 인정된다
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D-NAO-283 — 배송비 자(尺) 정합: ⓑ형제 실측 폴백 · ⓒ판매가 폴백 ③(메타 할인적용가)
+# 계약 docs/contracts/CONTRACT_shipping_yardstick.md
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _meta(cpno, *, group=None, discounted=None, sale=None):
+    return NaverProductMetaCurrent(
+        channel_product_no=cpno, group_product_no=group,
+        discounted_price=discounted, sale_price=sale,
+    )
+
+
+def _mapped(db, cpid, *, cost="3000", mapping_price="0", name="X"):
+    pm = ProductMaster(internal_sku=f"SKU-{cpid}", product_name=name, cost_price=Decimal(cost))
+    db.add(pm)
+    db.flush()
+    db.add(ProductChannelMapping(product_id=pm.id, channel_id=6, channel_product_id=cpid,
+                                 channel_product_name=name,
+                                 selling_price=Decimal(mapping_price), is_active=True))
+    return pm
+
+
+def test_sibling_logistics_used_when_product_has_no_orders(db):
+    """★ⓑ 주문 0건 상품은 같은 group_product_no 형제의 실측 배송 구성을 물려받는다.
+
+    종전엔 「수취 0 · 수량 1」 가정으로 1,900원 **전액**이 잡혔다 — 형제가 실제로는 3,000원을
+    받고 있는데도. 라이브에서 그 차이가 BEP 약 14% 과대였다(폴드7 2.0366 vs 형제 기준 1.7838).
+    형제 3건: 지불 1,900(일반) · 수취 3,000 ⇒ net −1,100, 수량 1 ⇒ logistics −1,100."""
+    for i in range(3):
+        db.add(Order(channel_id=6, platform_product_id="bro", selling_price=Decimal("10000"),
+                     quantity=1, shipping_cost=Decimal("3000"),
+                     order_date=kst_today() - timedelta(days=i + 1), order_number=f"b{i}"))
+    db.add(_meta("bro", group="G1"))
+    db.add(_meta("newbie", group="G1"))       # 주문 0건 형제
+    db.commit()
+
+    out = bep_calculator.logistics_by_product(db)
+    assert out["bro"]["basis"] == "orders"
+    assert out["newbie"]["basis"] == "sibling"
+    assert out["newbie"]["logistics"] == Decimal("-1100.00")   # 형제 실측 그대로
+    assert out["newbie"]["collected"] == Decimal("3000")
+
+
+def test_own_orders_beat_siblings(db):
+    """★자기 주문이 있으면 형제는 쓰지 않는다 — 형제는 «모를 때»의 답이지 «더 나은» 답이 아니다."""
+    db.add(Order(channel_id=6, platform_product_id="bro", selling_price=Decimal("10000"),
+                 quantity=1, shipping_cost=Decimal("3000"),
+                 order_date=kst_today() - timedelta(days=1), order_number="b1"))
+    db.add(Order(channel_id=6, platform_product_id="self", selling_price=Decimal("10000"),
+                 quantity=1, shipping_cost=Decimal("0"),      # 자기는 무료배송(수취 0)
+                 order_date=kst_today() - timedelta(days=1), order_number="s1"))
+    db.add(_meta("bro", group="G1"))
+    db.add(_meta("self", group="G1"))
+    db.commit()
+
+    out = bep_calculator.logistics_by_product(db)
+    assert out["self"]["basis"] == "orders"
+    assert out["self"]["logistics"] == Decimal("1900.00")   # 형제의 −1,100을 물려받지 않는다
+
+
+def test_no_sibling_falls_back_to_default_and_says_so(db):
+    """★형제가 없으면 현행 폴백을 유지한다(계약 §2-3) — 그리고 그것이 «모름»이라고 말한다."""
+    db.add(_meta("lonely", group="G9"))   # 그룹은 있으나 주문 있는 형제가 없다
+    db.add(_meta("groupless"))            # 그룹 자체가 없다
+    db.commit()
+
+    out = bep_calculator.logistics_by_product(db)
+    for cpid in ("lonely", "groupless"):
+        assert out[cpid]["basis"] == "default"
+        assert out[cpid]["logistics"] == bep_calculator.SHIPPING_COST_NORMAL
+        assert out[cpid]["orders"] == 0
+
+
+def test_meta_discounted_price_is_third_price_fallback(db):
+    """★ⓒ orders도 mapping도 없으면 커머스API 할인적용가로 BEP를 산출한다.
+
+    손계산 대조(거울 방지): sp=19,900(meta) / rate=0.05(채널 5%) / cost=6,406 /
+      logistics=1,900(형제 없음 → 기본 폴백)
+      commission = 19,900 × 0.05 = 995
+      contribution = (19900 − 995 − 6406 − 1900)/1.1 = 10599/1.1 = 9635.4545… → 9635.45
+      bep = 19900 / 9635.4545… = 2.06531… → 2.0653"""
+    db.add(Channel(id=6, name="네이버", code="NAVER", platform="naver", commission_rate=Decimal("5.0")))
+    _mapped(db, "13687558209", cost="6406", mapping_price="0", name="4매입 폴드")
+    db.add(_meta("13687558209", group="52308509", discounted=19900, sale=27500))
+    db.commit()
+
+    bep_calculator.calculate_bep(db)
+    row = db.query(NaverProductBep).filter(
+        NaverProductBep.channel_product_id == "13687558209").one()
+    assert row.selling_price == Decimal("19900.00")
+    assert row.price_basis == "meta"
+    assert row.logistics_basis == "default"
+    assert row.has_cost is True
+    assert row.contribution_margin == Decimal("9635.45")
+    assert row.bep_roas == Decimal("2.0653")
+
+
+def test_sale_price_is_never_used_as_selling_price(db):
+    """★금지선(계약 §3): 정가(sale_price)를 판매가로 쓰지 않는다.
+
+    그룹 52308509에서 정가 27,500 vs 할인적용가 19,900은 **38% 차이**다. 정가를 쓰면 상한이
+    그만큼 부풀어 과지출 방향으로 틀어진다. 할인적용가가 없으면 값을 만들지 않는다."""
+    db.add(Channel(id=6, name="네이버", code="NAVER", platform="naver", commission_rate=Decimal("5.0")))
+    _mapped(db, "onlysale", cost="6406", mapping_price="0")
+    db.add(_meta("onlysale", discounted=None, sale=27500))   # 정가만 있다
+    db.commit()
+
+    bep_calculator.calculate_bep(db)
+    row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "onlysale").one()
+    assert row.selling_price == Decimal("0.00")   # 27,500이 새어 들어오면 여기서 죽는다
+    assert row.bep_roas is None
+    assert row.has_cost is False
+
+
+def test_price_fallback_priority_orders_then_mapping_then_meta(db):
+    """★폴백은 순서대로 은퇴한다 — 실거래 > 사람 입력 > 메타. 셋이 다 있으면 실거래가 이긴다."""
+    db.add(Channel(id=6, name="네이버", code="NAVER", platform="naver", commission_rate=Decimal("5.0")))
+    _mapped(db, "all3", cost="1000", mapping_price="15000")
+    db.add(Order(channel_id=6, platform_product_id="all3", selling_price=Decimal("12000"),
+                 quantity=1, order_date=kst_today() - timedelta(days=1), order_number="a1"))
+    db.add(_meta("all3", discounted=19900))
+    _mapped(db, "map2", cost="1000", mapping_price="15000")   # 주문 없음, 매핑값 있음
+    db.add(_meta("map2", discounted=19900))
+    db.commit()
+
+    bep_calculator.calculate_bep(db)
+    rows = {r.channel_product_id: r for r in db.query(NaverProductBep).all()}
+    assert rows["all3"].selling_price == Decimal("12000.00")   # 실거래
+    assert rows["all3"].price_basis == "orders"
+    assert rows["map2"].selling_price == Decimal("15000.00")   # 사람 입력이 메타를 이긴다
+    assert rows["map2"].price_basis == "mapping"
+
+
+def test_basis_counts_reported_by_calculate_bep(db):
+    """★출처 분포가 반환·로그에 실린다 — 화면 밖에서도 「자가 무엇으로 만들어졌나」를 셀 수 있게."""
+    db.add(Channel(id=6, name="네이버", code="NAVER", platform="naver", commission_rate=Decimal("5.0")))
+    _mapped(db, "o1", cost="1000")
+    db.add(Order(channel_id=6, platform_product_id="o1", selling_price=Decimal("12000"),
+                 quantity=1, order_date=kst_today() - timedelta(days=1), order_number="x1"))
+    _mapped(db, "m1", cost="1000")
+    db.add(_meta("m1", discounted=19900))
+    db.commit()
+
+    res = bep_calculator.calculate_bep(db)
+    assert res["price_basis_counts"] == {"orders": 1, "meta": 1}
+    assert res["logistics_basis_counts"] == {"orders": 1, "default": 1}
+
+
+def test_select_best_mappings_smaller_product_id_wins_not_bigger_price(db):
+    """★dedupe 규칙 못박기 — 판매가가 서로 다르면 **큰 값이 아니라 product_id 작은 쪽**이 이긴다.
+
+    적대 리뷰 2R P2-2에서 배포 전 시뮬레이터가 이 규칙을 `max(판매가)`로 베껴 적어 본체와
+    어긋났다. 규칙을 select_best_mappings 하나로 모았고, 이 테스트가 그 계약을 고정한다 —
+    「큰 값이 이긴다」로 바꾸는 변이가 여기서 죽는다."""
+    lo = ProductMaster(internal_sku="SKU-LO", product_name="lo", cost_price=Decimal("1000"))
+    hi = ProductMaster(internal_sku="SKU-HI", product_name="hi", cost_price=Decimal("1000"))
+    db.add_all([lo, hi])
+    db.flush()
+    assert lo.id < hi.id, "픽스처 전제: lo가 더 작은 product_id"
+    db.add(ProductChannelMapping(product_id=lo.id, channel_id=6, channel_product_id="dup",
+                                 channel_product_name="lo", selling_price=Decimal("10000"),
+                                 is_active=True))
+    db.add(ProductChannelMapping(product_id=hi.id, channel_id=6, channel_product_id="dup",
+                                 channel_product_name="hi", selling_price=Decimal("99000"),
+                                 is_active=True))
+    db.commit()
+
+    best = bep_calculator.select_best_mappings(db)
+    assert best["dup"].product_id == lo.id
+    assert Decimal(str(best["dup"].selling_price)) == Decimal("10000")   # 99,000이 아니다

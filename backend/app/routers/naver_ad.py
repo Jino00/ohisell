@@ -203,6 +203,10 @@ def _serialize_bep(r: NaverProductBep) -> dict:
         "aggressiveness": r.aggressiveness,
         "target_roas": _num(r.target_roas),
         "has_cost": r.has_cost,
+        # D-NAO-283: 이 행의 자가 «무엇으로» 만들어졌나. 실측/입력/모름이 화면에서 갈린다.
+        "commission_basis": r.commission_basis,
+        "price_basis": r.price_basis,
+        "logistics_basis": r.logistics_basis,
     }
 
 

@@ -2445,6 +2445,19 @@ class NaverProductBep(Base):
     #                   않을 때의 계정 단일 요율 폴백. ★언디루션은 라이브에서 항등(ref 42 §6, N3).
     #   blended        — 전체 회계 실효율(|Σcomm|/(Σsettle+|Σcomm|)) 최종 폴백.
     commission_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # ── D-NAO-283 (2026-09-01): 자가 «무엇으로» 만들어졌나를 행 단위로 남긴다 ──
+    # 종전엔 폴백 상수와 실측이 같은 칸에 구분 없이 앉아 있어, 다음 세션이 「이 숫자가 실측인가
+    # 추정인가」를 되물을 수 없었다(bep_calculator.py 머리말이 이미 부채로 적어 둔 구멍).
+    #   판매가 price_basis:
+    #     orders  — orders 실거래 단가 median (기본·가장 정직)
+    #     mapping — product_channel_mapping.selling_price (사람이 손으로 넣은 값, D-NAO-95)
+    #     meta    — naver_product_meta_current.discounted_price (커머스API 할인적용가, C10 09:55)
+    #   물류비 logistics_basis:
+    #     orders  — 그 상품 자기 주문 실측
+    #     sibling — 같은 group_product_no 형제 주문 실측 (주문 0건 상품)
+    #     default — 자기도 형제도 없음. 수취 0 · 수량 1 가정 = **측정이 아니라 «모름»**
+    price_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    logistics_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     calculated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

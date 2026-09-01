@@ -323,3 +323,78 @@ def test_market_bid_prefers_latest_observation_day(client_and_session):
     row = next(r for r in out["rows"] if r["cost_price"] is not None)
     assert row["market_bid"] == 1500
     assert row["market_bid_observed_on"] == today.isoformat()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D-NAO-283 — 출처(price_basis · logistics_basis)가 **실제 HTTP 응답까지** 나가는가
+#
+# ★적대 리뷰 1R P1 상환. 초판엔 이 배선을 지키는 테스트가 **한 개도 없었다**:
+#   백엔드 테스트는 `NaverProductBep.price_basis`(DB 컬럼)를 직접 쿼리했고,
+#   프론트 표면 테스트는 `../lib/api`를 통째로 vi.mock 해 **손으로 쓴 fixture**를 그렸다.
+#   ⇒ 두 층은 각각 지켜졌는데 «둘을 잇는 한 줄»(직렬화)만 무보호였다.
+#   bep_breakdown.build()와 _serialize_bep()에서 그 줄을 지워도 **1,346건 전건 초록**이었다.
+#
+# ★이건 이 저장소가 «이름까지 붙여 둔» 결함이다 — 교훈 #380(2026-08-31, 바로 직전 슬라이스):
+#   *"두 층 각각은 지켜지는데 «둘을 잇는 한 줄»만 아무도 안 지킨다 … 표면 절단 변이는
+#     «렌더 절단»만이 아니라 «배선 절단»까지여야 한다"*.
+#   그 교훈을 커밋 메시지에 인용하면서 같은 구멍을 세 번째 자리에 남겼다.
+#   ⇒ 여기서 지키는 것은 산식이 아니라 **JSON에 그 키가 실려 나가는가**다.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _basis_row(pid: str, *, logistics_basis: str, price_basis: str, logi: int = 1900):
+    row = _bep_row(pid, sp=12900, cost=3100, rate="0.0589", logi=logi, name=f"출처 {pid}")
+    row.logistics_basis = logistics_basis
+    row.price_basis = price_basis
+    return row
+
+
+def test_http_bep_breakdown_carries_basis_fields(client_and_session):
+    """★배선: /performance/bep-breakdown **HTTP 응답**에 출처 두 키가 실린다.
+
+    build()에서 반환 줄을 지우는 변이가 여기서 죽는다(초판엔 그 변이가 생존했다)."""
+    client, db = client_and_session
+    _seed(db)
+    db.add(NaverAdgroupProduct(adgroup_id=GROUP_A, campaign_id=CAMPAIGN,
+                               mall_product_id="p-sibling", product_name="형제", ad_id="nad-sib"))
+    db.add(_basis_row("p-sibling", logistics_basis="sibling", price_basis="meta", logi=-209))
+    db.commit()
+
+    res = client.get("/api/naver/ad/performance/bep-breakdown", params={"campaign_id": CAMPAIGN})
+    assert res.status_code == 200
+    rows = {r["product_name"]: r for r in res.json()["rows"]}
+    sib = rows["출처 p-sibling"]
+    assert sib["logistics_basis"] == "sibling"
+    assert sib["price_basis"] == "meta"
+    assert sib["logistics_cost"] == -209        # ★음수 물류비가 JSON까지 살아서 나간다
+    # 실측 행은 「orders」로 나가야 한다 — None으로 뭉개지면 화면이 출처를 못 가른다.
+    assert rows["[P_삭제금지]아이폰 강화유리"]["logistics_basis"] is None  # 시드는 미설정(마이그 직후 모양)
+
+
+def test_http_bep_list_carries_basis_fields(client_and_session):
+    """★배선: /bep 목록 **HTTP 응답**에도 출처가 실린다(_serialize_bep).
+
+    성과뷰와 리포트는 서로 다른 엔드포인트를 쓴다 — 한쪽만 지키면 다른 쪽이 조용히 빈다."""
+    client, db = client_and_session
+    db.add(_basis_row("p-meta", logistics_basis="default", price_basis="meta"))
+    db.add(_basis_row("p-own", logistics_basis="orders", price_basis="orders"))
+    db.commit()
+
+    res = client.get("/api/naver/ad/bep")
+    assert res.status_code == 200
+    rows = {r["channel_product_id"]: r for r in res.json()["rows"]}
+    assert rows["p-meta"]["price_basis"] == "meta"
+    assert rows["p-meta"]["logistics_basis"] == "default"
+    assert rows["p-own"]["price_basis"] == "orders"
+    assert rows["p-own"]["logistics_basis"] == "orders"
+    assert rows["p-own"]["commission_basis"] == "delivery_case"
+
+
+def test_http_bep_list_serves_negative_logistics(client_and_session):
+    """★ⓐ의 결과가 API 경계를 넘는가 — 음수 물류비가 0이나 절댓값으로 뭉개지지 않는다."""
+    client, db = client_and_session
+    db.add(_basis_row("p-margin", logistics_basis="orders", price_basis="orders", logi=-1100))
+    db.commit()
+
+    res = client.get("/api/naver/ad/bep")
+    row = next(r for r in res.json()["rows"] if r["channel_product_id"] == "p-margin")
+    assert row["logistics_cost"] == -1100.0

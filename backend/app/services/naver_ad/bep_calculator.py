@@ -4,8 +4,13 @@
 # 판매가 소스: ①orders 실거래가(기본) — selling_price는 라인총액이라 수량으로 나눠 단가
 #   정규화 후 상품별 median(프로모 완화). ②주문 0건이면 product_channel_mapping.selling_price
 #   폴백(D-NAO-95, 신규 상품 온보딩용 — 사람이 커머스API 실판매가를 적어 넣는 자리).
-#   ★②로 산출된 행은 "실거래로 검증된 판매가"가 아니다(운영자 입력값) — 주문이 한 건이라도
-#   생기면 ①이 이겨 자동 은퇴한다. 행 단위 출처 컬럼은 아직 없다(스키마 변경 별건).
+#   ③②도 비어 있으면 naver_product_meta_current.discounted_price(D-NAO-283 — C10이 매일 09:55
+#   수집하는 커머스API 할인적용가). ②는 «손으로 넣는 자리»라 실제로는 대부분 비어 있었다:
+#   라이브 758행 중 201행이 sp<=0 → bep_roas NULL이었고, 그 201행은 **전부 원가는 있었다**
+#   (=「판매가를 모른다」가 아니라 「판매가를 넣을 자리가 없다」). 그중 166행에 ③이 이미 있다.
+#   ★②③으로 산출된 행은 "실거래로 검증된 판매가"가 아니다 — 주문이 한 건이라도 생기면 ①이
+#   이겨 자동 은퇴한다. **어느 것이 쓰였는지는 price_basis 컬럼에 행 단위로 남긴다**(D-NAO-283
+#   — 종전엔 출처 컬럼이 없어 「이 숫자가 실측인가 입력값인가」를 되물을 수 없었다).
 # 참고 메모리: bep-roas-calculation-structure (BEP ROAS = 판매가 ÷ 공헌이익).
 # ★N1 (D-NAO-99, ref 42): 이 모듈은 harness다 — 입력 3개를 각각의 SA에서 받아 조합한다.
 #   판매가·N배송 혼합비 = 최근 10건 표본(레짐 변수, D-NAO-100) / 평균수량·수취배송비 = 넓은 창 /
@@ -21,8 +26,8 @@ from sqlalchemy import delete, func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Channel, NaverProductBep, NaverSettlementCase, NaverSettlementDaily, Order,
-    ProductChannelMapping, ProductMaster,
+    Channel, NaverProductBep, NaverProductMetaCurrent, NaverSettlementCase, NaverSettlementDaily,
+    Order, ProductChannelMapping, ProductMaster,
 )
 from app.services import order_delivery
 from app.services.naver_ad import product_commission
@@ -272,7 +277,7 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
     """네이버 상품(channel_product_id)별 평균 주문수량 + 단가당 **순**물류비(D-NAO-57 C, 리뷰 P2-1).
 
     logistics(단가당) = 상품별 순배송원가(건당) ÷ 평균 주문수량.
-      순배송원가 net_ship = max(0, 지불 배송비 − 평균 수취 배송비)
+      순배송원가 net_ship = 지불 배송비 − 평균 수취 배송비  (**클램프 없음 — 음수 가능**)
         - 지불 배송비 = NORMAL + (NBAESONG − NORMAL) × **N배송 혼합비** (N1 · D-NAO-99).
           ★계수를 숫자로 적지 않는다 — 단가는 order_delivery.py가 정본이고 갱신된다
             (현재 1,900 / 3,377 ⇒ 차액 1,477. 2026-08-26까지 이 주석은 옛 차액 1,120으로
@@ -288,14 +293,27 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
           병에 걸린다"는 구조 논증이지 실측이 아니다(ref 43 §8-4).
         - 수취 배송비: Order.shipping_cost(고객이 낸 deliveryFeeAmount) 실측 평균 —
           라이브 실측(120일): 채널 25.4% 주문이 수취(상품별 무료/유료 혼합이 사실).
-        - ★max(0,·) 클램프 = 보수 방향: 수취가 지불을 초과해도 배송 마진을 이익(음수 물류비)으로
-          잡지 않는다 — BEP를 낙관 쪽으로 움직이는 오차를 구조적으로 차단.
+        - ★**클램프 없음**(D-NAO-283, Jino 승인 2026-09-01). 종전엔 max(0, 지불−수취)로 배송
+          마진을 이익으로 인정하지 않았고 주석은 그것을 "보수 방향"이라 불렀다. 그러나 **그
+          「보수」는 실제 배송 구조와 어긋난다.** Jino 원문(2026-08-31 21:32): 재고가 없어
+          내일배송으로 돌리면 한진택배에 1,900원을 내고 고객에게 3,000원을 받아 **"1100원이
+          남는"**다. N배송은 반대로 3,377 지불/3,000 수취 = 377원 부담이다. 즉 두 방식의 부호가
+          애초에 다르고, 클램프는 그중 **이익 쪽만 골라 0으로 지웠다** — 한 방향으로만 틀리는
+          편향이다(물류비 과대 → 공헌이익 과소 → BEP 과대 → **벌 수 있는 광고를 끈다**).
+          라이브 실측(2026-09-01): 758행 중 **81행이 logistics_cost=0**으로 굳어 있었고
+          음수 행은 0이었다 — 클램프가 실제로 물고 있었다는 직접 증거.
+          ★같은 논증이 D-NAO-168 주석에 이미 적혀 있다(수취 표본이 어긋나 물류비가 과대하던
+          건). 그때는 «표본»을 고쳤고 이번엔 «부호»를 고친다.
+          ★order_delivery.net_shipping_burden은 처음부터 클램프가 없었고 docstring이 "BEP는
+          별도로 클램프한다"고 대조 설명해 왔다 — 이 변경으로 두 경로의 계약이 합쳐진다.
     ★평균 주문수량·수취 배송비는 **표본 민감 항목이라 넓은 창(_PRICE_WINDOW_DAYS)을 유지**한다
-    (창을 같이 줄이면 잡음이 폭증 — ref 42 §0-6). 주문 없는 상품은 수량 1 + 수취 0 폴백
-    (= 배송비 전액 차감, 보수적).
+    (창을 같이 줄이면 잡음이 폭증 — ref 42 §0-6).
+    ★주문이 0건인 상품은 **여기 나오지 않는다** — 이 함수는 주문이 있는 상품만 잰다.
+      그 상품들의 폴백은 logistics_by_product()가 「형제 실측 → 기본 폴백」 순으로 결정한다.
 
     반환: {cpid: {"avg_qty", "shipping"(지불), "collected"(수취 평균), "net_ship",
-                  "logistics"(단가당), "orders", "nb_share", "nb_sample", "nb_fresh"}}
+                  "logistics"(단가당), "orders", "nb_share", "nb_sample", "nb_fresh",
+                  "basis"("orders")}}
     """
     by_pid = orders_by_pid if orders_by_pid is not None else _naver_order_rows(db)
     cutoff = kst_today() - timedelta(days=_PRICE_WINDOW_DAYS)
@@ -326,18 +344,119 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
         #   (평균 수량은 넓은 창 유지 — 그건 레짐이 아니라 진짜 표본 민감 항목이다.)
         collected = (sum((r["collected"] for r in recent), Decimal("0")) / Decimal(len(recent))
                      if recent else Decimal("0"))
-        net_ship = max(Decimal("0"), shipping - collected)  # ★보수 클램프(배송마진 이익 미인정)
+        # ★클램프 없음 — 내일배송은 수취가 지불을 넘어 **이익이 남는** 구조다(D-NAO-283).
+        net_ship = order_delivery.net_shipping_burden(shipping, collected)
         logistics = (net_ship / avg_qty).quantize(Decimal("0.01"), ROUND_HALF_UP)
         out[pid] = {"avg_qty": avg_qty, "shipping": shipping, "collected": collected,
                     "net_ship": net_ship, "logistics": logistics, "orders": n,
-                    "nb_share": nb_share, "nb_sample": len(recent), "nb_fresh": fresh}
+                    "nb_share": nb_share, "nb_sample": len(recent), "nb_fresh": fresh,
+                    "basis": "orders"}
+    return out
+
+
+def _meta_by_cpid(db: Session) -> dict[str, dict]:
+    """네이버 상품 메타 현재 단면 — {channel_product_no: {group_no, discounted_price}}.
+
+    ★조인 키 동일성 검증(2026-09-01 prod 실측, D-NAO-283) — models.py의
+      NaverProductMetaCurrent docstring이 `channel_product_no ≡ mall_product_id` 동일성을
+      **[미상]**으로 표시해 두고 있었다. 착수 전 라이브로 확인했다:
+        · naver_product_bep 758행 중 **721행(95.1%)**이 channel_product_no로 붙는다
+        · meta 쪽 channel_product_no 중복 그룹 **0** (1:1)
+        · 대안 키 origin_product_no로는 **2행**만 붙는다 — 대안이 아니다
+        · ★독립 증거: 판매가가 있는 555행에서 bep.selling_price(orders 실거래 median) ↔
+          meta.discounted_price가 **정확 일치 510행(91.9%)**. 조인이 틀렸다면 나올 수 없다.
+      ⇒ 이 함수는 그 검증 위에 선다. 붙지 않는 37행은 폴백이 «없다»로 흘러 기본값을 받는다.
+    """
+    out: dict[str, dict] = {}
+    for cpno, gno, dprice in db.query(
+        NaverProductMetaCurrent.channel_product_no,
+        NaverProductMetaCurrent.group_product_no,
+        NaverProductMetaCurrent.discounted_price,
+    ).all():
+        if not cpno:
+            continue
+        out[cpno] = {
+            "group_no": (gno or None),
+            "discounted_price": (Decimal(str(dprice)) if dprice and dprice > 0 else None),
+        }
+    return out
+
+
+def _group_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]],
+                     meta: dict[str, dict],
+                     sample_size: int = _RECENT_SAMPLE_SIZE) -> dict[str, dict]:
+    """group_product_no별 **형제 실측** 물류비 — 그룹의 주문을 한 표본으로 모아 같은 산식으로 잰다.
+
+    ★왜 «상수 폴백»이 아니라 «형제»인가 (D-NAO-283): 형제는 같은 상품의 기종·용량 변형이라
+      배송 구조(N배송 여부·고객 수취액·묶음 수량)가 같다. 「모른다」의 가장 정직한 답은 상수가
+      아니라 **가장 가까운 관측**이다. 종전 폴백은 「수취 0 + 수량 1」 가정이라 배송비 1,900원
+      전액이 잡혔고, 형제가 실제로는 3,000원을 받고 있어도 그 사실을 못 봤다 —
+      라이브 실측으로 BEP가 약 14% 과대였다(폴드7 2.0366 vs 형제 기준 1.7838).
+    ★산식을 새로 만들지 않는다 — 형제 주문을 pooled 표본으로 넘겨 _avg_qty_and_logistics를
+      **그대로** 돌린다. 그래야 자기 실측 경로와 형제 경로가 영원히 같은 산식을 쓴다
+      (두 벌로 갈라지면 한쪽만 고쳐지는 날이 온다).
+    ★표본은 그룹 전체를 시각 내림차순으로 다시 정렬한 뒤 최근 N건이다 — 형제 A의 옛 주문이
+      형제 B의 최신 주문을 밀어내지 않는다.
+
+    라이브(2026-09-01): 주문 0건 201행 중 **161행**이 「주문 있는 형제」를 실제로 갖는다.
+    """
+    pooled: dict[str, list[dict]] = {}
+    for pid, rows in orders_by_pid.items():
+        gno = (meta.get(pid) or {}).get("group_no")
+        if not gno:
+            continue
+        pooled.setdefault(gno, []).extend(rows)
+    for lst in pooled.values():
+        lst.sort(key=_order_sort_key, reverse=True)
+    out = _avg_qty_and_logistics(db, orders_by_pid=pooled, sample_size=sample_size)
+    for row in out.values():
+        row["basis"] = "sibling"
+    return out
+
+
+def _default_logistics_row() -> dict:
+    """물류비 기본 폴백 — 자기 주문도 없고 형제도 없을 때(수취 0 · 수량 1 가정).
+
+    ★이 값은 «측정»이 아니라 «모름»이다. basis="default"로 그 사실이 행에 남고 화면에 뜬다 —
+      종전엔 이 폴백이 실측과 구분 없이 같은 칸에 앉아 있었다."""
+    return {"avg_qty": Decimal("1"), "shipping": SHIPPING_COST_NORMAL,
+            "collected": Decimal("0"), "net_ship": SHIPPING_COST_NORMAL,
+            "logistics": SHIPPING_COST_NORMAL, "orders": 0,
+            "nb_share": Decimal("0"), "nb_sample": 0, "nb_fresh": True, "basis": "default"}
+
+
+def logistics_by_product(db: Session, *, orders_by_pid: dict[str, list[dict]] | None = None,
+                         meta: dict[str, dict] | None = None,
+                         sample_size: int = _RECENT_SAMPLE_SIZE) -> dict[str, dict]:
+    """상품별 물류비 — 출처 3종을 **한 map**으로. 우선순위: ①자기 주문 실측 ②형제 실측 ③기본 폴백.
+
+    각 행에 `basis` ∈ {"orders", "sibling", "default"}가 붙는다(D-NAO-283 — 합격기준 ⑤).
+    ③은 여기서 «생성하지 않는다»: 이 함수가 아는 상품 우주는 「주문이 있는 것」 ∪ 「메타에 있는 것」
+    뿐이라, 둘 다 아닌 cpid의 기본 폴백은 호출부(calculate_bep)가 _default_logistics_row()로 준다.
+    다만 **메타에 있는데 자기 주문도 형제 주문도 없는** 상품은 여기서 명시적으로 default 행을
+    만들어 준다 — 그래야 화면이 「이 칸은 모름이다」를 말할 수 있다(빈칸은 아무 말도 못 한다).
+    """
+    order_rows = orders_by_pid if orders_by_pid is not None else _naver_order_rows(db)
+    meta_map = meta if meta is not None else _meta_by_cpid(db)
+    own = _avg_qty_and_logistics(db, orders_by_pid=order_rows, sample_size=sample_size)
+    groups = _group_logistics(db, orders_by_pid=order_rows, meta=meta_map, sample_size=sample_size)
+    out: dict[str, dict] = dict(own)
+    for cpid, info in meta_map.items():
+        if cpid in out:
+            continue  # ①자기 실측이 이긴다 — 형제는 «모를 때»의 답이다
+        sib = groups.get(info.get("group_no")) if info.get("group_no") else None
+        out[cpid] = dict(sib) if sib is not None else _default_logistics_row()
     return out
 
 
 def delivery_composition(db: Session) -> dict[str, dict]:
     """상품별 배송 구성(N배송 혼합비·지불/수취 배송비·평균 수량·단가당 물류비) — **읽기 전용 공개창**.
 
-    _avg_qty_and_logistics를 그대로 노출한다(새 산식 없음). 스냅샷(naver_product_bep)은
+    logistics_by_product를 그대로 노출한다(새 산식 없음). 즉 **주문 0건 상품도 형제 실측으로
+    한 행을 갖고**, 각 행의 `basis`가 그 숫자의 출처를 말한다(D-NAO-283).
+    종전엔 _avg_qty_and_logistics만 노출해 주문 0건 상품이 이 map에서 통째로 빠졌고, 화면은
+    그 칸을 빈칸으로 그렸다 — 「모른다」와 「해당 없음」이 같은 모양이었다.
+    스냅샷(naver_product_bep)은
     `logistics_cost`(= 순배송원가 ÷ 평균수량)만 저장하고 **nb_share를 버린다**. 그래서 BEP를
     "무엇으로 이 숫자가 됐는지" 화면(성과뷰 ⑤ · 계획서 §4-ⓓ)에서 되짚으려면 조회 시점에
     같은 함수로 다시 구하는 수밖에 없다.
@@ -345,7 +464,7 @@ def delivery_composition(db: Session) -> dict[str, dict]:
       NORMAL+(NBAESONG−NORMAL)p 를 두 번(수취·수량) 가려 놓아 역산이 성립하지 않는다. 억지로 역산하면
       배송비 상수가 바뀌는 날 조용히 틀린 비율을 화면에 띄운다.
     """
-    return _avg_qty_and_logistics(db)
+    return logistics_by_product(db)
 
 
 def _unit_prices(db: Session, *, orders_by_pid: dict[str, list[dict]] | None = None,
@@ -377,6 +496,82 @@ def _unit_prices(db: Session, *, orders_by_pid: dict[str, list[dict]] | None = N
     return prices
 
 
+def select_best_mappings(db: Session, *, masters: dict | None = None
+                         ) -> dict[str, ProductChannelMapping]:
+    """cpid당 «최선 매핑» 1개 — 네이버 활성 매핑의 dedupe 규칙 **정본**.
+
+    같은 channel_product_id에 중복 매핑이 존재한다(라이브 22건, 실측: 네이버 옵션 1개가 기기
+    variant별 SKU 여러 개에 매핑된 경우 — 원가는 항상 동일).
+    규칙: ①원가 있는 매핑 우선(BEP 산출 가능) ②원가 동률이면 판매가 있는 매핑 우선
+          ③그래도 동률이면 product_id 최솟값(order_by로 고정) → 재실행 결정적.
+    ★②는 D-NAO-95에서 추가. 종전 주석은 "원가는 항상 동일해 금액에는 영향 없음"을 근거로
+      타이브레이크가 무해하다고 적었는데, 판매가 폴백이 생긴 뒤로 그 근거가 깨졌다 —
+      중복 매핑 중 값이 적힌 행이 지면 (ⓐ)판매가를 적어도 조용히 무시되고, 반대로 낡은 값이
+      이기면 (ⓑ)상한이 부풀어 과지출 방향으로 틀어진다. ②로 ⓐ를 막고, 값이 서로 다른
+      중복은 경고로 표면화해 ⓑ가 조용히 지나가지 않게 한다.
+    ★**«값이 큰 쪽»이 이기는 게 아니다** — 판매가가 서로 다르면 이기는 것은 product_id가
+      작은 쪽이고, 불일치는 경고로만 남는다.
+
+    ★왜 함수로 뽑았나 (D-NAO-283, 적대 리뷰 2R P2-2): 배포 전 시뮬레이터가 이 규칙을
+      **베껴 적었다가** `max(판매가)`로 어긋났다 — 즉 시뮬레이터가 낸 숫자(계약 §4 근거)와
+      실제 산출이 갈릴 수 있었다. `bep_from_parts`와 같은 처방이다: 규칙이 두 벌이면
+      한쪽만 고쳐지는 날이 온다.
+    """
+    if masters is None:
+        masters = {pm.id: (Decimal(str(pm.cost_price or 0)), pm.product_name or "")
+                   for pm in db.query(ProductMaster).all()}
+    mappings = db.query(ProductChannelMapping).filter(
+        ProductChannelMapping.channel_id == NAVER_CHANNEL_ID,
+        ProductChannelMapping.is_active.is_(True),
+    ).order_by(ProductChannelMapping.product_id).all()
+
+    best: dict[str, ProductChannelMapping] = {}
+    for m in mappings:
+        cur = best.get(m.channel_product_id)
+        if cur is None:
+            best[m.channel_product_id] = m
+            continue
+        cur_cost = masters.get(cur.product_id, (Decimal("0"), ""))[0]
+        new_cost = masters.get(m.product_id, (Decimal("0"), ""))[0]
+        cur_price = Decimal(str(cur.selling_price or 0))
+        new_price = Decimal(str(m.selling_price or 0))
+        if cur_price > 0 and new_price > 0 and cur_price != new_price:
+            log.warning(
+                "naver_product_bep: cpid=%s 중복 매핑의 판매가 불일치(%s vs %s) — 낡은 값이 "
+                "BEP 상한을 왜곡할 수 있음. 매핑 정리 필요.",
+                m.channel_product_id, cur_price, new_price,
+            )
+        if new_cost > 0 and cur_cost <= 0:
+            best[m.channel_product_id] = m
+        elif (new_cost > 0) == (cur_cost > 0) and new_price > 0 and cur_price <= 0:
+            best[m.channel_product_id] = m
+    return best
+
+
+def bep_from_parts(sp: Decimal, rate: Decimal, cost: Decimal, logistics: Decimal,
+                   mult: Decimal) -> dict:
+    """BEP 산식 — 순수 함수. 부품 4개(+공격성 배수) → 공헌이익·BEP·타겟.
+
+    ★왜 뽑았나 (D-NAO-283, 교훈 #375의 집행): 배포 «전»에 「이 변경이 BEP를 얼마나 움직이나」를
+      prod에서 읽기 전용으로 재려면 시뮬레이터가 필요한데, 시뮬레이터가 산식을 **다시 적으면
+      조회 스크립트와 본체가 두 벌이 된다** — 그러면 「예측 2150.5 ≠ 실제 2230.8」처럼 어느
+      쪽이 틀렸는지 모르는 상태로 숫자를 보고하게 된다(2026-08-28 실사고).
+      calculate_bep과 scripts/simulate_bep_shift.py가 **이 함수 하나**를 공유한다.
+    ★계약: contribution ≤ 0이면 bep·target은 None이다. 이 불변식이 하류 전체를 지킨다 —
+      bep_roas가 non-None인 행은 항상 공헌이익>0이라, 상한 산출의 나눗셈 분모가 0·음수가 되지
+      않는다(bid_simulator.affordable_ceiling · bid_ceiling_calculator).
+    """
+    has_cost = sp > 0 and cost > 0
+    commission = sp * rate
+    contribution = (sp - commission - cost - logistics) / VAT_DIVISOR if has_cost else Decimal("0")
+    bep = target = None
+    if has_cost and contribution > 0:
+        bep = (sp / contribution).quantize(Decimal("0.0001"), ROUND_HALF_UP)
+        target = (bep * mult).quantize(Decimal("0.0001"), ROUND_HALF_UP)
+    return {"has_cost": has_cost, "commission": commission,
+            "contribution": contribution, "bep_roas": bep, "target_roas": target}
+
+
 def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     """네이버 전 활성 매핑에 대해 BEP ROAS 산출 → naver_product_bep snapshot 교체.
 
@@ -386,10 +581,12 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     D-NAO-57 (B): 광고 의사결정 BEP라 광고 경로 실효율(ad_commission_rate, 매출연동 언디루션)을
     우선 쓰고, 정산 표본 부족 등으로 산출 불가면 기존 블렌드(effective_commission_rate)로 폴백.
     어느 기준을 썼는지 commission_basis(ad_case/blended)로 정직 표기(행·반환 둘 다).
-    D-NAO-57 (C, 리뷰 P2-1): logistics=상품별 (순배송원가 ÷ 평균 주문수량) — 순배송원가 =
-    max(0, 지불 − 고객 수취 배송비 평균)(수취 실측: 채널 25.4% 주문이 유료배송). VAT는
-    기존 관례대로 공헌이익 분자 안에서 ÷1.1(원가·수수료와 동일 — 지불·수취 배송비 모두
-    부가세포함이라 이중차감/미차감 없음).
+    D-NAO-57 (C, 리뷰 P2-1) + D-NAO-283: logistics=상품별 (순배송원가 ÷ 평균 주문수량) —
+    순배송원가 = `order_delivery.net_shipping_burden(지불, 수취 평균)` = 지불 − 수취,
+    **클램프 없음이라 음수 가능**(내일배송은 배송 마진이 남는다). 산식 정본은 그 함수이지
+    이 문단이 아니다 — 여기 숫자를 다시 적으면 정본과 갈라진다(이 파일이 이미 7곳에서 겪었다).
+    수취 실측: 채널 25.4% 주문이 유료배송. VAT는 기존 관례대로 공헌이익 분자 안에서 ÷1.1
+    (원가·수수료와 동일 — 지불·수취 배송비 모두 부가세포함이라 이중차감/미차감 없음).
 
     ★N1 (D-NAO-99, ref 42) — 배송방식 인지형 정합. **산식(공헌이익·BEP 정의)은 불변**이고,
     3개 입력의 산출 창·입자도만 바뀐다:
@@ -419,44 +616,12 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
         rate, commission_basis = commissions.rate_for(None)  # 계정 실측(배송 중립) 대표값
     mult = AGG_MULT.get(aggressiveness, AGG_MULT["standard"])
     order_rows = _naver_order_rows(db)  # 주문 1회 적재 → 두 헬퍼가 공유(창만 달리 자름)
+    meta_map = _meta_by_cpid(db)        # D-NAO-283: 판매가 폴백 ③ + 형제 그룹 키
     prices = _unit_prices(db, orders_by_pid=order_rows)
-    logistics_by_pid = _avg_qty_and_logistics(db, orders_by_pid=order_rows)
+    logistics_by_pid = logistics_by_product(db, orders_by_pid=order_rows, meta=meta_map)
     masters = {pm.id: (Decimal(str(pm.cost_price or 0)), pm.product_name or "")
                for pm in db.query(ProductMaster).all()}
-    mappings = db.query(ProductChannelMapping).filter(
-        ProductChannelMapping.channel_id == NAVER_CHANNEL_ID,
-        ProductChannelMapping.is_active.is_(True),
-    ).order_by(ProductChannelMapping.product_id).all()
-
-    # 같은 channel_product_id에 중복 매핑 존재(라이브 22건, 실측: 네이버 옵션 1개가 기기
-    # variant별 SKU 여러 개에 매핑된 경우 — 원가는 항상 동일).
-    # cpid당 1개로 dedupe: ①원가 있는 매핑 우선(BEP 산출 가능) ②원가 동률이면 판매가 있는
-    # 매핑 우선 ③그래도 동률이면 product_id 최솟값(위 order_by로 고정) → 재실행 결정적.
-    # ★②는 D-NAO-95에서 추가. 종전 주석은 "원가는 항상 동일해 금액에는 영향 없음"을 근거로
-    # 타이브레이크가 무해하다고 적었는데, 판매가 폴백이 생긴 뒤로 그 근거가 깨졌다 —
-    # 중복 매핑 중 값이 적힌 행이 지면 (ⓐ)판매가를 적어도 조용히 무시되고, 반대로 낡은 값이
-    # 이기면 (ⓑ)상한이 부풀어 과지출 방향으로 틀어진다. ②로 ⓐ를 막고, 값이 서로 다른
-    # 중복은 경고로 표면화해 ⓑ가 조용히 지나가지 않게 한다.
-    best: dict[str, ProductChannelMapping] = {}
-    for m in mappings:
-        cur = best.get(m.channel_product_id)
-        if cur is None:
-            best[m.channel_product_id] = m
-            continue
-        cur_cost = masters.get(cur.product_id, (Decimal("0"), ""))[0]
-        new_cost = masters.get(m.product_id, (Decimal("0"), ""))[0]
-        cur_price = Decimal(str(cur.selling_price or 0))
-        new_price = Decimal(str(m.selling_price or 0))
-        if cur_price > 0 and new_price > 0 and cur_price != new_price:
-            log.warning(
-                "naver_product_bep: cpid=%s 중복 매핑의 판매가 불일치(%s vs %s) — 낡은 값이 "
-                "BEP 상한을 왜곡할 수 있음. 매핑 정리 필요.",
-                m.channel_product_id, cur_price, new_price,
-            )
-        if new_cost > 0 and cur_cost <= 0:
-            best[m.channel_product_id] = m
-        elif (new_cost > 0) == (cur_cost > 0) and new_price > 0 and cur_price <= 0:
-            best[m.channel_product_id] = m
+    best = select_best_mappings(db, masters=masters)
 
     db.execute(delete(NaverProductBep).where(NaverProductBep.channel_id == NAVER_CHANNEL_ID))
     now = kst_now()
@@ -465,6 +630,9 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     n_mapped_price = 0      # 판매가를 매핑 폴백에서 가져온 행 수
     n_mapped_with_bep = 0   # 그중 실제로 BEP까지 산출된 행 수(원가까지 있어야 함)
     n_case_rate = 0         # 상품별 실측 수수료율이 적용된 행 수(N1 — 나머지는 계정 실측)
+    # D-NAO-283: 출처 분포 — 「자가 무엇으로 만들어졌나」를 반환·로그에 실어 화면 밖에서도 센다.
+    basis_counts: dict[str, int] = {}   # 판매가 출처 orders/mapping/meta
+    logi_counts: dict[str, int] = {}    # 물류비 출처 orders/sibling/default
     for m in best.values():
         # 판매가 우선순위: ①orders 실거래 중앙값(기본 — 실제로 팔린 값이 가장 정직하다)
         # ②매핑에 손으로 넣은 판매가(product_channel_mapping.selling_price).
@@ -473,6 +641,12 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
         # BEP로 내려앉는다(guardrail_gate._check_bid 주석 참조) — 즉 "판매가를 모른다"가 아니라
         # "판매가를 넣을 자리가 없다"가 문제였다. 추정이 아니라 커머스API 실판매가를 매핑에
         # 적어 넣는 경로이며, 주문이 한 건이라도 쌓이면 ①이 자동으로 이긴다(폴백은 스스로 은퇴).
+        # ③(D-NAO-283) ②도 비어 있으면 커머스API 할인적용가(naver_product_meta_current).
+        #   ②는 «손으로 넣는 자리»라 실제로는 대부분 비어 있었다 — 라이브 758행 중 201행이
+        #   sp<=0이었고 **전부 원가는 있었다**. 그중 166행에 ③이 이미 들어와 있다(C10 09:55 크론).
+        #   ★정가(sale_price)를 쓰지 않는다(계약 §3 금지선): 그룹 52308509에서 둘의 차이는
+        #     19,900 vs 27,500 = 38%다. 할인적용가가 실거래에 가깝다 —
+        #     판매가가 있는 555행 대조에서 orders median과 **정확 일치 510행(91.9%)**.
         sp = prices.get(m.channel_product_id, Decimal("0"))
         price_basis = "orders"
         if sp <= 0 and m.selling_price:
@@ -480,14 +654,21 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
             if mapped > 0:
                 sp = mapped
                 price_basis = "mapping"
+        if sp <= 0:
+            meta_price = (meta_map.get(m.channel_product_id) or {}).get("discounted_price")
+            if meta_price and meta_price > 0:
+                sp = meta_price
+                price_basis = "meta"
         cost, master_name = masters.get(m.product_id, (Decimal("0"), ""))
         name = (m.channel_product_name or master_name or "")[:300]
         # D-NAO-57 (C): 상품별 단가당 순물류비(순배송원가 ÷ 평균 주문수량, 수취 배송비 차감).
-        # 주문 이력 없으면 수취 0 가정 = 배송비 전액 차감(수량 1, 보수적) — 헬퍼 폴백과 정합.
-        logi_row = logistics_by_pid.get(
-            m.channel_product_id, {"logistics": SHIPPING_COST_NORMAL, "nb_share": Decimal("0")}
-        )
+        # D-NAO-283: 출처 3종 — ①자기 주문 실측 ②같은 group_product_no 형제 실측 ③기본 폴백.
+        #   logistics_by_product가 ①②를 결정하고, 여기 default는 **메타에도 없는 상품**용이다
+        #   (라이브 758행 중 37행이 메타에 안 붙는다). 어느 것이 쓰였는지는 logistics_basis에
+        #   행 단위로 남는다 — 종전엔 폴백 상수와 실측이 같은 칸에 구분 없이 앉아 있었다.
+        logi_row = logistics_by_pid.get(m.channel_product_id) or _default_logistics_row()
         logistics = logi_row["logistics"]
+        logistics_basis = logi_row.get("basis") or "default"
         # N1 ③: 상품별 실측 수수료율 + 그 상품의 현재 N배송 혼합비(원칙 18-6 — harness가
         # 물류 SA의 출력을 수수료 SA의 입력으로 유통시킨다). 실측 표본이 없으면 계정 폴백.
         nb_share = logi_row.get("nb_share") or Decimal("0")
@@ -497,14 +678,12 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
                 n_case_rate += 1
         else:
             row_rate, row_basis = fallback_rate, fallback_basis
-        has_cost = sp > 0 and cost > 0
-        commission = sp * row_rate
-        contribution = (sp - commission - cost - logistics) / VAT_DIVISOR if has_cost else Decimal("0")
-        bep = None
-        target = None
-        if has_cost and contribution > 0:
-            bep = (sp / contribution).quantize(Decimal("0.0001"), ROUND_HALF_UP)
-            target = (bep * mult).quantize(Decimal("0.0001"), ROUND_HALF_UP)
+        parts = bep_from_parts(sp, row_rate, cost, logistics, mult)
+        has_cost = parts["has_cost"]
+        contribution = parts["contribution"]
+        bep = parts["bep_roas"]
+        target = parts["target_roas"]
+        if bep is not None:
             n_bep += 1
             if price_basis == "mapping":
                 n_mapped_with_bep += 1
@@ -525,16 +704,22 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
             target_roas=target,
             has_cost=has_cost,
             commission_basis=row_basis,
+            price_basis=price_basis,
+            logistics_basis=logistics_basis,
             calculated_at=now,
         ))
         n_total += 1
+        basis_counts[price_basis] = basis_counts.get(price_basis, 0) + 1
+        logi_counts[logistics_basis] = logi_counts.get(logistics_basis, 0) + 1
     db.commit()
     log.info("naver_product_bep 산출: %d행(bep %d, 매핑판매가 %d→bep %d, 상품실측요율 %d) "
-             "rate=%.4f 기준=%s 공격성=%s 표본=최근%d건",
+             "rate=%.4f 기준=%s 공격성=%s 표본=최근%d건 판매가출처=%s 물류비출처=%s",
              n_total, n_bep, n_mapped_price, n_mapped_with_bep, n_case_rate, float(rate),
-             commission_basis, aggressiveness, _RECENT_SAMPLE_SIZE)
+             commission_basis, aggressiveness, _RECENT_SAMPLE_SIZE,
+             basis_counts, logi_counts)
     return {"rows": n_total, "with_bep": n_bep, "mapped_price_rows": n_mapped_price,
             "mapped_price_with_bep": n_mapped_with_bep,
             "product_rate_rows": n_case_rate,
+            "price_basis_counts": basis_counts, "logistics_basis_counts": logi_counts,
             "commission_rate": float(rate), "commission_basis": commission_basis,
             "aggressiveness": aggressiveness}
