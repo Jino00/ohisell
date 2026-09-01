@@ -755,6 +755,10 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCostPriceHistory: vi.fn(async () => ({
       items: [], total: 0, started_at: null, empty_reason: "이력이 아직 한 건도 없다",
     })),
+    // ★D-CPP-64 S2 — `load()`가 정본 판별도 부른다. 여기 없으면 전역 fetchSpy의 `{}`가
+    //   패널로 흘러 「형식이 다르다」 분기로 빠지고, 아래 배선 테스트가 «없어서» 실패한
+    //   것인지 «끊겨서» 실패한 것인지 못 가른다.
+    fetchCostTruthBoard: vi.fn(async () => TRUTH_BOARD),
     fetchCostAutoRefreshRuns: vi.fn(async () => ({ items: [] })),
     fetchCostAutoRefreshQueue: vi.fn(async () => ({ items: [] })),
     runCostAutoRefreshNow: vi.fn(async () => ({
@@ -813,6 +817,80 @@ const fetchSpy = vi.fn(async () => ({
   json: async () => ({}),
 })) as unknown as typeof fetch;
 
+// ★D-CPP-64 S2 — 정본 판별 픽스처. 세 유형을 한 벌에 담는다(계산값·보류·정본 없음):
+//   한 유형만 넣으면 「보류가 계산값으로 그려지는」 변이가 안 죽는다.
+const TRUTH_BOARD = {
+  items: [
+    {
+      internal_sku: "OHI-TRUTH-C",
+      product_name: "매트 필름 3매 · bar",
+      truth_type: "computed" as const,
+      truth_label: "계산값",
+      truth_value: "2649.7",
+      current_cost_price: "2350.7",
+      gap: "299.0",
+      cause: "g2_parts_299",
+      cause_ref118: "G2",
+      reason: "엑셀이 부자재 4종을 안 세고 있다 — 격차가 정확히 +299.0원. 계산이 정본",
+      owner: "계약 D-CPP-64 S3 — 컷오버",
+      recipe_id: 68,
+      recipe_product_name: "매트 필름 3매",
+      form_factor: "bar",
+      recipe_kind: "assembly",
+      computed_value: "2649.7",
+    },
+    {
+      internal_sku: "OHI-TRUTH-H",
+      product_name: "매트 필름 3매 · flip",
+      truth_type: "held" as const,
+      truth_label: "보류",
+      truth_value: null,
+      current_cost_price: "1412.4",
+      gap: null,
+      cause: "g1_grain_mismatch",
+      cause_ref118: "G1",
+      reason: "그레인 불일치 — 레시피는 계산값 1개인데 SKU가 현재 원가를 5종 갖고 있다",
+      owner: "트랙 A2 — 그레인 정의",
+      recipe_id: 69,
+      recipe_product_name: "매트 필름 3매",
+      form_factor: "flip",
+      recipe_kind: "assembly",
+      computed_value: "3746.4",
+    },
+    {
+      internal_sku: "OHI-TRUTH-N",
+      product_name: "[중복] 필름",
+      truth_type: "none" as const,
+      truth_label: "정본 없음",
+      truth_value: null,
+      current_cost_price: "1.0",
+      gap: null,
+      cause: "no_link_dupe",
+      cause_ref118: null,
+      reason: "상품명에 「[중복]」 표지가 있다 — 정리 대상이지 원가를 세울 대상이 아니다",
+      owner: "소관 없음",
+      recipe_id: null,
+      recipe_product_name: null,
+      form_factor: null,
+      recipe_kind: null,
+      computed_value: null,
+    },
+  ],
+  sku_count: 3,
+  price_rule: "latest",
+  census: {
+    by_truth_type: { computed: 1, purchased: 0, held: 1, none: 1 },
+    by_cause: { g2_parts_299: 1, g1_grain_mismatch: 1, no_link_dupe: 1 },
+    cause_ref118: { g2_parts_299: "G2", g1_grain_mismatch: "G1" },
+    cutover_ready_count: 1,
+    cutover_gap_sum: "299.0",
+    matched_count: 0,
+    held_count: 1,
+    none_count: 1,
+  },
+  caveats: ["이 표는 읽기 전용이다 — cost_price를 한 건도 바꾸지 않는다."],
+};
+
 beforeEach(() => {
   vi.stubGlobal("fetch", fetchSpy);
   window.history.pushState({}, "", "/cost");
@@ -828,6 +906,61 @@ async function renderApp() {
   const { default: App } = await import("../App");
   return render(<App />);
 }
+
+describe("★정본 판별이 사람에게 닿는 경로 (계약 D-CPP-64 §4 S2)", () => {
+  // ★이 묶음이 재는 것은 «판정이 맞는가»가 아니라 «판정이 화면 픽셀이 되는가»다.
+  //   `costTruthSurface.test.tsx`는 패널을 props로 직접 렌더하므로 **호출부를 못 잰다** —
+  //   `<CostTruthBoardPanel data={truthBoard} />`를 지워도 그 파일은 초록이다.
+  //   여기서만 죽는 변이: ①탭 항목 제거 ②`CostTab`에서 "truth" 제거 ③렌더 블록 제거
+  //   ④`load()`의 `fetchCostTruthBoard()` 제거 ⑤`setTruthBoard(tb)` 제거
+  //   ⑥`data={truthBoard}`를 `data={null}`·빈 리터럴로 교체.
+  async function openTruthTab() {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "정본 판별" }));
+    return screen.findByTestId("cost-truth-table");
+  }
+
+  it("탭을 누르면 API가 준 판정이 표로 선다 — 호출부·state·렌더가 한 줄로 이어져야 통과한다", async () => {
+    await openTruthTab();
+    // ★내용까지 단언한다. 「표가 있다」만 보면 `data={{items:[]}}` 리터럴 변이가 살아남는다.
+    const row = await screen.findByTestId("cost-truth-row-OHI-TRUTH-C");
+    expect(within(row).getByTestId("cost-truth-type-OHI-TRUTH-C").textContent).toContain("계산값");
+    expect(within(row).getByTestId("cost-truth-value-OHI-TRUTH-C").textContent).toContain(
+      "2,649.7원",
+    );
+    expect(within(row).getByTestId("cost-truth-reason-OHI-TRUTH-C").textContent).toContain(
+      "부자재 4종",
+    );
+  });
+
+  it("★보류 행이 「—」로 서고 사유·소관이 화면에 있다 — 이게 S2-②의 마지막 한 칸이다", async () => {
+    await openTruthTab();
+    expect(screen.getByTestId("cost-truth-value-OHI-TRUTH-H").textContent).toBe("—");
+    expect(screen.getByTestId("cost-truth-gap-OHI-TRUTH-H").textContent).toBe("—");
+    expect(screen.getByTestId("cost-truth-reason-OHI-TRUTH-H").textContent).toContain(
+      "그레인 불일치",
+    );
+    expect(screen.getByTestId("cost-truth-owner-OHI-TRUTH-H").textContent).toContain("트랙 A2");
+  });
+
+  it("정본 없음 행이 소관과 함께 선다 — 「소관 없음」도 화면에 적힌다", async () => {
+    await openTruthTab();
+    expect(screen.getByTestId("cost-truth-owner-OHI-TRUTH-N").textContent).toContain("소관 없음");
+  });
+
+  it("상단 집계와 자백 문구가 같은 화면에 있다", async () => {
+    await openTruthTab();
+    expect(screen.getByTestId("cost-truth-census-held").textContent).toContain("보류 1");
+    expect(screen.getByTestId("cost-truth-caveats").textContent).toContain("읽기 전용");
+  });
+
+  it("★다른 탭에선 이 표가 없다 — 항상 켜져 있으면 탭이 아니다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    expect(screen.queryByTestId("cost-truth-table")).toBeNull();
+  });
+});
 
 describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메뉴·호출부가 한 줄로 이어진다", () => {
   it("SUR-3: `/cost` 라우트가 있어야 원가 화면이 뜬다", async () => {

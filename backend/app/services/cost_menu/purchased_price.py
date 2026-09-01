@@ -292,7 +292,7 @@ def _load_sku_facts(db: Session) -> dict[str, _SkuFacts]:
     }
 
 
-def _load_approved_prices(
+def load_approved_prices(
     db: Session, *, include_blank: bool = False
 ) -> dict[str, Optional[Decimal]]:
     """SKU → 이미 «확정된» 매입가(최신 1건).
@@ -360,7 +360,7 @@ def build_proposal(
     """
 
     facts = _load_sku_facts(db)
-    approved = _load_approved_prices(db)
+    approved = load_approved_prices(db)
 
     by_name: dict[str, list[_SkuFacts]] = {}
     for f in facts.values():
@@ -588,9 +588,9 @@ def board_counts(db: Session) -> dict[str, int]:
 
     # ★「최신 확정 매입가」를 «두 벌»로 쓰지 않는다(적대 리뷰 P2-1 · 계약 §2 *"단가 선택·
     #   적재 로직은 항상 한 벌이다"*). 초판은 여기서 bare-column GROUP BY로 따로 셌고,
-    #   `_load_approved_prices`의 서브쿼리 조인과 같은 데이터에서 답이 갈렸다(카드는
+    #   `load_approved_prices`의 서브쿼리 조인과 같은 데이터에서 답이 갈렸다(카드는
     #   「이미 근거 있음」인데 보드는 `held_blank`). 08-28 교훈 #375의 재현이다.
-    latest = _load_approved_prices(db, include_blank=True)
+    latest = load_approved_prices(db, include_blank=True)
 
     grounded = held = 0
     for f in candidates:

@@ -31,6 +31,7 @@ import {
   fetchCostSettings,
   fetchCostTableCensus,
   fetchCostTableItems,
+  fetchCostTruthBoard,
   importCostRecipes,
   linkCostLedgerPrice,
   patchCostMaterial,
@@ -60,6 +61,8 @@ import {
   type CostStandard,
   type CostTableCensus,
   type CostTableItemList,
+  type CostTruthBoard,
+  type CostTruthRow,
 } from "../lib/api";
 import {
   costPageWidthClass,
@@ -69,6 +72,7 @@ import {
   standardPriceRuleText,
   sweepSummaryText,
   triggerLabel,
+  type CostTab,
 } from "../lib/costMenuSurface";
 import { COST_PRICE_PATH_LABELS, costPricePathLabel } from "../lib/costPriceGate";
 import {
@@ -96,14 +100,13 @@ import {
 } from "../lib/costHome";
 import CostPurchasedPricePanel from "./costPurchasedPricePanel";
 
-/** ★`"home"`이 **기본 탭**이다(D-CPP-62 S2). 나머지 셋은 지우지 않는다 — 홈은 새 입구지
- *  기존 탭의 대체가 아니고, 인박스·왕복 표가 결국 그 탭들의 기존 패널로 «데려간다». */
-export type CostTab =
-  | "home"
-  | "materials"
-  | "recipes"
-  | "board"
-  | "purchased";
+/** ★`"home"`이 **기본 탭**이다(D-CPP-62 S2). 나머지는 지우지 않는다 — 홈은 새 입구지
+ *  기존 탭의 대체가 아니고, 인박스·왕복 표가 결국 그 탭들의 기존 패널로 «데려간다».
+ *
+ *  ★정의는 `lib/costMenuSurface.ts`에 있다(단일 출처). 여기서는 **re-export만** 한다 —
+ *  `costPageWidthClass(tab)`가 같은 유니온을 받는데 양쪽에 손으로 적어 두면 탭이 늘 때마다
+ *  두 곳을 고치게 된다(2026-09-01 「정본 판별」 탭에서 실제로 `tsc -b`가 거기서 멈췄다). */
+export type { CostTab };
 
 // ══════════════════════════════════════════════════════════════════
 // 순수 표시 규칙 (테스트가 이 함수들을 직접 잡는다)
@@ -515,6 +518,202 @@ export function VatBasisBadge() {
   return (
     <div className="text-xs px-3 py-1.5 rounded-md border bg-blue-50 border-blue-200 text-blue-800">
       원가 = 부가세 포함 — 사내 관리회계 기준(D-CPP-51). 제외값은 옆 칸에 함께 표시한다.
+    </div>
+  );
+}
+
+/** 정본 유형 배지 색 — 「보류」와 「정본 없음」이 같은 회색이면 둘이 한 덩어리로 읽힌다. */
+const TRUTH_BADGE: Record<string, string> = {
+  computed: "bg-emerald-50 border-emerald-200 text-emerald-800",
+  purchased: "bg-sky-50 border-sky-200 text-sky-800",
+  held: "bg-amber-50 border-amber-200 text-amber-800",
+  none: "bg-gray-100 border-gray-300 text-gray-600",
+};
+
+/** 정본 판별 표 (계약 D-CPP-64 §4 S2).
+ *
+ * ★**이 패널이 답하는 질문은 「이 SKU의 원가 정본이 무엇인가」다** — 「계산값이 얼마인가」가
+ *   아니다(그건 표준원가 보드). 매입품엔 계산값이 **원리적으로 없어서**(ref 119 §2-2) 보드는
+ *   그 SKU들을 아예 못 싣는다. 그래서 표가 둘이다.
+ *
+ * ★**보류·정본 없음의 정본값 칸은 「—」다.** 계산값을 대신 그리면 화면이 「이 값으로 갈아타면
+ *   된다」고 말하는 셈이 되고, 그게 계약 §2-6이 금지한 것이다.
+ *
+ * ★**사유와 소관은 접지 않는다.** 이 트랙에서 「값은 맞는데 사람이 못 본다」가 여덟 번 났다.
+ */
+export function CostTruthBoardPanel({
+  data,
+  limit = 200,
+}: {
+  /** null = 아직 안 불렀다(로딩). `items:[]` = 불렀는데 0건. 둘은 다른 사실이다. */
+  data: CostTruthBoard | null;
+  limit?: number;
+}) {
+  // ★응답 형식이 깨져도 화면 전체가 하얘지지 않는다 — 대신 「형식이 다르다」고 말한다.
+  const items: CostTruthRow[] = data && Array.isArray(data.items) ? data.items : [];
+  const shapeBroken = data !== null && !Array.isArray(data.items);
+  const census = data?.census;
+  const shown = items.slice(0, limit);
+
+  return (
+    <div className="mt-4" data-testid="cost-truth-panel">
+      <div className="flex items-baseline gap-2">
+        <h3 className="text-sm font-semibold text-gray-700">정본 판별</h3>
+        <span className="text-[11px] text-gray-500">
+          SKU마다 「원가의 정본이 무엇인가」 — 계산값·매입가·보류·정본 없음
+        </span>
+      </div>
+
+      {data === null ? (
+        <div className="mt-2 text-xs text-gray-400" data-testid="cost-truth-loading">
+          정본 판별을 불러오는 중…
+        </div>
+      ) : shapeBroken ? (
+        <div
+          className="mt-2 text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded p-2"
+          data-testid="cost-truth-broken"
+        >
+          정본 판별 응답에 목록이 없다 — 0건이 아니라 «형식이 다르다»는 뜻이다(백엔드 확인 필요).
+        </div>
+      ) : (
+        <>
+          {census ? (
+            <div className="mt-2 flex flex-wrap gap-2" data-testid="cost-truth-census">
+              {(
+                [
+                  ["computed", "계산값"],
+                  ["purchased", "매입가"],
+                  ["held", "보류"],
+                  ["none", "정본 없음"],
+                ] as [string, string][]
+              ).map(([k, label]) => (
+                <span
+                  key={k}
+                  data-testid={`cost-truth-census-${k}`}
+                  className={`text-xs px-2 py-1 rounded border ${TRUTH_BADGE[k]}`}
+                >
+                  {label} {census.by_truth_type?.[k] ?? 0}
+                </span>
+              ))}
+              <span
+                className="text-xs px-2 py-1 rounded border bg-white border-gray-300 text-gray-700"
+                data-testid="cost-truth-census-ready"
+              >
+                즉시 컷오버 가능 {census.cutover_ready_count}건 · Σ격차{" "}
+                {formatCostWon(census.cutover_gap_sum)}
+              </span>
+              <span
+                className="text-xs px-2 py-1 rounded border bg-white border-gray-300 text-gray-500"
+                data-testid="cost-truth-census-matched"
+              >
+                이미 일치 {census.matched_count}건
+              </span>
+            </div>
+          ) : null}
+
+          {/* ★집계가 조용히 «완전»해 보이면 안 된다 — 못 답한 것을 같은 화면에 둔다. */}
+          {data.caveats?.length ? (
+            <ul
+              className="mt-2 text-[11px] text-gray-600 bg-amber-50 border border-amber-200 rounded p-2 space-y-1"
+              data-testid="cost-truth-caveats"
+            >
+              {data.caveats.map((c, i) => (
+                <li key={i}>· {c}</li>
+              ))}
+            </ul>
+          ) : null}
+
+          {items.length === 0 ? (
+            <div
+              className="mt-2 text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded p-2"
+              data-testid="cost-truth-empty"
+            >
+              판별할 SKU가 0건이다 — `product_master`가 비었거나 조회가 실패했다.
+            </div>
+          ) : (
+            <>
+              <div className="mt-2 overflow-x-auto">
+                <table className="min-w-full text-xs" data-testid="cost-truth-table">
+                  <thead className="bg-gray-50 text-gray-600">
+                    <tr>
+                      <th className="px-2 py-1 text-left">SKU</th>
+                      <th className="px-2 py-1 text-left">상품명</th>
+                      <th className="px-2 py-1 text-left">정본 유형</th>
+                      <th className="px-2 py-1 text-right">정본값</th>
+                      <th className="px-2 py-1 text-right">현재 원가</th>
+                      <th className="px-2 py-1 text-right">격차</th>
+                      <th className="px-2 py-1 text-left">사유</th>
+                      <th className="px-2 py-1 text-left">소관</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shown.map((row) => (
+                      <tr
+                        key={row.internal_sku}
+                        className="border-t"
+                        data-testid={`cost-truth-row-${row.internal_sku}`}
+                      >
+                        <td className="px-2 py-1 font-mono">{row.internal_sku}</td>
+                        <td className="px-2 py-1 max-w-[18rem] truncate" title={row.product_name}>
+                          {row.product_name}
+                        </td>
+                        {/* ★testid는 «칸»에 붙인다 — 배지에만 붙이면 옆의 ref 118 이름표가
+                            단언 범위 밖으로 빠져 「G2가 사라져도 초록」이 된다(실측). */}
+                        <td
+                          className="px-2 py-1"
+                          data-testid={`cost-truth-type-${row.internal_sku}`}
+                        >
+                          <span
+                            className={`px-1.5 py-0.5 rounded border ${
+                              TRUTH_BADGE[row.truth_type] ?? TRUTH_BADGE.none
+                            }`}
+                          >
+                            {row.truth_label}
+                          </span>
+                          {row.cause_ref118 ? (
+                            <span className="ml-1 text-[10px] text-gray-500">
+                              {row.cause_ref118}
+                            </span>
+                          ) : null}
+                        </td>
+                        {/* ★「—」가 정답인 칸이다 — 0을 그리면 미판정이 확정값으로 둔갑한다. */}
+                        <td className="px-2 py-1 text-right" data-testid={`cost-truth-value-${row.internal_sku}`}>
+                          {formatCostWon(row.truth_value)}
+                        </td>
+                        <td className="px-2 py-1 text-right">
+                          {formatCostWon(row.current_cost_price)}
+                        </td>
+                        <td className="px-2 py-1 text-right" data-testid={`cost-truth-gap-${row.internal_sku}`}>
+                          {formatCostWon(row.gap)}
+                        </td>
+                        <td
+                          className="px-2 py-1 text-gray-700"
+                          data-testid={`cost-truth-reason-${row.internal_sku}`}
+                        >
+                          {row.reason}
+                        </td>
+                        <td
+                          className="px-2 py-1 text-gray-600 whitespace-nowrap"
+                          data-testid={`cost-truth-owner-${row.internal_sku}`}
+                        >
+                          {row.owner}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {items.length > shown.length ? (
+                // ★잘라 놓고 조용하지 않는다 — 몇 건을 안 그렸는지 말한다(교훈 #123 계열).
+                <p className="mt-1 text-[11px] text-gray-500" data-testid="cost-truth-truncated">
+                  {items.length}건 중 {shown.length}건만 그렸다 — 나머지{" "}
+                  {items.length - shown.length}건은 집계에는 들어 있다.
+                </p>
+              ) : null}
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -2811,6 +3010,7 @@ export default function CostPage() {
   //   ★null은 «아직 안 불렀다»이고 `items:[]`는 «불렀는데 0건»이다. 패널이 그 둘을 다르게
   //     말한다 — 같게 보이면 「이상 없음」으로 읽힌다.
   const [priceHistory, setPriceHistory] = useState<CostPriceHistoryList | null>(null);
+  const [truthBoard, setTruthBoard] = useState<CostTruthBoard | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [recipes, setRecipes] = useState<CostRecipe[]>([]);
   const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
@@ -3031,7 +3231,7 @@ export default function CostPage() {
 
   const load = useCallback(async () => {
     try {
-      const [m, l, s, r, b, sh, ar, aq, ct, ph] = await Promise.all([
+      const [m, l, s, r, b, sh, ar, aq, ct, ph, tb] = await Promise.all([
         fetchCostMaterials(),
         fetchCostLedgerMaterialLines(),
         fetchCostSettings(),
@@ -3042,6 +3242,7 @@ export default function CostPage() {
         fetchCostAutoRefreshQueue(),
         fetchCostTableCensus(),
         fetchCostPriceHistory({ limit: 100 }),
+        fetchCostTruthBoard(),
       ]);
       setMaterials(m.items);
       setLedgerLines(l.items);
@@ -3051,6 +3252,7 @@ export default function CostPage() {
       setTableCensus(ct);
       setSettingHistory(sh.items);
       setPriceHistory(ph);
+      setTruthBoard(tb);
       setAutoRefreshRuns(ar.items);
       setAutoRefreshQueue(aq.items);
       // ★부자재 선택도 여기서 건드리지 않는다(2026-08-23 N5) — 부자재 탭에도 필터가
@@ -3365,6 +3567,7 @@ export default function CostPage() {
             ["recipes", "레시피"],
             ["board", "표준원가 보드"],
             ["purchased", "매입품 단가"],
+            ["truth", "정본 판별"],
           ] as [CostTab, string][]
         ).map(([k, label]) => (
           <button
@@ -3939,10 +4142,20 @@ export default function CostPage() {
           />
           {/* ★보드 아래에 둔다 — 보드는 «계산값이 얼마인가»이고 이 표는 «장부값이 어떻게
               움직였나»다. 둘을 같은 화면에 두는 것이 계약 C의 요점(두 숫자가 이어진 적이
-              없었다, ref 119 §0)이고, S2·S3의 대조·컷오버 패널도 여기로 붙는다. */}
+              없었다, ref 119 §0)이다.
+              ★S2의 정본 판별은 결국 **별도 탭**(「정본 판별」)이 됐다 — 이 자리에 붙일
+              계획이었으나 963행 전건이라 보드와 겹쳐 놓으면 둘 다 못 읽는다. S3의 컷오버는
+              그 탭에 붙는다(판별한 자리에서 갈아타는 것이 자연스럽다). */}
           <CostPriceHistoryPanel data={priceHistory} />
         </div>
       ) : null}
+
+      {/* ══════════════════════════════════════════════════════════════
+          정본 판별 (계약 D-CPP-64 §4 S2) — **읽기 전용**이다.
+          이 탭은 「이 SKU의 정본이 무엇인가」를 답하고, 컷오버(쓰기)는 S3가 신설하는
+          경로 한 벌의 몫이다. 판별과 쓰기를 한 슬라이스에 섞지 않는 것이 계약 §3-B다.
+          ══════════════════════════════════════════════════════════════ */}
+      {tab === "truth" ? <CostTruthBoardPanel data={truthBoard} /> : null}
     </div>
   );
 }

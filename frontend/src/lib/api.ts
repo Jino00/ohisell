@@ -4022,6 +4022,58 @@ export function fetchNaverAdProposals(params?: {
   return fetchApi<NaverAdProposalList>(`/api/naver/ad/proposals${qs ? `?${qs}` : ""}`);
 }
 
+// ── D-NAO-283 (계약 P2-ⓒ · H2) — 사람 발의 입구 ──────────────────────────────
+// ★유형 목록을 프론트에 «적지 않는다». 무엇을 발의할 수 있고 무엇이 엔진 전용인지는
+//   백엔드 게이트(_AD_UP_OPEN_TYPES·BID_DOWN_TYPES·제외 계열)에서 파생되므로, 화면이
+//   자기 목록을 들고 있으면 게이트가 바뀔 때 «화면만 옛말»을 한다(교훈 #380).
+export interface NaverProposableType {
+  proposal_type: string;
+  action: string | null;
+  direction: "up" | "down" | null;
+}
+
+export interface NaverProposableTypes {
+  proposable: NaverProposableType[];
+  /** 엔진 전용 유형 + **사유**. 빼고 주면 화면이 「왜 없는지」를 못 말한다(조용한 실패 금지). */
+  engine_only: { proposal_type: string; reason: string }[];
+  open_actions: string[];
+}
+
+export function fetchNaverProposableTypes(): Promise<NaverProposableTypes> {
+  return fetchApi<NaverProposableTypes>("/api/naver/ad/proposals/proposable-types");
+}
+
+export interface NaverProposalCreateInput {
+  proposalType: string;
+  targetType: string;
+  targetId: string;
+  campaignId: string;
+  adgroupId?: string | null;
+  rationale: string;
+  expectedEffect?: string | null;
+  targetBid?: number | null;
+  proposedBy?: string | null;
+}
+
+/** 사람 발의 — pending 제안 1건을 만든다(승인 아님). 이후는 기존 승인→실행 경로 그대로. */
+export function createNaverProposal(input: NaverProposalCreateInput): Promise<NaverAdProposal> {
+  const body: Record<string, unknown> = {
+    proposal_type: input.proposalType,
+    target_type: input.targetType,
+    target_id: input.targetId,
+    campaign_id: input.campaignId,
+    rationale: input.rationale,
+  };
+  if (input.adgroupId) body.adgroup_id = input.adgroupId;
+  if (input.expectedEffect) body.expected_effect = input.expectedEffect;
+  if (input.targetBid !== undefined && input.targetBid !== null) body.target_bid = input.targetBid;
+  if (input.proposedBy) body.proposed_by = input.proposedBy;
+  return fetchApi<NaverAdProposal>("/api/naver/ad/proposals", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // X1a T4 — 콘솔 승인/반려 상태 전이.
 // D-NAO-249 §4-B(B1) — param_change 제안을 승인(approved)할 때는 applied_value가 **필수**다
 // (없으면 서버 400). 반영될 값은 사람이 정한다 — 코드가 값을 발명하지 않는다. decidedBy·
@@ -6322,6 +6374,61 @@ export function fetchCostPriceHistory(params?: {
   if (params?.path) q.set("path", params.path);
   const qs = q.toString();
   return fetchApi(`/api/cost/price-history${qs ? `?${qs}` : ""}`);
+}
+
+// ──────────────────────────────────────────────
+// 정본 판별 (계약 D-CPP-64 §4 S2)
+// ──────────────────────────────────────────────
+
+/** `computed` 계산값 · `purchased` 매입가 · `held` 보류 · `none` 정본 없음. */
+export type CostTruthType = "computed" | "purchased" | "held" | "none";
+
+export interface CostTruthRow {
+  internal_sku: string;
+  product_name: string;
+  truth_type: CostTruthType;
+  truth_label: string;
+  /** ★보류·정본 없음이면 **null**이다 — 0이 아니다(「없음 ≠ 0」). */
+  truth_value: string | null;
+  current_cost_price: string | null;
+  /** 정본이 서 있을 때만 값이 있다. G1(그레인 불일치)은 뺄셈이 성립하지 않아 null. */
+  gap: string | null;
+  cause: string;
+  /** ref 118 §3 표의 원인 이름표(G1·G2·G3-1…) — 없으면 그 표에 없는 갈래다. */
+  cause_ref118: string | null;
+  /** 왜 이 판정인가 — 문장. 화면은 이걸 그대로 띄운다(빈 칸도 0도 아니다). */
+  reason: string;
+  /** 이 행을 움직일 수 있는 곳. 「소관 없음」도 유효한 답이다. */
+  owner: string;
+  recipe_id: number | null;
+  recipe_product_name: string | null;
+  form_factor: string | null;
+  recipe_kind: string | null;
+  computed_value: string | null;
+}
+
+export interface CostTruthCensus {
+  by_truth_type: Record<string, number>;
+  by_cause: Record<string, number>;
+  cause_ref118: Record<string, string>;
+  cutover_ready_count: number;
+  cutover_gap_sum: string;
+  matched_count: number;
+  held_count: number;
+  none_count: number;
+}
+
+export interface CostTruthBoard {
+  items: CostTruthRow[];
+  sku_count: number;
+  price_rule: string;
+  census: CostTruthCensus;
+  /** 이 층이 답하지 못하는 것 — 화면이 반드시 띄운다(집계가 조용히 완전해 보이면 안 된다). */
+  caveats: string[];
+}
+
+export function fetchCostTruthBoard(): Promise<CostTruthBoard> {
+  return fetchApi("/api/cost/truth-board");
 }
 
 /** 설정 1건 확인·변경. **값이 그대로여도** `value_changed:false`로 그 사실을 자백한다 —

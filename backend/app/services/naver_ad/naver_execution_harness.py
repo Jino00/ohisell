@@ -72,6 +72,24 @@ from app.services.naver_ad.bid_step_types import (
 #   (적대 리뷰 재현: 300원→90,000원). 이 불변식은 테스트로 고정한다 —
 #   test_ad_up_open_types_are_never_clamp_exempt.
 _AD_UP_OPEN_TYPES: frozenset[str] = frozenset({"bid_up"})
+
+# D-NAO-283(계약 P2-ⓒ · H2 사람 발의 입구) — **사람이 콘솔에서 «새로 만들» 수 있는** 제안 유형.
+# ★파생이지 목록이 아니다. 하드코딩하면 위 게이트들이 바뀔 때 조용히 갈라진다(교훈 #380 —
+#   「층 사이의 계약」이 없어서 두 층이 각자 초록이던 그 자리). 세 갈래에서 파생한다:
+#   ① UP = `_AD_UP_OPEN_TYPES` — 승인원 무관으로 열려 있는 유일한 UP(= 사람이 발의해도
+#      쌍방향 잠금에 안 걸리는 유일한 UP).
+#   ② DOWN = `BID_DOWN_TYPES` — 소재 DOWN은 애초에 「콘솔 Confirm 몫」으로 설계돼 있다.
+#   ③ 제외 계열 = `negative_keyword` + `search_term_exclude` — 후자는 자동 승인원 배선이
+#      아예 없고 콘솔 Confirm만이 승인 경로다(위 `_ACTION_BY_PROPOSAL_TYPE` 주석).
+# ★여기 없는 유형(탐색·콜드스타트·서보·pacing·정보성·param_change)은 **엔진 승인원 전용**이다.
+#   우회 입구를 새로 내지 않는다(계약 §5 금지선) — 사람 발의는 «봉투 면제가 없는 유형»에만
+#   열린다. 실제 차단은 이 집합이 아니라 기존 쌍방향 잠금(_execute_update_bid·
+#   real_write_blocker)이 이미 하고 있고, 이 집합은 **그 잠금과 같은 답을 내는 입구 측 표기**다.
+HUMAN_PROPOSABLE_TYPES: frozenset[str] = frozenset(
+    _AD_UP_OPEN_TYPES
+    | BID_DOWN_TYPES
+    | {"negative_keyword", search_term_judge.SEARCH_TERM_EXCLUDE_TYPE}
+)
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.services import naver_sa_ad_fetcher as naver_sa_fetcher
 from app.utils.kst import kst_now
@@ -2281,6 +2299,64 @@ def open_executable_actions() -> list[str]:
     라우터가 프라이빗 `_WRITE_EXECUTORS`를 직접 참조하지 않게 한다 — 하드코딩 라벨이
     개방 순서와 어긋나던 결함 재발 방지)."""
     return sorted(OPEN_ACTIONS & set(_WRITE_EXECUTORS))
+
+
+def human_proposable_types() -> list[str]:
+    """사람이 콘솔에서 «새로 발의»할 수 있는 제안 유형(정렬). `HUMAN_PROPOSABLE_TYPES`의
+    공개 접근자 — 라우터·화면이 프라이빗 게이트 상수를 직접 참조하지 않게 한다
+    (`open_executable_actions`와 같은 관례). ★실쓰기 구현이 없는 유형은 발의해도 죽은
+    카드가 되므로 실행 가능 액션과의 **교집합**만 낸다 — 이중 방벽의 발의판이다."""
+    return sorted(
+        t for t in HUMAN_PROPOSABLE_TYPES
+        if _ACTION_BY_PROPOSAL_TYPE.get(t) in set(open_executable_actions())
+    )
+
+
+def human_proposal_blocker(proposal_type: str) -> str | None:
+    """이 유형을 «사람이 발의»할 수 없는 이유(한국어), 가능하면 None (D-NAO-283 계약 P2-ⓒ).
+
+    ★조용한 실패 금지(계약 §3 P2 ★v9): 화면이 「이 유형은 엔진만 발의합니다」를 **사유와
+    함께** 표기해야 하므로, 판정과 문구를 한 함수가 같이 낸다 — 프론트가 유형 문자열로
+    사유를 재추론하면 게이트가 바뀔 때 화면만 옛말을 한다(`action` 파생과 같은 관례).
+
+    사유는 **실제 게이트 집합에서 파생**한다(문구 하드코딩 금지):
+    탐색/콜드는 각자 전용 승인원과 쌍방향 잠금돼 있고, rank-step은 신선도·TOCTOU 기계가
+    폐루프 안에서만 성립하며, 그 밖은 애초에 발의 입구를 안 연 유형이다.
+    """
+    if proposal_type in HUMAN_PROPOSABLE_TYPES:
+        if proposal_type in human_proposable_types():
+            return None
+        return (
+            f"{proposal_type}은 발의 대상이나 실쓰기 액션이 아직 미개방 — "
+            "발의해도 실행할 수 없다(D-NAO-16 개방 순서)"
+        )
+    if proposal_type in EXPLORATION_STEP_TYPES:
+        return (
+            f"이 유형은 엔진만 발의합니다 — 탐색 스텝({proposal_type})은 explore_op 승인원과 "
+            "쌍방향으로 잠겨 있고(경제성 상한·base_bid 마커가 레인 산정에서만 나온다) "
+            "사람 발의로는 그 상한 근거가 없다"
+        )
+    if proposal_type in COLD_START_STEP_TYPES:
+        return (
+            f"이 유형은 엔진만 발의합니다 — 콜드 첫 입찰({proposal_type})은 ±15% 변경폭이 "
+            "완전 면제라 유일한 브레이크가 레인이 산정한 상한이고, cold_op 승인원 전용이다"
+        )
+    if proposal_type in RANK_STEP_TYPES:
+        return (
+            f"이 유형은 엔진만 발의합니다 — 순위 스텝({proposal_type})은 생성 직후 인라인 "
+            "실행되는 폐루프 전용이다(신선도 10분·base_bid TOCTOU 재검증이 전제)"
+        )
+    if proposal_type in CHANGE_PCT_EXEMPT_TYPES:
+        return (
+            f"이 유형은 엔진만 발의합니다 — {proposal_type}은 ±15% 변경폭 면제 유형이라 "
+            "봉투 밖 상한을 레인이 대신 산정한다(사람 발의는 면제 없는 유형에만 열린다)"
+        )
+    if proposal_type not in _ACTION_BY_PROPOSAL_TYPE:
+        return f"이 유형은 엔진만 발의합니다 — {proposal_type}은 실행 대상이 없는 정보성·결정 전용 유형이다"
+    return (
+        f"이 유형은 엔진만 발의합니다 — {proposal_type}은 사람 발의 입구가 열려 있지 않다"
+        f"(열린 유형: {', '.join(human_proposable_types())})"
+    )
 
 
 def real_write_blocker(proposal: NaverProposal, db: Session | None = None) -> str | None:
