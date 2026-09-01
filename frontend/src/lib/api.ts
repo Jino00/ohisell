@@ -7126,8 +7126,8 @@ export interface PaoScopeBulkResult {
    *  화면이 「N건 맡김」이라 말할 때 그 N은 이 값이어야 감사 원장의 줄 수와 일치한다. */
   changed: number;
   counts: { created: number; updated: number; unchanged: number };
-  rows: { adgroup_id: string; outcome: "created" | "updated" | "unchanged";
-          role: PaoScopeRole | null; enabled: boolean }[];
+  // ★행별 outcome 배열은 **두지 않는다** — 적대 리뷰 MB-11이 「빈 배열로 치환해도 전건
+  //   초록」임을 보였다. 아무도 안 읽고 아무 테스트도 안 지키는 필드는 계약만 넓히고 썩는다.
 }
 
 /** H5 — 캠페인의 여러 광고그룹을 한 번에 맡긴다/뺀다(계약 P2).
@@ -7141,8 +7141,11 @@ export interface PaoScopeBulkResult {
 export function putPaoScopeCampaignBulk(body: {
   campaign_id: string;
   adgroup_ids: string[];
-  role: PaoScopeRole | null;
   enabled: boolean;
+  /** ★**생략 = 「건드리지 마라」**, 명시 `null` = 「지워라」(적대 리뷰 P1-1).
+   *  「전부 끄기」가 사람이 붙여 둔 역할을 쓸어버리지 않게 하는 계약이라 옵셔널이다. */
+  role?: PaoScopeRole | null;
+  /** 생략 = 보존. 화면은 지금 보내지 않는다. */
   memo?: string | null;
 }): Promise<PaoScopeBulkResult> {
   return fetchApi(`/api/naver/ad/scope/campaign`, {

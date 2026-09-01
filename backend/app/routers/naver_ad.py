@@ -70,7 +70,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -1241,7 +1241,16 @@ class CampaignScopeBulkIn(BaseModel):
     campaign_id: str = Field(min_length=1, max_length=50)
     # 상한 500 — 한 캠페인의 실제 그룹 수는 수십 규모다(prod 최대 58). 무제한이면 한 번의
     # 잘못된 호출이 원장을 통째로 덮는다(`ConsoleExclusionImportIn`의 상한과 같은 이유).
-    adgroup_ids: list[str] = Field(min_length=1, max_length=500)
+    # ★원소에도 길이 제약을 건다(적대 리뷰 P2-2): 컬럼이 `String(50)`인데 리스트 원소만
+    #   무제약이면 빈 문자열 행이 생기거나(그 캠페인이 「일부만 맡긴 상태」로 뒤집힌다)
+    #   PostgreSQL 전환 시 DataError→500이 된다. SQLite가 안 막는다고 없어도 되는 게 아니다.
+    adgroup_ids: list[Annotated[str, Field(min_length=1, max_length=50)]] = Field(
+        min_length=1, max_length=500
+    )
+    # ★★`role`·`memo`는 **안 보내면 「건드리지 마라」**다(적대 리뷰 P1-1). 명시 `null`은
+    #   「지워라」로 남긴다. 둘을 같은 값으로 두면 「켜기/끄기」 버튼 한 번에 사람이 붙여 둔
+    #   역할·메모가 N건 사라지는데, 그건 어떤 타입으로도 못 막는다 — 판별은
+    #   pydantic의 `model_fields_set`(=요청 본문에 그 키가 있었나)으로 한다.
     role: str | None = None
     enabled: bool = True
     memo: str | None = None
@@ -1259,6 +1268,9 @@ def pao_scope_campaign_bulk_put(body: CampaignScopeBulkIn, db: Session = Depends
 
     ★중복 `adgroup_ids`는 **422로 거부**한다 — 조용히 dedupe 하면 「보낸 수」와 「손댄 수」가
     달라지고, 그 차이는 응답의 카운트가 아니라 사람의 기대에서 어긋난다.
+
+    ★★`role`·`memo`를 **안 보내면 보존한다**(적대 리뷰 P1-1). 「전부 끄기」는 `enabled`만
+    바꾸는 동작이어야 하고, 화면의 확인 문구가 그렇게 약속한다.
     """
     if body.role is not None and body.role not in adgroup_scope.VALID_ROLES:
         raise HTTPException(
@@ -1267,12 +1279,16 @@ def pao_scope_campaign_bulk_put(body: CampaignScopeBulkIn, db: Session = Depends
     if len(set(body.adgroup_ids)) != len(body.adgroup_ids):
         raise HTTPException(422, "adgroup_ids에 중복이 있습니다")
 
+    # 「안 보냄」과 「null로 보냄」을 가른다 — 전자는 보존(KEEP), 후자는 지우기.
+    role_arg = body.role if "role" in body.model_fields_set else adgroup_scope.KEEP
+    memo_arg = body.memo if "memo" in body.model_fields_set else adgroup_scope.KEEP
+
     now = kst_now()
     results = []
     for adgroup_id in body.adgroup_ids:
         res = adgroup_scope.apply_scope_row(
             db, campaign_id=body.campaign_id, adgroup_id=adgroup_id,
-            role=body.role, enabled=body.enabled, memo=body.memo,
+            role=role_arg, enabled=body.enabled, memo=memo_arg,
         )
         results.append(res)
         if res["outcome"] != "unchanged":
@@ -1296,8 +1312,9 @@ def pao_scope_campaign_bulk_put(body: CampaignScopeBulkIn, db: Session = Depends
         #   같아야 한다. requested를 그대로 쓰면 no-op까지 「했다」로 표시된다.
         "changed": counts["created"] + counts["updated"],
         "counts": counts,
-        "rows": [{"adgroup_id": r["adgroup_id"], "outcome": r["outcome"],
-                  "role": r["role"], "enabled": r["enabled"]} for r in results],
+        # ★`rows`(행별 outcome)를 **뺐다** — 적대 리뷰 MB-11이 「빈 배열로 치환해도 전건
+        #   초록」임을 보였다. 아무도 안 읽고 아무 테스트도 안 지키는 필드는 응답 계약을
+        #   넓히기만 하고 조용히 썩는다. 필요해지면 그때 소비처·테스트와 함께 되살린다.
     }
 
 

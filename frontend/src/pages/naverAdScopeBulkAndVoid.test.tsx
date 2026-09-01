@@ -175,6 +175,46 @@ describe("H5 — 스코프 캠페인 단위 일괄 지정이 사람에게 닿는
     expect(arg.campaign_id).toBe("cmp-tpu");
     expect(arg.adgroup_ids).toEqual(["grp-s25fe", "grp-z8wide"]);
     expect(arg.enabled).toBe(true);
+    // ★적대 리뷰 P1-1: 역할 셀렉트를 안 건드렸으면 `role` 키가 **아예 없어야** 한다.
+    //   `role: null`을 보내면 사람이 붙여 둔 역할이 N건 조용히 지워진다.
+    expect("role" in arg).toBe(false);
+  });
+
+  it("MF-3: ★「일괄 역할」 셀렉트가 실제로 payload에 닿는다", async () => {
+    // 변이 저항: 셀렉트를 장식으로 만드는 변이(role을 항상 고정값으로)를 잡는다.
+    // BV-2만으로는 셀렉트가 아무 데도 안 닿아도 초록이었다(적대 리뷰 MF-3 생존).
+    await renderApp();
+    fireEvent.change(await screen.findByLabelText("일괄 역할"), { target: { value: "brake" } });
+    fireEvent.click(await screen.findByRole("button", { name: "전부 맡김" }));
+
+    await waitFor(() => expect(putPaoScopeCampaignBulk).toHaveBeenCalled());
+    expect(vi.mocked(putPaoScopeCampaignBulk).mock.calls[0][0].role).toBe("brake");
+  });
+
+  it("MF-3b: 「역할 지우기」를 골랐을 때만 명시 null이 나간다", async () => {
+    await renderApp();
+    fireEvent.change(await screen.findByLabelText("일괄 역할"), { target: { value: "__clear__" } });
+    fireEvent.click(await screen.findByRole("button", { name: "전부 맡김" }));
+
+    await waitFor(() => expect(putPaoScopeCampaignBulk).toHaveBeenCalled());
+    const arg = vi.mocked(putPaoScopeCampaignBulk).mock.calls[0][0];
+    expect("role" in arg).toBe(true);
+    expect(arg.role).toBeNull();
+  });
+
+  it("MF-1: ★일괄 성공 뒤 표가 «다시 읽힌다»", async () => {
+    // 변이 저항: 성공 후 `onChanged()` 한 줄을 지우면 사용자는 「1건 바뀜」을 읽는데
+    // 표의 「맡김」·「역할」 열은 옛 값 그대로다 — 화면이 자기 메시지와 모순된다.
+    // 적대 리뷰 MF-1이 이 자리를 끊었고 두 파일 41건이 전건 초록이었다.
+    const { fetchPaoScopeRoster } = await import("../lib/api");
+    await renderApp();
+    await screen.findByRole("button", { name: "전부 맡김" });
+    const before = vi.mocked(fetchPaoScopeRoster).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "전부 맡김" }));
+    await waitFor(() =>
+      expect(vi.mocked(fetchPaoScopeRoster).mock.calls.length).toBeGreaterThan(before),
+    );
   });
 
   it("BV-2b: 「전부 끄기」는 enabled=false로 보낸다(행 삭제가 아니다)", async () => {
@@ -259,6 +299,22 @@ describe("void — 원장 무효화 손이 사람에게 닿는다", () => {
 
     expect(await screen.findByText(/이미 학습에 셈이 들어갔을 수 있습니다/)).toBeTruthy();
     expect(screen.queryByText(/확인하지 못했습니다/)).toBeNull();
+  });
+
+  it("MF-2: ★무효화 성공 뒤 제외 목록이 «다시 읽힌다»", async () => {
+    // 변이 저항: `onDone`에서 `setReloadKey`를 지우면 무효화한 행이 목록에서 안 사라진다.
+    // 사람이 다시 누르면 `already_void`가 뜨고, 「무효화했습니다」와 화면이 서로 모순인데
+    // 적대 리뷰 MF-2에서 13건 전건 초록이었다.
+    const { fetchNaverSearchTermExclusions } = await import("../lib/api");
+    vi.spyOn(window, "prompt").mockReturnValue("사유");
+    await renderApp();
+    await screen.findByRole("button", { name: "무효화" });
+    const before = vi.mocked(fetchNaverSearchTermExclusions).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "무효화" }));
+    await waitFor(() =>
+      expect(vi.mocked(fetchNaverSearchTermExclusions).mock.calls.length).toBeGreaterThan(before),
+    );
   });
 
   it("멱등 — 이미 무효화된 행이면 그 사실을 말한다", async () => {

@@ -560,7 +560,8 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
   }
   return (
     <>
-    <BulkScopeBar campaignId={c.campaign_id} adgroups={c.adgroups} onChanged={onChanged} />
+    <BulkScopeBar campaignId={c.campaign_id} adgroups={c.adgroups}
+                  hasScope={c.has_scope} adgroupCount={c.adgroup_count} onChanged={onChanged} />
     <Table
       head={
         // ★`<tr>`로 감싸지 않는다 — `Table`이 이미 `<thead><tr>{head}</tr></thead>`로 감싼다
@@ -605,21 +606,44 @@ function AdgroupTable({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () => 
  *  ★**엔진을 켜지 않는다** — 스코프는 `auto_operate` «아래»의 축이다. 그 사실을 버튼 옆에
  *    적어 둔다(누르는 사람이 「이걸로 돌기 시작한다」고 읽으면 안 된다). */
 function BulkScopeBar({
-  campaignId, adgroups, onChanged,
-}: { campaignId: string; adgroups: PaoScopeAdgroup[]; onChanged: () => void }) {
-  const [role, setRole] = useState<PaoScopeRole | "">("");
+  campaignId, adgroups, hasScope, adgroupCount, onChanged,
+}: {
+  campaignId: string; adgroups: PaoScopeAdgroup[]; hasScope: boolean;
+  adgroupCount: number; onChanged: () => void;
+}) {
+  // ★기본이 **「역할 유지」**다(적대 리뷰 P1-1). 초판은 기본이 「역할 없음」이라 사람이
+  //   역할 칸을 손대지 않고 「전부 끄기」만 눌러도 붙여 둔 역할이 N건 지워졌고, 확인
+  //   문구는 「행은 남고 꺼지기만 합니다」라며 그 반대를 단언했다.
+  const [role, setRole] = useState<PaoScopeRole | "__keep__" | "__clear__">("__keep__");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
   const ids = adgroups.map((g) => g.adgroup_id);
+  // 창 밖 그룹 수 — 로스터는 「창 안 집행분 ∪ 기존 스코프 행」만 싣는다(적대 리뷰 P2-1).
+  const outsideWindow = Math.max(0, adgroupCount - ids.length);
 
   async function apply(enabled: boolean) {
     const verb = enabled ? "맡깁니다" : "끕니다";
+    const roleLine =
+      role === "__keep__"
+        ? "· 역할·메모는 그대로 둡니다(이 버튼은 맡김 여부만 바꿉니다).\n"
+        : role === "__clear__"
+          ? "⚠️ 역할을 «없음»으로 **지웁니다**(이 목록의 그룹 전부).\n"
+          : `· 역할을 「${ROLE_LABEL[role]}」로 함께 바꿉니다.\n`;
+    // ★창 밖 그룹 경고는 「스코프가 아직 없는 캠페인」에서만 뜻이 있다 — 첫 행이 생기는
+    //   순간 진리표가 「목록에 없는 그룹 = OFF」로 바뀌기 때문이다(D-NAO-244).
+    const outsideLine =
+      enabled && !hasScope && outsideWindow > 0
+        ? `\n⚠️⚠️ 이 캠페인은 아직 스코프가 없습니다. 지금 ${ids.length}개만 맡기면 ` +
+          `**이 창에 안 보이는 ${outsideWindow}개는 «맡김 밖»으로 넘어갑니다**(원장에 줄도 남지 않습니다).\n`
+        : "";
     const ok = window.confirm(
       `보이는 광고그룹 ${ids.length}개를 한 번에 ${verb}.\n\n` +
+        roleLine +
         (enabled
           ? "⚠️ 이 캠페인이 「일부 그룹만 맡긴 상태」가 되면 캠페인 레벨 액션(예산)이 hold됩니다.\n"
-          : "행은 남고 꺼지기만 합니다(스코프에서 빼는 «해제»와 결과가 다릅니다).\n") +
+          : "· 행은 남고 꺼지기만 합니다(스코프에서 빼는 «해제»와 결과가 다릅니다).\n") +
+        outsideLine +
         "\n이 동작은 엔진을 켜지 않습니다 — 켜는 것은 별도 스위치입니다.",
     );
     if (!ok) return;
@@ -627,7 +651,11 @@ function BulkScopeBar({
     setMsg(null);
     try {
       const r = await putPaoScopeCampaignBulk({
-        campaign_id: campaignId, adgroup_ids: ids, role: role || null, enabled,
+        campaign_id: campaignId,
+        adgroup_ids: ids,
+        enabled,
+        // ★「유지」면 키 자체를 **안 보낸다** — 백엔드가 «안 보냄»과 «null»을 가른다.
+        ...(role === "__keep__" ? {} : { role: role === "__clear__" ? null : role }),
       });
       // ★`requested`가 아니라 `changed`를 말한다 — 이미 같은 값이던 행까지 「했다」고 세면
       //   화면의 숫자가 감사 원장의 줄 수와 어긋난다.
@@ -651,13 +679,15 @@ function BulkScopeBar({
         className="text-xs border border-gray-200 rounded px-1 py-0.5"
         value={role}
         disabled={busy}
-        onChange={(e) => setRole(e.target.value as PaoScopeRole | "")}
+        onChange={(e) => setRole(e.target.value as PaoScopeRole | "__keep__" | "__clear__")}
         aria-label="일괄 역할"
       >
-        <option value="">역할 없음</option>
+        {/* ★기본이 「유지」다 — 「없음」이 기본이면 역할 칸을 안 건드린 사람이 라벨을 지운다 */}
+        <option value="__keep__">역할 유지</option>
         <option value="accel">액셀</option>
         <option value="boundary">경계</option>
         <option value="brake">브레이크</option>
+        <option value="__clear__">역할 지우기</option>
       </select>
       <button
         type="button"
