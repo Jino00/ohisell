@@ -274,6 +274,35 @@ _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은
 # ★이 값을 «키우는» 것은 안전 완화다: 2로 올리면 retro가 하루 죽어도 탐색이 계속 오른다.
 #   조정하려면 그 대가(옛 성적표로 UP 집행)를 계약에 적고 §7 대칭 검사를 거칠 것.
 _RETRO_ASOF_MAX_LAG_DAYS = 1
+# ★★D-NAO-284 (2026-09-01): 위 «기대값»은 **일 레인(08:50) 기준으로만** 옳았다. 그런데 이 게이트를
+#   읽는 레인은 하나가 아니다 — 시간별 레인이 **매시 :20에 24번** 돈다. 그중 KST 00:20~08:20의
+#   **9개 회차는 08:30 retro가 아직 안 돈 시각**이라, 그때 최신 as-of는 구조적으로 today−2다.
+#   그 9회차마다 게이트가 today−1을 요구하니 **원리적으로 만족 불가능한 창**이 매일 생겼다.
+#   ★라이브 실측(2026-09-01, 최근 7일): 「소급채점 stale」 차단이 **KST 00~08시에만 매시 정확히
+#     109건**, 09시 이후 **0건**. 그 창이 stale 차단 981건의 **전부**이고 전체 차단의 48%다.
+#     (ops_diary_entries.created_at은 UTC다 — scheduler_state.last_run_at(KST)과 9시간 차로 확정.
+#      UTC로 보면 15~23시라 「저녁에 막힌다」로 오독된다.)
+#   ⇒ 고치는 것은 **허용 지연 상수가 아니라 «지금 존재할 수 있는 가장 신선한 as-of»의 정의**다.
+#     상수를 2로 키우면 retro가 **진짜로** 하루 죽어도 UP이 나간다(fail-open) — 그건 안전 완화고
+#     주석이 이미 금지해 뒀다. 시각 인지형 기대는 **정상을 정상으로 읽을 뿐 고장은 그대로 잡는다**:
+#     08:30 이후에 today−1이 없으면 그건 진짜 실패이고 여전히 fail-closed다.
+# ★이 시각은 scheduler_service의 ("run_naver_retro_scoring", "30 8 * * *")와 **짝이다.**
+#   크론을 옮기면 여기도 옮겨야 한다 — 두 곳이 갈라지면 그날부터 조용히 창이 다시 생긴다.
+_RETRO_CRON_HOUR_KST = 8
+_RETRO_CRON_MINUTE_KST = 30
+
+
+def _expected_retro_asof(today: date, now: datetime | None = None) -> date:
+    """지금 이 순간 «존재할 수 있는 가장 신선한» 소급채점 as-of (D-NAO-284).
+
+    08:30 KST retro가 «어제» as-of를 만든다. 그러므로:
+      · 08:30 **이후** → today − 1 이 있어야 정상(없으면 그날 크론 실패 = fail-closed 유지)
+      · 08:30 **이전** → today − 2 가 최신인 게 정상(아직 안 돌았을 뿐, 고장이 아니다)
+    """
+    at = now or kst_now()
+    ran_today = (at.hour, at.minute) >= (_RETRO_CRON_HOUR_KST, _RETRO_CRON_MINUTE_KST)
+    lag = _RETRO_ASOF_MAX_LAG_DAYS if ran_today else _RETRO_ASOF_MAX_LAG_DAYS + 1
+    return today - timedelta(days=lag)
 # _HOURLY_RANK_DOWN_THRESHOLD: 과열밴드 DOWN(<2.5)은 IU2(D-NAO-66)로 폐지 — 순위는 목표가
 # 아니라 결과이므로 순위만으로 강제 하향하지 않는다(상단 순위의 이상 지출은 CPC 급등 DOWN +
 # RL3 loss 고삐가 담당). 이 상수는 탐침(_probe_trigger·_learned_optimal_skip의 밴드 프라이어)
@@ -698,7 +727,8 @@ def format_held_by_reason(counts: dict[str, int]) -> str:
     return " ".join(f"{k}={v}" for k, v in counts.items())
 
 
-def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date) -> str | None:
+def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date,
+                          now: datetime | None = None) -> str | None:
     """D-NAO-48 조건④(최신 소급채점에서 bleeding 아님) 판정 — 미충족 시 hold 사유, 통과 시
     None. retro_snapshotter._BOARDS가 매일 08:30 board별로 스냅샷하는 NaverRetroSignal의
     최신 asof_date 행에 이 target_id가 해당 bleeding 보드(board)로 존재하면 bleeding.
@@ -706,10 +736,13 @@ def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: 
     fail-closed 계열(전부 hold):
     - 알 수 없는 grain(board 매핑 없음) — 판정 불가.
     - 소급채점 데이터 전무(latest_asof None) — 검증 근거 없음.
-    - codex 4R[P1] asof 신선도: 일 레인(08:50) 기준 기대 as-of = 오늘-1(08:30 retro가
-      매일 어제 as-of를 생성). latest_asof < 기대면 당일 retro 크론이 실패한 것 — 과거
-      성적표에서의 "부재"를 "bleeding 아님"으로 해석하면 stale 데이터로 bid_up이 자동
-      실행된다(fail-open). stale이면 존재 여부와 무관하게 hold.
+    - codex 4R[P1] asof 신선도: 기대 as-of는 _expected_retro_asof가 정한다 — 08:30 retro
+      **이후**면 오늘-1, **이전**이면 오늘-2(아직 안 돌았을 뿐이라 그게 정상이다, D-NAO-284).
+      latest_asof < 기대면 그날 retro 크론이 실패한 것 — 과거 성적표에서의 "부재"를
+      "bleeding 아님"으로 해석하면 stale 데이터로 bid_up이 자동 실행된다(fail-open).
+      stale이면 존재 여부와 무관하게 hold.
+      ★종전엔 시각을 안 보고 항상 오늘-1을 요구해, **매일 KST 00:00~08:30이 통째로
+        만족 불가능**했다(라이브 실측: 그 창에서만 매시 109건 차단·나머지 시각 0건).
 
     최신(신선한) 스냅샷은 있는데 이 target_id가 그 보드에 없으면 "그날 안 걸림" = 실제
     not-bleeding 신호 — 통과(None)."""
@@ -719,12 +752,12 @@ def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: 
     latest_asof = db.query(sqlfunc.max(NaverRetroSignal.asof_date)).scalar()
     if latest_asof is None:
         return "④소급채점 데이터 없음 — bleeding 검증 불가(fail-closed)"
-    expected_asof = today - timedelta(days=_RETRO_ASOF_MAX_LAG_DAYS)
+    expected_asof = _expected_retro_asof(today, now)
     if latest_asof < expected_asof:
         return (
             f"④소급채점 stale — latest_asof={latest_asof.isoformat()} < 기대 "
             f"{expected_asof.isoformat()}(당일 retro 미완주, fail-closed, codex 4R[P1], "
-            f"허용지연={_RETRO_ASOF_MAX_LAG_DAYS}일)"
+            f"허용지연={_RETRO_ASOF_MAX_LAG_DAYS}일, D-NAO-284 시각인지형)"
         )
     exists = db.query(NaverRetroSignal.id).filter(
         NaverRetroSignal.asof_date == latest_asof,
@@ -803,6 +836,7 @@ def _ex_allocation_adgroups(
 
 def _check_bid_up_conditions(
     db: Session, p: NaverProposal, today: date, *, ex_ctx: dict | None = None,
+    now: datetime | None = None,
 ) -> str | None:
     """D-NAO-48 bid_up 4조건(PLAN §3) — 하나라도 미충족이면 hold 사유 문자열, 전부
     충족이면 None(승인 가능).
@@ -881,7 +915,7 @@ def _check_bid_up_conditions(
             return f"EX 멤버십 재검증 실패 — 배분 목록에 없음(target={p.target_id}, clk={clk})"
 
     # ④최신 소급채점에서 bleeding 아님(asof 신선도 포함 — codex 4R[P1]). ★폴백 없음.
-    bleeding_reason = _bleeding_hold_reason(db, p.target_type, p.target_id, today)
+    bleeding_reason = _bleeding_hold_reason(db, p.target_type, p.target_id, today, now)
     if bleeding_reason:
         return bleeding_reason
 
@@ -1193,7 +1227,7 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             continue
 
         if p.proposal_type == "bid_up":
-            hold_reason = _check_bid_up_conditions(db, p, today, ex_ctx=ex_ctx)
+            hold_reason = _check_bid_up_conditions(db, p, today, ex_ctx=ex_ctx, now=now)
             if hold_reason:
                 result["held"].append({"id": p.id, "reason": hold_reason})
                 _record_blocked(
@@ -2358,7 +2392,8 @@ def _learned_optimal_skip(
 _ADGROUP_DAILY_LOSS_BOARDS = ("shopping_group_bep", "shopping_pause_candidates")
 
 
-def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date) -> str | None:
+def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date,
+                                   now: datetime | None = None) -> str | None:
     """탐색 후보 그룹이 **활성 daily 손실 상태**면 제외 사유(문자열), 아니면 None(PLAN §1 가드5,
     GATE P2-risk6). DL이 읽는 것과 **동일 보드/신선도**를 재사용한다:
     - shopping_group_bep + asof 신선도 = 일 레인 bid_up 게이트(_bleeding_hold_reason, D-NAO-48 조건④)
@@ -2367,7 +2402,7 @@ def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date) ->
       제외(같은 최신 asof — group_bep 통과 시 신선함이 보장됨).
     ★탐색은 표본-기반 UP인데 daily 손실 조치는 비용-기반 백스톱이라, 후자가 조인 그룹을 전자가
       역전하면 어제 조치가 무의미해진다(가드5: 손실 조치 그룹 UP 금지)."""
-    bep_reason = _bleeding_hold_reason(db, "adgroup", adgroup_id, today)
+    bep_reason = _bleeding_hold_reason(db, "adgroup", adgroup_id, today, now)
     if bep_reason is not None:
         return bep_reason  # shopping_group_bep bleeding OR asof stale/missing(fail-closed)
     # group_bep 통과 = 신선 asof 확정 → 같은 최신 asof에서 스톱로스 보드도 확인.
@@ -2707,7 +2742,7 @@ def _run_exploration_for_campaign(
 
         # GATE P2-risk6(가드5 완성): 활성 daily 손실 상태(스톱로스/floored/바닥손실) 그룹 제외 —
         # 어제 daily 고삐가 조인 그룹을 오늘 탐색 UP으로 역전하지 않는다(DL과 동일 보드·신선도).
-        loss_reason = _exploration_daily_loss_reason(db, adgroup_id, today)
+        loss_reason = _exploration_daily_loss_reason(db, adgroup_id, today, now)
         if loss_reason is not None:
             result["held"].append({"target_id": adgroup_id, "reason": f"[탐색] daily 손실상태 제외 — {loss_reason}"})
             _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
