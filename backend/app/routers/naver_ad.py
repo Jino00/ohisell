@@ -8,6 +8,12 @@
 # GET /api/naver/ad/proposals         — 제안 카드 목록(P2-S3, naver_proposals 단순 read).
 #   각 행에 expert_verdict(최근 완료(status=ok) run의 평결 요약) 조인(E1a T6, 배지용) +
 #   executable/not_executable_reason(X1a T4, naver_execution_harness.real_write_blocker).
+# POST /api/naver/ad/proposals         — **사람 발의**(D-NAO-283, 계약 P2-ⓒ H2). pending 제안
+#   1건 생성 — 승인이 아니다. 여는 유형은 bid_up·bid_down·제외 계열뿐이고(탐색·콜드·서보는
+#   엔진 승인원 전용), 구조 검증은 실행기 real_write_blocker를 **재사용**한다(콘솔이 만들게
+#   해주는데 실행기가 거부하는 죽은 카드 방지). 봉투 면제 신설 없음.
+# GET /api/naver/ad/proposals/proposable-types — 발의 폼용. 열린 유형 + **엔진 전용 유형과
+#   그 사유**를 둘 다 준다(조용한 실패 금지 — 「왜 없는지」를 화면이 말해야 한다).
 # POST /api/naver/ad/proposals/{id}/status  — 상태 전이(승인/반려, X1a T4). D-NAO-5 사람 승인
 #   게이트의 유일한 정당 경로 — pending→approved가 이 라우터를 거쳐야 harness.execute()가
 #   실행을 허용한다.
@@ -418,6 +424,127 @@ def proposals(
         "open_actions": naver_execution_harness.open_executable_actions(),
         "rows": [_serialize_proposal(p, verdicts.get(p.id), ent_names, camp_names, db) for p in rows],
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-283 (계약 P2-ⓒ · H2) — 사람 발의 제안 입구
+# ══════════════════════════════════════════════════════════════════
+# ★이 입구가 «새로 만드는» 것은 제안 1건뿐이다. 그 뒤는 기존 경로 그대로다:
+#   발의(pending) → 사람 승인(POST /proposals/{id}/status) → 실행(POST /proposals/{id}/execute)
+#   → harness.execute()의 D-NAO-13 하드체크·가드레일 봉투.
+# **봉투 면제를 신설하지 않는다**(계약 §3 P2·§5 금지선). 큰 폭이 필요하면 스텝을 나눈다.
+#
+# ★검증은 «실행기의 판정을 재사용»한다(교훈 #380 — 두 층이 각자 초록이던 그 자리).
+#   필수 필드·구조 조건을 여기 다시 적으면 실행기와 갈라져 「콘솔은 만들게 해주는데
+#   실행은 거부하는」 죽은 카드가 태어난다(prod 실측 133건이 그 모양이었다).
+#   그래서 미저장(transient) NaverProposal을 만들어 real_write_blocker에 그대로 물어본다.
+
+
+class ProposalCreateIn(BaseModel):
+    """사람 발의 제안 1건. 필드 의미는 NaverProposal과 1:1 — 새 어휘를 만들지 않는다."""
+
+    proposal_type: str
+    target_type: str
+    target_id: str
+    campaign_id: str
+    adgroup_id: str | None = None
+    rationale: str                      # ★필수 — 근거 없는 발의는 학습 사슬에서 유령이 된다
+    expected_effect: str | None = None
+    target_bid: int | None = None       # bid_up/bid_down
+    proposed_by: str | None = None      # 발의 주체 메모(옵션) — 미지정 시 "console"
+
+
+@router.get("/proposals/proposable-types")
+def proposal_proposable_types():
+    """발의 폼이 그릴 유형 목록 — **열린 것과 엔진 전용을 «둘 다»** 준다(계약 §3 P2 ★v9).
+
+    ★엔진 전용을 «빼서» 주지 않는 이유: 빼면 화면이 「그 유형이 없다」고만 말하고 사람은
+    왜 없는지 모른다 — 계약이 명시적으로 금지한 조용한 실패다. 사유 문구도 백엔드가 낸다
+    (프론트가 유형 문자열로 사유를 재추론하면 게이트가 바뀔 때 화면만 옛말을 한다 —
+    `action`·`informational` 파생과 같은 관례).
+    """
+    proposable = naver_execution_harness.human_proposable_types()
+    engine_only = [
+        {"proposal_type": t, "reason": naver_execution_harness.human_proposal_blocker(t)}
+        for t in sorted(naver_execution_harness._ACTION_BY_PROPOSAL_TYPE)
+        if t not in proposable
+    ]
+    return {
+        "proposable": [
+            {
+                "proposal_type": t,
+                "action": naver_execution_harness._ACTION_BY_PROPOSAL_TYPE.get(t),
+                "direction": bid_step_types.direction_of(t),
+            }
+            for t in proposable
+        ],
+        "engine_only": engine_only,
+        "open_actions": naver_execution_harness.open_executable_actions(),
+    }
+
+
+@router.post("/proposals")
+def proposal_create(body: ProposalCreateIn, db: Session = Depends(get_db)):
+    """사람이 콘솔에서 제안을 발의한다(D-NAO-283 · 계약 P2-ⓒ H2).
+
+    생성되는 것은 `status='pending'` 제안 1건이다 — **승인이 아니다.** `approval_source`는
+    비워 둔다(그 컬럼의 뜻은 「승인 출처」이고, 승인은 아직 일어나지 않았다. 여기서 채우면
+    감사상 「발의=승인」으로 읽힌다).
+
+    거부 순서(전부 fail-closed):
+    ① 유형이 사람 발의 대상이 아님 → 400 + 「이 유형은 엔진만 발의합니다 + 사유」
+    ② 캠페인이 `optimizer='ours'`가 아님 → 409 (D-NAO-13. 실행 직전에도 재검증되지만,
+       그때 거부하면 죽은 카드가 남으므로 입구에서 같은 답을 낸다 — 이중 방벽이지 우회 아님)
+    ③ 실행기가 그 제안을 실행 못 할 구조 → 400 + **실행기가 낸 사유 그대로**
+    """
+    blocker = naver_execution_harness.human_proposal_blocker(body.proposal_type)
+    if blocker is not None:
+        raise HTTPException(400, blocker)
+
+    optimizer = naver_execution_harness._resolve_optimizer(db, body.campaign_id)
+    if optimizer != "ours":
+        raise HTTPException(
+            409,
+            f"캠페인 {body.campaign_id}의 optimizer={optimizer!r} — 'ours'가 아닌 캠페인엔 "
+            "쓰기 금지(D-NAO-13). 발의해도 실행 단계에서 거부되므로 입구에서 막는다.",
+        )
+
+    # ★미저장 제안으로 실행기에 먼저 물어본다 — 구조 판정을 여기 복제하지 않기 위함이다.
+    #   (real_write_blocker는 순수 판정 함수이고 DB를 건드리지 않는다 — 그 계약에 기댄다.)
+    # ★★`approval_source="console"`을 «판정용으로만» 실어 묻는다. 이 발의가 승인되면
+    #   `/proposals/{id}/status`가 정확히 그 값을 박고, real_write_blocker의 스코프 판정
+    #   (D-NAO-244)은 `approval_source is not None`일 때만 발동하기 때문이다. None으로 물으면
+    #   스코프 밖 그룹이 입구를 통과하고, 승인 뒤 실행에서 ScopeGuardError로 죽는다 —
+    #   그게 바로 이 입구가 만들지 않으려는 죽은 카드다. **묻는 값과 저장하는 값이 다르므로
+    #   아래에서 반드시 되돌린다**(회귀 테스트가 저장된 행의 approval_source is None을 고정).
+    proposed_by = (body.proposed_by or "console").strip() or "console"
+    candidate = NaverProposal(
+        proposal_type=body.proposal_type,
+        target_type=body.target_type,
+        target_id=body.target_id,
+        campaign_id=body.campaign_id,
+        adgroup_id=body.adgroup_id,
+        rationale=f"[사람 발의: {proposed_by}] {body.rationale}",
+        expected_effect=body.expected_effect,
+        target_bid=body.target_bid,
+        status="pending",
+        approval_source="console",  # ← 판정용. 저장 직전 None으로 되돌린다(바로 아래).
+    )
+    structural = naver_execution_harness.real_write_blocker(candidate, db)
+    if structural is not None:
+        raise HTTPException(400, f"실행 불가 구조라 발의를 거부한다 — {structural}")
+
+    # 발의는 승인이 아니다 — 「승인 출처」 컬럼은 비운 채로 저장한다(위 ★★).
+    candidate.approval_source = None
+    db.add(candidate)
+    db.commit()
+    db.refresh(candidate)
+    log.info(
+        "naver_ad 사람 발의: proposal_id=%s type=%s campaign=%s target=%s/%s by=%s",
+        candidate.id, candidate.proposal_type, candidate.campaign_id,
+        candidate.target_type, candidate.target_id, proposed_by,
+    )
+    return _serialize_proposal(candidate, None, db=db)
 
 
 # ══════════════════════════════════════════════════════════════════

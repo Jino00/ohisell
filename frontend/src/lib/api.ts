@@ -4016,6 +4016,58 @@ export function fetchNaverAdProposals(params?: {
   return fetchApi<NaverAdProposalList>(`/api/naver/ad/proposals${qs ? `?${qs}` : ""}`);
 }
 
+// ── D-NAO-283 (계약 P2-ⓒ · H2) — 사람 발의 입구 ──────────────────────────────
+// ★유형 목록을 프론트에 «적지 않는다». 무엇을 발의할 수 있고 무엇이 엔진 전용인지는
+//   백엔드 게이트(_AD_UP_OPEN_TYPES·BID_DOWN_TYPES·제외 계열)에서 파생되므로, 화면이
+//   자기 목록을 들고 있으면 게이트가 바뀔 때 «화면만 옛말»을 한다(교훈 #380).
+export interface NaverProposableType {
+  proposal_type: string;
+  action: string | null;
+  direction: "up" | "down" | null;
+}
+
+export interface NaverProposableTypes {
+  proposable: NaverProposableType[];
+  /** 엔진 전용 유형 + **사유**. 빼고 주면 화면이 「왜 없는지」를 못 말한다(조용한 실패 금지). */
+  engine_only: { proposal_type: string; reason: string }[];
+  open_actions: string[];
+}
+
+export function fetchNaverProposableTypes(): Promise<NaverProposableTypes> {
+  return fetchApi<NaverProposableTypes>("/api/naver/ad/proposals/proposable-types");
+}
+
+export interface NaverProposalCreateInput {
+  proposalType: string;
+  targetType: string;
+  targetId: string;
+  campaignId: string;
+  adgroupId?: string | null;
+  rationale: string;
+  expectedEffect?: string | null;
+  targetBid?: number | null;
+  proposedBy?: string | null;
+}
+
+/** 사람 발의 — pending 제안 1건을 만든다(승인 아님). 이후는 기존 승인→실행 경로 그대로. */
+export function createNaverProposal(input: NaverProposalCreateInput): Promise<NaverAdProposal> {
+  const body: Record<string, unknown> = {
+    proposal_type: input.proposalType,
+    target_type: input.targetType,
+    target_id: input.targetId,
+    campaign_id: input.campaignId,
+    rationale: input.rationale,
+  };
+  if (input.adgroupId) body.adgroup_id = input.adgroupId;
+  if (input.expectedEffect) body.expected_effect = input.expectedEffect;
+  if (input.targetBid !== undefined && input.targetBid !== null) body.target_bid = input.targetBid;
+  if (input.proposedBy) body.proposed_by = input.proposedBy;
+  return fetchApi<NaverAdProposal>("/api/naver/ad/proposals", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // X1a T4 — 콘솔 승인/반려 상태 전이.
 // D-NAO-249 §4-B(B1) — param_change 제안을 승인(approved)할 때는 applied_value가 **필수**다
 // (없으면 서버 400). 반영될 값은 사람이 정한다 — 코드가 값을 발명하지 않는다. decidedBy·

@@ -35,6 +35,10 @@ vi.mock("../lib/api", () => ({
   getNaverDashboardOverview: () => h.pending(),
   getNaverGuardrailParams: () => (h.guardrail ? Promise.resolve(h.guardrail) : h.pending()),
   putNaverGuardrailParams: () => h.pending(),
+  // D-NAO-283 — 발의 폼(NaverAdProposalForm)이 콘솔 안에서 부르는 API.
+  // 이 테스트들의 관심사가 아니라 pending으로 둔다(폼 자체는 naverAdProposalForm.test.tsx가 잰다).
+  fetchNaverProposableTypes: () => h.pending(),
+  createNaverProposal: () => h.pending(),
 }));
 
 import NaverAdOptimizationConsole from "./NaverAdOptimizationConsole";
