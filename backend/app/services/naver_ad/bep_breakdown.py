@@ -254,6 +254,11 @@ def build(
             "logistics_cost": int(logi),
             "nbaesong_share": float(nb_share) if nb_share is not None else None,
             "nbaesong_sample": int(nb_sample) if nb_sample is not None else None,
+            # D-NAO-283: 이 칸의 숫자가 «무엇으로» 만들어졌나 — 실측/형제/모름, 실거래/입력/메타.
+            # 저장값(스냅샷)을 쓴다. nb_shares(조회 시점 재계산)와 갈라질 수 있는데, 화면이
+            # 설명해야 하는 것은 **그 행의 숫자를 만든 산출**이지 지금 다시 잰 값이 아니다.
+            "logistics_basis": bep.logistics_basis,
+            "price_basis": bep.price_basis,
             "pre_vat_margin": int(sp - commission - cost - logi) if has_cost else None,
             "contribution_margin": (
                 int(Decimal(str(bep.contribution_margin or 0))) if has_cost else None

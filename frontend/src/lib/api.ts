@@ -3407,6 +3407,12 @@ export interface NaverAdBepRow {
   aggressiveness: string | null;
   target_roas: number | null;
   has_cost: boolean;
+  /** D-NAO-283 — 이 행의 자가 무엇으로 만들어졌나. null = 산출 전(마이그 직후). */
+  commission_basis: string | null;
+  /** orders(실거래 median) / mapping(사람 입력) / meta(커머스API 할인적용가) */
+  price_basis: string | null;
+  /** orders(자기 주문 실측) / sibling(같은 그룹 형제 실측) / default(모름 — 측정 아님) */
+  logistics_basis: string | null;
 }
 
 export interface NaverAdBepList {
@@ -5298,10 +5304,15 @@ export interface NaverPerformanceBepRow {
   commission_won: number;
   /** null = 원가 미입력 — 0으로 렌더하지 않는다. */
   cost_price: number | null;
+  /** D-NAO-283부터 **음수 가능** — 내일배송은 1,900 지불/3,000 수취라 배송 마진이 남는다. */
   logistics_cost: number;
   /** 분수(0~1). */
   nbaesong_share: number | null;
   nbaesong_sample: number | null;
+  /** orders(자기 주문 실측) / sibling(같은 그룹 형제 실측) / default(모름 — 측정 아님) */
+  logistics_basis: string | null;
+  /** orders(실거래 median) / mapping(사람 입력) / meta(커머스API 할인적용가) */
+  price_basis: string | null;
   /** 판매가−수수료−원가−물류비. null = 원가 미입력이라 산출 불가. */
   pre_vat_margin: number | null;
   /** pre_vat_margin ÷ vat_divisor. */

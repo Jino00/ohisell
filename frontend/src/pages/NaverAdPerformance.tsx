@@ -516,6 +516,30 @@ const MARKET_BID_TONE_TEXT: Record<string, string> = {
   idle: "text-gray-400",
 };
 
+// ── D-NAO-283: 「이 숫자가 어디서 왔나」를 칸 옆에 한 줄로 ──
+// 실측이면 아무 말도 하지 않는다(기본이 실측이고, 모든 칸에 라벨을 달면 아무도 안 읽는다).
+// 실측이 아닌 것에만 표시한다 — 「안 잰 것에 꼬리표를 단다」와 같은 규약이다.
+function logisticsBasisNote(b: string | null): string {
+  if (b === "sibling") return "형제 상품 실측";
+  if (b === "default") return "실측 없음(가정)";
+  return "";
+}
+function logisticsBasisTitle(b: string | null): string {
+  if (b === "sibling") return "이 상품은 아직 주문이 없어, 같은 그룹상품번호의 형제 주문에서 배송 구성을 그대로 가져왔습니다.";
+  if (b === "default") return "이 상품도 형제도 주문이 없습니다. 배송비 1,900원을 전액 부담하고 고객 수취는 0원이라고 «가정»한 값입니다 — 측정된 값이 아닙니다.";
+  return "";
+}
+function priceBasisNote(b: string | null): string {
+  if (b === "mapping") return "손으로 넣은 값";
+  if (b === "meta") return "스토어 할인가";
+  return "";
+}
+function priceBasisTitle(b: string | null): string {
+  if (b === "mapping") return "실거래가 아직 없어, 상품 매핑에 사람이 적어 넣은 판매가를 씁니다. 주문이 한 건이라도 생기면 실거래 값이 이깁니다.";
+  if (b === "meta") return "실거래가 아직 없어, 커머스API가 매일 09:55에 수집하는 스토어 할인적용가를 씁니다. 주문이 한 건이라도 생기면 실거래 값이 이깁니다.";
+  return "";
+}
+
 function BepRowView({ r }: { r: NaverPerformanceBepRow }) {
   const tone = marketBidTone(r.market_bid, r.ceiling_bid, r.ceiling_is_borrowed);
   // 상한을 못 세운 행만 사유를 상품명 아래 붙인다(blocked_reason 우선, 없으면 ceiling_basis).
@@ -534,7 +558,14 @@ function BepRowView({ r }: { r: NaverPerformanceBepRow }) {
           <div className="mt-0.5 text-xs text-gray-500 break-keep">{noCeilingReason}</div>
         )}
       </Td>
-      <Td right>{won(r.selling_price)}</Td>
+      <Td right>
+        {won(r.selling_price)}
+        {priceBasisNote(r.price_basis) && (
+          <div className="text-xs text-gray-400" title={priceBasisTitle(r.price_basis)}>
+            {priceBasisNote(r.price_basis)}
+          </div>
+        )}
+      </Td>
       <Td right>
         {won(r.commission_won)}
         <div className="text-xs text-gray-400">{pctFromFraction(r.commission_rate)}</div>
@@ -542,9 +573,19 @@ function BepRowView({ r }: { r: NaverPerformanceBepRow }) {
       <Td right>{r.cost_price == null ? NO_DATA : won(r.cost_price)}</Td>
       <Td right>
         {won(r.logistics_cost)}
+        {r.logistics_cost < 0 && (
+          <div className="text-xs text-emerald-600" title="내일배송은 우리가 한진택배에 1,900원을 내고 고객에게 3,000원을 받아 1,100원이 남습니다. 그 이익을 인정한 값입니다.">
+            배송 마진
+          </div>
+        )}
         {r.nbaesong_share != null && (
           <div className="text-xs text-gray-400">
             도착보장 {pctFromFraction(r.nbaesong_share)}
+          </div>
+        )}
+        {logisticsBasisNote(r.logistics_basis) && (
+          <div className="text-xs text-gray-400" title={logisticsBasisTitle(r.logistics_basis)}>
+            {logisticsBasisNote(r.logistics_basis)}
           </div>
         )}
       </Td>
