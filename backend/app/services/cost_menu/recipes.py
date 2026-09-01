@@ -202,7 +202,25 @@ def _match_draft(
         return _Match(None, "SKU에 도달하지 못했다(채널코드 미매칭)", [], None, sku_count)
 
     mode, _count = Counter(cost_prices).most_common(1)[0]
+    # ★폼팩터 «없는» 품목도 후보다 (D-CPP-64, 2026-09-02).
+    #
+    #   케이스·그립톡·거치대·셀카봉·맥탭 카드케이스는 **폼팩터가 없는 물건**이라
+    #   `form_factor=None` 칸에 들어간다(`recipe_parser.NO_FORM_FACTOR_SECTIONS`).
+    #   그런데 그 제품들의 레시피는 옵션명에서 `bar`로 뽑히므로, 칸을 정확히 일치로만
+    #   뒤지면 **두 칸이 영영 안 만난다** — 값이 소수점까지 같아도 매칭이 0건이었다.
+    #
+    #   실측(2026-09-02 prod): 구성 0줄 draft 77건 전건 `no_recipe_match`·픽 0건.
+    #   그중 6건은 `cost_price`가 엑셀 제품원가와 **정확히 일치**하는데도 못 붙었다
+    #   (r94 2,222.0「일반 소다 케이스 포유」· r93 4,202.0「맥세이프 소다 케이스 포유」…).
+    #   ★어제 파서 수정으로 되살린 8행이 바로 이 NULL 칸에 있었다 — 살려 놓고 아무도
+    #   못 보는 자리에 둔 셈이다.
+    #
+    #   ⚠️**후보를 넓히는 변경이라 «조용한 오매칭»이 위험**이다. 그래서 넓히기만 하고
+    #   판정 규칙(`len(hits) == 1`일 때만 자동 연결)은 **한 글자도 안 바꾼다** — 둘 이상
+    #   걸리면 종전대로 사람에게 넘긴다. 시뮬레이션에서 「후보 여럿」은 0건이었다.
     pool = drafts_by_form.get(form_factor, [])
+    if form_factor is not None:
+        pool = pool + drafts_by_form.get(None, [])
     hits = [
         d
         for d in pool
