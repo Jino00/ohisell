@@ -42,6 +42,7 @@ from app.services.cost_menu import materials as M
 from app.services.cost_menu import recipes as R
 from app.services.cost_menu import purchased_price as PP
 from app.services.cost_menu import round_trip as RT
+from app.services.cost_menu import truth_source as TS
 from app.services.cost_menu.purchased_price_parser import (
     PriceSheetError,
     parse_price_sheet,
@@ -555,6 +556,21 @@ def cost_table_census(db: Session = Depends(get_db)):
 def standard_cost_board(db: Session = Depends(get_db)):
     """표준원가 보드 — SKU별 표준원가 · 현 `cost_price` 대조 · 격차(계약 §5-3 탭3)."""
     return R.board(db)
+
+
+@router.get("/truth-board")
+def truth_source_board(db: Session = Depends(get_db)):
+    """정본 판별 — SKU마다 「정본이 무엇인가」(계약 D-CPP-64 §4 S2).
+
+    ★`/board`와 무엇이 다른가: `/board`는 **조립품 레시피에 연결된 SKU만** 싣고 「계산값 ↔
+    현재값」을 보여준다. 이 엔드포인트는 **`product_master` 전건**을 싣고 각 SKU의 **정본
+    유형**(계산값·매입가·보류·정본 없음)을 판정한다 — 매입가 경로(`cost_purchased_price`)가
+    `/board`엔 아예 없어서, 「매입품엔 계산값이 원리적으로 없다」(ref 119 §2-2)를 그 표는
+    표현하지 못한다.
+
+    ★**읽기 전용이다.** 쓰기는 S3가 신설하는 컷오버 경로 한 벌의 몫이다(계약 §3-B).
+    """
+    return TS.truth_board(db)
 
 
 @router.post("/roundtrip/download")

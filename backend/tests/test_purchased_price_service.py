@@ -471,7 +471,7 @@ def test_p2_4_unapproved_newer_row_does_not_hide_the_approved_one(db):
                               created_at=datetime(2026, 8, 31, 11, 0)))
     db.flush()
 
-    assert PP._load_approved_prices(db) == {"A": D("922")}
+    assert PP.load_approved_prices(db) == {"A": D("922")}
     assert PP.board_counts(db)["grounded"] == 1
 
 
@@ -484,7 +484,7 @@ def test_p2_1_board_and_badge_read_the_same_latest_price_logic(db):
     db.flush()
 
     # 배지용(값 있는 것만) ↔ 보드용(보류 포함)이 같은 사실을 말한다
-    assert PP._load_approved_prices(db) == {}
+    assert PP.load_approved_prices(db) == {}
     assert PP.board_counts(db)["held_blank"] == 1
     assert PP.board_counts(db)["grounded"] == 0
 
