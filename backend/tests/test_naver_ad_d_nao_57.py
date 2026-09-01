@@ -837,3 +837,27 @@ def test_basis_counts_reported_by_calculate_bep(db):
     res = bep_calculator.calculate_bep(db)
     assert res["price_basis_counts"] == {"orders": 1, "meta": 1}
     assert res["logistics_basis_counts"] == {"orders": 1, "default": 1}
+
+
+def test_select_best_mappings_smaller_product_id_wins_not_bigger_price(db):
+    """★dedupe 규칙 못박기 — 판매가가 서로 다르면 **큰 값이 아니라 product_id 작은 쪽**이 이긴다.
+
+    적대 리뷰 2R P2-2에서 배포 전 시뮬레이터가 이 규칙을 `max(판매가)`로 베껴 적어 본체와
+    어긋났다. 규칙을 select_best_mappings 하나로 모았고, 이 테스트가 그 계약을 고정한다 —
+    「큰 값이 이긴다」로 바꾸는 변이가 여기서 죽는다."""
+    lo = ProductMaster(internal_sku="SKU-LO", product_name="lo", cost_price=Decimal("1000"))
+    hi = ProductMaster(internal_sku="SKU-HI", product_name="hi", cost_price=Decimal("1000"))
+    db.add_all([lo, hi])
+    db.flush()
+    assert lo.id < hi.id, "픽스처 전제: lo가 더 작은 product_id"
+    db.add(ProductChannelMapping(product_id=lo.id, channel_id=6, channel_product_id="dup",
+                                 channel_product_name="lo", selling_price=Decimal("10000"),
+                                 is_active=True))
+    db.add(ProductChannelMapping(product_id=hi.id, channel_id=6, channel_product_id="dup",
+                                 channel_product_name="hi", selling_price=Decimal("99000"),
+                                 is_active=True))
+    db.commit()
+
+    best = bep_calculator.select_best_mappings(db)
+    assert best["dup"].product_id == lo.id
+    assert Decimal(str(best["dup"].selling_price)) == Decimal("10000")   # 99,000이 아니다

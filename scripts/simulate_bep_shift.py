@@ -23,7 +23,7 @@ from decimal import Decimal
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import NaverProductBep, ProductChannelMapping
+from app.models import NaverProductBep
 
 
 def load_new_module(path: str):
@@ -47,16 +47,14 @@ def main(new_path: str, db_path: str = "ohisell.db") -> None:
     mult = bep_new.AGG_MULT["standard"]
 
     # 사람이 손으로 넣은 판매가(D-NAO-95) — 스냅샷에 없으므로 원천에서 직접 읽는다.
-    mapping_price: dict[str, Decimal] = {}
-    for cpid, price in db.query(
-        ProductChannelMapping.channel_product_id, ProductChannelMapping.selling_price,
-    ).filter(
-        ProductChannelMapping.channel_id == bep_new.NAVER_CHANNEL_ID,
-        ProductChannelMapping.is_active.is_(True),
-    ).all():
-        p = Decimal(str(price or 0))
-        if p > 0:
-            mapping_price[cpid] = max(mapping_price.get(cpid, Decimal("0")), p)
+    # ★적대 리뷰 2R P2-2 상환: 초판은 여기서 `max(판매가)`를 취해 calculate_bep의 dedupe와
+    #   **어긋났다**(실제 규칙은 원가>0 → 판매가>0 → product_id 최솟값이고, 값이 큰 쪽이
+    #   이기는 게 아니다). 규칙을 여기 베끼는 대신 **본체의 함수를 그대로 부른다** —
+    #   규칙이 두 벌이면 한쪽만 고쳐지는 날이 온다(bep_from_parts와 같은 처방).
+    mapping_price: dict[str, Decimal] = {
+        cpid: Decimal(str(m.selling_price or 0))
+        for cpid, m in bep_new.select_best_mappings(db).items()
+    }
 
     stored = db.query(NaverProductBep).all()
     print(f"저장된 행 {len(stored)}개 · 주문 있는 상품 {len(order_rows)} · 메타 {len(meta_map)}")

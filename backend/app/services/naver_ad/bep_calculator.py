@@ -496,6 +496,58 @@ def _unit_prices(db: Session, *, orders_by_pid: dict[str, list[dict]] | None = N
     return prices
 
 
+def select_best_mappings(db: Session, *, masters: dict | None = None
+                         ) -> dict[str, ProductChannelMapping]:
+    """cpid당 «최선 매핑» 1개 — 네이버 활성 매핑의 dedupe 규칙 **정본**.
+
+    같은 channel_product_id에 중복 매핑이 존재한다(라이브 22건, 실측: 네이버 옵션 1개가 기기
+    variant별 SKU 여러 개에 매핑된 경우 — 원가는 항상 동일).
+    규칙: ①원가 있는 매핑 우선(BEP 산출 가능) ②원가 동률이면 판매가 있는 매핑 우선
+          ③그래도 동률이면 product_id 최솟값(order_by로 고정) → 재실행 결정적.
+    ★②는 D-NAO-95에서 추가. 종전 주석은 "원가는 항상 동일해 금액에는 영향 없음"을 근거로
+      타이브레이크가 무해하다고 적었는데, 판매가 폴백이 생긴 뒤로 그 근거가 깨졌다 —
+      중복 매핑 중 값이 적힌 행이 지면 (ⓐ)판매가를 적어도 조용히 무시되고, 반대로 낡은 값이
+      이기면 (ⓑ)상한이 부풀어 과지출 방향으로 틀어진다. ②로 ⓐ를 막고, 값이 서로 다른
+      중복은 경고로 표면화해 ⓑ가 조용히 지나가지 않게 한다.
+    ★**«값이 큰 쪽»이 이기는 게 아니다** — 판매가가 서로 다르면 이기는 것은 product_id가
+      작은 쪽이고, 불일치는 경고로만 남는다.
+
+    ★왜 함수로 뽑았나 (D-NAO-283, 적대 리뷰 2R P2-2): 배포 전 시뮬레이터가 이 규칙을
+      **베껴 적었다가** `max(판매가)`로 어긋났다 — 즉 시뮬레이터가 낸 숫자(계약 §4 근거)와
+      실제 산출이 갈릴 수 있었다. `bep_from_parts`와 같은 처방이다: 규칙이 두 벌이면
+      한쪽만 고쳐지는 날이 온다.
+    """
+    if masters is None:
+        masters = {pm.id: (Decimal(str(pm.cost_price or 0)), pm.product_name or "")
+                   for pm in db.query(ProductMaster).all()}
+    mappings = db.query(ProductChannelMapping).filter(
+        ProductChannelMapping.channel_id == NAVER_CHANNEL_ID,
+        ProductChannelMapping.is_active.is_(True),
+    ).order_by(ProductChannelMapping.product_id).all()
+
+    best: dict[str, ProductChannelMapping] = {}
+    for m in mappings:
+        cur = best.get(m.channel_product_id)
+        if cur is None:
+            best[m.channel_product_id] = m
+            continue
+        cur_cost = masters.get(cur.product_id, (Decimal("0"), ""))[0]
+        new_cost = masters.get(m.product_id, (Decimal("0"), ""))[0]
+        cur_price = Decimal(str(cur.selling_price or 0))
+        new_price = Decimal(str(m.selling_price or 0))
+        if cur_price > 0 and new_price > 0 and cur_price != new_price:
+            log.warning(
+                "naver_product_bep: cpid=%s 중복 매핑의 판매가 불일치(%s vs %s) — 낡은 값이 "
+                "BEP 상한을 왜곡할 수 있음. 매핑 정리 필요.",
+                m.channel_product_id, cur_price, new_price,
+            )
+        if new_cost > 0 and cur_cost <= 0:
+            best[m.channel_product_id] = m
+        elif (new_cost > 0) == (cur_cost > 0) and new_price > 0 and cur_price <= 0:
+            best[m.channel_product_id] = m
+    return best
+
+
 def bep_from_parts(sp: Decimal, rate: Decimal, cost: Decimal, logistics: Decimal,
                    mult: Decimal) -> dict:
     """BEP 산식 — 순수 함수. 부품 4개(+공격성 배수) → 공헌이익·BEP·타겟.
@@ -569,40 +621,7 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     logistics_by_pid = logistics_by_product(db, orders_by_pid=order_rows, meta=meta_map)
     masters = {pm.id: (Decimal(str(pm.cost_price or 0)), pm.product_name or "")
                for pm in db.query(ProductMaster).all()}
-    mappings = db.query(ProductChannelMapping).filter(
-        ProductChannelMapping.channel_id == NAVER_CHANNEL_ID,
-        ProductChannelMapping.is_active.is_(True),
-    ).order_by(ProductChannelMapping.product_id).all()
-
-    # 같은 channel_product_id에 중복 매핑 존재(라이브 22건, 실측: 네이버 옵션 1개가 기기
-    # variant별 SKU 여러 개에 매핑된 경우 — 원가는 항상 동일).
-    # cpid당 1개로 dedupe: ①원가 있는 매핑 우선(BEP 산출 가능) ②원가 동률이면 판매가 있는
-    # 매핑 우선 ③그래도 동률이면 product_id 최솟값(위 order_by로 고정) → 재실행 결정적.
-    # ★②는 D-NAO-95에서 추가. 종전 주석은 "원가는 항상 동일해 금액에는 영향 없음"을 근거로
-    # 타이브레이크가 무해하다고 적었는데, 판매가 폴백이 생긴 뒤로 그 근거가 깨졌다 —
-    # 중복 매핑 중 값이 적힌 행이 지면 (ⓐ)판매가를 적어도 조용히 무시되고, 반대로 낡은 값이
-    # 이기면 (ⓑ)상한이 부풀어 과지출 방향으로 틀어진다. ②로 ⓐ를 막고, 값이 서로 다른
-    # 중복은 경고로 표면화해 ⓑ가 조용히 지나가지 않게 한다.
-    best: dict[str, ProductChannelMapping] = {}
-    for m in mappings:
-        cur = best.get(m.channel_product_id)
-        if cur is None:
-            best[m.channel_product_id] = m
-            continue
-        cur_cost = masters.get(cur.product_id, (Decimal("0"), ""))[0]
-        new_cost = masters.get(m.product_id, (Decimal("0"), ""))[0]
-        cur_price = Decimal(str(cur.selling_price or 0))
-        new_price = Decimal(str(m.selling_price or 0))
-        if cur_price > 0 and new_price > 0 and cur_price != new_price:
-            log.warning(
-                "naver_product_bep: cpid=%s 중복 매핑의 판매가 불일치(%s vs %s) — 낡은 값이 "
-                "BEP 상한을 왜곡할 수 있음. 매핑 정리 필요.",
-                m.channel_product_id, cur_price, new_price,
-            )
-        if new_cost > 0 and cur_cost <= 0:
-            best[m.channel_product_id] = m
-        elif (new_cost > 0) == (cur_cost > 0) and new_price > 0 and cur_price <= 0:
-            best[m.channel_product_id] = m
+    best = select_best_mappings(db, masters=masters)
 
     db.execute(delete(NaverProductBep).where(NaverProductBep.channel_id == NAVER_CHANNEL_ID))
     now = kst_now()
