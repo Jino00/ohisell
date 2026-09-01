@@ -148,6 +148,91 @@ def _dec(value: Any) -> Optional[Decimal]:
 
 
 # ──────────────────────────────────────────────
+# 부자재 «종»의 이름 규칙 (D-CPP-65, Jino 확정 2026-09-01 22:18 — 선택지 ⓐ「규격으로」)
+# ──────────────────────────────────────────────
+#
+# ## 왜 바꿨나 — 폼팩터 이름이 «오독»을 만든다
+#
+# 2026-09-01, 폴드 레시피에 `패키지 (flip)`이 붙은 것을 보고 **버그로 오인해 결함 보고를
+# 냈다**. 실제로는 정상이었다 — Jino 원문: *"폴드 「힌지 2매」와 「사생활_외부2매」가 실제로
+# 플립과 같은 포장·안내문·비닐을 써"*. 이름이 «폼팩터»를 말하니 «다른 폼팩터에 붙은 것»이
+# 전부 이상해 보였다. 이름이 «물건»을 말하면(`패키지 (소)`) 그 오독이 원리적으로 안 난다.
+#
+# ## ★위(CLEANING_KIT_KEY)의 경고를 어기지 않는다 — 「접는다」와 「묶는다」는 다르다
+#
+# 그 주석은 *"패키지(98/370/550)·부착 안내문(30/40/55)은 폼팩터마다 값이 «실제로» 달라
+# 접으면 원가가 틀어진다"*고 경고한다. **옳다.** 그래서 여기서 하는 것은 «하나로 접기»가
+# 아니라 **«값이 같은 것끼리만 묶기»**다 — 패키지는 여전히 **3종**(소 171 · 대 320 ·
+# 태블릿 550)이고 값은 한 푼도 안 섞인다. 줄어드는 것은 «같은 값의 중복»뿐이다.
+#   실측(2026-09-01 prod): 부자재 49종 → 19종. 승인 레시피 22건 표준원가 **전건 불변**.
+#
+# ## 규칙 — 정적 표다(데이터로 이름을 정하지 않는다)
+#
+# 값을 보고 이름을 정하면 엑셀이 바뀔 때 이름이 흔들리고, 이름이 흔들리면 DB 매칭
+# (`_upsert_materials`가 이름으로 upsert한다)이 조용히 깨져 종이 하나 더 생긴다.
+# 그래서 «어느 라벨을 어떻게 가르는가»는 **여기 손으로 적는다.**
+
+#: ★등급은 «폼팩터»가 아니라 **«값»**이 정한다 — 이게 이 규칙의 핵심이고, 초판이 틀렸던 곳이다.
+#:
+#: 초판은 「fold면 대」로 폼팩터를 봤다. 그런데 폴드 「힌지 2매」·「사생활_외부2매」는
+#: **폴드 제품인데 소포장을 쓴다**(Jino 확인 2026-09-01: *"실제로 플립과 같은 포장·안내문·
+#: 비닐을 써"*). 그래서 「대」 아래에 171과 320이 같이 들어갔고, 아래 `_flat_label_conflicts()`
+#: 가드가 **배포 전에** 그걸 잡았다. ⇒ **이름에서 폼팩터를 뗐다면 등급에도 넣으면 안 된다.**
+#: 엑셀이 「이 제품이 어느 포장을 쓰나」를 말하는 유일한 신호는 **값**이다.
+#:
+#: ★표에 없는 값이 나오면 **고르지 않고 자백한다**(`unknown_grade:`) — 조용히 새 종을 만들지
+#: 않는다. 값으로 이름을 정하는 것의 위험이 「엑셀이 바뀌면 이름이 흔들린다」인데, 표를 손으로
+#: 적고 미지 값을 거부하면 흔들리는 대신 **멈춘다.**
+_GRADE_BY_VALUE: dict[str, dict[str, str]] = {
+    "부착 안내문": {"30": "소", "55": "대", "40": "태블릿"},
+    "패키지": {"171": "소", "320": "대", "550": "태블릿"},
+}
+
+#: 폼팩터를 **안 가르는** 부자재 — 전 섹션에서 같은 물건·같은 값임이 실측된 것만 적는다.
+#: 실측(2026-09-01 prod): 폼텍 스티커 7종 전부 6 · 알콜솜 2EA 6종 전부 60 · 스퀴즈 15cm 3종
+#: 전부 200. 나머지는 원래 1종이다.
+#:
+#: ★**비닐은 여기 없다** — Jino 확정 2026-09-01 22:35: *"비닐은 사이즈로 구분해야 해서
+#:   지금처럼 두는게 맞을거 같은데?"*. 비닐은 이름에 이미 치수가 실려 있고(9*18·12*22+4·
+#:   16*23+4·20*30), 같은 「12*22+4」가 플립 10원·bar 13원이라 값으로도 안 갈린다.
+#:   **손대지 않는다** — 지금처럼 폼팩터로 갈린 채 둔다.
+#: ★여기 라벨을 추가하려면 **값이 같다는 실측**이 먼저다. 값이 다른 것을 넣으면
+#:   위(CLEANING_KIT_KEY)가 경고한 「접으면 원가가 틀어진다」가 그대로 일어난다.
+#:   그 사고를 막는 가드가 `_flat_label_conflicts()`이고 파서가 매 업로드마다 실제로 센다.
+_FLAT_LABELS = frozenset({
+    "알콜솜 2EA", "폼텍 스티커", "스퀴즈 15cm", "스퀴즈 6.5cm",
+    "스티커 2EA (투명+오하이)", "하드보드지", "자", "부착 지그",
+})
+
+
+def _species_grade(
+    label: str, form_factor, value=None
+):
+    """(종 이름에 붙일 접미사, 이상 문자열). 접미사가 `None`이면 라벨 그대로가 종 이름이다.
+
+    ★필름은 이 함수를 거치지 않는다(필름 키는 품목명+부위로 따로 만든다) — 즉 **필름
+    86종의 이름은 한 글자도 안 바뀐다**. 이 작업의 금지선이다.
+    """
+    if form_factor is None:
+        return None, None
+    grades = _GRADE_BY_VALUE.get(label)
+    if grades is not None:
+        if value is None:
+            return form_factor, f"unknown_grade:{label}:값없음"
+        key = str(value.quantize(Decimal("1")) if value == value.to_integral_value() else value)
+        grade = grades.get(key)
+        if grade is None:
+            # ★모르는 값 — 고르지 않는다. 종전대로 폼팩터를 남기고 자백한다.
+            return form_factor, f"unknown_grade:{label}:{key}"
+        return grade, None
+    if label in _FLAT_LABELS:
+        return None, None
+    # ★모르는 라벨은 **종전대로 폼팩터를 남긴다.** 새 부자재가 조용히 합쳐지는 것보다,
+    #   안 합쳐진 채 눈에 띄는 편이 안전하다(합치기는 되돌리기 어렵다).
+    return form_factor, None
+
+
+# ──────────────────────────────────────────────
 # 값 객체
 # ──────────────────────────────────────────────
 @dataclass(frozen=True)
@@ -502,7 +587,38 @@ def parse_cost_table(rows: Iterable[Sequence[Any]]) -> ParseResult:
         for ln in draft.lines:
             seen_material_keys.setdefault(ln.key, None)
     result.materials = list(seen_material_keys)
+    result.anomalies.extend(_flat_label_conflicts(result))
     return result
+
+
+def _flat_label_conflicts(result: ParseResult) -> list[str]:
+    """★한 종 이름 아래 **값이 둘 이상** 들어왔는가 — 「접으면 원가가 틀어진다」의 가드.
+
+    `_FLAT_LABELS`·`_GRADE_BY_VALUE`는 「이 종 아래에서는 값이 하나다」라는 **실측에
+    기댄 주장**이다(D-CPP-65). 주장은 낡는다 — 엑셀이 바뀌어 `비닐 (9*18)`이 섹션마다 다른
+    값을 갖게 되면, 이름은 하나인데 값이 둘이라 **어느 한쪽이 조용히 이긴다.** 그 순간
+    `CLEANING_KIT_KEY` 주석이 경고한 사고가 그대로 일어난다.
+
+    그래서 파서가 **매 업로드마다 실제로 센다.** 값이 갈리면 고르지 않고 자백한다 —
+    처분(표를 고칠지 값을 고칠지)은 사람 몫이다. 조용히 고르는 것만 안 한다.
+    """
+    by_name: dict[str, dict[str, set[str]]] = {}
+    for draft in result.recipes:
+        for ln in draft.lines:
+            if ln.excel_ref_price is None or ln.key.part is not None:
+                continue          # 값 없음 / 필름(품목별 단가라 갈리는 게 정상)
+            by_name.setdefault(ln.key.display_name, {}).setdefault(
+                f"{ln.excel_ref_price}", set()
+            ).add(ln.key.form_factor or "-")
+    out: list[str] = []
+    for name, buckets in sorted(by_name.items()):
+        if len(buckets) < 2:
+            continue
+        detail = " / ".join(
+            f"{v}[{','.join(sorted(ffs))}]" for v, ffs in sorted(buckets.items())
+        )
+        out.append(f"species_value_conflict:{name}:{detail}")
+    return out
 
 
 def _build_recipe(
@@ -574,7 +690,13 @@ def _build_recipe(
             if value is None or value == _ZERO:
                 continue          # 빈 칸·0 = 그 부자재를 안 쓴다(«단가 0»이 아니다)
             quantity = Decimal("1")
-            key = MaterialKey(form_factor, None, spec.label)
+            # ★종의 신원을 «값»이 정한다(D-CPP-65). 여기서 정해야 하는 이유: `display_name`은
+            #   값을 모르고, 폼팩터로 등급을 정하면 **폴드가 쓰는 소포장이 「대」로 들어간다**
+            #   (초판이 그랬고 `_flat_label_conflicts()`가 배포 전에 잡았다).
+            grade, grade_anomaly = _species_grade(spec.label, form_factor, value)
+            if grade_anomaly:
+                anomalies.append(grade_anomaly)
+            key = MaterialKey(grade, None, spec.label)
             is_film = False
 
         prior = seen_keys.get(key)
