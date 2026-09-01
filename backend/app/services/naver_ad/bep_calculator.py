@@ -277,7 +277,7 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
     """네이버 상품(channel_product_id)별 평균 주문수량 + 단가당 **순**물류비(D-NAO-57 C, 리뷰 P2-1).
 
     logistics(단가당) = 상품별 순배송원가(건당) ÷ 평균 주문수량.
-      순배송원가 net_ship = max(0, 지불 배송비 − 평균 수취 배송비)
+      순배송원가 net_ship = 지불 배송비 − 평균 수취 배송비  (**클램프 없음 — 음수 가능**)
         - 지불 배송비 = NORMAL + (NBAESONG − NORMAL) × **N배송 혼합비** (N1 · D-NAO-99).
           ★계수를 숫자로 적지 않는다 — 단가는 order_delivery.py가 정본이고 갱신된다
             (현재 1,900 / 3,377 ⇒ 차액 1,477. 2026-08-26까지 이 주석은 옛 차액 1,120으로
@@ -529,10 +529,12 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     D-NAO-57 (B): 광고 의사결정 BEP라 광고 경로 실효율(ad_commission_rate, 매출연동 언디루션)을
     우선 쓰고, 정산 표본 부족 등으로 산출 불가면 기존 블렌드(effective_commission_rate)로 폴백.
     어느 기준을 썼는지 commission_basis(ad_case/blended)로 정직 표기(행·반환 둘 다).
-    D-NAO-57 (C, 리뷰 P2-1): logistics=상품별 (순배송원가 ÷ 평균 주문수량) — 순배송원가 =
-    max(0, 지불 − 고객 수취 배송비 평균)(수취 실측: 채널 25.4% 주문이 유료배송). VAT는
-    기존 관례대로 공헌이익 분자 안에서 ÷1.1(원가·수수료와 동일 — 지불·수취 배송비 모두
-    부가세포함이라 이중차감/미차감 없음).
+    D-NAO-57 (C, 리뷰 P2-1) + D-NAO-283: logistics=상품별 (순배송원가 ÷ 평균 주문수량) —
+    순배송원가 = `order_delivery.net_shipping_burden(지불, 수취 평균)` = 지불 − 수취,
+    **클램프 없음이라 음수 가능**(내일배송은 배송 마진이 남는다). 산식 정본은 그 함수이지
+    이 문단이 아니다 — 여기 숫자를 다시 적으면 정본과 갈라진다(이 파일이 이미 7곳에서 겪었다).
+    수취 실측: 채널 25.4% 주문이 유료배송. VAT는 기존 관례대로 공헌이익 분자 안에서 ÷1.1
+    (원가·수수료와 동일 — 지불·수취 배송비 모두 부가세포함이라 이중차감/미차감 없음).
 
     ★N1 (D-NAO-99, ref 42) — 배송방식 인지형 정합. **산식(공헌이익·BEP 정의)은 불변**이고,
     3개 입력의 산출 창·입자도만 바뀐다:

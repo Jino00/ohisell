@@ -23,7 +23,7 @@ from decimal import Decimal
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import NaverProductBep
+from app.models import NaverProductBep, ProductChannelMapping
 
 
 def load_new_module(path: str):
@@ -46,6 +46,18 @@ def main(new_path: str, db_path: str = "ohisell.db") -> None:
     new_prices = bep_new._unit_prices(db, orders_by_pid=order_rows)
     mult = bep_new.AGG_MULT["standard"]
 
+    # 사람이 손으로 넣은 판매가(D-NAO-95) — 스냅샷에 없으므로 원천에서 직접 읽는다.
+    mapping_price: dict[str, Decimal] = {}
+    for cpid, price in db.query(
+        ProductChannelMapping.channel_product_id, ProductChannelMapping.selling_price,
+    ).filter(
+        ProductChannelMapping.channel_id == bep_new.NAVER_CHANNEL_ID,
+        ProductChannelMapping.is_active.is_(True),
+    ).all():
+        p = Decimal(str(price or 0))
+        if p > 0:
+            mapping_price[cpid] = max(mapping_price.get(cpid, Decimal("0")), p)
+
     stored = db.query(NaverProductBep).all()
     print(f"저장된 행 {len(stored)}개 · 주문 있는 상품 {len(order_rows)} · 메타 {len(meta_map)}")
 
@@ -61,12 +73,15 @@ def main(new_path: str, db_path: str = "ohisell.db") -> None:
         cost = Decimal(str(r.cost_price or 0))
 
         # 새 판매가 — calculate_bep과 **같은 우선순위**(orders → mapping → meta).
-        # mapping은 스냅샷에 없으므로, 「저장된 sp가 orders와 다르면 mapping이었다」로 되짚는다.
+        # ★적대 리뷰 1R P2 상환: 초판은 mapping을 「저장된 sp가 orders와 다르면 mapping이었다」로
+        #   **되짚었다**. 그 추측은 두 시점 사이에 주문이 실제로 바뀌면 오분류한다(라이브에서
+        #   정확히 그런 행이 하나 있었다 — 12057833416). 이제 mapping을 **직접 조회**한다.
         sp = new_prices.get(cpid, Decimal("0"))
         pbasis = "orders"
         if sp <= 0:
-            if old_sp > 0:
-                sp, pbasis = old_sp, "mapping"   # 종전에 사람 입력값이 이미 이겼던 행
+            mapped = mapping_price.get(cpid)
+            if mapped and mapped > 0:
+                sp, pbasis = mapped, "mapping"
             else:
                 mp = (meta_map.get(cpid) or {}).get("discounted_price")
                 if mp and mp > 0:
