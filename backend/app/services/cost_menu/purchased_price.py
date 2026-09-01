@@ -57,6 +57,7 @@ from app.models import (
     ProductMaster,
 )
 
+from .materials import PURCHASED_KIND
 from .purchased_price_parser import PriceRow, PriceParseResult
 
 #: 링크 상태 중 «살아 있는» 것. prod 실측(2026-08-31): `approved` 450 · `draft` 474뿐이고
@@ -72,6 +73,10 @@ MAX_UNIT_PRICE: Decimal = Decimal("1000000000000")
 #: 계약 §4 S1의 합격 항목이라, 이유를 뭉뚱그리면 사람이 왜 빠졌는지 못 읽는다.
 REASON_ASSEMBLY = "조립품 — 구성이 있는 레시피다(우리 계산이 정본, 파일 값 금지)"
 REASON_IMPORTED = "수입 완제품 — 통관 원장에서 단가가 온다(파일 값 금지)"
+#: ★국내 매입 완제품 (Jino 확정 2026-09-01 20:0x · `materials.PURCHASED_KIND`).
+#: 이 파일(매입 완제품 단가 시트)의 대상이 **아니다** — 단가가 **원가표**에서 오기 때문이다.
+#: `REASON_IMPORTED`와 뭉뚱그리면 「원장을 기다린다」로 읽혀 영영 안 채워진다.
+REASON_PURCHASED = "국내 매입 완제품 — 원가표의 상품원가가 정본이다(이 파일 대상 아님)"
 REASON_NO_RECIPE = "레시피에 연결되지 않은 SKU — 먼저 연결해야 한다"
 REASON_NO_SKU = "이 상품명에 맞는 판매 SKU가 없다"
 REASON_AMBIGUOUS = "이 상품명이 SKU 여러 건에 걸린다 — 자동으로 고르지 않는다"
@@ -342,6 +347,12 @@ def _exclusion_reason(f: _SkuFacts) -> Optional[str]:
     for l in f.links:
         if (l.recipe_kind or "") == "imported_goods":
             return REASON_IMPORTED
+        # ★국내 매입 완제품은 «구성 1줄»을 갖는다(퇴화형). 아래 `line_count > 0`에 먼저
+        #   걸리면 「조립품 — 우리 계산이 정본」으로 잘못 읽히므로 **여기서 먼저 가른다.**
+        #   둘 다 「파일 값 금지」라 결과는 같지만, 사람이 읽는 이유가 달라진다(§4 S1은
+        #   「대상 아님 이유」가 화면에 서는 것을 합격으로 잰다 — 뭉뚱그리면 못 읽는다).
+        if (l.recipe_kind or "") == PURCHASED_KIND:
+            return REASON_PURCHASED
         if l.line_count > 0:
             return REASON_ASSEMBLY
     if len(f.links) > 1:

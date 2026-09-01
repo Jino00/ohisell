@@ -73,6 +73,8 @@ from app.utils.kst import kst_now
 from app.services.cost_menu.materials import (
     IMPORTED_GOODS_CATEGORY,
     IMPORTED_GOODS_KIND,
+    PURCHASED_CATEGORY,
+    PURCHASED_KIND,
     CostMenuConflict,
     CostMenuError,
     ledger_check,
@@ -985,15 +987,28 @@ def _apply_item_lines(db: Session, recipe: CostRecipe, item: CostTableItem) -> i
     recipe.lines.clear()
     db.flush()
 
-    if item.recipe_kind == IMPORTED_GOODS_KIND and not item.lines:
+    # ★「Σ의 퇴화형 1줄」은 **두 종류**가 쓴다 — 수입 완제품과 국내 매입 완제품.
+    #   모양은 같고 다른 것은 «단가가 어디서 오나»뿐이라, 산술 분기도 카테고리 말고는
+    #   아무것도 늘리지 않는다(Jino 확정 2026-09-01 20:0x — `materials.PURCHASED_KIND`).
+    #   ⚠️카테고리는 반드시 갈라야 한다: `IMPORTED_GOODS_CATEGORY`가 「원장 product 라인을
+    #   붙일 수 있다」의 유일한 표지라, 국내 매입품에 그걸 붙이면 원장 150줄이 새어 든다.
+    if item.recipe_kind in (IMPORTED_GOODS_KIND, PURCHASED_KIND) and not item.lines:
+        imported = item.recipe_kind == IMPORTED_GOODS_KIND
         material = _material_for_name(
-            db, item.item_name, category=IMPORTED_GOODS_CATEGORY
+            db,
+            item.item_name,
+            category=IMPORTED_GOODS_CATEGORY if imported else PURCHASED_CATEGORY,
         )
         recipe.lines.append(
             CostRecipeLine(
                 material_id=material.id,
                 quantity=Decimal("1"),
-                note="수입 완제품 — 원장 로트 단가가 이 종에 붙는다(매수는 사람이 고친다)",
+                note=(
+                    "수입 완제품 — 원장 로트 단가가 이 종에 붙는다(매수는 사람이 고친다)"
+                    if imported
+                    else "국내 매입 완제품 — 원가표의 상품원가가 이 종의 단가다"
+                    "(사람이 채택한다 · 매수는 사람이 고친다)"
+                ),
             )
         )
         db.flush()
