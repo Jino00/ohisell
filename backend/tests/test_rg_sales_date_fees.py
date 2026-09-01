@@ -676,6 +676,13 @@ def test_in_progress_cycle_seed_survives_clock_advance(db, monkeypatch):
     monkeypatch.setattr(_fees_mod, "date", _FutureDate)
     monkeypatch.setattr(sys.modules[__name__], "date", _FutureDate)
 
+    # ★**실질 방어선은 위 두 줄 중 «앱 모듈» 쪽이다** — 그 줄을 빼면 소스가 계속 진짜 오늘을 보고,
+    #   이 테스트는 «미래를 재지 않은 채» 그냥 초록이 된다(적대 리뷰 변이로 확인: 빼도 31/31 초록).
+    #   그래서 시계가 실제로 옮겨졌는지를 **테스트가 스스로 확인한다** — 이게 없으면 이 가드는
+    #   「통과하는데 아무것도 안 지키는 테스트」가 될 수 있다.
+    assert _fees_mod.date.today() == _fake_today, \
+        "앱 모듈의 시계가 안 옮겨졌다 — 이 테스트는 미래를 재고 있지 않다(가드가 공허하다)"
+
     for d in (date(2026, 8, 5), date(2026, 8, 6)):
         _seed_summary(db, d, 50_000, 5)
         _seed_option(db, d, "RG1", 50_000, 5)
