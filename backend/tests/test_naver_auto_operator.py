@@ -3786,3 +3786,66 @@ def test_hourly_lane_does_not_approve_out_of_scope_unit(db):
     approved = db.query(NaverProposal).filter(NaverProposal.status == "approved").all()
     assert approved == []                         # ★죽은 카드 0
     assert any("스코프" in (h.get("reason") or "") for h in result["held"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D-NAO-284 — 소급채점 기대 as-of를 «시각 인지형»으로 (매일 9시간이 죽던 창)
+#
+# 종전 게이트는 시각을 안 보고 항상 `today - 1`을 요구했다. 그런데 08:30 KST retro가
+# 「어제」 as-of를 만들므로 **00:00~08:30 사이엔 today-1이 원리적으로 존재할 수 없다.**
+# 시간별 레인은 매시 :20에 24번 도니, 그중 9회차가 매일 통째로 죽었다.
+#   라이브 실측(2026-09-01, 7일): 「소급채점 stale」 차단이 KST 00~08시에만 매시 정확히
+#   109건, 09시 이후 0건 — stale 차단 981건의 전부이자 전체 차단의 48%.
+#
+# ★고친 것은 «허용 지연 상수»가 아니라 «지금 존재할 수 있는 가장 신선한 as-of»의 정의다.
+#   상수를 2로 키우면 retro가 진짜 죽어도 UP이 나간다(fail-open, 주석이 금지). 아래 세 번째
+#   테스트가 그 경계를 지킨다 — 08:30 «이후»의 진짜 실패는 여전히 막혀야 한다.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_expected_retro_asof_before_cron_allows_two_day_lag():
+    """★08:30 이전 — today-2가 «정상»이다(아직 안 돌았을 뿐, 고장이 아니다)."""
+    d = date(2026, 9, 1)
+    for hh, mm in ((0, 0), (5, 20), (8, 0), (8, 29)):
+        assert auto_operator._expected_retro_asof(d, datetime(2026, 9, 1, hh, mm)) == date(2026, 8, 30), \
+            f"{hh:02d}:{mm:02d}에는 today-2가 기대값이어야 한다"
+
+
+def test_expected_retro_asof_after_cron_requires_yesterday():
+    """★08:30 이후 — today-1을 요구한다(그때부터는 없으면 진짜 실패다)."""
+    d = date(2026, 9, 1)
+    for hh, mm in ((8, 30), (8, 50), (14, 20), (23, 59)):
+        assert auto_operator._expected_retro_asof(d, datetime(2026, 9, 1, hh, mm)) == date(2026, 8, 31), \
+            f"{hh:02d}:{mm:02d}에는 today-1이 기대값이어야 한다"
+
+
+def test_bleeding_gate_opens_in_the_pre_cron_window(db):
+    """★그 창에서 게이트가 실제로 «열린다» — 이게 매일 9시간을 되찾는 항목이다.
+
+    최신 as-of가 today-2뿐이고 지금이 05:20 KST(retro 전)면, 종전엔 stale로 hold였다.
+    이제는 그게 정상 상태이므로 통과(None)해야 한다."""
+    _retro_signal(db, asof_date=date(2026, 8, 30), board="shopping_group_bep", target_id="other-grp",
+                  grain="adgroup")
+    with patch.object(auto_operator, "kst_now", lambda: datetime(2026, 9, 1, 5, 20)):
+        reason = auto_operator._bleeding_hold_reason(db, "adgroup", "grp-x", date(2026, 9, 1))
+    assert reason is None, f"08:30 이전엔 열려야 하는데 막혔다: {reason}"
+
+
+def test_bleeding_gate_still_closes_on_a_real_retro_failure(db):
+    """★★금지선 — 08:30 «이후»에 today-1이 없으면 그건 진짜 크론 실패다. 여전히 막아야 한다.
+
+    이 테스트가 「상수를 2로 키우는」 변이를 잡는다. 시각 인지형 기대가 안전 완화로
+    미끄러지지 않는다는 것을 지키는 자리다."""
+    _retro_signal(db, asof_date=date(2026, 8, 30), board="shopping_group_bep", target_id="other-grp",
+                  grain="adgroup")
+    with patch.object(auto_operator, "kst_now", lambda: datetime(2026, 9, 1, 14, 20)):
+        reason = auto_operator._bleeding_hold_reason(db, "adgroup", "grp-x", date(2026, 9, 1))
+    assert reason is not None and "stale" in reason, "진짜 retro 실패인데 통과시켰다"
+
+
+def test_bleeding_still_detected_in_the_pre_cron_window(db):
+    """★창을 열었다고 bleeding까지 통과시키면 안 된다 — 실제 bleeding은 그대로 잡힌다."""
+    _retro_signal(db, asof_date=date(2026, 8, 30), board="shopping_group_bep", target_id="grp-x",
+                  grain="adgroup")
+    with patch.object(auto_operator, "kst_now", lambda: datetime(2026, 9, 1, 5, 20)):
+        reason = auto_operator._bleeding_hold_reason(db, "adgroup", "grp-x", date(2026, 9, 1))
+    assert reason == "④최신 소급채점에서 bleeding으로 판정됨"
