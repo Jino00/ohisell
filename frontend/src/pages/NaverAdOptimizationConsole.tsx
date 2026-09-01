@@ -44,6 +44,7 @@ import { buildGuardrailSaveBody } from "../lib/guardrailParamsSave";
 import { buildApplyValue, prefillApplyValue } from "../lib/naverParamChangeApproval";
 import { formatDirectionCount, formatShare, isBrakeOnlyDrift } from "../lib/naverSymmetryFormat";
 import { LayerNav } from "../components/ui";
+import NaverAdProposalForm from "./NaverAdProposalForm";
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
@@ -1293,6 +1294,11 @@ export default function NaverAdOptimizationConsole() {
           </div>
         )}
       </div>
+
+      {/* 섹션 0-b: 발의 폼(D-NAO-283 · 계약 P2-ⓒ H2) — 「사람이 엔진을 만질 손」 중
+          «제안을 새로 만드는 입구». 발의하면 아래 제안 카드 목록을 곧바로 다시 읽는다
+          (안 읽으면 만든 사람이 자기 카드를 못 봐서 「발의됐다」가 화면에서 거짓이 된다). */}
+      <NaverAdProposalForm onCreated={() => { void loadProposals(); }} />
 
       {/* 섹션 1: 제안 카드 */}
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
