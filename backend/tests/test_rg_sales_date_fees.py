@@ -16,7 +16,7 @@
 # 라이브 API 호출 없음. 인메모리 SQLite. (픽스처·시딩 헬퍼는 test_rg_net_channel_pnl.py를 그대로 베꼈다.)
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -117,6 +117,27 @@ def _seed_account_fee(db, fee_type, amount, *, acc=ACC,
     db.add(CoupangRgSettlementFee(account_key=acc, recognition_date_from=dfrom,
                                   recognition_date_to=dto, fee_type=fee_type,
                                   vendor_item_id="", amount=Decimal(str(amount))))
+
+
+def _open_cycle_end() -> date:
+    """**아직 안 끝난** 정산주기의 종료일 — 「진행 중」을 뜻하는 시드에 쓴다.
+
+    ★고정 날짜로 쓰면 안 된다. 완결 판정은 `rg_sales_date_fees.py:139`의
+      `recognition_date_to < asof`이고, `asof`를 안 넘기면 `:321`·`:459`가
+      `date.today()`로 채운다(`compute_rg_summary_row` 경로엔 `asof` 인자 자체가 없다).
+      그래서 **고정 종료일은 그날이 지나는 순간 「진행 중」이 「완결」로 뒤집히고
+      테스트가 자정에 빨개진다.**
+
+    실제로 그렇게 터졌다 — 옛 시드 `date(2026, 8, 31)`이 2026-09-01 00:00 KST에 완결로
+    넘어가며 이 파일 2건(`test_falls_back_to_ledger_axis_when_rate_unknown`·
+    `test_commission_axis_requires_known_rate_even_with_full_fee_coverage`)이 실패했고,
+    main을 포함해 **그날 도는 모든 브랜치의 CI가 빨강**이 됐다(2026-09-01 실측:
+    main CI 3연속 실패 · PR #620이 그 때문에 머지 못 하고 반착지).
+
+    ⇒ 주기의 «뜻»이 「오늘 기준 아직 안 끝났다」는 **상대적** 사실이므로 날짜도 상대적으로
+      잡는다. 시계를 언제로 옮겨도 이 시드는 항상 「진행 중」이다.
+    """
+    return date.today() + timedelta(days=365)
 
 
 # ════════════════════════════════════════════════
@@ -360,8 +381,8 @@ def test_falls_back_to_ledger_axis_when_rate_unknown(db):
         _seed_option(db, d, "RG1", 50_000, 5)
     _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
     _seed_cost(db, "RG1", 2_000)
-    # 원장엔 값이 있는데 그 주기가 **아직 안 끝났다**(to=08-31 ≥ asof) → 완결 주기 0개 → rate=None
-    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 31))
+    # 원장엔 값이 있는데 그 주기가 **아직 안 끝났다**(to ≥ asof) → 완결 주기 0개 → rate=None
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=_open_cycle_end())
     db.commit()
 
     row = compute_rg_summary_row(db, ACC, date(2026, 8, 5), date(2026, 8, 6), _cost_master(db),
@@ -613,14 +634,61 @@ def test_commission_axis_requires_known_rate_even_with_full_fee_coverage(db):
     _seed_option_fee(db, "RG1", "delivery", 1_000, 10, dfrom=date(2026, 8, 1), dto=date(2026, 8, 7))
     _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
     _seed_cost(db, "RG1", 2_000)
-    # 진행 중 주기(아직 안 끝남, to=08-31) → 완결 주기 0개 → rate=None. 단가는 이미 100% 안다.
-    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=date(2026, 8, 31))
+    # 진행 중 주기(아직 안 끝남, to ≥ asof) → 완결 주기 0개 → rate=None. 단가는 이미 100% 안다.
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=_open_cycle_end())
     db.commit()
 
     row = compute_rg_summary_row(db, ACC, date(2026, 8, 5), date(2026, 8, 6), _cost_master(db), VENDOR)
     assert row["commission_basis"] == "rate_unknown"
     assert row["commission_axis"] == "recognition_date", \
         "요율을 못 재면 물류비 커버리지가 100%여도 판매일 축을 내면 안 된다"
+
+
+def test_in_progress_cycle_seed_survives_clock_advance(db, monkeypatch):
+    """★시계를 10년 앞으로 돌려도 「진행 중 주기」 시드는 여전히 진행 중이어야 한다.
+
+    **왜 이 테스트가 있나 — 「오늘 초록」이 이 결함을 못 잡았기 때문이다.**
+    2026-09-01 00:00 KST에 이 파일이 실제로 터졌다: 「진행 중」을 뜻하던 고정 시드
+    `dto=date(2026, 8, 31)`이 그 순간 «완결»로 넘어가 위 두 테스트가 `rate_unknown`
+    대신 `settled_rate`를 받았고, main을 포함해 **그날 도는 모든 브랜치의 CI가 멈췄다**
+    (PR #620이 그 때문에 머지 못 하고 반착지했다). 터지기 전날까지 전건 초록이었다 —
+    즉 회귀망이 «시각»을 한 번도 안 재고 있었다.
+
+    그래서 여기서는 **시계를 실제로 옮긴다**. 소스(`rg_sales_date_fees.date`)와 이 파일의
+    `date`를 같이 갈아끼워야 한다 — 진짜로 날이 바뀌면 둘 다 함께 움직이므로, 한쪽만
+    옮기면 현실에 없는 상태를 재게 된다.
+
+    누가 `_open_cycle_end()`를 다시 고정 날짜로 되돌리면 이 테스트는 **그 커밋에서 즉시**
+    빨개진다 — 다음 자정이 아니라.
+    """
+    import sys
+
+    from app.services.coupang import rg_sales_date_fees as _fees_mod
+
+    # ★값을 «패치 전에» 굳힌다 — 패치 후 `date.today()`를 부르면 이 클래스 자신을 다시 타 무한재귀다.
+    _fake_today = date(date.today().year + 10, 1, 15)
+
+    class _FutureDate(date):
+        @classmethod
+        def today(cls):
+            return _fake_today
+
+    monkeypatch.setattr(_fees_mod, "date", _FutureDate)
+    monkeypatch.setattr(sys.modules[__name__], "date", _FutureDate)
+
+    for d in (date(2026, 8, 5), date(2026, 8, 6)):
+        _seed_summary(db, d, 50_000, 5)
+        _seed_option(db, d, "RG1", 50_000, 5)
+    _seed_catalog(db, "RG1"); _seed_rg_inventory(db, "RG1")
+    _seed_cost(db, "RG1", 2_000)
+    _seed_account_fee(db, "sale_fee", 8_000, dfrom=date(2026, 8, 1), dto=_open_cycle_end())
+    db.commit()
+
+    row = compute_rg_summary_row(db, ACC, date(2026, 8, 5), date(2026, 8, 6), _cost_master(db),
+                                 VENDOR)
+    assert row["commission_basis"] == "rate_unknown", \
+        "시계가 10년 흘러도 이 시드는 「진행 중」이어야 한다 — 고정 날짜로 되돌린 순간 여기서 잡힌다"
+    assert row["commission_axis"] == "recognition_date"
 
 
 def test_settlement_reconcile_diff_stays_none_without_completed_cycle(db):
