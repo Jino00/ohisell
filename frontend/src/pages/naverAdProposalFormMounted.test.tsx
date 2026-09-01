@@ -12,13 +12,15 @@
 // 계약이 지목한 표면은 「폼 컴포넌트」가 아니라 **「콘솔 발의 폼」**이다. 그러니 그 마운트
 // 자체가 하나의 합격 조건이고, 이 파일이 그 한 줄을 지킨다.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const h = vi.hoisted(() => {
   const pending = () => new Promise<never>(() => {});
   return {
     pending,
+    /** 발의 성공 후 목록이 «다시 읽히는가»를 재기 위한 호출 카운터(적대 리뷰 1R 변이 4 상환). */
+    listCalls: 0,
     types: {
       proposable: [
         { proposal_type: "bid_down", action: "update_bid", direction: "down" },
@@ -34,7 +36,10 @@ const h = vi.hoisted(() => {
 
 vi.mock("../lib/api", () => ({
   fetchNaverAdReport: () => h.pending(),
-  fetchNaverAdProposals: () => h.pending(),
+  fetchNaverAdProposals: () => {
+    h.listCalls += 1;
+    return Promise.resolve({ total: 0, open_actions: [], rows: [] });
+  },
   fetchNaverCampaignSettings: () => h.pending(),
   putNaverCampaignSettings: () => h.pending(),
   fetchNaverAdDiagnosis: () => h.pending(),
@@ -49,7 +54,8 @@ vi.mock("../lib/api", () => ({
   getNaverGuardrailParams: () => h.pending(),
   putNaverGuardrailParams: () => h.pending(),
   fetchNaverProposableTypes: () => Promise.resolve(h.types),
-  createNaverProposal: () => h.pending(),
+  createNaverProposal: () =>
+    Promise.resolve({ id: 909, status: "pending", proposal_type: "negative_keyword" }),
 }));
 
 import NaverAdOptimizationConsole from "./NaverAdOptimizationConsole";
@@ -57,6 +63,7 @@ import NaverAdOptimizationConsole from "./NaverAdOptimizationConsole";
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  h.listCalls = 0;
 });
 
 describe("발의 폼이 콘솔에 마운트돼 있다 (D-NAO-283)", () => {
@@ -80,5 +87,35 @@ describe("발의 폼이 콘솔에 마운트돼 있다 (D-NAO-283)", () => {
 
     const note = await screen.findByText(/발의는 승인이 아닙니다/);
     expect(note.textContent).toContain("승인·실행은 지금까지와 똑같이 별도 Confirm");
+  });
+
+  it("★배선 절단 변이(적대 리뷰 1R 변이 4 상환): 발의에 성공하면 콘솔이 제안 목록을 «다시 읽는다»", async () => {
+    // ## 왜 이 케이스가 필요했나 — 리뷰어가 잡은 사각지대
+    // 콘솔의 `onCreated={() => { void loadProposals(); }}` 배선을 통째로 떼도 **콘솔 관련
+    // 테스트 5파일 76건이 전건 초록**이었다. 폼 단독 테스트는 자기가 준 목(mock) prop이
+    // 불렸는지만 보고, 마운트 테스트는 폼이 «있는가»만 봤다 — 그래서 콘솔이 실제로 무엇을
+    // 넘기는지는 아무도 안 봤다. 이 PR이 표방한 교훈 #380과 **글자 그대로 같은 모양**이
+    // 이 PR 자신의 회귀망에 남아 있었다.
+    //
+    // 끊겼을 때의 실제 결과: `loadProposals()`를 부르는 다른 경로가 없다(폴링 없음, 승인·
+    // 반려·실행 때만 재호출). 그래서 사람이 방금 발의한 카드가 **폼은 「발의됨」이라고 말하는데
+    // 목록에는 안 뜨는** 조용한 불일치가 된다 — 승인하러 갈 수가 없다.
+    render(
+      <MemoryRouter>
+        <NaverAdOptimizationConsole />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "발의하기" }));
+    await waitFor(() => expect(h.listCalls).toBeGreaterThan(0)); // 초기 로드 완료
+    const before = h.listCalls;
+
+    fireEvent.change(screen.getByLabelText("대상 ID"), { target: { value: "무관검색어" } });
+    fireEvent.change(screen.getByLabelText("캠페인 ID"), { target: { value: "cmp-1" } });
+    fireEvent.change(screen.getByLabelText("광고그룹 ID"), { target: { value: "grp-1" } });
+    fireEvent.change(screen.getByLabelText("근거"), { target: { value: "전환 0 · 비용 12,000원" } });
+    fireEvent.click(screen.getByRole("button", { name: "발의" }));
+
+    await waitFor(() => expect(h.listCalls).toBeGreaterThan(before));
   });
 });

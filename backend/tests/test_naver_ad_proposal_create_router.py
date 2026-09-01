@@ -110,6 +110,48 @@ def test_human_proposable_up_is_exactly_the_approval_source_agnostic_up_set():
     assert proposable_up == set(harness._AD_UP_OPEN_TYPES)
 
 
+def test_human_proposable_types_is_literally_derived_not_a_hardcoded_set():
+    """★`HUMAN_PROPOSABLE_TYPES`가 **파생식으로 쓰였는지**를 AST로 검사한다.
+
+    ## 왜 값 검사로는 안 되나 (적대 리뷰 1R 변이 11이 생존한 자리)
+    리뷰어가 이 상수를 **같은 값의 리터럴 집합**으로 바꿨더니 값 동등성 검사(`==`)를 하는
+    테스트가 전건 초록이었다. 당연하다 — `frozenset`은 모듈 로드 시 한 번 굳고, 「어떻게
+    계산됐는가」는 값에 남지 않는다. 그래서 그 위 테스트의 주석이 약속한 「리터럴로 바꾸면
+    잡는다」는 실제로는 **「다른 값의 리터럴로 바꾸면 잡는다」**였다.
+
+    ## 처방 — 이 저장소가 이미 값을 치른 그 처방
+    n=62가 같은 함정(`SPECS[k].default is judge._X`가 CPython 작은정수 캐싱 탓 리터럴에도
+    True)에서 **AST 검사로 전환**해 해결했다. 여기도 같다: 소스를 파싱해 이 할당의 우변이
+    게이트 상수 «이름»을 참조하는지 본다. 값이 아니라 **표현식의 모양**을 재는 것이 요점이다.
+
+    이걸 어기는 유일한 정당한 길은 이 테스트를 같이 고치는 것이고, 그때는 리뷰 diff에 남는다.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(harness))
+    assign = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AnnAssign | ast.Assign)
+            and any(
+                getattr(t, "id", None) == "HUMAN_PROPOSABLE_TYPES"
+                for t in ([node.target] if isinstance(node, ast.AnnAssign) else node.targets)
+            )
+        ),
+        None,
+    )
+    assert assign is not None, "HUMAN_PROPOSABLE_TYPES 할당을 소스에서 못 찾았다"
+
+    referenced = {n.id for n in ast.walk(assign.value) if isinstance(n, ast.Name)}
+    for required in ("_AD_UP_OPEN_TYPES", "BID_DOWN_TYPES"):
+        assert required in referenced, (
+            f"HUMAN_PROPOSABLE_TYPES가 {required}를 참조하지 않는다 — 하드코딩되면 그 게이트가 "
+            f"바뀌어도 발의 목록이 안 따라온다(참조된 이름: {sorted(referenced)})"
+        )
+
+
 def test_human_proposable_types_are_all_actually_executable():
     """발의 가능 유형은 전부 «실쓰기 액션이 개방된» 유형이어야 한다(이중 방벽의 발의판).
     아니면 발의하는 순간 죽은 카드가 된다."""
