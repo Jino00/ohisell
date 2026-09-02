@@ -10,12 +10,12 @@ export function CoverageBar({ ours, mop, manual }: { ours: number; mop: number; 
   return (
     <div>
       <div className="flex h-3 w-full overflow-hidden rounded bg-gray-100">
-        <div className="bg-owner-ours" style={{ width: `${pctOf(ours)}%` }} title="우리 MOP" />
-        <div className="bg-owner-mop" style={{ width: `${pctOf(mop)}%` }} title="원본 MOP" />
+        <div className="bg-owner-ours" style={{ width: `${pctOf(ours)}%` }} title="PAO" />
+        <div className="bg-owner-mop" style={{ width: `${pctOf(mop)}%` }} title="제3자(대행사)" />
         <div className="bg-owner-manual" style={{ width: `${pctOf(manual)}%` }} title="수동" />
       </div>
       <p className="mt-1 text-xs text-gray-500">
-        우리 MOP {won(ours)} ({pctFromFraction(ours / total)}) · 전체 {won(total)}
+        PAO {won(ours)} ({pctFromFraction(ours / total)}) · 전체 {won(total)}
       </p>
     </div>
   );

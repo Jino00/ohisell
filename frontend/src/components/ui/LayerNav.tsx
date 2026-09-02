@@ -8,6 +8,13 @@ const LINKS = [
   { to: "/naver-ad/report", label: "리포트" },
   { to: "/naver-ad/diagnosis", label: "진단 보드" },
   { to: "/naver-ad/console", label: "최적화 콘솔" },
+  // ★설계서 §7½ 1단계 「도달과 이름」 — 이 둘은 라우트·화면이 **이미 다 있었는데** 탭에
+  //   링크가 없어서 아무도 못 갔다. 광고그룹 On/Off 스위치(`PUT /scope/adgroup`)가 안 쓰인
+  //   이유가 기능 부재가 아니라 **도달 불능**이었다(122 설계서 §2-2·§7½).
+  //   탭이 8→10으로 «는다» — 최종형(탭 3개)의 역방향이지만 도달이 먼저다. 4·5단계에서
+  //   두 화면이 셋팅 면·격자 행으로 흡수되면 이 두 줄이 함께 빠진다.
+  { to: "/naver-ad/scope", label: "PAO 스코프" },
+  { to: "/naver-ad/exclusion-list", label: "검색어 제외" },
   // 「수정 사항」 — 그날 광고에 일어난 수정 전건 + 누가 했나(두 원천 합본). 라이브 editTm을
   // 손으로 대조하던 일을 대체한다.
   // 「소재 성과」 — 소재별 ROAS를 BEP와 나란히. 캠페인 평균이 적자 소재를 가리던
@@ -19,7 +26,7 @@ const LINKS = [
 
 export function LayerNav() {
   return (
-    <nav className="flex gap-1 border-b border-gray-200 mb-4">
+    <nav className="flex flex-wrap gap-1 border-b border-gray-200 mb-4">
       {LINKS.map((l) => (
         <NavLink
           key={l.to}

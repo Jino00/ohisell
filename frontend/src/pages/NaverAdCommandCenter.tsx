@@ -1,4 +1,4 @@
-// NaverAdCommandCenter.tsx — D-NAO-47 1층. 우리 MOP가 돌리는 광고의 성과.
+// NaverAdCommandCenter.tsx — D-NAO-47 1층. PAO가 돌리는 광고의 성과.
 //
 // D-47-a: 1층은 "우리 MOP가 돌리는 광고의 성과"다(Jino: "우리 MOP가 돌리는 광고성과를 보자는거야").
 // D-47-c: N=1(오늘 04 카나리 1개)과 N=여럿(나중)이 **같은 컴포넌트**다 — 카나리 전용 화면 금지.
@@ -79,7 +79,7 @@ export default function NaverAdCommandCenter() {
           <CoverageBar ours={cov.ours_cost} mop={cov.mop_cost} manual={cov.none_cost} />
           <div className="grid grid-cols-3 gap-4">
             <div className="rounded border border-blue-200 bg-blue-50/40 p-3">
-              <Badge tone="owner">우리 MOP</Badge>
+              <Badge tone="owner">PAO</Badge>
               <div className="mt-2">
                 {/* ★reason은 **측정한 사실만** 말한다(codex[P2] R5). ours_cost는 최근
                     N일 **광고비 롤업**이지 캠페인 보유 여부가 아니다. 0을 보고 "넘긴 캠페인이
@@ -90,14 +90,14 @@ export default function NaverAdCommandCenter() {
                   label="광고비"
                   value={won(cov.ours_cost)}
                   isEmpty={cov.ours_cost === 0}
-                  reason={`최근 ${cov.window_days}일 우리 MOP 캠페인의 광고비 집행이 없습니다.`}
+                  reason={`최근 ${cov.window_days}일 PAO 캠페인의 광고비 집행이 없습니다.`}
                   tone={cov.ours_cost === 0 ? "idle" : "neutral"}
                   sub={cov.total_cost ? `전체의 ${pctFromFraction(cov.ours_cost / cov.total_cost)}` : undefined}
                 />
               </div>
             </div>
             <div className="rounded border border-gray-200 p-3">
-              <Badge>원본 MOP</Badge>
+              <Badge>제3자(대행사)</Badge>
               <div className="mt-2">
                 {/* ★같은 이유로 태깅 여부를 단언하지 않는다 — 측정한 건 광고비 0이고,
                     태깅 누락은 **가장 유력한 원인**이지 관측 사실이 아니다(D-47-g). */}
@@ -120,7 +120,7 @@ export default function NaverAdCommandCenter() {
         </div>
       </Card>
 
-      {/* ② 우리 MOP 캠페인 리스트 — 오늘 1행, 나중 N행(D-47-c) */}
+      {/* ② PAO 캠페인 리스트 — 오늘 1행, 나중 N행(D-47-c) */}
       <Card
         title="스마트스토어 캠페인 — 누구에게 맡길지"
         right={
@@ -143,7 +143,7 @@ export default function NaverAdCommandCenter() {
         <Card title="우리가 한 일의 결과 (인과)">
           <ChangeLogPane />
         </Card>
-        <Card title="외부(MOP/사람)가 바꾼 것 감지">
+        <Card title="외부(제3자·사람)가 바꾼 것 감지">
           <ExternalChangesPane />
         </Card>
       </div>
@@ -227,8 +227,8 @@ function CampaignRoster() {
     <div>
       {saveError && <p className="px-4 py-2 text-xs text-judge-bad bg-red-50">{saveError}</p>}
       <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
-        전체 {num(rows.length)}개 중 우리 MOP {num(oursCount)}개 — 넘기면 우리 프로그램이 그 캠페인의
-        입찰을 제안·실행합니다(사람 승인 게이트 유지). 원본 MOP는 자동으로 꺼지지 않습니다.
+        전체 {num(rows.length)}개 중 PAO {num(oursCount)}개 — 넘기면 PAO가 그 캠페인의
+        입찰을 제안·실행합니다(사람 승인 게이트 유지). 제3자(대행사) 쪽은 자동으로 꺼지지 않습니다.
       </p>
       {[...byType.entries()].map(([type, list]) => (
         <div key={type}>
@@ -263,7 +263,7 @@ function CampaignRoster() {
                 </Td>
                 <Td>
                   {/* ★모든 캠페인에 스위치를 노출한다(편집은 optimizer와 독립). 다만 정책은
-                      우리 MOP(proposal_writer)가 loss를 처리할 때만 소비되므로, 'ours'가 아닌
+                      PAO(proposal_writer)가 loss를 처리할 때만 소비되므로, 'ours'가 아닌
                       캠페인엔 그 사실을 회색 부연으로 정직하게 붙인다(D-NAO-65 §0). */}
                   <div className="flex items-center gap-2">
                     <LossPolicySwitch
@@ -273,7 +273,7 @@ function CampaignRoster() {
                       onChange={changeLossPolicy}
                     />
                     {c.optimizer !== "ours" && (
-                      <span className="text-[11px] text-gray-400 whitespace-nowrap">우리 MOP 캠페인에서만 소비됨</span>
+                      <span className="text-[11px] text-gray-400 whitespace-nowrap">PAO 캠페인에서만 소비됨</span>
                     )}
                   </div>
                 </Td>
@@ -694,7 +694,7 @@ function ExternalChangesPane() {
   // D-NAO-50: actor=external의 **첫 화면 소비자**. 이 패널이 없으면 키워드·입찰가·상태
   // diff 밸브가 DB에만 쌓이고 어디서도 안 보인다 — 정확히 "수집은 풍부한데 화면엔 없음"
   // (스펙 §1-4)의 재발이다. ChangeLogPane과 구조는 같지만 관심사가 반대다:
-  // 그쪽=우리가 한 일(인과), 이쪽=외부(MOP/사람)가 바꾼 걸 우리가 관측한 것(감지).
+  // 그쪽=우리가 한 일(인과), 이쪽=외부(제3자·사람)가 바꾼 걸 우리가 관측한 것(감지).
   const p = usePeriod();
   return (
     <>

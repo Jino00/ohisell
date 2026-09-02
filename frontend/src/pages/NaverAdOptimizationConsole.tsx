@@ -220,10 +220,13 @@ const STAGE_STATUS_META: Record<string, { dot: string; label: string }> = {
   none: { dot: "bg-gray-300", label: "없음" },
 };
 
+// ★라벨은 `OptimizerSwitch`와 같은 낱말이어야 한다(설계서 §7-2) — 같은 값을 두 화면이
+//   다르게 부르면 「PAO가 돌리는가」를 화면끼리 대조할 수 없다. 「우리」는 §4-2에서 세 주체
+//   (우리 자동화·Ava·Jino)를 가르는 데 이미 쓰이므로 이 축의 라벨에서는 뺀다.
 const OPTIMIZER_OPTIONS: { key: NaverAdOptimizer; label: string }[] = [
   { key: "none", label: "없음(수동)" },
-  { key: "ours", label: "우리" },
-  { key: "mop", label: "MOP" },
+  { key: "ours", label: "PAO" },
+  { key: "mop", label: "제3자(대행사)" },
 ];
 
 const PROPOSAL_STATUS_TABS = [
