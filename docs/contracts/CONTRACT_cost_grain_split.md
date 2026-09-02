@@ -168,7 +168,15 @@
 
 ### S0 — 기준선 (읽기 전용 · 코드 0줄)
 
-- [ ] **기준선 4값이 트랙 확인줄 1줄에 남는다.** `GET /api/cost/truth-board` census: `held_count` **92** · `by_cause.g1_grain_mismatch` **92** · `cutover_ready_count` **0** · `matched_count` **358**(2026-09-02 19:48:20 KST 실측 — 세션 `16610af6`) / `GET /api/scheduler/health` `cost_drift`의 buffered 건수 **[재측]**. 표면: `docs/tracks/active/track_cost-truth-ledger.md` 확인줄 + 위 두 응답(KST 시각 병기).
+- [x] **기준선 4값이 트랙 확인줄 1줄에 남는다.** ✅ 2026-09-02 19:48:20~20:59:34 KST 실측 —
+      `held_count` **92** · `by_cause.g1_grain_mismatch` **92** · `cutover_ready_count` **0** ·
+      `matched_count` **358** · `none_count` **512**(prod `:8011`) / `cost_drift` **null**(buffered 항목
+      자체가 없다 — 「0건」이 아니라 **신호가 안 서 있다**. `cost_guard.active: true`,
+      스냅샷 `cost_truth_20260807.json`) / 트랙 확인줄 `2026-09-02 20:1x [16610af6]`
+      ⚠️`cost_drift`가 `null`이라 S4-① 「buffered 증가 0」은 **증가를 잴 분모가 없다** —
+      판정은 「S1·S2 뒤에도 여전히 null이고 배너가 빨개지지 않았다」로 한다. 이 사실을 여기
+      적어 두는 이유는, 나중에 `null`을 「0건이라 안전」으로 읽으면 그게 교훈 #123(발견 0건과
+      실행 안 됨이 같은 숫자로 보인다)의 재현이기 때문이다.
 
 ### S1 — 매트 56건: 구성 축 (마이그 1건 + 코드)
 
