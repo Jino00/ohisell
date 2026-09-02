@@ -18,7 +18,7 @@
 //   누르게 한다(차단이 아니라 고지 — 켜는 결정은 사람의 것이다).
 import { useState } from "react";
 import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
-import { kstDate } from "../lib/periodRange";
+import { kstDate, presetWindowExcludingToday } from "../lib/periodRange";
 import {
   Card, Table, Th, Td, Badge, Loading, EmptyState, LayerNav,
 } from "../components/ui";
@@ -107,11 +107,12 @@ function ProfitCell({
   );
 }
 
-/** 이 화면의 프리셋. ★새로 발명하지 않고 공용 어휘(`PeriodPreset`)에서 고른다 —
- *  종전 버튼이 7·21·51일이었는데, 21일은 이 화면의 기본 창(`DEFAULT_WINDOW_DAYS`)이고
- *  51일은 공용 어휘에 없다. 날짜를 직접 고를 수 있게 됐으므로 프리셋은 공용 것을 쓰고,
- *  기본 창 21일은 «시작 상태»로 남긴다(회귀 아님 — 아래 useState 참조). */
-const SCOPE_PERIOD_PRESETS: PeriodPreset[] = ["yesterday", "7d", "15d", "30d", "90d"];
+/** 이 화면의 프리셋. ★새로 발명하지 않고 공용 어휘(`PeriodPreset`)에서 고른다.
+ *  종전 버튼은 7·21·51일이었다. **21일은 이 화면의 기본 창**(`DEFAULT_WINDOW_DAYS`)이라
+ *  공용 어휘에 더해 남긴다 — 없으면 화면을 열자마자 «어느 버튼도 안 눌린» 상태가 된다.
+ *  51일은 뺐다(30·90이 감싸고, Jino 지시가 「대시보드처럼」이었다) — 조용히 사라진 게
+ *  아니라 여기 적어 둔 처분이다. */
+const SCOPE_PERIOD_PRESETS: PeriodPreset[] = ["yesterday", "7d", "21d", "30d", "90d"];
 
 export default function NaverAdScope() {
   // ★시작 창은 종전과 같은 21일(오늘 제외) — 화면을 열자마자 보던 것이 안 바뀐다.
@@ -134,6 +135,9 @@ export default function NaverAdScope() {
         label="성과 발생일"
         from={from} to={to} onFrom={setFrom} onTo={setTo}
         presets={SCOPE_PERIOD_PRESETS}
+        // ★이 화면의 창은 D-0을 뺀다 — 기본 `presetWindow`(오늘로 끝남)를 쓰면 프리셋을
+        //   누를 때마다 서버가 창을 잘라 «예외 경고»가 상시 경고가 된다(적대 리뷰 P1-1).
+        windowFor={presetWindowExcludingToday}
         note="오늘은 전환이 아직 정착 전이라 창에서 빠집니다 — 넣으면 총이익이 실제보다 적게 보입니다."
       />
       <Card title="PAO 스코프 — 무엇을 엔진에 맡길까">

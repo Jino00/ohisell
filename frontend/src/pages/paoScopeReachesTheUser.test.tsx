@@ -24,6 +24,7 @@ import type { PaoScopeRoster } from "../lib/api";
 //   잡아야 한다(아래 vi.mock 팩토리가 오버라이드한다). 리뷰어의 표면 변이 SUR-5(호출 제거)가
 //   생존했던 이유가 정확히 이것 — 읽기 표면만 재고 쓰기 표면은 아무도 안 봤다.
 import { putPaoScopeAdgroup, putNaverCampaignAutoOperate } from "../lib/api";
+import { kstDate } from "../lib/periodRange";
 
 // ★로스터를 테스트마다 갈아끼운다 (D-NAO-267). vi.mock 팩토리는 호이스팅돼서 바깥 변수를
 //   그냥 참조하면 초기화 전 접근이 된다 — vi.hoisted가 그 순서 문제의 공식 해법이다.
@@ -653,5 +654,60 @@ describe("★기간 바 — 대시보드와 같은 물건을 쓴다", () => {
     // 렌더 전에 재면 아무 경고도 없는 게 당연해서 아무것도 보증하지 않는다.
     await waitFor(() => expect(screen.getByText("01. 갤럭시_지문방지_TPU")).toBeTruthy());
     expect(screen.queryByText(/고르셨지만/), "안 잘랐는데 경고가 떴다").toBeNull();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 적대 리뷰 P1-1·P1-2 — 「무엇을 그리나」가 아니라 **「무엇을 요청하나」**를 잰다
+//
+// ★P1-1이 통과한 이유가 여기 있다: 방어선이 「목 로스터의 `clamped`를 화면이 그리나」에만
+//   서 있었고 **「이 화면이 실제로 어떤 창을 요청하나」에는 한 줄도 없었다.** 그래서 프리셋이
+//   전부 오늘을 보내 서버가 매번 창을 자르는데도 1,433건이 전건 초록이었다.
+// ★★그러면 「예외일 때만 뜨는 경고」가 상시 경고가 되고, 서버 자백문이 *"…까지 고르셨지만"*
+//   이라 **사용자가 하지 않은 입력을 사용자 탓으로** 돌린다. 버튼 라벨(7일)과 실제 창
+//   길이(6일)도 어긋난다.
+describe("★이 화면이 «실제로 요청하는 창» (적대 리뷰 P1-1·P1-2)", () => {
+  const lastArgs = async () => {
+    const { fetchPaoScopeRoster } = await import("../lib/api");
+    await waitFor(() => expect(vi.mocked(fetchPaoScopeRoster)).toHaveBeenCalled());
+    return vi.mocked(fetchPaoScopeRoster).mock.calls.at(-1)![0] as
+      { dateFrom?: string; dateTo?: string };
+  };
+  const daysBetween = (f: string, t: string) =>
+    Math.round((Date.parse(`${t}T00:00:00Z`) - Date.parse(`${f}T00:00:00Z`)) / 86_400_000) + 1;
+
+  it("★시작 창은 «어제로 끝나는 21일»이다 — 열자마자 보던 것이 안 바뀐다", async () => {
+    await renderApp();
+    const a = await lastArgs();
+    expect(a.dateTo, "창이 오늘로 끝난다 — D-0 제외 관례 위반").toBe(kstDate(-1));
+    expect(daysBetween(a.dateFrom!, a.dateTo!), "시작 창이 21일이 아니다").toBe(21);
+  });
+
+  it.each([
+    ["7일", 7], ["21일", 21], ["30일", 30], ["90일", 90],
+  ])("★프리셋 「%s」은 오늘을 안 보내고 길이가 라벨과 같다", async (label, want) => {
+    await renderApp();
+    const btn = await screen.findByRole("button", { name: label });
+    fireEvent.click(btn);
+    await waitFor(async () => {
+      const a = await lastArgs();
+      // ★오늘을 보내면 서버가 자르고 「예외 경고」가 상시가 된다 — 그게 P1-1이었다.
+      expect(a.dateTo, `${label}이 오늘을 보낸다`).toBe(kstDate(-1));
+      expect(daysBetween(a.dateFrom!, a.dateTo!), `${label} 창 길이가 라벨과 다르다`).toBe(want);
+    });
+  });
+
+  it("「어제」는 하루짜리 창이다", async () => {
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "어제" }));
+    await waitFor(async () => {
+      const a = await lastArgs();
+      expect([a.dateFrom, a.dateTo]).toEqual([kstDate(-1), kstDate(-1)]);
+    });
+  });
+
+  it("★축 이름이 화면에 있다 — 안 적으면 사용자는 자기가 아는 축으로 읽는다", async () => {
+    await renderApp();
+    expect(await screen.findByText("성과 발생일")).toBeTruthy();
   });
 });

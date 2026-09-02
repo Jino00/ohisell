@@ -79,3 +79,42 @@ export function rangeLabel(presetLabel: string | null, range: DateRange): string
   const span = range.from === range.to ? range.from : `${range.from} ~ ${range.to}`;
   return presetLabel ? `${presetLabel} (${span})` : span;
 }
+
+// ★프리셋 창의 «오늘 제외»판은 여기 산다 — 컴포넌트 파일에서 컴포넌트 아닌 것을
+//   export 하면 `react-refresh/only-export-components` 경고가 붙고, 이 저장소는
+//   `--max-warnings 96`이 **정확한 상한**이라 경고 하나가 곧 CI 빨강이다.
+//   그리고 이 파일은 원래 «프론트에서 유일하게 타임존이 걸린 코드»의 자리다.
+import type { PeriodPreset } from "../components/PeriodRangeBar";
+
+/** ★오늘(D-0)을 **창에서 빼는** 화면용 프리셋 창.
+ *
+ *  왜 두 벌인가(적대 리뷰 P1-1): 화면마다 창 관례가 다르다. 매출·운영 화면은 당일을 포함해
+ *  보지만, PAO 스코프처럼 **총이익**을 재는 화면은 D-0을 뺀다 — 당일 전환이 정착 전이라
+ *  총이익이 과소로 보이기 때문이다(`pao_scope_roster` 창 관례).
+ *
+ *  ★★그 관례를 무시하고 위 `presetWindow`를 쓰면 **프리셋을 누를 때마다 서버가 창을
+ *  자르고**, 「예외일 때만 뜨는 경고」가 상시 경고가 된다. 게다가 서버 자백문이
+ *  *"…까지 고르셨지만"*이라 **사용자가 하지 않은 입력을 사용자 탓으로 돌린다.**
+ *  버튼 라벨(「7일」)과 실제 창 길이(6일)도 어긋난다.
+ *  ⇒ 끝점을 어제로 당기고 길이는 라벨 그대로 둔다(7일 = 어제로 끝나는 7일).
+ */
+export function presetWindowExcludingToday(
+  k: PeriodPreset, today: string = kstDate(0),
+): { f: string; t: string } {
+  const shift = (n: number) => {
+    const ms = Date.parse(`${today}T00:00:00Z`) + n * 86_400_000;
+    return new Date(ms).toISOString().slice(0, 10);
+  };
+  const back = (days: number) => ({ f: shift(-days), t: shift(-1) });
+  switch (k) {
+    // 「오늘」은 이 관례에서 고를 수 없는 창이다 — 어제로 접는다(빈 창을 주지 않는다).
+    case "today":
+    case "yesterday": return { f: shift(-1), t: shift(-1) };
+    case "7d":        return back(7);
+    case "15d":       return back(15);
+    case "21d":       return back(21);
+    case "30d":       return back(30);
+    case "90d":       return back(90);
+    case "1y":        return back(365);
+  }
+}

@@ -264,18 +264,23 @@ def build_roster(
     if date_from_in is not None or date_to_in is not None:
         date_to = date_to_in or latest
         date_from = date_from_in or (date_to - timedelta(days=DEFAULT_WINDOW_DAYS - 1))
+        # ★뒤집힘은 **clamp «전»에** 본다. clamp 뒤에 보면, 두 칸에 오늘을 똑같이 넣었을 때
+        #   `date_to`만 하루 당겨져 「시작일이 종료일보다 뒤」가 되고 화면이 **사용자가 하지
+        #   않은 실수를 사용자 탓으로** 말한다(적대 리뷰 P2-1 실측).
+        if date_from > date_to:
+            clamped = True
+            note = "시작일이 종료일보다 뒤여서 하루짜리 창으로 봅니다."
+            date_from = date_to
         if date_to > latest:
             clamped = True
-            note = (
+            note = (note + " " if note else "") + (
                 f"{date_to.isoformat()}까지 고르셨지만 오늘({today.isoformat()})은 전환이 아직 "
                 f"정착 전이라 총이익이 실제보다 적게 보입니다 — {latest.isoformat()}까지로 "
                 f"보여드립니다."
             )
             date_to = latest
-        if date_from > date_to:                 # 뒤집힌 입력은 지어내지 않고 바로잡고 말한다
-            clamped = True
-            note = (note + " " if note else "") + "시작일이 종료일보다 뒤여서 하루짜리 창으로 봅니다."
-            date_from = date_to
+            if date_from > date_to:             # 시작일도 미래였으면 같이 당긴다
+                date_from = date_to
         span = (date_to - date_from).days + 1
         if span > MAX_WINDOW_DAYS:
             clamped = True
