@@ -173,12 +173,15 @@ class VariantSpec:
 
 @dataclass(frozen=True)
 class GroupPlan:
-    product_name: str
-    form_factor: str
-    #: `"composition"` | `"tablet_size"`
-    signal_kind: str
-    cost_table_section: str
-    variants: tuple[VariantSpec, ...]
+    #: ★이 «행»을 승인한 계약. 근거 문장이 이 이름을 달고 나가므로 틀리면 감사자가
+    #: 그 행이 없는 표에 도착한다(적대 리뷰 P1-2a). 기본값은 최초 12행의 계약이다.
+    contract: str = "D-CPP-67"
+    product_name: str = ""
+    form_factor: str = ""
+    #: `"composition"` | `"tablet_size"` | `"tablet_size_blc"`
+    signal_kind: str = ""
+    cost_table_section: str = ""
+    variants: tuple[VariantSpec, ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:
@@ -243,6 +246,7 @@ PLAN: tuple[GroupPlan, ...] = (
     # ★신호가 `tablet_size_blc`인 이유는 위 상수 주석 참조 — 비-BLC 군으로 새면
     #   이미 컷오버된 `OHI-0111`이 조용히 옮겨 간다.
     GroupPlan(
+        contract="D-CPP-68",
         product_name="강화유리코팅 고투명 6H 블루라이트 차단 액정보호필름 2매",
         form_factor="tablet",
         signal_kind="tablet_size_blc",
@@ -254,6 +258,7 @@ PLAN: tuple[GroupPlan, ...] = (
         ),
     ),
     GroupPlan(
+        contract="D-CPP-68",
         product_name="종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매",
         form_factor="tablet",
         signal_kind="tablet_size_blc",
@@ -265,6 +270,18 @@ PLAN: tuple[GroupPlan, ...] = (
         ),
     ),
 )
+
+#: 신호 종류 → 그 종류가 «찾는» 낱말. 근거 문장의 「찾은 낱말」이 여기서 나온다 —
+#: 군마다 다르므로 고정 목록을 적으면 문장이 거짓이 된다(적대 리뷰 P1-2b).
+_WORDS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "tablet_size": TABLET_ULTRA_WORDS + TABLET_PLUS_WORDS,
+    "tablet_size_blc": TABLET_ULTRA_WORDS + TABLET_S10FE_ULTRA_WORDS + TABLET_PLUS_WORDS,
+}
+
+
+def _words_for(signal_kind: str) -> tuple[str, ...]:
+    return _WORDS_BY_KIND.get(signal_kind, TABLET_ULTRA_WORDS + TABLET_PLUS_WORDS)
+
 
 #: 상품명 → (1차 신호 값, 그 값의 출처). **출처를 버리지 마라** — 위 주석 참조.
 _SIGNAL_FN: dict[str, Callable[[Optional[str]], tuple[object, str]]] = {
@@ -417,8 +434,10 @@ def _cross_check(
     for r in rows:
         if r.variant is None:
             continue
-        if r.internal_sku in DECIDED_BY_JINO:
-            continue  # ⑴ 되물을 상대가 없다
+        # ⑴ 되물을 상대가 없다 — 단 **판정과 «같은» 변형일 때만**이다(적대 리뷰 P2-3).
+        #    낱말 순서가 틀어져 다른 변형이 나왔다면 그건 예외가 아니라 사고다.
+        if DECIDED_BY_JINO.get(r.internal_sku) == r.variant:
+            continue
         prices_by_variant.setdefault(r.variant, set()).add(
             None if r.cost_price is None else Decimal(str(r.cost_price))
         )
@@ -426,23 +445,39 @@ def _cross_check(
     # ① 한 변형 안에서 현재 원가가 여러 종
     multi = {v for v, ps in prices_by_variant.items() if len(ps) > 1}
     # ② 서로 다른 변형이 같은 현재 원가 — 신호가 가른 것을 값이 부정한다
-    seen: dict[object, str] = {}
-    shared: set[str] = set()
+    #   ★값 하나에 변형이 **셋 이상** 걸릴 수 있다. 구판은 `seen[p] = variant`로 덮어써서
+    #     사슬이 끊겼고, 같은-총액 예외가 그 한 칸을 소비하면 **한 변형이 조용히 빠졌다**
+    #     (적대 리뷰 P2-2). 값마다 «변형 집합»을 들고 쌍으로 전부 본다.
+    by_price: dict[object, set[str]] = {}
     for variant, ps in prices_by_variant.items():
         for p in ps:
-            other = seen.get(p)
-            if other is not None and other != variant:
-                if not _same_plan_total(plan_totals, variant, other):
-                    shared.add(variant)
-                    shared.add(other)
-            seen[p] = variant
+            by_price.setdefault(p, set()).add(variant)
+    shared: set[str] = set()
+    for vs in by_price.values():
+        for a in vs:
+            for b in vs:
+                if a != b and not _same_plan_total(plan_totals, a, b):
+                    shared.add(a)
+                    shared.add(b)
 
     for r in rows:
-        if r.internal_sku in DECIDED_BY_JINO:
-            continue  # ⑴ 사람이 판정했다 — 되묻지 않는다
+        # ★★「1차 신호 없음」은 **2차 대조가 아니다** — 판정 SKU에도 그대로 적용한다.
+        #   구판은 판정 SKU에서 루프를 통째로 `continue` 해 이 검사까지 껐고, 그 결과
+        #   상품명이 빈 판정 SKU가 화면 `unassigned` 목록에서 **사라졌다**(적대 리뷰 P1-1).
+        #   예외의 범위는 「되묻기」이지 「보이기」가 아니다.
         if r.variant is None:
             r.conflict = "1차 신호 없음 — 상품명이 변형을 말하지 않는다(사람이 지정해야 한다)"
-        elif r.variant in multi:
+            continue
+        decided = DECIDED_BY_JINO.get(r.internal_sku)
+        if decided is not None:
+            if r.variant != decided:
+                # P2-3 — 판정과 신호가 어긋나면 침묵하지 않는다
+                r.conflict = (
+                    f"판정 불일치 — Jino는 「{decided}」로 판정했는데 "
+                    f"1차 신호가 「{r.variant}」를 냈다(신호 규칙을 봐야 한다)"
+                )
+            continue  # ⑴ 사람이 판정했다 — 2차 대조는 되묻지 않는다
+        if r.variant in multi:
             r.conflict = f"2차 대조 불일치 — 변형 「{r.variant}」 안에서 현재 원가가 여러 종이다"
         elif r.variant in shared:
             r.conflict = f"2차 대조 불일치 — 변형 「{r.variant}」가 다른 변형과 현재 원가를 공유한다"
@@ -493,9 +528,11 @@ def _note_for(row: _SkuRow, plan: GroupPlan) -> str:
         signal_text = f"{row.signal_source} 매수{list(sheets)}·낱말{list(words)}"
     elif row.signal_source == SOURCE_RESIDUAL:
         # 낱말이 «안» 걸렸다는 사실 자체가 근거다 — 그렇게 적는다.
+        # ★군마다 찾는 낱말이 다르다 — BLC 군은 `S10FE플러스`도 본다. 고정 목록을 적으면
+        #   「이 군에서 그 낱말이 검사됐나」에 **틀린 답**을 주는 문장이 된다(적대 리뷰 P1-2b).
         signal_text = (
             f"{SOURCE_RESIDUAL}(찾은 낱말: "
-            f"{'·'.join(TABLET_ULTRA_WORDS + TABLET_PLUS_WORDS)}) ⇒ 잔여 등급"
+            f"{'·'.join(_words_for(plan.signal_kind))}) ⇒ 잔여 등급"
         )
     else:
         signal_text = f"기종명 {row.signal_source}"
@@ -504,15 +541,21 @@ def _note_for(row: _SkuRow, plan: GroupPlan) -> str:
     #   정확히 그렇게 적었고 라이브에서 잡혔다. 적대 리뷰 1R P1-1과 **같은 병**이다 —
     #   예외를 만들 때는 그 예외가 «근거 문장»에 닿는지까지 봐야 한다.
     if row.internal_sku in DECIDED_BY_JINO:
+        # ★P2-4 — 「이 변형의 다른 SKU와 다르며」는 **계산하지 않은 비교**였다. 남은 11건을
+        #   컷오버하면 전부 같아져 그 문장이 거짓이 된다. 사실만 적는다.
         return (
-            f"D-CPP-68 분할 — 1차 신호: {signal_text} → 변형 「{row.variant}」 / "
+            f"{plan.contract} 분할 — 1차 신호: {signal_text} → 변형 「{row.variant}」 / "
             f"2차 대조: **하지 않았다** — Jino가 원가표를 정본으로 판정했다"
             f"(2026-09-03: \"초기 원가표 단계에서는 엑셀표가 기준이야\"). "
-            f"현재 원가 {price}원은 이 변형의 다른 SKU와 다르며, 틀린 쪽은 현재 원가다"
+            f"분할 당시 원가 {price}원"
         )
+    # ★P1-2a — 계약 이름을 «군»에서 가져온다. 구판은 새 6행에도 「D-CPP-67 분할」이라 적어,
+    #   감사자가 근거를 따라가면 **그 행이 없는 표**(§0-D 12행)에 도착했다.
+    # ★P2-5 — 「현재 원가」는 현재형인데 실제로는 분할 시점 스냅샷이다. 컷오버가 값을 바꾸면
+    #   낡은 값이 「현재」로 남는다(라이브에서 관측됨). 시점을 문장에 박는다.
     return (
-        f"D-CPP-67 분할 — 1차 신호: {signal_text} → 변형 「{row.variant}」 / "
-        f"2차 대조: 현재 원가 {price}원 (변형 안에서 1종)"
+        f"{plan.contract} 분할 — 1차 신호: {signal_text} → 변형 「{row.variant}」 / "
+        f"2차 대조: 분할 당시 원가 {price}원 (변형 안에서 1종)"
     )
 
 
@@ -623,7 +666,7 @@ def preview(db: Session) -> dict:
         all_ok = all_ok and group_ok
 
     return {
-        "contract": "D-CPP-67",
+        "contracts": sorted({p.contract for p in PLAN}),
         "groups": groups,
         "plan_sku_total": sum(v.expected_skus for p in PLAN for v in p.variants),
         "live_sku_total": sum(g["sku_count"] for g in groups),
@@ -750,7 +793,7 @@ def execute(db: Session, *, actor: str = "unknown", scope: str = "all") -> dict:
     db.flush()
     after = preview(db)
     return {
-        "contract": "D-CPP-67",
+        "contracts": sorted({p.contract for p in PLAN}),
         "actor": actor,
         "created_recipes": created,
         "renamed_base": renamed,

@@ -727,3 +727,108 @@ def test_sentence_counts_plan_rows_instead_of_hardcoding():
 
     assert GS._plan_row_count() == sum(len(p.variants) for p in GS.PLAN)
     assert GS._plan_row_count() != 12, "표가 자랐는데 12로 굳어 있으면 이 테스트가 존재할 이유가 없다"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R 지적 수리 (2026-09-03) — 리뷰어의 «재현»을 테스트로 옮긴다
+# ═══════════════════════════════════════════════════════════════════
+def test_p1_1_decided_sku_still_reports_missing_primary_signal():
+    """★P1-1 — 예외의 범위는 「되묻기」이지 「보이기」가 아니다.
+
+    구판은 판정 SKU에서 루프를 통째로 `continue` 해 「1차 신호 없음」 판정까지 껐다.
+    그러면 상품명이 빈 판정 SKU가 화면 `unassigned` 목록에서 **사라진다** —
+    하필 사람이 손으로 판정해 둔, 가장 눈이 필요한 자리에서.
+    """
+
+    decided = GS._SkuRow(internal_sku="OHI-0074", product_name="", cost_price=D("4572.70"),
+                         signal=None, signal_source=GS.SOURCE_NONE, variant=None,
+                         link_status="approved")
+    plain = GS._SkuRow(internal_sku="OHI-9999", product_name="", cost_price=D("4572.70"),
+                       signal=None, signal_source=GS.SOURCE_NONE, variant=None,
+                       link_status="approved")
+    GS._cross_check([decided, plain], {"울트라": D("6044.50")})
+    assert decided.conflict and "1차 신호 없음" in decided.conflict, decided.conflict
+    assert plain.conflict == decided.conflict
+
+
+def test_p2_3_decided_sku_whose_signal_disagrees_is_not_silently_exempt():
+    """★P2-3 — 판정 목록은 «멤버십»이 아니라 «값»이다.
+
+    낱말 순서가 틀어져 판정과 다른 변형이 나오면, 예외가 그 사고를 덮어선 안 된다.
+    """
+
+    r = _row("OHI-0074", "플러스", "4572.70")  # Jino 판정은 「울트라」
+    GS._cross_check([r], {"플러스": D("4504.50"), "울트라": D("6044.50")})
+    assert r.conflict and "판정 불일치" in r.conflict, r.conflict
+
+
+def test_p2_1_unknown_total_for_one_variant_is_not_treated_as_equal():
+    """★P2-1 — 「모름」을 「같음」으로 바꾸지 않는다. 적대 리뷰에서 **생존한 변이**의 자리다.
+
+    원가표 줄이 이름 변경·삭제로 사라지면 `plan_totals`의 «값»이 `None`이 된다
+    (딕셔너리 자체가 없는 경우는 기존 테스트가 덮는다).
+    """
+
+    rows = [_row("E1", "기본", "4352.70"), _row("E2", "플러스", "4352.70")]
+    GS._cross_check(rows, {"기본": None, "플러스": None})
+    assert all(r.conflict and "현재 원가를 공유" in r.conflict for r in rows), rows
+    # 한쪽만 모르는 경우도 마찬가지다
+    rows2 = [_row("F1", "기본", "4352.70"), _row("F2", "플러스", "4352.70")]
+    GS._cross_check(rows2, {"기본": D("4504.50"), "플러스": None})
+    assert all(r.conflict for r in rows2), rows2
+
+
+def test_p2_2_three_variants_sharing_one_price_all_surface():
+    """★P2-2 — 값 하나에 변형이 셋이면 셋 다 서야 한다.
+
+    구판은 `seen[p] = variant`로 덮어써 사슬이 끊겼고, 같은-총액 예외가 그 한 칸을
+    소비하면 **한 변형이 조용히 빠졌다**.
+    """
+
+    rows = [_row("G1", "기본", "4538.40"), _row("G2", "플러스", "4538.40"),
+            _row("G3", "울트라", "4538.40")]
+    GS._cross_check(rows, {"기본": D("4504.50"), "플러스": D("4504.50"),
+                           "울트라": D("6044.50")})
+    # 기본↔플러스는 총액이 같아 면제지만, 둘 다 울트라와는 총액이 다르다 ⇒ 셋 다 선다
+    assert [r.conflict is not None for r in rows] == [True, True, True], [r.conflict for r in rows]
+
+
+def test_p1_2a_note_names_the_contract_that_approved_this_row():
+    """★P1-2a — 근거 문장이 «그 행을 승인한 계약»을 말한다.
+
+    구판은 새 6행에도 「D-CPP-67 분할」이라 적었다. D-CPP-67 §0-D는 12행뿐이라,
+    감사자가 근거를 따라가면 **그 행이 없는 표**에 도착한다.
+    """
+
+    blc = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    old = GS.plan_for(TABLET, "tablet")
+    assert blc is not None and old is not None
+    assert blc.contract == "D-CPP-68" and old.contract == "D-CPP-67"
+    assert GS._note_for(_row("X1", "울트라", "5892.70", source=GS.SOURCE_ULTRA), blc).startswith("D-CPP-68 분할")
+    assert GS._note_for(_row("X2", "울트라", "7652.70", source=GS.SOURCE_ULTRA), old).startswith("D-CPP-67 분할")
+
+
+def test_p1_2b_residual_note_lists_the_words_this_group_actually_searched():
+    """★P1-2b — 「찾은 낱말」이 군마다 다르다. BLC 군은 `S10FE플러스`도 찾는다.
+
+    고정 목록을 적으면 「이 군에서 그 낱말이 검사됐나」에 **틀린 답**을 주는 문장이 된다.
+    """
+
+    blc = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    old = GS.plan_for(TABLET, "tablet")
+    r = _row("Y1", "기본", "4352.70")  # source=SOURCE_RESIDUAL
+    assert "S10FE플러스" in GS._note_for(r, blc), GS._note_for(r, blc)
+    assert "S10FE플러스" not in GS._note_for(r, old), GS._note_for(r, old)
+
+
+def test_p2_4_5_note_does_not_claim_an_uncomputed_comparison_or_a_stale_present_tense():
+    """★P2-4·P2-5 — 「이 변형의 다른 SKU와 다르며」는 계산하지 않은 비교였고,
+    「현재 원가」는 컷오버가 값을 바꾸면 낡은 값을 「현재」라 부른다(라이브 관측)."""
+
+    blc = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    n_dec = GS._note_for(_row("OHI-0074", "울트라", "4572.70", source=GS.SOURCE_S10FE_ULTRA), blc)
+    n_plain = GS._note_for(_row("Z1", "울트라", "5892.70", source=GS.SOURCE_ULTRA), blc)
+    for n in (n_dec, n_plain):
+        assert "현재 원가" not in n, n
+        assert "분할 당시 원가" in n, n
+    assert "다른 SKU와 다르며" not in n_dec, n_dec
