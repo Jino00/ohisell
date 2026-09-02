@@ -1063,6 +1063,15 @@ describe("★컷오버가 사람에게 닿는 경로 (계약 D-CPP-64 §4 S3)", 
     expect(screen.getByTestId("cost-cutover-not-eligible").textContent).toContain("512");
   });
 
+  it("★`load()`가 미리보기를 실제로 부른다 — 안 부르면 패널이 영원히 로딩이다", async () => {
+    // ★`load()`에서 `fetchCostCutoverPreview()`를 빼면 `cutoverPreview`가 null로 남아
+    //   패널이 「불러오는 중…」에서 멈춘다 — 화면은 조용하고 사람은 기능이 없다고 읽는다.
+    //   위 테스트는 패널이 «떴다»만 보므로 이 자리를 못 지킨다.
+    await openCutoverPanel();
+    expect(fetchCostCutoverPreview).toHaveBeenCalled();
+    expect(screen.queryByTestId("cost-cutover-loading")).toBeNull();
+  });
+
   it("★「전체 맞추기」를 누르면 실제 API가 scope=all로 불린다", async () => {
     await openCutoverPanel();
     fireEvent.click(screen.getByTestId("cost-cutover-run-all"));
