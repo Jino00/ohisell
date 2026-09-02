@@ -459,3 +459,98 @@ def test_variant_without_standard_says_recompute_not_unlinked(client):
         assert "재계산이 선행" in i["reason"]
         assert "연결된 적이 없다" not in i["reason"]
     assert body["census"]["by_cause"].get("no_link_other", 0) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 1R P1-1 — 태블릿 «잔여 등급»이 거짓말하지도 침묵하지도 않는다
+#
+#   리뷰어 재현: 태블릿 SKU 하나를 크기 낱말이 **하나도 없는** 신규 기종명으로 바꾸고
+#   현재 원가는 「기본」 군과 같게 두면, 초판은 `safe_to_execute: True` · `unassigned: []`로
+#   **완전히 조용했고**, 링크 note에는 「크기 낱말 「기본」」이라는 **없는 근거**가 적혔다.
+#
+#   ★처방은 «막기»가 아니라 «말하기»다 — 라이브 21건 전건이 낱말 없이 기본에 든다
+#   (원가표가 `_기본`/`_플러스`/`_울트라` 셋으로 생겼다). 막으면 정상 21건이 전부 선다.
+#   그래서 ①근거 문장이 사실을 말하고 ②잔여가 «몇 건인지» 화면에 선다.
+# ═══════════════════════════════════════════════════════════════════
+def test_tablet_residual_is_counted_not_silent(client):
+    prev = _preview(client)
+    g = _group(prev, "tablet")
+    base = next(v for v in g["variants"] if v["variant"] == "기본")
+    # 라이브 21건 전건이 낱말 없이 기본에 든다 — 그 사실이 «수»로 보여야 한다
+    assert base["residual_skus"] == 21, base
+    assert g["residual_total"] == 21
+    assert prev["residual_total"] == 21
+    assert "잔여" in (g["residual_sentence"] or "")
+    # 울트라·플러스는 낱말이 실제로 걸린다 — 잔여가 아니다
+    for v in g["variants"]:
+        if v["variant"] in ("울트라", "플러스"):
+            assert v["residual_skus"] == 0, v
+
+
+def test_tablet_residual_note_does_not_invent_a_word(client):
+    """★근거 문장이 «있지도 않은 낱말»을 있다고 적지 않는다."""
+    _split(client)
+    target = next(r for r in _recipes(client)
+                  if r["form_factor"] == "tablet" and r["variant"] == "기본")
+    body = client.get(f"/api/cost/recipes/{target['id']}").json()
+    notes = [l["note"] for l in body["links"]]
+    assert notes and all(n for n in notes)
+    for n in notes:
+        assert "잔여" in n, n
+        # 초판이 적던 거짓 문장이 다시 나오면 안 된다
+        assert "크기 낱말 「기본」" not in n, n
+    # 울트라는 낱말이 실제로 걸렸으므로 잔여라고 적으면 안 된다
+    ultra = next(r for r in _recipes(client)
+                 if r["form_factor"] == "tablet" and r["variant"] == "울트라")
+    ubody = client.get(f"/api/cost/recipes/{ultra['id']}").json()
+    for l in ubody["links"]:
+        assert "울트라 낱말" in l["note"], l["note"]
+        assert "잔여" not in l["note"], l["note"]
+
+
+def test_unknown_tablet_model_is_visible_as_residual(client):
+    """★리뷰어의 재현 그대로 — 낱말 없는 신규 기종명 + 같은 원가.
+
+    막지는 않는다(잔여는 정상 경로다). 그러나 **잔여 수가 늘고**, 그 SKU의 근거 문장이
+    「낱말이 안 걸렸다」를 말한다. 초판은 둘 다 없었다.
+    """
+    with client.testing_session() as s:
+        row = (s.query(ProductMaster)
+                 .filter(ProductMaster.product_name.like(f"{TABLET}, 아이패드프로7세대%11인치"))
+                 .first())
+        assert row is not None
+        row.product_name = f"{TABLET}, 뉴패드X100"   # 크기 낱말 0개
+        s.commit()
+
+    prev = _preview(client)
+    g = _group(prev, "tablet")
+    base = next(v for v in g["variants"] if v["variant"] == "기본")
+    assert base["residual_skus"] == 21          # 여전히 21 — 이 SKU도 잔여였다
+    assert base["live_skus"] == 21              # 개수 게이트는 안 걸린다(리뷰어 지적 그대로)
+    assert prev["safe_to_execute"] is True      # 막지 않는다 — 잔여는 정상 등급이다
+
+    _split(client)
+    target = next(r for r in _recipes(client)
+                  if r["form_factor"] == "tablet" and r["variant"] == "기본")
+    body = client.get(f"/api/cost/recipes/{target['id']}").json()
+    hit = [l for l in body["links"] if "뉴패드" in (l["note"] or "") or l["internal_sku"]]
+    note = next(l["note"] for l in body["links"] if l["note"])
+    assert "잔여" in note
+    # ★이 SKU가 «어느 낱말로도» 안 걸렸다는 사실이 화면에 남는다
+    assert "안 걸렸다" in note, note
+
+
+def test_empty_product_name_has_no_signal_at_all(client):
+    """상품명이 비면 잔여도 아니다 — 「신호 없음」이라 자동 귀속을 거부한다."""
+    with client.testing_session() as s:
+        row = (s.query(ProductMaster)
+                 .filter(ProductMaster.product_name.like(f"{TABLET}, 갤럭시탭S9울트라%"))
+                 .first())
+        assert row is not None
+        row.product_name = "   "
+        s.commit()
+    prev = _preview(client)
+    assert prev["safe_to_execute"] is False
+    g = _group(prev, "tablet")
+    assert any("1차 신호 없음" in (u["reason"] or "") for u in g["unassigned"]), g["unassigned"]
+    _split(client, expect=409)

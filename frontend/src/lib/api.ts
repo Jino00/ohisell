@@ -6742,6 +6742,8 @@ export interface CostGrainSplitVariant {
   cost_table_item_total: string | null;
   expected_skus: number;
   live_skus: number;
+  /** 이 변형에 붙은 것 중 «1차 낱말이 안 걸려» 잔여 등급으로 온 건수 (적대 리뷰 1R P1-1). */
+  residual_skus: number;
   matches_plan: boolean;
   recipe_id: number | null;
   recipe_status: string | null;
@@ -6763,6 +6765,9 @@ export interface CostGrainSplitGroup {
     cost_price: string | null;
     reason: string | null;
   }[];
+  residual_total: number;
+  /** 잔여 귀속이 있으면 그 사실을 문장으로 말한다 — 세지 않으면 그게 침묵이다. */
+  residual_sentence: string | null;
   matches_plan: boolean;
   reason: string | null;
 }
@@ -6772,6 +6777,7 @@ export interface CostGrainSplitPreview {
   groups: CostGrainSplitGroup[];
   plan_sku_total: number;
   live_sku_total: number;
+  residual_total: number;
   /** 계획표와 라이브가 전부 같은가 — 아니면 실행이 거부된다(§-1 Q3-B). */
   safe_to_execute: boolean;
   sentence: string;

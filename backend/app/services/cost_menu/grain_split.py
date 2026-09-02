@@ -49,29 +49,52 @@ from .truth_source import composition_signature
 TABLET_ULTRA_WORDS = ("울트라",)
 TABLET_PLUS_WORDS = ("플러스", "13인치", "12.9")
 
+#: 신호의 «출처» — 값만큼이나 중요하다. 아래 `tablet_size_grade_with_source` 주석 참조.
+SOURCE_ULTRA = "울트라 낱말"
+SOURCE_PLUS = "플러스·13인치·12.9 낱말"
+SOURCE_RESIDUAL = "잔여 — 크기 낱말이 하나도 안 걸렸다"
+SOURCE_NONE = "상품명이 비었다"
+SOURCE_COMPOSITION = "구성 지문"
 
-def tablet_size_grade(product_name: Optional[str]) -> Optional[str]:
-    """태블릿 상품명 → 크기 등급. 낱말이 없으면 `None`(= 사람이 지정해야 한다)."""
+
+def tablet_size_grade_with_source(product_name: Optional[str]) -> tuple[Optional[str], str]:
+    """태블릿 상품명 → (크기 등급, **그 등급을 어떻게 얻었나**).
+
+    ★★**왜 «출처»를 같이 돌려주나** (적대 리뷰 1R P1-1이 신설시켰다).
+    초판은 등급만 돌려줬고 낱말이 하나도 안 걸리면 그냥 `"기본"`을 냈다. 그러면 두 가지가
+    한꺼번에 무너진다:
+      ① 귀속 근거가 **거짓이 된다** — 링크 `note`에 「크기 낱말 「기본」」이라 적히는데
+         그 상품명엔 「기본」이라는 낱말이 없다. 화면이 있지도 않은 근거를 있다고 말한다.
+         D-CPP-63이 「근거 없는 승인 10건 363 SKU」로 이미 겪은 병과 같은 모양이다.
+      ② 「낱말이 안 걸렸다」가 **관측될 길이 사라진다.** 계약 §8은 「태블릿 36 SKU 전건에
+         크기 낱말이 있는가」를 [미상]으로 남기고 「S2 미리보기가 답한다」고 적었는데,
+         폴백이 그 질문을 영원히 덮는다 — **[미상]을 폴백으로 덮으면 [미상]인 줄도 모르게 된다.**
+
+    ★그런데 **「기본」은 폴백이 아니라 «잔여 등급»이다** — 원가표가 그렇게 생겼다
+    (`지문방지 PET 2매_기본` / `_플러스,12.9형,13인치` / `_울트라`). 라이브 21건 전건이
+    낱말 없이 이 등급에 든다(2026-09-02 실측). 그래서 잔여를 «막지» 않고 «말한다» —
+    막으면 정상 21건이 전부 서고, 침묵하면 위 ①②가 난다. 세는 것이 답이다.
+    """
 
     name = product_name or ""
+    if not name.strip():
+        return (None, SOURCE_NONE)
     if any(w in name for w in TABLET_ULTRA_WORDS):
-        return "울트라"
+        return ("울트라", SOURCE_ULTRA)
     if any(w in name for w in TABLET_PLUS_WORDS):
-        return "플러스"
-    if name.strip():
-        return "기본"
-    return None
+        return ("플러스", SOURCE_PLUS)
+    return ("기본", SOURCE_RESIDUAL)
 
 
-def composition_key(product_name: Optional[str]) -> tuple:
-    """매트 상품명 → 구성 지문. `truth_source`의 것을 **그대로 쓴다**.
+def composition_key_with_source(product_name: Optional[str]) -> tuple[tuple, str]:
+    """매트 상품명 → (구성 지문, 출처). `truth_source`의 지문 함수를 **그대로 쓴다**.
 
     ★지문 함수를 여기서 새로 쓰지 않는 이유: 분할의 옳음을 판정하는 게이트
     (`classify_group`의 `name_grain_kinds`)가 바로 그 함수를 쓴다. 둘이 갈라지면
     「분할했는데 게이트가 안 풀리는」 침묵이 생긴다.
     """
 
-    return composition_signature(product_name)
+    return (composition_signature(product_name), SOURCE_COMPOSITION)
 
 
 # ──────────────────────────────────────────────
@@ -161,9 +184,10 @@ PLAN: tuple[GroupPlan, ...] = (
     ),
 )
 
-_SIGNAL_FN: dict[str, Callable[[Optional[str]], object]] = {
-    "composition": composition_key,
-    "tablet_size": tablet_size_grade,
+#: 상품명 → (1차 신호 값, 그 값의 출처). **출처를 버리지 마라** — 위 주석 참조.
+_SIGNAL_FN: dict[str, Callable[[Optional[str]], tuple[object, str]]] = {
+    "composition": composition_key_with_source,
+    "tablet_size": tablet_size_grade_with_source,
 }
 
 
@@ -185,6 +209,8 @@ class _SkuRow:
     product_name: Optional[str]
     cost_price: Optional[Decimal]
     signal: object
+    #: 그 신호를 «어떻게» 얻었나 — 값과 함께 다닌다(적대 리뷰 1R P1-1)
+    signal_source: str
     variant: Optional[str]
     link_status: str
     note: str = ""
@@ -267,13 +293,14 @@ def _collect_skus(db: Session, plan: GroupPlan, recipes: dict[str, CostRecipe]) 
     for link in links:
         master = masters.get(link.internal_sku)
         name = master.product_name if master else None
-        signal = signal_fn(name)
+        signal, source = signal_fn(name)
         rows.append(
             _SkuRow(
                 internal_sku=link.internal_sku,
                 product_name=name,
                 cost_price=master.cost_price if master else None,
                 signal=signal,
+                signal_source=source,
                 variant=by_signal.get(signal),
                 link_status=link.status,
             )
@@ -318,12 +345,26 @@ def _cross_check(rows: list[_SkuRow]) -> None:
 
 
 def _note_for(row: _SkuRow, plan: GroupPlan) -> str:
+    """SKU가 «왜» 이 변형에 붙었나 — 링크에 남고 화면이 읽는다.
+
+    ★★**있지도 않은 근거를 적지 않는다** (적대 리뷰 1R P1-1). 초판은 태블릿에 대해
+    언제나 「기종명 크기 낱말 「기본」」이라 적었는데, 잔여 등급으로 떨어진 SKU의 상품명엔
+    「기본」이라는 낱말이 **없다**. 근거 문장이 거짓이면 감사가 감사를 못 한다 —
+    그건 근거가 없는 것보다 나쁘다.
+    """
+
     price = "없음" if row.cost_price is None else f"{Decimal(str(row.cost_price)):,}"
     if plan.signal_kind == "composition":
         sheets, words = row.signal  # type: ignore[misc]
-        signal_text = f"구성 지문 매수{list(sheets)}·낱말{list(words)}"
+        signal_text = f"{row.signal_source} 매수{list(sheets)}·낱말{list(words)}"
+    elif row.signal_source == SOURCE_RESIDUAL:
+        # 낱말이 «안» 걸렸다는 사실 자체가 근거다 — 그렇게 적는다.
+        signal_text = (
+            f"{SOURCE_RESIDUAL}(찾은 낱말: "
+            f"{'·'.join(TABLET_ULTRA_WORDS + TABLET_PLUS_WORDS)}) ⇒ 잔여 등급"
+        )
     else:
-        signal_text = f"기종명 크기 낱말 「{row.signal}」"
+        signal_text = f"기종명 {row.signal_source}"
     return (
         f"D-CPP-67 분할 — 1차 신호: {signal_text} → 변형 「{row.variant}」 / "
         f"2차 대조: 현재 원가 {price}원 (변형 안에서 1종)"
@@ -347,9 +388,16 @@ def preview(db: Session) -> dict:
         _cross_check(rows)
 
         counted: dict[str, int] = {}
+        # ★잔여 귀속(=1차 낱말이 하나도 안 걸려 «남은 등급»으로 간 것)을 **센다**
+        #   (적대 리뷰 1R P1-1). 막지 않는 이유는 `tablet_size_grade_with_source`
+        #   주석에 있다 — 잔여는 원가표가 만든 정상 등급이다. 다만 **몇 건인지 안 보이면**
+        #   그건 침묵이고, 침묵이 이 계약이 없애려는 것이다.
+        residual: dict[str, int] = {}
         for r in rows:
             if r.variant is not None and r.conflict is None:
                 counted[r.variant] = counted.get(r.variant, 0) + 1
+                if r.signal_source == SOURCE_RESIDUAL:
+                    residual[r.variant] = residual.get(r.variant, 0) + 1
 
         variant_rows = []
         group_ok = base is not None and bool(rows)
@@ -369,6 +417,8 @@ def preview(db: Session) -> dict:
                     "cost_table_item_total": RC._d(item.total_inc_vat) if item else None,
                     "expected_skus": spec.expected_skus,
                     "live_skus": live,
+                    # 이 변형에 붙은 것 중 «낱말이 안 걸려» 잔여로 온 건수
+                    "residual_skus": residual.get(spec.variant, 0),
                     "matches_plan": ok,
                     "recipe_id": existing.id if existing else None,
                     "recipe_status": existing.status if existing else None,
@@ -407,6 +457,16 @@ def preview(db: Session) -> dict:
                 "sku_count": len(rows),
                 "variants": variant_rows,
                 "unassigned": unassigned,
+                "residual_total": sum(residual.values()),
+                "residual_sentence": (
+                    None
+                    if not residual
+                    else (
+                        f"이 묶음의 {sum(residual.values())}건은 1차 낱말이 하나도 안 걸려 "
+                        f"«잔여 등급»으로 귀속됐다 — 원가표가 그렇게 생긴 정상 경로이지만, "
+                        f"새 기종이 조용히 여기 섞일 수 있는 자리이기도 하다(계약 §8 [미상])."
+                    )
+                ),
                 "matches_plan": group_ok,
                 "reason": (
                     None
@@ -422,6 +482,7 @@ def preview(db: Session) -> dict:
         "groups": groups,
         "plan_sku_total": sum(v.expected_skus for p in PLAN for v in p.variants),
         "live_sku_total": sum(g["sku_count"] for g in groups),
+        "residual_total": sum(g["residual_total"] for g in groups),
         "safe_to_execute": all_ok,
         "sentence": (
             "계획표 12행과 라이브가 전부 같다 — 실행할 수 있다"

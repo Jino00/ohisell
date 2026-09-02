@@ -675,6 +675,18 @@ export function CostGrainSplitPanel({
                       data-testid={`cost-grain-split-live-${g.form_factor}-${v.variant}`}
                     >
                       {v.live_skus}
+                      {/* ★잔여 귀속을 «수»로 보인다 (적대 리뷰 1R P1-1). 1차 낱말이 하나도
+                          안 걸려 남은 등급으로 온 건수다 — 정상 경로이지만 새 기종이
+                          조용히 섞일 수 있는 자리라, 안 보이면 그게 침묵이다. */}
+                      {v.residual_skus > 0 ? (
+                        <span
+                          className="ml-1 text-amber-700"
+                          title="1차 낱말이 하나도 안 걸려 «잔여 등급»으로 귀속된 건수"
+                          data-testid={`cost-grain-split-residual-${g.form_factor}-${v.variant}`}
+                        >
+                          (잔여 {v.residual_skus})
+                        </span>
+                      ) : null}
                     </td>
                     <td className="py-0.5 text-gray-600">
                       {v.matches_plan ? (v.recipe_id ? "레시피 있음" : "만들 것") : v.reason}
@@ -683,6 +695,14 @@ export function CostGrainSplitPanel({
                 ))}
               </tbody>
             </table>
+            {g.residual_sentence ? (
+              <div
+                className="mt-1 text-xs text-amber-800"
+                data-testid={`cost-grain-split-residual-note-${g.form_factor}`}
+              >
+                {g.residual_sentence}
+              </div>
+            ) : null}
             {g.unassigned.length > 0 ? (
               <div
                 className="mt-1 text-xs text-amber-800"

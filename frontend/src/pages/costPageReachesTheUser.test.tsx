@@ -479,6 +479,9 @@ const RECIPE_VARIANT: CostRecipe = {
       source: "excel",
       note: "D-CPP-67 분할 — 1차 신호: 구성 지문 매수['2','3','3','3']·낱말['후면','내부','외부'] → 변형 「외3+내3+후2」 / 2차 대조: 현재 원가 4,483.00원 (변형 안에서 1종)",
     },
+    // ★근거가 «없는» 링크 — 분할 이전부터 붙어 있던 것. 이 절은 근거가 있는 링크만
+    //   그려야 한다(빈 줄이 서면 「봤는데 근거가 없다」와 「분할이 안 건드렸다」가 뭉개진다).
+    { internal_sku: "OHI-FL099", status: "approved", source: "excel", note: null },
   ],
 };
 
@@ -928,6 +931,7 @@ const GRAIN_SPLIT_PREVIEW = {
   contract: "D-CPP-67",
   plan_sku_total: 92,
   live_sku_total: 92,
+  residual_total: 0,
   safe_to_execute: true,
   sentence: "계획표 12행과 라이브가 전부 같다 — 실행할 수 있다",
   groups: [
@@ -940,12 +944,14 @@ const GRAIN_SPLIT_PREVIEW = {
       sku_count: 30,
       matches_plan: true,
       reason: null,
+      residual_total: 0,
+      residual_sentence: null,
       unassigned: [],
       variants: [
         {
           variant: "외3", is_base: false, cost_table_item: "지문방지_외부3매",
           cost_table_item_id: 36, cost_table_item_total: "2666.40",
-          expected_skus: 9, live_skus: 9, matches_plan: true,
+          expected_skus: 9, live_skus: 9, residual_skus: 0, matches_plan: true,
           recipe_id: null, recipe_status: null, reason: null,
         },
       ],
@@ -1114,6 +1120,39 @@ describe("★정본 판별이 사람에게 닿는 경로 (계약 D-CPP-64 §4 S2
     const done = await screen.findByTestId("cost-grain-split-result");
     expect(done.textContent).toContain("1개");
     expect(done.textContent).toContain("21건");
+  });
+
+  it("★귀속 근거가 «레시피 상세»에서 읽힌다 (D-CPP-67 §4 S1 넷째)", async () => {
+    // ★★적대 리뷰 1R P1-2가 신설시켰다: 이 절(`recipe-link-attribution`)을 통째로
+    //   `false`로 꺼도 프런트 테스트 144건이 **전건 초록으로 생존**했다. 픽스처
+    //   `RECIPE_VARIANT`가 note 달린 links를 이미 들고 있었는데도 그걸 «소비하는»
+    //   테스트가 하나도 없었다 — 이 저장소가 여덟 번 밟은 「값은 맞는데 사람이 못 본다」가
+    //   또 한 번 준비돼 있었다.
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    fireEvent.click(await screen.findByTestId("recipe-row-108"));
+
+    const panel = await screen.findByTestId("recipe-detail-panel");
+    // 상세 머리줄이 변형을 말한다
+    await waitFor(() => expect(within(panel).getByText(/변형 외3\+내3\+후2/)).toBeTruthy());
+    // 그리고 «왜 이 SKU가 이 변형인가»가 화면에 있다
+    const attrib = within(panel).getByTestId("recipe-link-attribution");
+    const note = within(attrib).getByTestId("recipe-link-note-OHI-FL042");
+    expect(note.textContent).toContain("1차 신호");
+    expect(note.textContent).toContain("2차 대조");
+    expect(note.textContent).toContain("외3+내3+후2");
+    // ★근거 «없는» 링크는 이 절에 안 선다 — 빈 줄이 서면 두 사실이 뭉개진다.
+    expect(within(attrib).queryByTestId("recipe-link-note-OHI-FL099")).toBeNull();
+  });
+
+  it("★근거가 없는 레시피엔 그 절이 아예 안 선다 — 빈 절은 「봤다」로 읽힌다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    fireEvent.click(await screen.findByTestId("recipe-row-8")); // 안 갈라진 레시피
+    await screen.findByTestId("recipe-detail-panel");
+    expect(screen.queryByTestId("recipe-link-attribution")).toBeNull();
   });
 
   it("★변형 라벨이 «레시피 목록»에 선다 — 안 갈라진 행의 표시는 한 글자도 안 바뀐다", async () => {

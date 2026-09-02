@@ -25,6 +25,7 @@ const CLEAN: CostGrainSplitPreview = {
   contract: "D-CPP-67",
   plan_sku_total: 92,
   live_sku_total: 92,
+  residual_total: 0,
   safe_to_execute: true,
   sentence: "계획표 12행과 라이브가 전부 같다 — 실행할 수 있다",
   groups: [
@@ -37,18 +38,20 @@ const CLEAN: CostGrainSplitPreview = {
       sku_count: 30,
       matches_plan: true,
       reason: null,
+      residual_total: 0,
+      residual_sentence: null,
       unassigned: [],
       variants: [
         {
           variant: "외3+내3", is_base: true, cost_table_item: "지문방지_내부3매+외부3매",
           cost_table_item_id: 28, cost_table_item_total: "6186.40",
-          expected_skus: 9, live_skus: 9, matches_plan: true,
+          expected_skus: 9, live_skus: 9, residual_skus: 0, matches_plan: true,
           recipe_id: 70, recipe_status: "approved", reason: null,
         },
         {
           variant: "외3", is_base: false, cost_table_item: "지문방지_외부3매",
           cost_table_item_id: 36, cost_table_item_total: "2666.40",
-          expected_skus: 9, live_skus: 9, matches_plan: true,
+          expected_skus: 9, live_skus: 9, residual_skus: 0, matches_plan: true,
           recipe_id: null, recipe_status: null, reason: null,
         },
       ],
