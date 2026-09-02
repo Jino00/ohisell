@@ -26,6 +26,7 @@ import {
   type NaverRetroScorecard, type NaverChangeLogRow, type NaverChangeLogResponse,
 } from "../lib/api";
 import { PROPOSAL_TYPE_LABEL } from "./NaverAdOptimizationConsole";
+import { OPTIMIZER_LABEL } from "../lib/optimizerLabels";
 
 // D-NAO-47 2층 ③ — 보드 6종(진단 보드와 동일 키) 한글 라벨. NaverRetroSignal.board 실측
 // (models.py:1638 docstring) 기준.
@@ -79,7 +80,7 @@ export default function NaverAdCommandCenter() {
           <CoverageBar ours={cov.ours_cost} mop={cov.mop_cost} manual={cov.none_cost} />
           <div className="grid grid-cols-3 gap-4">
             <div className="rounded border border-blue-200 bg-blue-50/40 p-3">
-              <Badge tone="owner">PAO</Badge>
+              <Badge tone="owner">{OPTIMIZER_LABEL.ours}</Badge>
               <div className="mt-2">
                 {/* ★reason은 **측정한 사실만** 말한다(codex[P2] R5). ours_cost는 최근
                     N일 **광고비 롤업**이지 캠페인 보유 여부가 아니다. 0을 보고 "넘긴 캠페인이
@@ -97,7 +98,7 @@ export default function NaverAdCommandCenter() {
               </div>
             </div>
             <div className="rounded border border-gray-200 p-3">
-              <Badge>제3자(대행사)</Badge>
+              <Badge>{OPTIMIZER_LABEL.mop}</Badge>
               <div className="mt-2">
                 {/* ★같은 이유로 태깅 여부를 단언하지 않는다 — 측정한 건 광고비 0이고,
                     태깅 누락은 **가장 유력한 원인**이지 관측 사실이 아니다(D-47-g). */}

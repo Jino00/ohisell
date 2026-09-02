@@ -31,6 +31,7 @@ import {
   type PaoScopeDayClassSplit, type NaverAdIgnitionPreflight,
   type NaverSearchTermExclusionRow,
 } from "../lib/api";
+import { optimizerBadgeLabel } from "../lib/optimizerLabels";
 
 const ROLE_LABEL: Record<PaoScopeRole, string> = {
   accel: "액셀",
@@ -376,7 +377,7 @@ function CampaignBlock({ c, onChanged }: { c: PaoScopeCampaign; onChanged: () =>
             <Badge tone="neutral">전 그룹</Badge>
           )}
           <Badge tone={c.auto_operate && c.optimizer === "ours" ? "good" : "neutral"}>
-            {c.optimizer === "ours" ? (c.auto_operate ? "PAO 가동" : "PAO 정지") : c.optimizer === "mop" ? "제3자(대행사)" : "수동"}
+            {optimizerBadgeLabel(c.optimizer, c.auto_operate)}
           </Badge>
           {/* ★D-NAO-267: 램프업 그룹은 총이익 합산에서 빠진다 — 몇 개가 빠졌는지 «여기서»
               말하지 않으면 옆의 총이익이 「그냥 그만큼인 값」으로 읽힌다. */}

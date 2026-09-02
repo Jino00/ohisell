@@ -14,6 +14,7 @@
 //   콘솔에서 직접 꺼야 한다. 화면이 이 말을 안 하면 아무도 모른다(지금 콘솔 select가 그렇다).
 import { useState } from "react";
 import type { NaverAdOptimizer } from "../../lib/api";
+import { OPTIMIZER_LABEL, OPTIMIZER_TITLE } from "../../lib/optimizerLabels";
 
 // ★설계서 §7-2 개명(122 문서). 'MOP'는 **경쟁 상용 도구**의 이름인데 화면이 그 한 낱말을
 //   두 뜻으로 썼다 — 「우리 MOP」(=우리 엔진)와 「원본 MOP」(=그 경쟁 도구). Jino는 「PAO
@@ -21,11 +22,10 @@ import type { NaverAdOptimizer } from "../../lib/api";
 //   PAO(Profit Ad Optimizer)로 확정돼 있었고 백엔드 주체 판정(`change_actor.py`)엔 「화면에
 //   MOP를 쓰지 않는다」가 서 있었다 — **규칙이 한 층에만 있어서** 프론트가 그 밖에 있었다.
 //   `none`=「수동」은 이미 멀쩡하므로 손대지 않는다(불필요한 변경).
-const OPTIONS: { key: NaverAdOptimizer; label: string; title: string }[] = [
-  { key: "ours", label: "PAO", title: "PAO(우리 프로그램)가 제안·실행" },
-  { key: "mop", label: "제3자(대행사)", title: "제3자가 소유 — 우리는 손대지 않음(진단·리포트만)" },
-  { key: "none", label: "수동", title: "아무 자동화도 하지 않음" },
-];
+const OPTIONS: { key: NaverAdOptimizer; label: string; title: string }[] =
+  (["ours", "mop", "none"] as const).map((k) => ({
+    key: k, label: OPTIMIZER_LABEL[k], title: OPTIMIZER_TITLE[k],
+  }));
 
 const ACTIVE: Record<NaverAdOptimizer, string> = {
   ours: "bg-owner-ours text-white",
@@ -36,10 +36,10 @@ const ACTIVE: Record<NaverAdOptimizer, string> = {
 /** 'ours'로 넘길 때만 뜨는 경고. **이 문구가 이 컴포넌트에서 가장 중요하다.** */
 function confirmText(campaignName: string): string {
   return (
-    `"${campaignName}"을(를) PAO로 넘깁니다.\n\n` +
-    `· PAO가 이 캠페인의 입찰을 자동으로 바꾸기 시작합니다(사람 승인 게이트는 유지).\n\n` +
-    `⚠️ 제3자(대행사) 쪽은 자동으로 꺼지지 않습니다.\n` +
-    `PAO는 그쪽을 끌 수 없습니다(별도 SaaS). 그 콘솔에서 이 캠페인을 직접 꺼주세요.\n` +
+    `"${campaignName}"을(를) ${OPTIMIZER_LABEL.ours}로 넘깁니다.\n\n` +
+    `· ${OPTIMIZER_LABEL.ours}가 이 캠페인의 입찰을 자동으로 바꾸기 시작합니다(사람 승인 게이트는 유지).\n\n` +
+    `⚠️ ${OPTIMIZER_LABEL.mop} 쪽은 자동으로 꺼지지 않습니다.\n` +
+    `${OPTIMIZER_LABEL.ours}는 그쪽을 끌 수 없습니다(별도 SaaS). 그 콘솔에서 이 캠페인을 직접 꺼주세요.\n` +
     `안 끄면 두 시스템이 같은 캠페인 입찰을 두고 서로 덮어씁니다.\n\n` +
     `계속할까요?`
   );
