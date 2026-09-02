@@ -670,8 +670,13 @@ function CandidateTable({
 function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
   const [open, setOpenGroup] = useState<string | null>(null);
   const t = slots.totals;
-  // ★분모는 라이브 총계다. 귀속 네 칸의 합이 라이브와 같아야 한다 — 백엔드가 그렇게 낸다.
-  const pct = (n: number) => (t.used > 0 ? `${((n * 100) / t.used).toFixed(1)}%` : NO_DATA);
+  // ★분모는 «막대에 실제로 그리는 네 조각의 합»이다. 라이브 총계(`used`)를 분모로 쓰면
+  //   원장 초과분(음의 몫)이 상계돼 있어 폭 합이 100%를 넘는다 — 막대는 flex라 눌려서
+  //   «정상으로 보이고», 범례만 101.16% 같은 값을 낸다(적대 리뷰 P1-2 실측).
+  const barTotal = t.ours + t.agency + t.other_source + t.live_excess;
+  const pct = (n: number) => (barTotal > 0 ? `${((n * 100) / barTotal).toFixed(1)}%` : NO_DATA);
+  // ★폭은 절대 음수가 되지 않는다 — 음수 %는 무효 CSS라 조각이 «소리 없이» 사라진다.
+  const pctW = (n: number) => (barTotal > 0 ? `${Math.max((n * 100) / barTotal, 0)}%` : "0%");
   return (
     <Card title="제외 슬롯 In/Out — 더 걸 칸이 남았는가">
       <div className="p-4 space-y-4">
@@ -712,26 +717,48 @@ function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
           </div>
         </div>
 
-        {/* §5-4 ②③ — 원장↔라이브 차이 = 미귀속. 3분할을 나란히 둔다. */}
+        {/* §5-4 ②③ — 원장↔라이브 차이. ★적대 리뷰 P1-2: 순액 하나로 뭉치면 뜻이 정반대인
+            두 사실이 상계돼 「0으로 뭉개는 것」과 정보량이 같아진다. 그래서 방향을 가른다.
+            ★그리고 폭은 절대 음수가 되면 안 된다 — 음수 %는 무효 CSS라 조각이 «소리 없이»
+            사라지고 막대는 flex라 합이 101%여도 눌려서 정상으로 보인다(리뷰 실측). */}
         <div>
           <p className="text-xs font-medium text-gray-700 mb-1">
-            찬 칸 {num(t.used)}개는 누가 걸었나 <span className="font-normal text-gray-500">(정본은 라이브 — 원장은 편입 누락·대행사 신규분만큼 적게 나옵니다)</span>
+            원장 귀속분 + 라이브 초과분 {num(barTotal)}칸은 누가 걸었나{" "}
+            <span className="font-normal text-gray-500">
+              (정본은 라이브 — 원장은 편입 누락·대행사 신규분만큼 적게 나옵니다)
+            </span>
           </p>
           <div className="flex h-3 w-full overflow-hidden rounded bg-gray-100">
-            <div className="bg-owner-ours" style={{ width: t.used ? `${(t.ours * 100) / t.used}%` : "0%" }} title="우리 실행분" />
-            <div className="bg-owner-mop" style={{ width: t.used ? `${(t.agency * 100) / t.used}%` : "0%" }} title="대행사 축적분" />
-            <div className="bg-gray-400" style={{ width: t.used ? `${(t.other_source * 100) / t.used}%` : "0%" }} title="기타 출처" />
-            <div className="bg-amber-400" style={{ width: t.used ? `${(t.unattributed * 100) / t.used}%` : "0%" }} title="미귀속" />
+            <div className="bg-owner-ours" style={{ width: pctW(t.ours) }} title="우리 실행분" />
+            <div className="bg-owner-mop" style={{ width: pctW(t.agency) }} title="대행사 축적분" />
+            <div className="bg-gray-400" style={{ width: pctW(t.other_source) }} title="기타 출처" />
+            <div className="bg-amber-400" style={{ width: pctW(t.live_excess) }} title="미귀속(라이브 초과)" />
           </div>
           <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
             <div><span className="inline-block w-2 h-2 rounded-sm bg-owner-ours mr-1" />우리 실행분 <b>{num(t.ours)}</b> ({pct(t.ours)})</div>
             <div><span className="inline-block w-2 h-2 rounded-sm bg-owner-mop mr-1" />대행사 축적분 <b>{num(t.agency)}</b> ({pct(t.agency)})</div>
             <div><span className="inline-block w-2 h-2 rounded-sm bg-gray-400 mr-1" />기타 출처 <b>{num(t.other_source)}</b> ({pct(t.other_source)})</div>
-            <div><span className="inline-block w-2 h-2 rounded-sm bg-amber-400 mr-1" />미귀속 <b>{num(t.unattributed)}</b> ({pct(t.unattributed)})</div>
+            <div><span className="inline-block w-2 h-2 rounded-sm bg-amber-400 mr-1" />미귀속 <b>{num(t.live_excess)}</b> ({pct(t.live_excess)})</div>
           </div>
           <p className="mt-1 text-[11px] text-gray-500">
-            미귀속 = 라이브 총계 − 원장 귀속분. 우리 원장이 모르는 남의 칸입니다 — 0으로 뭉개지 않습니다.
+            미귀속 = 라이브가 원장보다 많은 몫. 우리 원장이 모르는 남의 칸입니다 — 0으로 뭉개지 않습니다.
+            (라이브 총 찬 칸은 {num(t.used)}개)
           </p>
+
+          {/* ★반대 방향 — 뜻이 완전히 다르므로 같은 막대에 섞지 않는다. */}
+          {t.ledger_excess > 0 && (
+            <p className="mt-2 text-xs text-judge-bad">
+              ⚠️ 반대 방향 <b>{num(t.ledger_excess)}칸</b>({num(t.ledger_excess_groups)}개 그룹):
+              우리 원장엔 있는데 <b>라이브에는 안 보입니다</b> — 우리가 건 제외가 지워졌을 수 있습니다.
+              <span className="text-gray-500"> (「조치 생존」 소관 — 아래 카드에서 봅니다)</span>
+            </p>
+          )}
+          {t.uncounted_ledger > 0 && (
+            <p className="mt-1 text-[11px] text-gray-500">
+              ※ 위 셈에서 빠진 것: 라이브를 못 센 그룹에 붙은 원장 <b>{num(t.uncounted_ledger)}건</b>
+              — 그 그룹들은 라이브 값이 없어 방향을 가릴 수 없습니다.
+            </p>
+          )}
           {slots.reclaim_note && (
             <p className="mt-1 text-[11px] text-gray-500">⚠️ {slots.reclaim_note}</p>
           )}
@@ -791,6 +818,9 @@ function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
                       <button
                         type="button"
                         className="text-xs text-blue-600 hover:underline whitespace-nowrap"
+                        // ★보조기술엔 「접기/펼치기」 글자만 바뀐다 — Jino가 눈으로 겪은 것과
+                        //   같은 모양의 문제가 스크린리더에는 남는다(적대 리뷰 P2-9).
+                        aria-expanded={isOpen}
                         onClick={() => setOpenGroup(open === r.adgroup_id ? null : r.adgroup_id)}
                       >
                         {isOpen ? "접기 ▲" : "펼치기 ▼"}
@@ -852,7 +882,12 @@ function GroupTermsPanel({ adgroupId, row }: {
   );
   const known = data?.rows.length ?? 0;
   // ★모르는 칸 = 라이브 − 아는 것. used가 null(못 셈)이면 «모른다»조차 셀 수 없다.
-  const unknown = row.used === null ? null : Math.max(row.used - known, 0);
+  //   ★음수면(원장이 라이브보다 많다) 「전부 압니다」가 아니다 — 그건 **반대 방향의 사실**
+  //   (우리가 건 제외가 라이브에 안 보인다)이고, 0으로 clamp하면 그 사실이 「다 안다」로
+  //   뒤집힌다(적대 리뷰 P2-1). prod에 그런 그룹이 58개 있다.
+  const delta = row.used === null ? null : row.used - known;
+  const unknown = delta === null ? null : Math.max(delta, 0);
+  const missingLive = delta === null ? 0 : Math.max(-delta, 0);
 
   return (
     <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3">
@@ -870,7 +905,8 @@ function GroupTermsPanel({ adgroupId, row }: {
             ) : (
               <>라이브 <b>{num(row.used)}칸</b> 중 우리 원장이 아는 것은 <b>{num(known)}개</b>
                 {unknown ? <> · 나머지 <b className="text-amber-700">{num(unknown)}칸은 무엇인지 모릅니다</b>(미귀속)</>
-                         : <> · 전부 압니다</>}
+                 : missingLive ? <> · <b className="text-judge-bad">원장이 {num(missingLive)}건 더 많습니다</b> — 우리가 건 제외가 라이브에 안 보입니다(지워졌을 수 있음)</>
+                 : <> · 전부 압니다</>}
               </>
             )}
           </p>
@@ -903,7 +939,7 @@ function GroupTermsPanel({ adgroupId, row }: {
             </p>
           )}
           <p className="mt-2 text-[11px] text-gray-500">
-            파란 칩 = 우리 실행분 · 흰 칩 = 대행사 축적분. 칩에 마우스를 올리면 등급과 날짜가 뜹니다.
+            파란 칩 = 우리 실행분 · 흰 칩 = 대행사 축적분. 칩에 마우스를 올리면 출처와 걸린 날짜가 뜹니다.
           </p>
         </>
       )}

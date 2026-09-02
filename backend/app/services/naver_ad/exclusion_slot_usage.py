@@ -203,7 +203,19 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
     #   그리려면 `used - ours - agency`로 추정할 수밖에 없었는데, 그건 other_source를
     #   미귀속에 뭉개는 계산이다 — 이 모듈 머리말이 «0으로 뭉개지 않는다»고 적어 둔 바로
     #   그 값을 화면이 뭉개게 된다. 그래서 행에서 이미 재고 있는 것을 누계로도 낸다.
+    #
+    # ★★그런데 순액 하나로는 «0으로 뭉개는 것»과 정보량이 같아진다(적대 리뷰 P1-2).
+    #   그룹별 `used - 원장`은 부호가 둘이고 뜻이 정반대다:
+    #     양수 = 라이브 초과 → 「우리가 모르는 남의 칸」
+    #     음수 = 원장 초과   → 「우리가 건 제외가 라이브에 안 보인다 — 지워졌을 수 있다」
+    #   2026-09-02 prod 실측: +3,662 / −1,824(58그룹) → 순액 1,838. 절반이 상계된다.
+    #   그래서 방향을 갈라 싣는다. 순액(`unattributed`)도 남기되 화면은 갈라 쓴다.
     unattributed_sum = 0
+    live_excess_sum = ledger_excess_sum = ledger_excess_groups = 0
+    # ★라이브를 «못 센» 그룹에 붙은 원장 행. 여기에 있는 것을 ours/agency 누계에 더하면
+    #   `ours+agency+other+unattributed == used` 항등식이 그만큼 깨진다(P1-1, prod에서 +67).
+    #   그렇다고 조용히 버리면 「우리 실행분」이 실제보다 적게 보인다 — 그래서 따로 센다.
+    uncounted_ledger_sum = 0
     # ★스윕 시각 창. `as_of`는 «이 응답을 만든 시각»이지 «라이브를 마지막으로 본 시각»이
     #   아니다(호출할 때마다 바뀐다). 화면이 as_of를 「기준 시각」으로 쓰면 09:35에 본 것을
     #   20:00 기준이라고 말하는 거짓말이 된다 — 그래서 관측 시각의 범위를 따로 실어 보낸다.
@@ -221,10 +233,19 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
         other = g.get("other_source", 0)
         if used is not None:
             used_sum += used
-            unattributed_sum += used - ours - agency - other
-        ours_sum += ours
-        agency_sum += agency
-        other_sum += other
+            delta = used - ours - agency - other
+            unattributed_sum += delta
+            if delta >= 0:
+                live_excess_sum += delta
+            else:
+                ledger_excess_sum += -delta
+                ledger_excess_groups += 1
+            # ★누계는 «센 그룹»에 대해서만 더한다 — 항등식을 지키는 유일한 방법이다.
+            ours_sum += ours
+            agency_sum += agency
+            other_sum += other
+        else:
+            uncounted_ledger_sum += ours + agency + other
         if t.observed_at is not None:
             observed_min = t.observed_at if observed_min is None else min(observed_min, t.observed_at)
             observed_max = t.observed_at if observed_max is None else max(observed_max, t.observed_at)
@@ -281,9 +302,17 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
             "used": used_sum,
             "ours": ours_sum,
             "agency": agency_sum,
-            # ★가산 2개 — 계정 수준 귀속 3분할이 추정 없이 서게 한다.
+            # ★가산 — 계정 수준 귀속 분할이 추정 없이 서게 한다.
+            #   ours/agency/other/unattributed 는 **라이브를 센 그룹에 대해서만** 더한다:
+            #   `ours + agency + other_source + unattributed == used` 가 성립해야 화면의
+            #   막대가 거짓말을 안 한다.
             "other_source": other_sum,
-            "unattributed": unattributed_sum,
+            "unattributed": unattributed_sum,          # 순액(부호 있음)
+            "live_excess": live_excess_sum,            # 양의 몫 — 「모르는 남의 칸」
+            "ledger_excess": ledger_excess_sum,        # 음의 몫 — 「우리 조치가 안 보임」
+            "ledger_excess_groups": ledger_excess_groups,
+            # ★못 센 그룹에 붙은 원장 행. 위 누계에서 빠졌다는 사실을 숨기지 않는다.
+            "uncounted_ledger": uncounted_ledger_sum,
             "capacity": len(rows) * EXCLUSION_SLOT_CAP,
         },
         "reclaim_note": RECLAIM_NOTE,

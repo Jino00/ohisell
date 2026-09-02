@@ -546,3 +546,84 @@ def test_missing_campaign_name_is_blank_not_invented(db):
     db.add(_target())
     db.commit()
     assert esu.slot_usage(db, now=NOW)["rows"][0]["campaign_name"] == ""
+
+
+# ══════════════ H. 적대 리뷰 P1-1·P1-2 — 항등식과 방향 ══════════════
+
+def test_identity_holds_even_when_an_uncounted_group_has_ledger_rows(db):
+    """★P1-1 회귀 고정. 이 자리를 지키는 «척»하던 테스트가 이미 있었다
+    (`test_unknown_group_does_not_inflate_unattributed`) — 그런데 그건 **원장 행이 없는**
+    못 센 그룹만 넣어서 **원리적으로 실패할 수 없었다.** prod에선 못 센 그룹에 원장 행이
+    67개 붙어 있었고, 그래서 계정 합이 `2+3984+0+1838 = 5824 ≠ 5757`로 어긋났다.
+    막대는 flex라 폭 합이 101%여도 눌려서 **정상으로 보인다.**"""
+    db.add(_target(adgroup_id="grp-counted", restrict_keyword_count=10))
+    db.add(_excl(adgroup_id="grp-counted", search_term="센그룹것"))
+    # ★핵심: 못 센 그룹인데 원장 행이 «있다»
+    db.add(_target(adgroup_id="grp-uncounted", restrict_keyword_count=None, probe_status=404))
+    db.add(_excl(adgroup_id="grp-uncounted", search_term="못센그룹것1"))
+    db.add(_excl(adgroup_id="grp-uncounted", search_term="못센그룹것2", source="console_import"))
+    db.commit()
+    t = esu.slot_usage(db, now=NOW)["totals"]
+    assert t["ours"] + t["agency"] + t["other_source"] + t["unattributed"] == t["used"], (
+        f"항등식 파괴: {t['ours']}+{t['agency']}+{t['other_source']}+{t['unattributed']}"
+        f" != {t['used']}"
+    )
+    # 빠진 몫은 «사라지지» 않는다 — 따로 세어 화면이 말할 수 있게 한다.
+    assert t["uncounted_ledger"] == 2
+
+
+def test_unattributed_is_split_by_direction_because_the_two_mean_opposite_things(db):
+    """★P1-2 회귀 고정. 순액 하나로 뭉치면 「0으로 뭉개는 것」과 정보량이 같아진다.
+
+    prod 실측(2026-09-02): 라이브 초과 **+3,662**(모르는 남의 칸) / 원장 초과 **−1,824**
+    (58그룹 — 우리가 건 제외가 라이브에 안 보인다). 순액은 1,838이고, 그 절반이 상계다.
+    백엔드 주석 자신이 음수를 *"우리 조치가 지워졌을 수 있다"*라고 다른 사실로 적어 뒀다."""
+    # 라이브가 원장보다 많은 그룹: +7
+    db.add(_target(adgroup_id="grp-live-more", restrict_keyword_count=10))
+    db.add(_excl(adgroup_id="grp-live-more", search_term="a"))
+    db.add(_excl(adgroup_id="grp-live-more", search_term="b", source="console_import"))
+    db.add(_excl(adgroup_id="grp-live-more", search_term="c", source="console_import"))
+    # 원장이 라이브보다 많은 그룹: −2 (우리 조치가 라이브에서 사라졌다)
+    db.add(_target(adgroup_id="grp-ledger-more", restrict_keyword_count=1))
+    db.add(_excl(adgroup_id="grp-ledger-more", search_term="x"))
+    db.add(_excl(adgroup_id="grp-ledger-more", search_term="y"))
+    db.add(_excl(adgroup_id="grp-ledger-more", search_term="z"))
+    db.commit()
+    t = esu.slot_usage(db, now=NOW)["totals"]
+    assert t["live_excess"] == 7, "라이브 초과분이 상계돼 사라졌다"
+    assert t["ledger_excess"] == 2, "원장 초과분이 상계돼 사라졌다"
+    assert t["ledger_excess_groups"] == 1
+    # 순액은 남기되, 그것만 보면 두 사실이 하나로 뭉개진다.
+    assert t["unattributed"] == 5 == t["live_excess"] - t["ledger_excess"]
+    assert t["ours"] + t["agency"] + t["other_source"] + t["unattributed"] == t["used"]
+
+
+def test_all_ledger_excess_still_keeps_the_identity(db):
+    """전부 원장 초과인 계정에서도 항등식은 선다(미귀속이 «음수»가 된다)."""
+    db.add(_target(restrict_keyword_count=1))
+    db.add(_excl(search_term="p"))
+    db.add(_excl(search_term="q"))
+    db.commit()
+    t = esu.slot_usage(db, now=NOW)["totals"]
+    assert t["unattributed"] == -1
+    assert t["live_excess"] == 0 and t["ledger_excess"] == 1
+    assert t["ours"] + t["agency"] + t["other_source"] + t["unattributed"] == t["used"]
+
+
+def test_bar_inputs_are_never_negative(db):
+    """★화면 막대에 들어가는 네 값은 **음수가 될 수 없다** — 그게 clamp가 도달 불가인 이유다.
+
+    적대 리뷰 N4가 프론트의 폭 clamp를 지워도 안 죽는다고 지적했는데, 원인은 테스트 부재가
+    아니라 **입력이 구조적으로 비음수**라서다(순액 `unattributed`는 음수가 될 수 있지만
+    막대는 그걸 안 쓴다 — `live_excess`를 쓴다). 그 불변식을 «참인 자리»에서 고정한다.
+    프론트 clamp는 그 위의 보험이고, 이 테스트가 깨지면 clamp가 실제로 필요해진다."""
+    # 원장이 라이브보다 많아 순액이 음수가 되는 계정
+    db.add(_target(adgroup_id="grp-a", restrict_keyword_count=1))
+    for i, t in enumerate(("x", "y", "z")):
+        db.add(_excl(adgroup_id="grp-a", search_term=t, source=None if i else "console_import"))
+    db.commit()
+    t = esu.slot_usage(db, now=NOW)["totals"]
+    assert t["unattributed"] < 0, "이 픽스처는 순액이 음수여야 의미가 있다"
+    for k in ("ours", "agency", "other_source", "live_excess", "ledger_excess",
+              "uncounted_ledger", "used", "capacity"):
+        assert t[k] >= 0, f"막대 입력 {k}가 음수다: {t[k]}"

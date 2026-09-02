@@ -3805,8 +3805,18 @@ export interface NaverExclusionSlots extends SchedulerHealthExclusionSlots {
     ours: number;
     agency: number;
     other_source: number;
-    /** 라이브 − 원장 귀속분. ★0으로 뭉개지 않는다 — 이게 「우리가 모르는 남의 칸」이다. */
+    /** 라이브 − 원장 귀속분의 **순액**(부호 있음). `ours+agency+other_source+unattributed
+     *  == used` 가 성립한다(라이브를 «센» 그룹에 대해). ★화면에 이 값을 「남의 칸」이라
+     *  이름 붙이면 안 된다 — 아래 둘이 상계된 값이다. */
     unattributed: number;
+    /** 양의 몫 — 진짜 「우리가 모르는 남의 칸」. */
+    live_excess: number;
+    /** 음의 몫(절댓값) — **우리가 건 제외가 라이브에 안 보인다**(지워졌을 수 있다).
+     *  뜻이 정반대라 순액으로 뭉치면 「0으로 뭉개는 것」과 정보량이 같아진다. */
+    ledger_excess: number;
+    ledger_excess_groups: number;
+    /** 라이브를 «못 센» 그룹에 붙은 원장 행. 위 누계에서 빠졌다는 사실을 숨기지 않는다. */
+    uncounted_ledger: number;
     capacity: number;
   };
 }

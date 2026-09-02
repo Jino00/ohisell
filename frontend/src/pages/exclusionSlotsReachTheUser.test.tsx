@@ -65,7 +65,16 @@ const LIVE = {
     row({ adgroup_id: "grp-ok", name: "01. 갤럭시_TPU", used: 12, remaining: 58, agency: 12 }),
   ],
   rows_truncated: 1010,
-  totals: { used: 5757, ours: 2, agency: 3984, other_source: 0, unattributed: 1771, capacity: 70910 },
+  // ★2026-09-02 prod 실측(그룹별 합) — 앞서 «1,771»이라 보고했던 것은 계정 수준 뺄셈
+  //   `used − ours − agency`였고, 새 필드가 실제로 내는 값은 다르다(적대 리뷰 P2-12).
+  totals: {
+    used: 5757, ours: 2, agency: 3984, other_source: 0,
+    unattributed: 1838,            // 순액 = 3662 − 1824
+    live_excess: 3662,             // 진짜 「모르는 남의 칸」
+    ledger_excess: 1824, ledger_excess_groups: 58,
+    uncounted_ledger: 67,          // 못 센 그룹에 붙은 원장 행
+    capacity: 70910,
+  },
   reclaim_note: "대행사 칸은 우리가 반납하지 않는다 — 소유권 분리 협의 전엔 금지선이다.",
 };
 
@@ -78,8 +87,8 @@ const term = (o: Record<string, unknown> = {}) => ({
   ...o,
 });
 
-const drill = (rows: unknown[]) => ({
-  total: rows.length, summary_by_status: { excluded: rows.length },
+const drill = (rows: unknown[], total = rows.length) => ({
+  total, summary_by_status: { excluded: rows.length },
   today_excluded: 0, today_opened: 0, today_restored: 0, rows,
 });
 
@@ -114,8 +123,9 @@ describe("★설계서 §5-4의 넷 — 하나라도 빠지면 화면이 거짓�
   it("①·②·③ 귀속 3분할이 뜨고 미귀속이 0으로 뭉개지지 않는다", async () => {
     await renderApp();
     const p = await panel();
-    // 미귀속 1,771 = 라이브 5,757 − 원장 귀속분. 이 값이 곧 「원장↔라이브 차이」다.
-    expect(within(p).getAllByText("1,771").length).toBeGreaterThan(0);
+    // ★미귀속으로 «보여야 하는» 값은 순액 1,838이 아니라 **라이브 초과분 3,662**다.
+    //   순액은 뜻이 정반대인 두 사실이 상계된 값이라 「남의 칸」이라 부르면 거짓이다.
+    expect(within(p).getAllByText("3,662").length).toBeGreaterThan(0);
     expect(within(p).getAllByText(/미귀속/).length).toBeGreaterThan(0);
     expect(within(p).getAllByText("3,984").length).toBeGreaterThan(0); // 대행사
     expect(p.textContent).toContain("정본은 라이브");
@@ -296,5 +306,148 @@ describe("★대행사 편입분의 날짜는 «편입 시각»이 아니다 (D-
 
   it("우리 실행분은 우리 시각을 쓴다", () => {
     expect(termTitle(term({ source: null }) as never)).toContain("우리 실행분");
+  });
+});
+
+describe("★부호가 반대인 두 사실을 상계하지 않는다 (적대 리뷰 P1-2)", () => {
+  it("반대 방향(원장 초과)을 따로 말한다 — 순액에 묻히면 「0으로 뭉개는 것」과 같다", async () => {
+    await renderApp();
+    const p = await panel();
+    expect(p.textContent).toContain("1,824");
+    expect(p.textContent).toContain("58");
+    expect(p.textContent).toMatch(/라이브에는 안 보입니다|지워졌을 수 있습니다/);
+  });
+
+  it("★순액(1,838)을 「남의 칸」이라 부르지 않는다", async () => {
+    await renderApp();
+    const p = await panel();
+    const legend = within(p).getAllByText(/미귀속/)[0].closest("div")!;
+    expect(legend.textContent).not.toContain("1,838");
+  });
+
+  it("못 센 그룹에 붙은 원장 행이 «사라지지» 않는다", async () => {
+    await renderApp();
+    const p = await panel();
+    expect(p.textContent).toContain("67");
+    expect(p.textContent).toMatch(/빠진 것|못 센 그룹에 붙은/);
+  });
+
+  it("★막대 폭이 음수가 되지 않는다 — 음수 %는 무효 CSS라 조각이 소리 없이 사라진다", async () => {
+    vi.mocked(getSearchTermExclusionSlots).mockResolvedValue({
+      ...LIVE,
+      totals: { ...LIVE.totals, used: 100, ours: 0, agency: 320, other_source: 0,
+                unattributed: -220, live_excess: 0, ledger_excess: 220, ledger_excess_groups: 3 },
+    } as never);
+    await renderApp();
+    const p = await panel();
+    const widths = [...p.querySelectorAll<HTMLElement>("div[title]")].map((d) => d.style.width);
+    for (const w of widths) {
+      expect(w.startsWith("-"), `음수 폭: ${w}`).toBe(false);
+      expect(parseFloat(w) >= 0 || w === "", `음수 폭: ${w}`).toBe(true);
+    }
+  });
+
+  it("★백분율의 «분모»가 막대에 그리는 네 조각의 합이다", async () => {
+    // 2+3984+0+3662 = 7648. 대행사 3984/7648 = 52.1% · 미귀속 3662/7648 = 47.9%.
+    // 분모를 capacity(70,910)로 두면 5.6%·5.2%가 되고 합이 100에 한참 못 미친다 —
+    // 「합 ≤ 100」만 보는 느슨한 단언은 그걸 못 잡는다(변이 M9가 그렇게 살아남았다).
+    await renderApp();
+    const p = await panel();
+    expect(p.textContent).toContain("52.1%");
+    expect(p.textContent).toContain("47.9%");
+    const nums = [...p.textContent!.matchAll(/\((\d+\.\d)%\)/g)].map((m) => parseFloat(m[1]));
+    const sum = nums.reduce((a, b) => a + b, 0);
+    expect(sum, `백분율 합 ${sum}`).toBeGreaterThan(99);
+    expect(sum, `백분율 합 ${sum}`).toBeLessThanOrEqual(100.5);
+  });
+});
+
+describe("★표 헤더와 본문 칸이 짝이다 (적대 리뷰 P2-3)", () => {
+  it("헤더 칸 수 = 본문 칸 수 = 펼침 행의 colSpan", async () => {
+    await renderApp();
+    const p = await panel();
+    const table = within(p).getByText("광고캠페인").closest("table")!;
+    const heads = table.querySelectorAll("thead th").length;
+    const cells = table.querySelectorAll("tbody tr")[0].querySelectorAll("td").length;
+    expect(cells, `헤더 ${heads} vs 본문 ${cells}`).toBe(heads);
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    const span = (row.nextElementSibling as HTMLElement).querySelector("td")!.getAttribute("colspan");
+    expect(Number(span), "펼침 행이 표 너비와 안 맞는다").toBe(heads);
+  });
+
+  it("펼침 버튼이 aria-expanded로 상태를 알린다", async () => {
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    const btn = within(row).getByRole("button", { name: /펼치기/ });
+    expect(btn.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(btn);
+    await waitFor(() => expect(
+      within(row).getByRole("button").getAttribute("aria-expanded")).toBe("true"));
+  });
+});
+
+describe("★행 단위 «원장 초과»를 「전부 압니다」로 뒤집지 않는다 (P2-1)", () => {
+  it("원장이 라이브보다 많으면 그 사실을 말한다", async () => {
+    vi.mocked(getSearchTermExclusionSlots).mockResolvedValue({
+      ...LIVE,
+      rows: [{ ...LIVE.rows[0], used: 0, remaining: 70, agency: 12, unattributed: -12 }],
+    } as never);
+    vi.mocked(fetchNaverSearchTermExclusions).mockResolvedValue(
+      drill([term(), term({ id: 2, search_term: "둘째" })]) as never);
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    const box = row.nextElementSibling as HTMLElement;
+    await waitFor(() => expect(box.textContent).toMatch(/원장이 .*더 많습니다/));
+    expect(box.textContent).not.toContain("전부 압니다");
+  });
+});
+
+describe("★리뷰가 살려 보낸 나머지 자리 (P2-2·5·6·7·8)", () => {
+  it("칩에 출처·날짜 툴팁이 «실제로» 붙는다", async () => {
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    const chip = await screen.findByText("S23보호필름");
+    expect(chip.getAttribute("title"), "칩에 title이 없다").toBeTruthy();
+    expect(chip.getAttribute("title")).toContain("대행사 축적분");
+  });
+
+  it("★드릴다운도 status·limit을 실제로 넘긴다 — 빠지면 probation이 섞이고 200건이 잘린다", async () => {
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    await waitFor(() => expect(vi.mocked(fetchNaverSearchTermExclusions)).toHaveBeenCalled());
+    expect(vi.mocked(fetchNaverSearchTermExclusions)).toHaveBeenCalledWith({
+      adgroupId: "grp-full", status: "excluded", limit: 200,
+    });
+  });
+
+  it("드릴다운이 잘렸으면 잘렸다고 말한다", async () => {
+    vi.mocked(fetchNaverSearchTermExclusions).mockResolvedValue(drill([term()], 350) as never);
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    const box = row.nextElementSibling as HTMLElement;
+    await waitFor(() => expect(box.textContent).toContain("350"));
+    expect(box.textContent).toMatch(/건만 보여줍니다/);
+  });
+
+  it("행의 «우리 / 대행사 / 미귀속» 순서가 라벨과 같다", async () => {
+    // 뒤바꿔도 셋 다 숫자라 눈으로는 안 보인다 — 순서 자체를 잰다(변이 M25).
+    vi.mocked(getSearchTermExclusionSlots).mockResolvedValue({
+      ...LIVE,
+      rows: [{ ...LIVE.rows[0], ours: 11, agency: 22, unattributed: 33 }],
+    } as never);
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    expect(within(row).getByText("11 / 22 / 33")).toBeTruthy();
   });
 });
