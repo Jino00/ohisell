@@ -42,6 +42,9 @@ from app.services.cost_menu.purchased_price import (
 )
 from app.services.cost_menu.recipe_parser import parse_cost_table
 from app.services.cost_menu.truth_source import (
+    CAUSE_INCOMPLETE_SINGLE_LINE,
+    OWNER_CUTOVER,
+    TRUTH_COMPUTED,
     CAUSE_IMPORTED_SINGLE_LINE,
     CAUSE_PURCHASED_SINGLE_LINE,
     OWNER_DCPP63,
@@ -321,14 +324,27 @@ def test_purchased_truth_is_the_purchase_price_not_the_computed_value():
 
 
 def test_imported_and_assembly_single_line_paths_are_unchanged():
-    """이 변경의 «안 건드린다» 쪽 — 나머지 두 종류는 그대로다."""
+    """★1줄짜리 세 종류가 **서로 다른 답**을 낸다 — D-CPP-66 이후 판이 바뀐 자리.
+
+    · 수입 완제품  → 계산값이 정본(원장 로트 단가). **보류 해제됨**
+    · 국내 매입품  → 매입가가 정본
+    · 조립품      → 진짜로 계산이 불완전하다(부자재 미보강). **여전히 보류**
+
+    ★셋이 같은 사유 코드를 쓰면 화면이 사유로 묶어 세는 순간 조용히 틀린다 —
+      그래서 조립품에 `CAUSE_INCOMPLETE_SINGLE_LINE`을 따로 뒀다.
+    """
     c_imp, t_imp, r_imp, o_imp = classify_group(_group(IMPORTED_GOODS_KIND), ())
-    assert (c_imp, t_imp, o_imp) == (CAUSE_IMPORTED_SINGLE_LINE, TRUTH_HELD, OWNER_DCPP63)
+    assert (c_imp, t_imp, o_imp) == (CAUSE_IMPORTED_SINGLE_LINE, TRUTH_COMPUTED, OWNER_CUTOVER)
     assert "원장" in r_imp
 
     c_asm, t_asm, r_asm, o_asm = classify_group(_group("assembly"), ())
-    assert (c_asm, t_asm, o_asm) == (CAUSE_IMPORTED_SINGLE_LINE, TRUTH_HELD, OWNER_TRACK_A1A2)
+    assert (c_asm, t_asm, o_asm) == (
+        CAUSE_INCOMPLETE_SINGLE_LINE,
+        TRUTH_HELD,
+        OWNER_TRACK_A1A2,
+    )
     assert "부자재 보강이 선행이다" in r_asm
+    assert c_imp != c_asm, "수입품과 조립품이 같은 사유 코드를 쓰면 집계가 섞인다"
 
 
 def test_the_three_single_line_kinds_do_not_collapse_into_one_message():

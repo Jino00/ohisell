@@ -90,6 +90,8 @@ CAUSE_PARTS_299 = "g2_parts_299"
 CAUSE_FAMILY_NOT_SPLIT = "g3_2_family_not_split"
 CAUSE_GRAIN_MISMATCH = "g1_grain_mismatch"
 CAUSE_IMPORTED_SINGLE_LINE = "g3_1_imported_single_line"
+#: 수입품이 아닌데 구성이 1줄 — 진짜로 부자재가 안 붙은 것(D-CPP-66에서 위와 갈랐다)
+CAUSE_INCOMPLETE_SINGLE_LINE = "g3_1_incomplete_single_line"
 CAUSE_RESIDUAL = "g3_residual"
 CAUSE_NO_STANDARD = "no_standard"
 CAUSE_TWO_GROUNDS = "two_grounds"
@@ -109,6 +111,7 @@ CAUSE_REF118 = {
     CAUSE_GRAIN_MISMATCH: "G1",
     CAUSE_PARTS_299: "G2",
     CAUSE_IMPORTED_SINGLE_LINE: "G3-1",
+    CAUSE_INCOMPLETE_SINGLE_LINE: "G3-1(부자재 미보강)",
     CAUSE_FAMILY_NOT_SPLIT: "G3-2",
     CAUSE_RESIDUAL: "G3-3·4·5",
     CAUSE_MATCH: "(일치)",
@@ -243,13 +246,23 @@ def classify_group(
         )
 
     if group.line_count == 1 and (group.recipe_kind or "") == "imported_goods":
+        # ★**보류를 푼다** (D-CPP-66, Jino 2026-09-02 15:09 지시: *"엑셀에 있는 가격먼저 다
+        #   업데이트해달라고 했잖아"*). 초판은 「레시피마다 격차 방향이 달라 판정 보류」였다.
+        #
+        #   왜 풀 수 있게 됐나: 수입 완제품의 정본은 **수입원장의 로트 단가**이고(Jino 확인
+        #   *"이것도 otao에서 수입하는 제품이잖아"*, 2026-09-02), 그 값은 이 레시피의 구성
+        #   1줄에 이미 실려 있다. 격차의 «방향»이 갈리는 것은 현재 `cost_price`가 제각각이기
+        #   때문이지 계산값이 흔들려서가 아니다 — 정본을 못 정할 이유가 아니었다.
+        #
+        #   ★**그레인은 이미 보장돼 있다**: 위 `cost_price_kinds > 1` 분기를 통과했으므로
+        #   이 묶음의 SKU는 현재 원가를 **1종만** 갖는다. 즉 한 계산값을 전건에 적용해도
+        #   서로 다른 구성에 같은 값이 박히는 사고가 원리적으로 안 난다.
         return (
             CAUSE_IMPORTED_SINGLE_LINE,
-            TRUTH_HELD,
+            TRUTH_COMPUTED,
             "수입 완제품 — 구성이 1줄인 것은 결함이 아니라 종류다(원장 로트 단가가 그 한 줄이다). "
-            f"격차 {gap:+.1f}원이지만 이 묶음은 레시피마다 격차 방향이 달라 계약이 판정을 보류했다. "
-            + G31_CONTRACT_NOTE,
-            OWNER_DCPP63,
+            f"정본은 그 로트 단가이고 현재 원가와의 격차는 {gap:+.1f}원이다(D-CPP-66에서 보류 해제)",
+            OWNER_CUTOVER,
         )
 
     if group.line_count == 1 and (group.recipe_kind or "") == PURCHASED_KIND:
@@ -267,8 +280,12 @@ def classify_group(
         )
 
     if group.line_count == 1:
+        # ★사유 코드를 위 «수입 완제품»과 **가른다**(D-CPP-66). 초판은 둘 다
+        #   `CAUSE_IMPORTED_SINGLE_LINE`이었는데, 위가 `TRUTH_COMPUTED`로 풀리면서
+        #   같은 코드가 두 정본유형을 가리키게 된다 — 그러면 화면이 사유로 묶어 세는 순간
+        #   조용히 틀린다. **이 갈래는 진짜로 계산이 불완전하다**(부자재가 안 붙었다).
         return (
-            CAUSE_IMPORTED_SINGLE_LINE,
+            CAUSE_INCOMPLETE_SINGLE_LINE,
             TRUTH_HELD,
             f"구성이 1줄뿐이라 계산이 불완전하다(격차 {gap:+.1f}원) — 부자재 보강이 선행이다",
             OWNER_TRACK_A1A2,
@@ -295,11 +312,17 @@ def classify_group(
             OWNER_CUTOVER,
         )
 
+    # ★**보류를 푼다** (D-CPP-66). 초판은 「단일 원인으로 설명되지 않으니 개별 확인이
+    #   선행」이었다. 그런데 «격차의 원인을 이름 붙일 수 있는가»와 «정본이 무엇인가»는
+    #   다른 질문이다 — 원인을 몰라도 정본은 계산값이다(엑셀 구성 × 단가). 원인 규명을
+    #   기다리는 동안 **현재 원가가 근거 없는 값인 채로 손익에 흘러가는 것**이 더 나쁘다.
+    #   ★그레인은 위 분기가 이미 보장한다(SKU 현재 원가 1종).
     return (
         CAUSE_RESIDUAL,
-        TRUTH_HELD,
-        f"잔여 격차 {gap:+.1f}원 — 단일 원인으로 설명되지 않는다. 개별 확인이 선행이다",
-        OWNER_TRACK_A1A2,
+        TRUTH_COMPUTED,
+        f"잔여 격차 {gap:+.1f}원 — 원인이 단일하게 설명되진 않지만 정본은 계산값이다"
+        "(엑셀 구성 × 단가). 원인 규명은 별건이다(D-CPP-66에서 보류 해제)",
+        OWNER_CUTOVER,
     )
 
 
