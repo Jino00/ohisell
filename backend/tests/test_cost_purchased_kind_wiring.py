@@ -18,6 +18,8 @@
 #   상품 행이 먹힌다"). 적어 두는 것으로는 안 막힌다 — 그게 이 파일이 있는 이유다.
 from __future__ import annotations
 
+from dataclasses import replace
+
 from decimal import Decimal
 
 import pytest
@@ -42,6 +44,9 @@ from app.services.cost_menu.purchased_price import (
 )
 from app.services.cost_menu.recipe_parser import parse_cost_table
 from app.services.cost_menu.truth_source import (
+    CAUSE_INCOMPLETE_SINGLE_LINE,
+    OWNER_CUTOVER,
+    TRUTH_COMPUTED,
     CAUSE_IMPORTED_SINGLE_LINE,
     CAUSE_PURCHASED_SINGLE_LINE,
     OWNER_DCPP63,
@@ -321,14 +326,27 @@ def test_purchased_truth_is_the_purchase_price_not_the_computed_value():
 
 
 def test_imported_and_assembly_single_line_paths_are_unchanged():
-    """이 변경의 «안 건드린다» 쪽 — 나머지 두 종류는 그대로다."""
+    """★1줄짜리 세 종류가 **서로 다른 답**을 낸다 — D-CPP-66 이후 판이 바뀐 자리.
+
+    · 수입 완제품  → 계산값이 정본(원장 로트 단가). **보류 해제됨**
+    · 국내 매입품  → 매입가가 정본
+    · 조립품      → 진짜로 계산이 불완전하다(부자재 미보강). **여전히 보류**
+
+    ★셋이 같은 사유 코드를 쓰면 화면이 사유로 묶어 세는 순간 조용히 틀린다 —
+      그래서 조립품에 `CAUSE_INCOMPLETE_SINGLE_LINE`을 따로 뒀다.
+    """
     c_imp, t_imp, r_imp, o_imp = classify_group(_group(IMPORTED_GOODS_KIND), ())
-    assert (c_imp, t_imp, o_imp) == (CAUSE_IMPORTED_SINGLE_LINE, TRUTH_HELD, OWNER_DCPP63)
+    assert (c_imp, t_imp, o_imp) == (CAUSE_IMPORTED_SINGLE_LINE, TRUTH_COMPUTED, OWNER_CUTOVER)
     assert "원장" in r_imp
 
     c_asm, t_asm, r_asm, o_asm = classify_group(_group("assembly"), ())
-    assert (c_asm, t_asm, o_asm) == (CAUSE_IMPORTED_SINGLE_LINE, TRUTH_HELD, OWNER_TRACK_A1A2)
+    assert (c_asm, t_asm, o_asm) == (
+        CAUSE_INCOMPLETE_SINGLE_LINE,
+        TRUTH_HELD,
+        OWNER_TRACK_A1A2,
+    )
     assert "부자재 보강이 선행이다" in r_asm
+    assert c_imp != c_asm, "수입품과 조립품이 같은 사유 코드를 쓰면 집계가 섞인다"
 
 
 def test_the_three_single_line_kinds_do_not_collapse_into_one_message():
@@ -338,3 +356,48 @@ def test_the_three_single_line_kinds_do_not_collapse_into_one_message():
         for k in (PURCHASED_KIND, IMPORTED_GOODS_KIND, "assembly")
     }
     assert len(reasons) == 3, reasons
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ★적대 리뷰 2026-09-02 P1-1 — 「가격이 우연히 같은」 그레인 불일치
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_same_price_but_different_composition_is_still_held():
+    """★★리뷰어가 깬 논거를 코드로 막는다.
+
+    D-CPP-66은 「가격 게이트(`cost_price_kinds > 1`)를 통과했으니 구성이 하나다」를 근거로
+    보류를 풀었다. **그 근거는 틀렸다** — 가격 게이트는 「가격이 같은가」만 잰다. 기본/
+    플러스/울트라가 한 레시피에 섞였는데 아직 개별 가격이 매겨진 적이 없어 «우연히» 전건
+    같은 값이면 통과하고, 그러면 **플러스에 기본 값이 박힌다.**
+
+    ★라이브(2026-09-02 승인 레시피 22개 전수)에선 이 경우가 **0건**이다. 그런데도 이
+    테스트가 있는 이유는 「한 번 확인했다」와 「구조로 막힌다」가 다르기 때문이다 —
+    새 SKU가 붙는 순간 그 확인은 낡는다.
+    """
+    from app.services.cost_menu.truth_source import CAUSE_GRAIN_MISMATCH, OWNER_TRACK_A2
+
+    g = _group("assembly")
+    mixed = replace(g, name_grain_kinds=3, line_count=8)
+    cause, truth, reason, owner = classify_group(mixed, ())
+    assert (cause, truth, owner) == (CAUSE_GRAIN_MISMATCH, TRUTH_HELD, OWNER_TRACK_A2)
+    assert "우연히" in reason, "왜 막았는지가 화면 문장에 남아야 한다"
+    assert "구성별로 가르는 것이 선행" in reason
+
+    # 신호가 하나면(=안 갈림) 종전대로 풀린다 — 이 게이트가 과하게 막지 않는다.
+    single = replace(g, name_grain_kinds=1, line_count=8)
+    assert classify_group(single, ())[1] != TRUTH_HELD or classify_group(single, ())[0] != CAUSE_GRAIN_MISMATCH
+
+
+def test_composition_signature_reads_sheet_counts_and_words():
+    """구성 지문이 «가격과 독립인» 신호인지 — 상품명만 보고 갈라야 한다."""
+    from app.services.cost_menu.truth_source import composition_signature as sig
+
+    # 매수가 다르면 다른 구성
+    assert sig("매트 필름 3매, Z폴드8 (외부액정3매+내부액정3매)") != sig(
+        "매트 필름 3매, Z폴드8 (외부액정3매)"
+    )
+    # 후면·힌지가 붙으면 다른 구성
+    assert sig("필름 3매 (외부3매+내부3매)") != sig("필름 3매 (외부3매+내부3매+후면2매)")
+    # 기종만 다르면 «같은» 구성이어야 한다 — 아니면 이 게이트가 전부를 막는다
+    assert sig("EZ툴 강화유리필름 2매, 아이폰15") == sig("EZ툴 강화유리필름 2매, 아이폰16")

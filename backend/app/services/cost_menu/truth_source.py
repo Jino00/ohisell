@@ -29,6 +29,7 @@ S3가 신설하는 경로 한 벌의 몫이고, 이 파일에 `.cost_price =` �
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -76,6 +77,22 @@ PARTS_GAP_EPSILON = Decimal("0.01")
 #: ref 118 §2 — 「일치」로 보는 폭. 0.5원 미만이면 반올림 잔차다.
 MATCH_EPSILON = Decimal("0.5")
 
+#: ★상품명에서 «구성»을 읽는 신호 (적대 리뷰 2026-09-02 P1-1).
+#:   「N매」의 다중집합 + 구성 낱말의 유무. 상품명은 사람이 쓴 것이라 정밀하진 않지만,
+#:   **`cost_price`와 독립인 신호**라는 것이 요점이다.
+COMPOSITION_WORDS = ("후면", "힌지", "내부", "외부", "세트", "트라이")
+_SHEET_COUNT_RE = re.compile(r"(\d+)\s*매")
+
+
+def composition_signature(product_name: Optional[str]) -> tuple:
+    """상품명의 구성 지문. 같은 구성이면 같은 값이 나와야 한다."""
+    n = product_name or ""
+    return (
+        tuple(sorted(_SHEET_COUNT_RE.findall(n))),
+        tuple(w for w in COMPOSITION_WORDS if w in n),
+    )
+
+
 #: 링크 없는 SKU를 가르는 표지. `product_master.category`는 963 중 940이 NULL이라
 #: 분류에 못 쓴다(ref 119 §2-1) — 그래서 상품명의 표지를 본다. 규칙을 사유 문장에
 #: 그대로 실어 화면에서 감사 가능하게 둔다.
@@ -90,6 +107,8 @@ CAUSE_PARTS_299 = "g2_parts_299"
 CAUSE_FAMILY_NOT_SPLIT = "g3_2_family_not_split"
 CAUSE_GRAIN_MISMATCH = "g1_grain_mismatch"
 CAUSE_IMPORTED_SINGLE_LINE = "g3_1_imported_single_line"
+#: 수입품이 아닌데 구성이 1줄 — 진짜로 부자재가 안 붙은 것(D-CPP-66에서 위와 갈랐다)
+CAUSE_INCOMPLETE_SINGLE_LINE = "g3_1_incomplete_single_line"
 CAUSE_RESIDUAL = "g3_residual"
 CAUSE_NO_STANDARD = "no_standard"
 CAUSE_TWO_GROUNDS = "two_grounds"
@@ -109,6 +128,7 @@ CAUSE_REF118 = {
     CAUSE_GRAIN_MISMATCH: "G1",
     CAUSE_PARTS_299: "G2",
     CAUSE_IMPORTED_SINGLE_LINE: "G3-1",
+    CAUSE_INCOMPLETE_SINGLE_LINE: "G3-1(부자재 미보강)",
     CAUSE_FAMILY_NOT_SPLIT: "G3-2",
     CAUSE_RESIDUAL: "G3-3·4·5",
     CAUSE_MATCH: "(일치)",
@@ -154,6 +174,11 @@ class RecipeGroup:
     cost_price_min: Optional[Decimal]
     std_cost_inc_vat: Optional[Decimal]
     line_count: int
+    #: ★이 묶음의 SKU 상품명에서 읽은 «구성» 가짓수 (적대 리뷰 2026-09-02 P1-1).
+    #:   `cost_price_kinds`는 「현재 가격이 같은가」만 재고 「구성이 하나인가」는 못 잰다 —
+    #:   가격이 **우연히** 같은 그레인 불일치가 게이트를 통과한다. 이 필드가 그 구멍을 막는
+    #:   **가격과 독립인 두 번째 신호**다. 기본 1(신호 없음 = 안 갈림).
+    name_grain_kinds: int = 1
 
     @property
     def gap(self) -> Optional[Decimal]:
@@ -231,6 +256,30 @@ def classify_group(
             OWNER_TRACK_A2,
         )
 
+    if group.name_grain_kinds > 1:
+        # ★★적대 리뷰 2026-09-02 P1-1이 신설시킨 게이트.
+        #
+        #   D-CPP-66이 보류를 풀면서 든 근거는 「위 가격 게이트를 통과했으니 이 묶음의 SKU는
+        #   현재 원가가 1종이고, 따라서 한 계산값을 전건에 적용해도 안전하다」였다.
+        #   리뷰어가 그 논거를 깼다: **`cost_price_kinds`는 「가격이 같은가」만 재지
+        #   「구성이 하나인가」를 못 잰다.** 실제로는 기본/플러스/울트라가 섞였는데 아직
+        #   개별 가격이 매겨진 적이 없어 «우연히» 전건 같은 값이면 게이트를 통과하고,
+        #   그러면 플러스에 기본 값이 박힌다 — 이 계약이 없애려는 병 그 자체다.
+        #
+        #   그래서 **가격과 독립인 두 번째 신호**로 한 번 더 거른다: 상품명이 말하는 구성.
+        #   ★라이브 실측(2026-09-02, 승인 레시피 22개 전수)에서 이 조건에 걸리는 묶음은
+        #   **0개**다 — 즉 이 게이트는 지금 아무것도 안 막는다. 그런데도 두는 이유는
+        #   「한 번 확인했다」와 「구조로 막힌다」가 다르기 때문이다. 새 SKU가 붙는 순간
+        #   그 확인은 낡는다.
+        return (
+            CAUSE_GRAIN_MISMATCH,
+            TRUTH_HELD,
+            f"그레인 불일치 — 현재 원가는 1종이지만 이 묶음의 SKU 상품명이 서로 다른 구성을 "
+            f"말한다({group.name_grain_kinds}종). 가격이 «우연히» 같은 것일 수 있어 "
+            "한 계산값을 전건에 적용하지 않는다 — 레시피를 구성별로 가르는 것이 선행이다",
+            OWNER_TRACK_A2,
+        )
+
     gap = group.gap
     assert gap is not None  # cost_price_kinds == 1 이고 std가 있으면 항상 값이 있다
 
@@ -243,13 +292,27 @@ def classify_group(
         )
 
     if group.line_count == 1 and (group.recipe_kind or "") == "imported_goods":
+        # ★**보류를 푼다** (D-CPP-66, Jino 2026-09-02 15:09 지시: *"엑셀에 있는 가격먼저 다
+        #   업데이트해달라고 했잖아"*). 초판은 「레시피마다 격차 방향이 달라 판정 보류」였다.
+        #
+        #   왜 풀 수 있게 됐나: 수입 완제품의 정본은 **수입원장의 로트 단가**이고(Jino 확인
+        #   *"이것도 otao에서 수입하는 제품이잖아"*, 2026-09-02), 그 값은 이 레시피의 구성
+        #   1줄에 이미 실려 있다. 격차의 «방향»이 갈리는 것은 현재 `cost_price`가 제각각이기
+        #   때문이지 계산값이 흔들려서가 아니다 — 정본을 못 정할 이유가 아니었다.
+        #
+        #   ★**그레인은 게이트 «둘»이 지킨다** — 초판은 여기에 「위 `cost_price_kinds > 1`을
+        #   통과했으므로 원리적으로 안전하다」고 적었는데 **그건 틀린 말이었다**(적대 리뷰
+        #   2026-09-02 P1-1). 가격 게이트는 「가격이 같은가」만 재지 「구성이 하나인가」를
+        #   못 잰다 — 구성이 섞였는데 개별 가격이 매겨진 적이 없어 «우연히» 같으면 통과한다.
+        #   그래서 바로 뒤에 `name_grain_kinds > 1`(상품명이 말하는 구성) 게이트를 뒀다.
+        #   ★둘을 다 통과해야 여기 온다. 「원리적으로」가 아니라 **「두 신호가 다 하나라고
+        #   말할 때만」**이 정확한 조건이다.
         return (
             CAUSE_IMPORTED_SINGLE_LINE,
-            TRUTH_HELD,
+            TRUTH_COMPUTED,
             "수입 완제품 — 구성이 1줄인 것은 결함이 아니라 종류다(원장 로트 단가가 그 한 줄이다). "
-            f"격차 {gap:+.1f}원이지만 이 묶음은 레시피마다 격차 방향이 달라 계약이 판정을 보류했다. "
-            + G31_CONTRACT_NOTE,
-            OWNER_DCPP63,
+            f"정본은 그 로트 단가이고 현재 원가와의 격차는 {gap:+.1f}원이다(D-CPP-66에서 보류 해제)",
+            OWNER_CUTOVER,
         )
 
     if group.line_count == 1 and (group.recipe_kind or "") == PURCHASED_KIND:
@@ -267,8 +330,12 @@ def classify_group(
         )
 
     if group.line_count == 1:
+        # ★사유 코드를 위 «수입 완제품»과 **가른다**(D-CPP-66). 초판은 둘 다
+        #   `CAUSE_IMPORTED_SINGLE_LINE`이었는데, 위가 `TRUTH_COMPUTED`로 풀리면서
+        #   같은 코드가 두 정본유형을 가리키게 된다 — 그러면 화면이 사유로 묶어 세는 순간
+        #   조용히 틀린다. **이 갈래는 진짜로 계산이 불완전하다**(부자재가 안 붙었다).
         return (
-            CAUSE_IMPORTED_SINGLE_LINE,
+            CAUSE_INCOMPLETE_SINGLE_LINE,
             TRUTH_HELD,
             f"구성이 1줄뿐이라 계산이 불완전하다(격차 {gap:+.1f}원) — 부자재 보강이 선행이다",
             OWNER_TRACK_A1A2,
@@ -295,11 +362,18 @@ def classify_group(
             OWNER_CUTOVER,
         )
 
+    # ★**보류를 푼다** (D-CPP-66). 초판은 「단일 원인으로 설명되지 않으니 개별 확인이
+    #   선행」이었다. 그런데 «격차의 원인을 이름 붙일 수 있는가»와 «정본이 무엇인가»는
+    #   다른 질문이다 — 원인을 몰라도 정본은 계산값이다(엑셀 구성 × 단가). 원인 규명을
+    #   기다리는 동안 **현재 원가가 근거 없는 값인 채로 손익에 흘러가는 것**이 더 나쁘다.
+    #   ★그레인은 위 게이트 **둘**이 지킨다(현재 원가 1종 **그리고** 상품명 구성 1종) —
+    #   가격 하나만으로는 부족하다는 것이 적대 리뷰 P1-1의 지적이었다.
     return (
         CAUSE_RESIDUAL,
-        TRUTH_HELD,
-        f"잔여 격차 {gap:+.1f}원 — 단일 원인으로 설명되지 않는다. 개별 확인이 선행이다",
-        OWNER_TRACK_A1A2,
+        TRUTH_COMPUTED,
+        f"잔여 격차 {gap:+.1f}원 — 원인이 단일하게 설명되진 않지만 정본은 계산값이다"
+        "(엑셀 구성 × 단가). 원인 규명은 별건이다(D-CPP-66에서 보류 해제)",
+        OWNER_CUTOVER,
     )
 
 
@@ -460,6 +534,9 @@ def truth_board(db: Session) -> dict:
             cost_price_kinds=len(distinct),
             cost_price_min=min(distinct) if distinct else None,
             std_cost_inc_vat=_dec(std.std_cost_inc_vat) if std else None,
+            name_grain_kinds=len(
+                {composition_signature(master_by_sku[x].product_name) for x in skus}
+            ) or 1,
             line_count=(
                 _breakdown_line_count(std)
                 if _breakdown_line_count(std) is not None
