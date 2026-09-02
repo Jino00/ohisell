@@ -580,3 +580,78 @@ describe("★설계서 §7½ 1단계 — 닿은 자리에서 「PAO」라고 부
     }
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 기간 바 — Jino 2026-09-02 23:35: *"캘린더가 너무 부실하다. 대시보드에 있는 캘린더처럼 만들자"*
+//
+// ★이 화면은 `7일 / 21일 / 51일` 버튼 3개를 **자기가 따로** 들고 있었다. 공용
+//   `PeriodRangeBar`의 머리말이 스스로 적어 둔 이유가 그대로 적용된다 —
+//   *"같은 UI를 두 화면이 각자 들고 있으면 곧 갈라진다"*.
+// ★★그리고 날짜 입력을 주는 순간 새 위험이 생긴다: 서버가 `days`만 받으면 «고른 날짜»와
+//   «실제 조회 창»이 갈라진다. 그러면 화면은 **사용자가 고른 구간을 보여줬다고 믿게 만든다.**
+//   그래서 여기서 재는 것은 「달력이 예쁜가」가 아니라 **「고른 날짜가 요청에 실리는가」**다.
+describe("★기간 바 — 대시보드와 같은 물건을 쓴다", () => {
+  it("날짜 입력 두 칸과 프리셋이 뜬다", async () => {
+    await renderApp();
+    const inputs = await waitFor(() => {
+      const found = document.querySelectorAll<HTMLInputElement>('input[type="date"]');
+      expect(found.length).toBeGreaterThanOrEqual(2);
+      return found;
+    });
+    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    for (const label of ["어제", "7일", "30일"]) {
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("★고른 날짜가 «요청»에 실린다 — 안 실리면 화면이 거짓말한다", async () => {
+    const { fetchPaoScopeRoster } = await import("../lib/api");
+    await renderApp();
+    await waitFor(() => expect(vi.mocked(fetchPaoScopeRoster)).toHaveBeenCalled());
+    const [first] = vi.mocked(fetchPaoScopeRoster).mock.calls.at(-1)!;
+    expect(first, "요청에 날짜 구간이 없다 — 서버는 기본 창을 돌려준다").toEqual(
+      expect.objectContaining({ dateFrom: expect.any(String), dateTo: expect.any(String) }),
+    );
+
+    const [fromInput] = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="date"]'));
+    const before = vi.mocked(fetchPaoScopeRoster).mock.calls.length;
+    fireEvent.change(fromInput, { target: { value: "2026-08-10" } });
+    await waitFor(() =>
+      expect(vi.mocked(fetchPaoScopeRoster).mock.calls.length).toBeGreaterThan(before));
+    const [after] = vi.mocked(fetchPaoScopeRoster).mock.calls.at(-1)!;
+    expect(after).toEqual(expect.objectContaining({ dateFrom: "2026-08-10" }));
+  });
+
+  it("★서버가 창을 잘랐으면 «왜»가 화면에 뜬다 — 조용히 자르면 고른 날짜가 사라진 것과 같다", async () => {
+    hoisted.roster = {
+      ...ROSTER,
+      window: {
+        ...ROSTER.window, clamped: true,
+        note: "2026-09-02까지 고르셨지만 오늘은 전환이 아직 정착 전이라 총이익이 실제보다 적게 보입니다 — 2026-09-01까지로 보여드립니다.",
+      },
+    };
+    await renderApp();
+    // ★«정착 전»만 보면 안 된다 — 기간 바에 상시로 붙는 안내 문구에도 같은 말이 있어서
+    //   경고를 «안 그려도» 통과한다(내 초판이 그랬다). 서버 note에만 있는 말로 잰다.
+    await waitFor(() => expect(screen.getByText(/고르셨지만/)).toBeTruthy());
+    expect(screen.getByText(/보여드립니다/)).toBeTruthy();
+  });
+
+  it("★note가 있어도 clamped가 아니면 경고가 아니다 — 계약은 «잘랐을 때»만이다", async () => {
+    hoisted.roster = {
+      ...ROSTER,
+      window: { ...ROSTER.window, clamped: false, note: "고르셨지만 참고용 안내입니다" },
+    };
+    await renderApp();
+    await waitFor(() => expect(screen.getByText("01. 갤럭시_지문방지_TPU")).toBeTruthy());
+    expect(screen.queryByText(/고르셨지만/), "안 잘랐는데 경고가 떴다").toBeNull();
+  });
+
+  it("자르지 않았으면 경고를 띄우지 않는다 — 늘 뜨는 경고는 아무도 안 읽는다", async () => {
+    await renderApp();
+    // 기본 로스터(clamped 없음)가 그려질 때까지 기다린 뒤에 «없음»을 잰다 —
+    // 렌더 전에 재면 아무 경고도 없는 게 당연해서 아무것도 보증하지 않는다.
+    await waitFor(() => expect(screen.getByText("01. 갤럭시_지문방지_TPU")).toBeTruthy());
+    expect(screen.queryByText(/고르셨지만/), "안 잘랐는데 경고가 떴다").toBeNull();
+  });
+});

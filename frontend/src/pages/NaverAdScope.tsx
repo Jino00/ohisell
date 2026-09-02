@@ -17,6 +17,8 @@
 //   `optimizer='none'`이라도 켜면 네이버 실쓰기가 나간다. 그래서 켜기 전 preflight를 «보여준 뒤»
 //   누르게 한다(차단이 아니라 고지 — 켜는 결정은 사람의 것이다).
 import { useState } from "react";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+import { kstDate } from "../lib/periodRange";
 import {
   Card, Table, Th, Td, Badge, Loading, EmptyState, LayerNav,
 } from "../components/ui";
@@ -105,33 +107,36 @@ function ProfitCell({
   );
 }
 
+/** 이 화면의 프리셋. ★새로 발명하지 않고 공용 어휘(`PeriodPreset`)에서 고른다 —
+ *  종전 버튼이 7·21·51일이었는데, 21일은 이 화면의 기본 창(`DEFAULT_WINDOW_DAYS`)이고
+ *  51일은 공용 어휘에 없다. 날짜를 직접 고를 수 있게 됐으므로 프리셋은 공용 것을 쓰고,
+ *  기본 창 21일은 «시작 상태»로 남긴다(회귀 아님 — 아래 useState 참조). */
+const SCOPE_PERIOD_PRESETS: PeriodPreset[] = ["yesterday", "7d", "15d", "30d", "90d"];
+
 export default function NaverAdScope() {
-  const [days, setDays] = useState(21);
+  // ★시작 창은 종전과 같은 21일(오늘 제외) — 화면을 열자마자 보던 것이 안 바뀐다.
+  const [from, setFrom] = useState(() => kstDate(-21));
+  const [to, setTo] = useState(() => kstDate(-1));
   const [reloadKey, setReloadKey] = useState(0);
-  const { data, error } = useAsyncData(() => fetchPaoScopeRoster({ days }), [days, reloadKey]);
+  const { data, error } = useAsyncData(
+    () => fetchPaoScopeRoster({ dateFrom: from, dateTo: to }),
+    [from, to, reloadKey],
+  );
 
   return (
     <div className="space-y-4">
       <LayerNav />
-      <Card
-        title="PAO 스코프 — 무엇을 엔진에 맡길까"
-        right={
-          <div className="flex items-center gap-1">
-            {[7, 21, 51].map((d) => (
-              <button
-                key={d}
-                type="button"
-                onClick={() => setDays(d)}
-                className={`px-2 py-0.5 text-xs rounded-full ${
-                  days === d ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
-                }`}
-              >
-                {d}일
-              </button>
-            ))}
-          </div>
-        }
-      >
+      {/* 기간 선택 — 공용 `PeriodRangeBar`. ★이 화면은 자기 버튼 3개를 따로 들고 있었다.
+          그 컴포넌트의 머리말이 스스로 적어 둔 이유가 그대로 적용된다:
+          *"같은 UI를 두 화면이 각자 들고 있으면 곧 갈라진다"*.
+          축 이름은 화면이 정한다 — 여기는 **성과 발생일**(광고비·전환이 일어난 날). */}
+      <PeriodRangeBar
+        label="성과 발생일"
+        from={from} to={to} onFrom={setFrom} onTo={setTo}
+        presets={SCOPE_PERIOD_PRESETS}
+        note="오늘은 전환이 아직 정착 전이라 창에서 빠집니다 — 넣으면 총이익이 실제보다 적게 보입니다."
+      />
+      <Card title="PAO 스코프 — 무엇을 엔진에 맡길까">
         {error ? (
           <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 서버 로그를 확인하세요." />
         ) : data === null ? (
@@ -144,6 +149,14 @@ export default function NaverAdScope() {
         ) : (
           <>
             <EngineStateNotice campaigns={data.campaigns} />
+            {/* ★고른 창을 그대로 못 줬으면 «왜»를 화면이 말한다. 서버가 note를 줘도 여기서
+                안 그리면 조용히 잘리는 것과 같다 — 사용자는 자기가 고른 날짜를 봤다고 믿는다.
+                문구는 백엔드 것을 그대로 렌더한다(프론트가 새로 짓지 않는다). */}
+            {data.window.clamped && data.window.note && (
+              <p className="mx-4 mb-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                ⚠️ {data.window.note}
+              </p>
+            )}
             <div className="px-4 pb-2 text-xs text-gray-500">
               창 {data.window.date_from} ~ {data.window.date_to} ({data.window.days}일, 오늘 제외)
               {" · "}
