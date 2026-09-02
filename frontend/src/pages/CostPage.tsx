@@ -32,6 +32,8 @@ import {
   fetchCostTableCensus,
   fetchCostTableItems,
   fetchCostTruthBoard,
+  fetchCostCutoverPreview,
+  runCostCutover,
   importCostRecipes,
   linkCostLedgerPrice,
   patchCostMaterial,
@@ -62,6 +64,8 @@ import {
   type CostTableCensus,
   type CostTableItemList,
   type CostTruthBoard,
+  type CostCutoverPreview,
+  type CostCutoverResult,
   type CostTruthRow,
 } from "../lib/api";
 import {
@@ -529,6 +533,173 @@ const TRUTH_BADGE: Record<string, string> = {
   held: "bg-amber-50 border-amber-200 text-amber-800",
   none: "bg-gray-100 border-gray-300 text-gray-600",
 };
+
+/** 컷오버 패널 (계약 D-CPP-64 §4 S3) — `cost_price`를 정본에 맞추는 **유일한 문의 손잡이**.
+ *
+ * ★**클릭 «전»에 무엇이 서야 하는가**가 계약 문언이다: 사유 그룹별 SKU 수 · old→new · Σ격차.
+ *   숫자만 있고 old→new가 없으면 사람은 「무엇이 무엇으로 바뀌는지」 모른 채 누르게 된다.
+ *
+ * ★**컷오버로 못 고치는 것을 같은 화면에 둔다.** 보류·정본 없음은 맞출 정본이 아직 없어서
+ *   대상이 아니다. 이걸 안 그리면 「278건 하면 원가가 다 맞는다」로 읽히는데, 실제로는
+ *   681건이 정본 자체가 없다 — 그 오독이 이 트랙에서 가장 비싼 종류다.
+ *
+ * ★**누르기 전엔 한 건도 안 움직인다.** 이 패널은 자동으로 아무것도 실행하지 않는다
+ *   (계약 §4 S3 셋째 항목의 화면 쪽 절반).
+ */
+export function CostCutoverPanel({
+  data,
+  result,
+  busy,
+  error,
+  onRun,
+}: {
+  /** null = 아직 안 불렀다(로딩). `groups:[]` = 불렀는데 대상 0건. 둘은 다른 사실이다. */
+  data: CostCutoverPreview | null;
+  result: CostCutoverResult | null;
+  busy: string | null;
+  error: string | null;
+  onRun: (body: { scope: "all" | "cause"; cause?: string }, busyKey: string) => void;
+}) {
+  if (data === null) {
+    return (
+      <div className="mt-4 text-xs text-gray-400" data-testid="cost-cutover-loading">
+        컷오버 대상을 불러오는 중…
+      </div>
+    );
+  }
+
+  // ★응답 형식이 깨져도 **화면 전체가 하얘지지 않는다** — 대신 「형식이 다르다」고 말한다.
+  //   판별 패널(`CostTruthBoardPanel`)이 이미 같은 규율을 쓴다. 초판엔 이 방어가 없어서
+  //   `not_eligible`이 없는 응답 하나에 **원가 페이지가 통째로 죽었다** — 새 패널 하나가
+  //   옆 탭까지 끌고 내려가는 모양이었고, 기존 end-to-end 테스트 4건이 그걸 잡았다.
+  const groups = Array.isArray(data.groups) ? data.groups : [];
+  const notEligible = data.not_eligible ?? null;
+
+  if (!Array.isArray(data.groups) || notEligible === null) {
+    return (
+      <div
+        className="mt-4 text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded p-2"
+        data-testid="cost-cutover-broken"
+      >
+        컷오버 응답의 형식이 다르다 — 대상 0건이 아니라 «백엔드가 다른 모양을 줬다»는 뜻이다.
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="mt-4 border border-blue-200 bg-blue-50/40 rounded p-3"
+      data-testid="cost-cutover-panel"
+    >
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <h3 className="text-sm font-semibold text-gray-800">컷오버 — 원가를 정본에 맞춘다</h3>
+        <span className="text-[11px] text-gray-600">
+          누르기 전엔 한 건도 안 움직인다 · 바뀐 값은 전부 이력에 남는다
+        </span>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <span
+          className="text-xs px-2 py-1 rounded border bg-white border-blue-300 text-blue-900"
+          data-testid="cost-cutover-total"
+        >
+          대상 {data.total_sku_count}건 · Σ격차 {formatCostWon(data.total_gap_sum)}
+        </span>
+        <button
+          type="button"
+          disabled={busy !== null || data.total_sku_count === 0}
+          onClick={() => onRun({ scope: "all" }, "all")}
+          data-testid="cost-cutover-run-all"
+          className="text-xs px-3 py-1 rounded border bg-blue-600 text-white border-blue-700 disabled:opacity-40"
+        >
+          {busy === "all" ? "맞추는 중…" : `전체 ${data.total_sku_count}건 맞추기`}
+        </button>
+      </div>
+
+      {/* ★컷오버로 «못» 고치는 것 — 빼면 화면이 「이것만 하면 끝」으로 읽힌다. */}
+      <div
+        className="mt-2 text-[11px] text-gray-700 bg-amber-50 border border-amber-200 rounded p-2"
+        data-testid="cost-cutover-not-eligible"
+      >
+        보류 {notEligible.held_count}건 · 정본 없음 {notEligible.none_count}건은{" "}
+        <b>대상이 아니다</b> — {notEligible.sentence}
+      </div>
+
+      {error ? (
+        <div
+          className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2"
+          data-testid="cost-cutover-error"
+        >
+          컷오버 실패 — {error}
+        </div>
+      ) : null}
+
+      {result ? (
+        <div
+          className="mt-2 text-xs text-gray-800 bg-white border border-gray-200 rounded p-2"
+          data-testid="cost-cutover-result"
+        >
+          바꿨다 {result.changed_count}건 · 건너뜀 {result.skipped_count}건 · 좁힌 격차{" "}
+          {formatCostWon(result.gap_closed)}
+          {result.skipped_count > 0 ? (
+            <div className="mt-1 text-[11px] text-gray-600">
+              건너뛴 사유: {result.skipped[0]?.sentence}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {groups.length === 0 ? (
+        <div
+          className="mt-2 text-xs text-gray-700 bg-white border border-gray-200 rounded p-2"
+          data-testid="cost-cutover-empty"
+        >
+          컷오버 대상이 0건이다 — 정본이 있는 SKU는 전부 이미 정본값과 같다.
+        </div>
+      ) : (
+        <div className="mt-2 space-y-2" data-testid="cost-cutover-groups">
+          {groups.map((g) => (
+            <div key={g.cause} className="bg-white border border-gray-200 rounded p-2">
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className="text-xs font-medium text-gray-800">
+                  {g.cause_ref118 ? `${g.cause_ref118} · ` : ""}
+                  {g.cause}
+                </span>
+                <span className="text-[11px] text-gray-600">
+                  {g.sku_count}건 · Σ격차 {formatCostWon(g.gap_sum)}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => onRun({ scope: "cause", cause: g.cause }, g.cause)}
+                  data-testid={`cost-cutover-run-${g.cause}`}
+                  className="text-[11px] px-2 py-0.5 rounded border bg-white border-blue-400 text-blue-800 disabled:opacity-40"
+                >
+                  {busy === g.cause ? "맞추는 중…" : "이 그룹만 맞추기"}
+                </button>
+              </div>
+              {g.reason ? (
+                <div className="mt-1 text-[11px] text-gray-600">{g.reason}</div>
+              ) : null}
+              {/* ★old→new를 «클릭 전에» 보인다 — 계약 §4 S3 첫째 항목의 문언이다. */}
+              <ul className="mt-1 text-[11px] text-gray-700 space-y-0.5">
+                {g.items.slice(0, 5).map((i) => (
+                  <li key={i.internal_sku} data-testid={`cost-cutover-item-${i.internal_sku}`}>
+                    {i.internal_sku} · {i.product_name.slice(0, 30)} —{" "}
+                    <b>{formatCostWon(i.old_value)}</b> → <b>{formatCostWon(i.new_value)}</b>
+                  </li>
+                ))}
+                {g.items.length > 5 ? (
+                  <li className="text-gray-500">…외 {g.items.length - 5}건</li>
+                ) : null}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** 정본 판별 표 (계약 D-CPP-64 §4 S2).
  *
@@ -3011,6 +3182,11 @@ export default function CostPage() {
   //     말한다 — 같게 보이면 「이상 없음」으로 읽힌다.
   const [priceHistory, setPriceHistory] = useState<CostPriceHistoryList | null>(null);
   const [truthBoard, setTruthBoard] = useState<CostTruthBoard | null>(null);
+  const [cutoverPreview, setCutoverPreview] = useState<CostCutoverPreview | null>(null);
+  /** 마지막 컷오버 결과 — 「몇 건 바뀌었나」를 화면이 말한다. null = 아직 한 번도 안 눌렀다. */
+  const [cutoverResult, setCutoverResult] = useState<CostCutoverResult | null>(null);
+  const [cutoverBusy, setCutoverBusy] = useState<string | null>(null);
+  const [cutoverErr, setCutoverErr] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [recipes, setRecipes] = useState<CostRecipe[]>([]);
   const [selectedRecipeId, setSelectedRecipeId] = useState<number | null>(null);
@@ -3231,7 +3407,7 @@ export default function CostPage() {
 
   const load = useCallback(async () => {
     try {
-      const [m, l, s, r, b, sh, ar, aq, ct, ph, tb] = await Promise.all([
+      const [m, l, s, r, b, sh, ar, aq, ct, ph, tb, cp] = await Promise.all([
         fetchCostMaterials(),
         fetchCostLedgerMaterialLines(),
         fetchCostSettings(),
@@ -3243,6 +3419,7 @@ export default function CostPage() {
         fetchCostTableCensus(),
         fetchCostPriceHistory({ limit: 100 }),
         fetchCostTruthBoard(),
+        fetchCostCutoverPreview(),
       ]);
       setMaterials(m.items);
       setLedgerLines(l.items);
@@ -3253,6 +3430,7 @@ export default function CostPage() {
       setSettingHistory(sh.items);
       setPriceHistory(ph);
       setTruthBoard(tb);
+      setCutoverPreview(cp);
       setAutoRefreshRuns(ar.items);
       setAutoRefreshQueue(aq.items);
       // ★부자재 선택도 여기서 건드리지 않는다(2026-08-23 N5) — 부자재 탭에도 필터가
@@ -3271,6 +3449,30 @@ export default function CostPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** 컷오버 실행 (계약 D-CPP-64 §4 S3).
+   *
+   * ★**끝나면 반드시 `load()`로 다시 읽는다.** 안 그러면 값은 바뀌었는데 화면의 격차 열이
+   *   옛 숫자를 그대로 들고 있어, 사람이 「안 됐다」고 읽고 한 번 더 누른다. 이 트랙이
+   *   반복해 밟은 「값은 맞는데 사람이 못 본다」의 갱신판이다.
+   * ★실패를 삼키지 않는다 — 실패했는데 조용하면 「됐다」로 읽힌다.
+   */
+  const runCutover = useCallback(
+    async (body: { scope: "all" | "cause"; cause?: string }, busyKey: string) => {
+      setCutoverBusy(busyKey);
+      setCutoverErr(null);
+      try {
+        const res = await runCostCutover({ ...body, actor: "jino" });
+        setCutoverResult(res);
+        await load();
+      } catch (e) {
+        setCutoverErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setCutoverBusy(null);
+      }
+    },
+    [load],
+  );
 
   // ★레시피와 같은 규율: 오른쪽 단가 이력 패널은 **필터된 목록 안에서만** 종을 찾는다.
   //   `materials`(전체 129종)에서 찾으면 필터 밖 종이 그대로 패널에 남아, 사람은 목록에
@@ -4155,7 +4357,20 @@ export default function CostPage() {
           이 탭은 「이 SKU의 정본이 무엇인가」를 답하고, 컷오버(쓰기)는 S3가 신설하는
           경로 한 벌의 몫이다. 판별과 쓰기를 한 슬라이스에 섞지 않는 것이 계약 §3-B다.
           ══════════════════════════════════════════════════════════════ */}
-      {tab === "truth" ? <CostTruthBoardPanel data={truthBoard} /> : null}
+      {tab === "truth" ? (
+        <>
+          {/* ★컷오버는 판별 «위»에 둔다 — 판별표는 963행이라 아래에 두면 스크롤 끝에 묻힌다.
+              「정본이 무엇인가」를 본 자리에서 바로 갈아타는 것이 계약 §4 S3의 동선이다. */}
+          <CostCutoverPanel
+            data={cutoverPreview}
+            result={cutoverResult}
+            busy={cutoverBusy}
+            error={cutoverErr}
+            onRun={runCutover}
+          />
+          <CostTruthBoardPanel data={truthBoard} />
+        </>
+      ) : null}
     </div>
   );
 }

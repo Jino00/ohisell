@@ -6464,6 +6464,72 @@ export function fetchCostTruthBoard(): Promise<CostTruthBoard> {
   return fetchApi("/api/cost/truth-board");
 }
 
+/* ── 컷오버 (계약 D-CPP-64 §4 S3) ─────────────────────────────────
+   ★`cost_price`를 쓰는 **유일한 문**이다. 여기 두 번째 경로를 만들지 않는다 — 값이 여러
+     문으로 들어오면 「어느 문이 열려 있나」를 세는 순간 틀린다(ref 119 §3-1의 재발). */
+
+export interface CostCutoverItem {
+  internal_sku: string;
+  product_name: string;
+  old_value: string | null;
+  new_value: string | null;
+  gap: string | null;
+  truth_label: string;
+}
+
+export interface CostCutoverGroup {
+  cause: string;
+  cause_ref118: string | null;
+  reason: string | null;
+  sku_count: number;
+  gap_sum: string;
+  items: CostCutoverItem[];
+}
+
+export interface CostCutoverPreview {
+  groups: CostCutoverGroup[];
+  total_sku_count: number;
+  total_gap_sum: string;
+  /** ★컷오버로 «못» 고치는 것. 이걸 안 그리면 화면이 「이것만 하면 끝」으로 읽힌다. */
+  not_eligible: { held_count: number; none_count: number; sentence: string };
+}
+
+export interface CostCutoverResult {
+  scope: string;
+  requested_count: number;
+  changed_count: number;
+  skipped_count: number;
+  gap_closed: string;
+  changed: Array<{
+    internal_sku: string;
+    product_name: string;
+    old_value: string | null;
+    new_value: string;
+    gap: string | null;
+    cause: string;
+  }>;
+  skipped: Array<{ internal_sku: string; skip_reason: string; sentence: string }>;
+}
+
+export function fetchCostCutoverPreview(): Promise<CostCutoverPreview> {
+  return fetchApi("/api/cost/cutover/preview");
+}
+
+/** 컷오버 실행. ★**값을 보내지 않는다** — 화면이 5분 전에 본 숫자를 실어 보내면 그 사이
+ *  단가가 바뀌어도 옛 값이 굳는다. 쓰는 값은 서버가 실행 시점에 다시 구한다. */
+export function runCostCutover(body: {
+  scope: "all" | "skus" | "cause";
+  skus?: string[];
+  cause?: string;
+  actor?: string;
+}): Promise<CostCutoverResult> {
+  return fetchApi("/api/cost/cutover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 /** 설정 1건 확인·변경. **값이 그대로여도** `value_changed:false`로 그 사실을 자백한다 —
  *  화면은 「값은 그대로 · 확인 기록 1건 추가」라고 말해야 한다(§2-6 침묵 금지). */
 export function updateCostSetting(

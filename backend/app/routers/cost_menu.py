@@ -10,9 +10,12 @@
 ★요청 스키마를 `app/schemas.py`가 아니라 이 파일에 둔다 — 병행 세션이 같은 파일을 건드릴 때
 충돌하는 자리라서다(계약 B 라우터와 같은 이유). 이 라우터 밖에서 쓰이지 않는다.
 
-★**`product_master.cost_price`를 쓰지 않는다** — 계약 C(D-CPP-64, 2026-08-31 승인)가 A′ §3의
-이 금지선을 **조건부로** 풀었지만, 열린 것은 「컷오버 경로 한 벌 + Jino 클릭 + 이력 + 근거
-좌표」일 때뿐이고 그 경로는 **S3에서 생긴다.** S1인 지금 이 라우터의 쓰기는 여전히 0이다.
+★**`product_master.cost_price`를 쓰는 문은 이 라우터에 «하나»뿐이다** — `POST /api/cost/cutover`
+(계약 D-CPP-64 §4 S3, 2026-09-02 신설). 계약 C가 A′ §3의 금지선을 **조건부로** 풀었고 그 조건이
+「컷오버 경로 한 벌 + 사람의 클릭 + 이력 + 근거 좌표」였다 — 넷을 다 갖춘 경로가 이것이다.
+★**두 번째 문을 만들지 않는다.** 다른 엔드포인트가 `cost_price`에 대입하는 순간 계약 §3-B의
+금지선을 어기는 것이고, 그러면 「값이 넷으로 들어오는데 이력은 없다」(ref 119 §3-1)로 되돌아간다.
+값 쓰기는 `services/cost_menu/cutover.py` 한 벌을 지나고, 그 모듈이 이력을 같은 커밋에 넣는다.
 
 ★단 **이력은 읽는다**(2026-08-31, 계약 §4 S1-①): `GET /api/cost/price-history`는
 `cost_price_history` 표를 읽어 「누가·언제·어느 문으로·무엇에서 무엇으로」를 화면에 낸다.
@@ -38,6 +41,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services import cost_price_history as CPH
 from app.services.cost_menu import auto_refresh as AR
+from app.services.cost_menu import cutover as CO
 from app.services.cost_menu import materials as M
 from app.services.cost_menu import recipes as R
 from app.services.cost_menu import purchased_price as PP
@@ -129,6 +133,23 @@ class AbsentIn(BaseModel):
     """
 
     note: Optional[str] = None
+
+
+class CutoverIn(BaseModel):
+    """컷오버 실행 요청 (계약 D-CPP-64 §4 S3).
+
+    ★`scope`에 **기본값을 두지 않는다.** 「아무것도 안 고름」이 「전건」으로 해석되면 실수
+    한 번이 963 SKU를 움직인다 — 이 문에서 가장 비싼 사고다. 그래서 필수 필드이고,
+    어휘 밖 값은 서비스가 `ValueError` → 400으로 돌려보낸다.
+    ★**값을 받지 않는다.** old→new 숫자는 요청에 실리지 않는다 — 화면이 5분 전에 본 값을
+    그대로 보내면 그 사이 단가가 바뀌어도 옛 값이 굳는다. 쓰는 값은 서버가 실행 시점에
+    정본 판별표를 다시 돌려 구한다.
+    """
+
+    scope: Literal["all", "skus", "cause"]
+    skus: Optional[list[str]] = None
+    cause: Optional[str] = None
+    actor: Optional[str] = None
 
 
 class ManualPriceIn(BaseModel):
@@ -568,9 +589,47 @@ def truth_source_board(db: Session = Depends(get_db)):
     `/board`엔 아예 없어서, 「매입품엔 계산값이 원리적으로 없다」(ref 119 §2-2)를 그 표는
     표현하지 못한다.
 
-    ★**읽기 전용이다.** 쓰기는 S3가 신설하는 컷오버 경로 한 벌의 몫이다(계약 §3-B).
+    ★**읽기 전용이다.** 쓰기는 컷오버 경로 한 벌(`POST /cutover`)의 몫이다(계약 §3-B).
     """
     return TS.truth_board(db)
+
+
+# ──────────────────────────────────────────────
+# 컷오버 — `cost_price`를 정본값에 맞추는 **유일한 문** (계약 D-CPP-64 §4 S3)
+# ──────────────────────────────────────────────
+@router.get("/cutover/preview")
+def cutover_preview(db: Session = Depends(get_db)):
+    """클릭 «전»에 서는 것 — 사유 그룹별 SKU 수 · old→new · Σ격차.
+
+    ★읽기 전용이다. 계약 §4 S3 첫째 항목이 「클릭 전에 무엇이 서야 하는가」를 못 박았고
+    이 payload가 그 재료다. **컷오버로 못 고치는 것**(보류·정본 없음)도 같이 싣는다 —
+    빼면 화면이 「이것만 하면 끝」으로 읽힌다.
+    """
+    return CO.preview(db)
+
+
+@router.post("/cutover")
+def cutover_execute(body: CutoverIn, db: Session = Depends(get_db)):
+    """정본값을 `cost_price`에 쓴다 — **이 라우터에서 값을 쓰는 유일한 자리**.
+
+    ★`scope`에 기본값이 없다(스키마에서 필수). 빈 요청이 「전건」으로 해석되면 실수 한 번이
+    963 SKU를 움직인다 — 이 문에서 가장 비싼 사고라 어휘 밖 입력은 400으로 돌려보낸다.
+    ★클라이언트가 보낸 «값»은 안 쓴다. 서비스가 실행 시점에 정본 판별표를 다시 돌려
+    그 자리에서 계산된 정본값만 쓴다(`services/cost_menu/cutover.py` 헤더).
+    ★값 변경과 이력이 **같은 커밋**에 들어간다 — 여기서만 commit 한다.
+    """
+    try:
+        result = CO.execute(
+            db,
+            scope=body.scope,
+            skus=body.skus,
+            cause=body.cause,
+            actor=body.actor,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.commit()
+    return result
 
 
 @router.post("/roundtrip/download")
