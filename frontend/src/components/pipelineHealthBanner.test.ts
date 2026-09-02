@@ -447,7 +447,8 @@ describe("제외 슬롯 소진 (S6-a, ref 66 §5-2)", () => {
   });
 
   const row = (over: Record<string, unknown> = {}) => ({
-    adgroup_id: "grp-1", campaign_id: "cmp-1", name: "01. TPU",
+    adgroup_id: "grp-1", campaign_id: "cmp-1", campaign_name: "01. 갤럭시_지문방지_TPU",
+    name: "01. TPU",
     state: "exhausted", used: 70, cap: 70, remaining: 0, usage_pct: 100,
     ours: 2, agency: 60, other_source: 0, unattributed: 8,
     exhaust_eta_days: 0, exhaust_eta_reason: "이미 70/70 — 남은 칸이 없다",

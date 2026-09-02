@@ -175,22 +175,52 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
     """제외 슬롯 사용률·소진 예상일 요약 (읽기 전용 · 외부 호출 0).
 
     반환: {cap, as_of, groups, exhausted, unknown, stale, healthy, rows, rows_truncated,
-           totals, reclaim_note}
+           observed_from, observed_to, totals, reclaim_note}
+    ★`as_of`는 «응답 생성 시각»이고 `observed_from/to`가 «라이브를 마지막으로 본 창»이다.
+      화면에 붙일 기준 시각은 후자다.
     """
     now = now or kst_now()
     ledger = _ledger_by_group(db, now)
 
     names: dict[str, str] = {}
+    # ★캠페인 이름도 같이 받는다(가산). 그룹 이름만 있으면 화면에서 «어느 캠페인의 그룹인가»를
+    #   알 수 없다 — 「01. TEST_S20」 같은 이름은 캠페인을 모르면 어디 것인지 가려낼 수 없다.
+    #   (Jino 2026-09-02: *"어느 광고캠페인에 속해있는 광고그룹인지 알 수 없어"*)
+    camp_names: dict[str, str] = {}
     try:
         from app.models import NaverEntity  # noqa: PLC0415 — 이름은 «있으면 좋은» 정보다
-        for e in db.query(NaverEntity).filter(NaverEntity.entity_type == "adgroup").all():
-            names[e.entity_id] = e.name
+        for e in db.query(NaverEntity).filter(
+            NaverEntity.entity_type.in_(("adgroup", "campaign"))
+        ).all():
+            (names if e.entity_type == "adgroup" else camp_names)[e.entity_id] = e.name
     except Exception:  # noqa: BLE001 — 이름을 못 얻어도 사용률 판정은 그대로 서야 한다
-        log.warning("[제외슬롯] 광고그룹 이름 조회 실패 — id로만 표기한다", exc_info=True)
+        log.warning("[제외슬롯] 엔티티 이름 조회 실패 — id로만 표기한다", exc_info=True)
 
     rows: list[dict] = []
     counts = {STATE_EXHAUSTED: 0, STATE_UNKNOWN: 0, STATE_STALE: 0, STATE_OK: 0}
-    used_sum = ours_sum = agency_sum = 0
+    used_sum = ours_sum = agency_sum = other_sum = 0
+    # ★미귀속을 «계정 수준»에서도 낸다. 여태 totals엔 ours·agency뿐이라 화면이 3분할을
+    #   그리려면 `used - ours - agency`로 추정할 수밖에 없었는데, 그건 other_source를
+    #   미귀속에 뭉개는 계산이다 — 이 모듈 머리말이 «0으로 뭉개지 않는다»고 적어 둔 바로
+    #   그 값을 화면이 뭉개게 된다. 그래서 행에서 이미 재고 있는 것을 누계로도 낸다.
+    #
+    # ★★그런데 순액 하나로는 «0으로 뭉개는 것»과 정보량이 같아진다(적대 리뷰 P1-2).
+    #   그룹별 `used - 원장`은 부호가 둘이고 뜻이 정반대다:
+    #     양수 = 라이브 초과 → 「우리가 모르는 남의 칸」
+    #     음수 = 원장 초과   → 「우리가 건 제외가 라이브에 안 보인다 — 지워졌을 수 있다」
+    #   2026-09-02 prod 실측: +3,662 / −1,824(58그룹) → 순액 1,838. 절반이 상계된다.
+    #   그래서 방향을 갈라 싣는다. 순액(`unattributed`)도 남기되 화면은 갈라 쓴다.
+    unattributed_sum = 0
+    live_excess_sum = ledger_excess_sum = ledger_excess_groups = 0
+    # ★라이브를 «못 센» 그룹에 붙은 원장 행. 여기에 있는 것을 ours/agency 누계에 더하면
+    #   `ours+agency+other+unattributed == used` 항등식이 그만큼 깨진다(P1-1, prod에서 +67).
+    #   그렇다고 조용히 버리면 「우리 실행분」이 실제보다 적게 보인다 — 그래서 따로 센다.
+    uncounted_ledger_sum = 0
+    # ★스윕 시각 창. `as_of`는 «이 응답을 만든 시각»이지 «라이브를 마지막으로 본 시각»이
+    #   아니다(호출할 때마다 바뀐다). 화면이 as_of를 「기준 시각」으로 쓰면 09:35에 본 것을
+    #   20:00 기준이라고 말하는 거짓말이 된다 — 그래서 관측 시각의 범위를 따로 실어 보낸다.
+    observed_min: datetime | None = None
+    observed_max: datetime | None = None
 
     for t in db.query(NaverAdgroupTargetCurrent).all():
         used = t.restrict_keyword_count
@@ -200,13 +230,30 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
         ours, agency = g.get("ours", 0), g.get("agency", 0)
         remaining = None if used is None else max(EXCLUSION_SLOT_CAP - used, 0)
         eta_days, eta_reason = _eta(remaining, g.get("inflow", 0))
+        other = g.get("other_source", 0)
         if used is not None:
             used_sum += used
-        ours_sum += ours
-        agency_sum += agency
+            delta = used - ours - agency - other
+            unattributed_sum += delta
+            if delta >= 0:
+                live_excess_sum += delta
+            else:
+                ledger_excess_sum += -delta
+                ledger_excess_groups += 1
+            # ★누계는 «센 그룹»에 대해서만 더한다 — 항등식을 지키는 유일한 방법이다.
+            ours_sum += ours
+            agency_sum += agency
+            other_sum += other
+        else:
+            uncounted_ledger_sum += ours + agency + other
+        if t.observed_at is not None:
+            observed_min = t.observed_at if observed_min is None else min(observed_min, t.observed_at)
+            observed_max = t.observed_at if observed_max is None else max(observed_max, t.observed_at)
         rows.append({
             "adgroup_id": t.adgroup_id,
             "campaign_id": t.campaign_id,
+            # ★못 찾으면 빈 문자열이다 — 프론트가 id로 폴백한다(지어내지 않음).
+            "campaign_name": camp_names.get(t.campaign_id, ""),
             "name": names.get(t.adgroup_id, ""),
             "state": state,
             "used": used,                       # ★None = 못 셌다(0 아님)
@@ -216,10 +263,10 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
             # ── 귀속 3분 표기 (ref 66 §5-3) ──
             "ours": ours,
             "agency": agency,
-            "other_source": g.get("other_source", 0),
+            "other_source": other,
             # ★라이브 총계에서 원장 귀속분을 뺀 나머지. 양수 = 원장이 모르는 남의 칸,
             #   음수 = 원장이 라이브보다 많다(우리 조치가 지워졌을 수 있다 — 생존감시 소관).
-            "unattributed": None if used is None else used - ours - agency - g.get("other_source", 0),
+            "unattributed": None if used is None else used - ours - agency - other,
             "grades": g.get("grades", {}),
             "inflow_30d": g.get("inflow", 0),
             "inflow_30d_ours": g.get("inflow_ours", 0),
@@ -248,10 +295,24 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
         "rows": shown,
         # ★잘렸다는 사실이 숨지 않게 총계를 따로 낸다(exclusion_survival과 같은 규율).
         "rows_truncated": max(len(rows) - len(shown), 0),
+        # ★스윕 시각 창(가산). 화면은 `as_of`가 아니라 이것을 「기준 시각」으로 쓴다.
+        "observed_from": observed_min.isoformat() if observed_min else None,
+        "observed_to": observed_max.isoformat() if observed_max else None,
         "totals": {
             "used": used_sum,
             "ours": ours_sum,
             "agency": agency_sum,
+            # ★가산 — 계정 수준 귀속 분할이 추정 없이 서게 한다.
+            #   ours/agency/other/unattributed 는 **라이브를 센 그룹에 대해서만** 더한다:
+            #   `ours + agency + other_source + unattributed == used` 가 성립해야 화면의
+            #   막대가 거짓말을 안 한다.
+            "other_source": other_sum,
+            "unattributed": unattributed_sum,          # 순액(부호 있음)
+            "live_excess": live_excess_sum,            # 양의 몫 — 「모르는 남의 칸」
+            "ledger_excess": ledger_excess_sum,        # 음의 몫 — 「우리 조치가 안 보임」
+            "ledger_excess_groups": ledger_excess_groups,
+            # ★못 센 그룹에 붙은 원장 행. 위 누계에서 빠졌다는 사실을 숨기지 않는다.
+            "uncounted_ledger": uncounted_ledger_sum,
             "capacity": len(rows) * EXCLUSION_SLOT_CAP,
         },
         "reclaim_note": RECLAIM_NOTE,

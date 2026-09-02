@@ -757,6 +757,8 @@ export interface SchedulerHealthExclusionSlots {
   rows: {
     adgroup_id: string;
     campaign_id: string;
+    /** ★그룹 이름만으론 «어느 캠페인 것인지» 모른다. 못 찾으면 "" — 화면이 id로 폴백한다. */
+    campaign_name: string;
     name: string;
     state: string; // exhausted | unknown | stale | ok
     used: number | null; // null = 못 셌다
@@ -3785,6 +3787,44 @@ export function getSearchTermExclusionSurvival(): Promise<NaverExclusionSurvival
   return fetchApi<NaverExclusionSurvival>("/api/naver/ad/search-term/exclusion-survival");
 }
 
+// ── 제외 슬롯 In/Out 현황 (설계서 §5-4 · D-NAO-264) ──
+// ★백엔드는 D-NAO-264 때부터 있었는데 **프론트가 한 번도 부르지 않았다**. 그래서 「더 걸
+//   칸이 남았나」를 아무도 화면에서 못 봤다 — 파이프라인도 값도 정상이라 다른 어떤 감시에도
+//   안 잡히는 종류의 공백이다.
+// ★`SchedulerHealthExclusionSlots`(헬스 배너용)와 «같은 응답»이다. 배너는 요약만 읽고
+//   화면은 총계·관측창까지 읽으므로 여기서 확장한다 — 타입을 두 벌 만들면 갈라진다.
+export interface NaverExclusionSlots extends SchedulerHealthExclusionSlots {
+  /** ★응답을 «만든» 시각이다. 화면의 기준 시각으로 쓰면 안 된다(아래 observed_* 참조). */
+  as_of: string;
+  /** 라이브를 마지막으로 «본» 창(일일 스윕 09:35). 화면이 말해야 하는 기준 시각은 이것이다. */
+  observed_from: string | null;
+  observed_to: string | null;
+  totals: {
+    /** 라이브 정본 — 원장이 아니다(원장은 편입 누락·대행사 신규분만큼 적게 나온다). */
+    used: number;
+    ours: number;
+    agency: number;
+    other_source: number;
+    /** 라이브 − 원장 귀속분의 **순액**(부호 있음). `ours+agency+other_source+unattributed
+     *  == used` 가 성립한다(라이브를 «센» 그룹에 대해). ★화면에 이 값을 「남의 칸」이라
+     *  이름 붙이면 안 된다 — 아래 둘이 상계된 값이다. */
+    unattributed: number;
+    /** 양의 몫 — 진짜 「우리가 모르는 남의 칸」. */
+    live_excess: number;
+    /** 음의 몫(절댓값) — **우리가 건 제외가 라이브에 안 보인다**(지워졌을 수 있다).
+     *  뜻이 정반대라 순액으로 뭉치면 「0으로 뭉개는 것」과 정보량이 같아진다. */
+    ledger_excess: number;
+    ledger_excess_groups: number;
+    /** 라이브를 «못 센» 그룹에 붙은 원장 행. 위 누계에서 빠졌다는 사실을 숨기지 않는다. */
+    uncounted_ledger: number;
+    capacity: number;
+  };
+}
+
+export function getSearchTermExclusionSlots(): Promise<NaverExclusionSlots> {
+  return fetchApi<NaverExclusionSlots>("/api/naver/ad/search-term/exclusion-slots");
+}
+
 // ── 검색어 제외 실행 기록 + 성적표 (D-NAO-173 P2, docs/PLAN_search-term-exclusion-list.md §4-a) ──
 // 시스템은 네이버에 쓰지 않는다 — 사람이 콘솔에서 실행한 것을 기록만 하고, 그 기록이
 // diary→outcome→wisdom 학습 사슬의 입구가 된다(search_term_execution.py docstring 참조).
@@ -4991,6 +5031,11 @@ export interface NaverSearchTermExclusionRow {
   status: string;
   cycle: number;
   source: string | null;
+  /** 우리 원장에 들어온 시각. ★`source='console_import'`면 이건 «편입 시각»이지
+   *  「대행사가 언제 걸었나」가 아니다 — 그대로 보여 주면 「오늘 자른 것」으로 읽힌다. */
+  excluded_at: string | null;
+  /** 콘솔이 알려준 «실제» 제외 시각(D-NAO-177). null = 모름 — 추정으로 메우지 않는다. */
+  console_excluded_at: string | null;
   next_review_at: string | null;
   probation_until: string | null;
   reopen_block_reason: string | null;
@@ -5008,10 +5053,14 @@ export interface NaverSearchTermExclusionList {
 /** 제외 상태기계 목록. ★백엔드는 오래전부터 있었는데 **프론트 호출부가 0건**이었다 — H1의
  *  preflight와 같은 병이다(만드는 층은 있는데 닿는 층이 없다). */
 export function fetchNaverSearchTermExclusions(params: {
-  campaignId?: string; status?: string; limit?: number; excludeConsoleImport?: boolean;
+  campaignId?: string; adgroupId?: string; status?: string; limit?: number;
+  excludeConsoleImport?: boolean;
 }): Promise<NaverSearchTermExclusionList> {
   const q = new URLSearchParams();
   if (params.campaignId) q.set("campaign_id", params.campaignId);
+  // ★그룹 단위로 좁힌다 — 캠페인으로만 내리면 한 캠페인의 수십 그룹이 `limit`을 채워
+  //   정작 보려던 그룹 몫이 잘리고 화면엔 「없다」로 보인다.
+  if (params.adgroupId) q.set("adgroup_id", params.adgroupId);
   if (params.status) q.set("status", params.status);
   if (params.limit) q.set("limit", String(params.limit));
   // ★`limit` «전»에 걸려야 한다 — 화면에서 거르면 페이지가 콘솔 편입분으로 차서 정작 열 수 있는

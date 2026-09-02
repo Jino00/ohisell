@@ -2499,6 +2499,11 @@ def get_search_term_exclusions(
     # void = 무효화된 행. 조회할 수 있어야 «지운 것»이 어디로 갔는지 확인 가능하다(사후 가시성).
     status: str | None = Query(None, pattern="^(excluded|probation|restored|void)$"),
     campaign_id: str | None = Query(None),
+    # ★광고그룹 필터(가산). 슬롯 화면이 「이 그룹에 실제로 뭐가 걸려 있나」를 열어 보려면
+    #   캠페인이 아니라 **그룹** 단위로 좁혀야 한다 — 한 캠페인에 그룹이 수십 개라
+    #   campaign_id로 내리면 `limit` 안에서 그 그룹 몫이 잘려 「없다」로 보인다
+    #   (같은 모양의 병이 `exclude_console_import`에서 이미 한 번 났다 — 위 주석).
+    adgroup_id: str | None = Query(None),
     # ★적대 리뷰 1R P1-1 상환. 재개방 패널은 «우리가 건 제외»만 봐야 하는데, 그 필터를 화면에서
     #   걸면 **`limit` 뒤에** 걸린다. 이 원장은 3,990행 중 **3,987행이 `console_import`**라
     #   (2026-08-31 실측) 한 페이지가 편입분으로 다 차고 정작 열 수 있는 due 행이 응답에서 빠진다.
@@ -2546,6 +2551,8 @@ def get_search_term_exclusions(
         q = q.filter(NaverSearchTermExclusion.status == status)
     if campaign_id:
         q = q.filter(NaverSearchTermExclusion.campaign_id == campaign_id)
+    if adgroup_id:
+        q = q.filter(NaverSearchTermExclusion.adgroup_id == adgroup_id)
     if exclude_console_import:
         # ★`limit` «전»에 건다 — 이 한 줄의 위치가 P1-1의 전부다(위 파라미터 주석).
         q = q.filter(search_term_execution.not_console_import())
