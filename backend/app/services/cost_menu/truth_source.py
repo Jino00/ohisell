@@ -29,6 +29,7 @@ S3가 신설하는 경로 한 벌의 몫이고, 이 파일에 `.cost_price =` �
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -75,6 +76,22 @@ PARTS_GAP_EPSILON = Decimal("0.01")
 
 #: ref 118 §2 — 「일치」로 보는 폭. 0.5원 미만이면 반올림 잔차다.
 MATCH_EPSILON = Decimal("0.5")
+
+#: ★상품명에서 «구성»을 읽는 신호 (적대 리뷰 2026-09-02 P1-1).
+#:   「N매」의 다중집합 + 구성 낱말의 유무. 상품명은 사람이 쓴 것이라 정밀하진 않지만,
+#:   **`cost_price`와 독립인 신호**라는 것이 요점이다.
+COMPOSITION_WORDS = ("후면", "힌지", "내부", "외부", "세트", "트라이")
+_SHEET_COUNT_RE = re.compile(r"(\d+)\s*매")
+
+
+def composition_signature(product_name: Optional[str]) -> tuple:
+    """상품명의 구성 지문. 같은 구성이면 같은 값이 나와야 한다."""
+    n = product_name or ""
+    return (
+        tuple(sorted(_SHEET_COUNT_RE.findall(n))),
+        tuple(w for w in COMPOSITION_WORDS if w in n),
+    )
+
 
 #: 링크 없는 SKU를 가르는 표지. `product_master.category`는 963 중 940이 NULL이라
 #: 분류에 못 쓴다(ref 119 §2-1) — 그래서 상품명의 표지를 본다. 규칙을 사유 문장에
@@ -157,6 +174,11 @@ class RecipeGroup:
     cost_price_min: Optional[Decimal]
     std_cost_inc_vat: Optional[Decimal]
     line_count: int
+    #: ★이 묶음의 SKU 상품명에서 읽은 «구성» 가짓수 (적대 리뷰 2026-09-02 P1-1).
+    #:   `cost_price_kinds`는 「현재 가격이 같은가」만 재고 「구성이 하나인가」는 못 잰다 —
+    #:   가격이 **우연히** 같은 그레인 불일치가 게이트를 통과한다. 이 필드가 그 구멍을 막는
+    #:   **가격과 독립인 두 번째 신호**다. 기본 1(신호 없음 = 안 갈림).
+    name_grain_kinds: int = 1
 
     @property
     def gap(self) -> Optional[Decimal]:
@@ -231,6 +253,30 @@ def classify_group(
             TRUTH_HELD,
             f"그레인 불일치 — 레시피는 계산값 1개인데 이 묶음의 SKU가 현재 원가를 "
             f"{group.cost_price_kinds}종 갖고 있다. 격차를 뺄셈으로 재는 것 자체가 성립하지 않는다",
+            OWNER_TRACK_A2,
+        )
+
+    if group.name_grain_kinds > 1:
+        # ★★적대 리뷰 2026-09-02 P1-1이 신설시킨 게이트.
+        #
+        #   D-CPP-66이 보류를 풀면서 든 근거는 「위 가격 게이트를 통과했으니 이 묶음의 SKU는
+        #   현재 원가가 1종이고, 따라서 한 계산값을 전건에 적용해도 안전하다」였다.
+        #   리뷰어가 그 논거를 깼다: **`cost_price_kinds`는 「가격이 같은가」만 재지
+        #   「구성이 하나인가」를 못 잰다.** 실제로는 기본/플러스/울트라가 섞였는데 아직
+        #   개별 가격이 매겨진 적이 없어 «우연히» 전건 같은 값이면 게이트를 통과하고,
+        #   그러면 플러스에 기본 값이 박힌다 — 이 계약이 없애려는 병 그 자체다.
+        #
+        #   그래서 **가격과 독립인 두 번째 신호**로 한 번 더 거른다: 상품명이 말하는 구성.
+        #   ★라이브 실측(2026-09-02, 승인 레시피 22개 전수)에서 이 조건에 걸리는 묶음은
+        #   **0개**다 — 즉 이 게이트는 지금 아무것도 안 막는다. 그런데도 두는 이유는
+        #   「한 번 확인했다」와 「구조로 막힌다」가 다르기 때문이다. 새 SKU가 붙는 순간
+        #   그 확인은 낡는다.
+        return (
+            CAUSE_GRAIN_MISMATCH,
+            TRUTH_HELD,
+            f"그레인 불일치 — 현재 원가는 1종이지만 이 묶음의 SKU 상품명이 서로 다른 구성을 "
+            f"말한다({group.name_grain_kinds}종). 가격이 «우연히» 같은 것일 수 있어 "
+            "한 계산값을 전건에 적용하지 않는다 — 레시피를 구성별로 가르는 것이 선행이다",
             OWNER_TRACK_A2,
         )
 
@@ -483,6 +529,9 @@ def truth_board(db: Session) -> dict:
             cost_price_kinds=len(distinct),
             cost_price_min=min(distinct) if distinct else None,
             std_cost_inc_vat=_dec(std.std_cost_inc_vat) if std else None,
+            name_grain_kinds=len(
+                {composition_signature(master_by_sku[x].product_name) for x in skus}
+            ) or 1,
             line_count=(
                 _breakdown_line_count(std)
                 if _breakdown_line_count(std) is not None
