@@ -491,6 +491,17 @@ def _note_for(row: _SkuRow, plan: GroupPlan) -> str:
         )
     else:
         signal_text = f"기종명 {row.signal_source}"
+    # ★★판정 SKU에 「변형 안에서 1종」을 적으면 **거짓이 된다** — 그 묶음은 실제로 2종이고,
+    #   그 SKU를 값 집합에서 뺐기 때문에 1종처럼 보였을 뿐이다. 초판(이 세션 첫 배포)이
+    #   정확히 그렇게 적었고 라이브에서 잡혔다. 적대 리뷰 1R P1-1과 **같은 병**이다 —
+    #   예외를 만들 때는 그 예외가 «근거 문장»에 닿는지까지 봐야 한다.
+    if row.internal_sku in DECIDED_BY_JINO:
+        return (
+            f"D-CPP-68 분할 — 1차 신호: {signal_text} → 변형 「{row.variant}」 / "
+            f"2차 대조: **하지 않았다** — Jino가 원가표를 정본으로 판정했다"
+            f"(2026-09-03: \"초기 원가표 단계에서는 엑셀표가 기준이야\"). "
+            f"현재 원가 {price}원은 이 변형의 다른 SKU와 다르며, 틀린 쪽은 현재 원가다"
+        )
     return (
         f"D-CPP-67 분할 — 1차 신호: {signal_text} → 변형 「{row.variant}」 / "
         f"2차 대조: 현재 원가 {price}원 (변형 안에서 1종)"

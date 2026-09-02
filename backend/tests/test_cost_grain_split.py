@@ -695,3 +695,23 @@ def test_s10fe_ultra_rule_does_not_leak_to_non_blc():
     assert GS.tablet_size_grade_with_source(name)[0] == "플러스"
     assert GS.tablet_size_grade_blc_with_source(name)[0] == "울트라"
     assert "OHI-0111" not in GS.DECIDED_BY_JINO
+
+
+def test_decided_sku_note_does_not_claim_a_cross_check_it_skipped():
+    """★판정 SKU의 근거 문장이 「변형 안에서 1종」이라 말하면 **거짓**이다.
+
+    그 묶음은 실제로 2종이고, 그 SKU를 값 집합에서 뺐기 때문에 1종처럼 보였을 뿐이다.
+    이 세션의 첫 prod 배포가 정확히 그렇게 적었고 라이브에서 잡혔다 —
+    적대 리뷰 1R P1-1(「있지도 않은 근거를 적지 않는다」)의 재발이다.
+    """
+
+    plan = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    assert plan is not None
+    decided = _row("OHI-0074", "울트라", "4572.70", source=GS.SOURCE_S10FE_ULTRA)
+    plain = _row("OTHER", "울트라", "5892.70", source=GS.SOURCE_ULTRA)
+
+    n_decided = GS._note_for(decided, plan)
+    assert "변형 안에서 1종" not in n_decided, n_decided
+    assert "하지 않았다" in n_decided and "엑셀표가 기준" in n_decided, n_decided
+    # 판정 «아닌» SKU는 구판 문장 그대로여야 한다 — 예외가 전건으로 새면 안 된다
+    assert "변형 안에서 1종" in GS._note_for(plain, plan)
