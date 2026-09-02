@@ -6710,6 +6710,13 @@ export interface CostRecipe {
    * 이미 있는 레시피도 재업로드 없이 「추정」을 말할 수 있다.
    */
   form_source: string | null;
+  /**
+   * grain의 셋째 축 — **변형** (계약 D-CPP-67).
+   *
+   * ★`""`은 「단일 그레인」이라는 **사실**이지 「모름」이 아니다. 화면은 빈 변형을
+   * **그리지 않는다** — 안 갈라진 레시피의 표시가 한 글자도 안 바뀌어야 한다.
+   */
+  variant: string;
   anomaly_flag: string | null;
   approved_at: string | null;
   match: CostRecipeMatch | null;
@@ -6717,7 +6724,75 @@ export interface CostRecipe {
   link_count: number;
   standard: CostStandard;
   picked: CostRecipePick;
-  links?: { internal_sku: string; status: string; source: string }[];
+  links?: {
+    internal_sku: string;
+    status: string;
+    source: string;
+    /** SKU가 «왜» 이 변형에 붙었나 — 분할이 남긴 귀속 근거(D-CPP-67 §2-6). */
+    note: string | null;
+  }[];
+}
+
+/** 분할 미리보기의 한 변형 행 — 계약 D-CPP-67 §0-D 표의 한 줄에 대응한다. */
+export interface CostGrainSplitVariant {
+  variant: string;
+  is_base: boolean;
+  cost_table_item: string;
+  cost_table_item_id: number | null;
+  cost_table_item_total: string | null;
+  expected_skus: number;
+  live_skus: number;
+  matches_plan: boolean;
+  recipe_id: number | null;
+  recipe_status: string | null;
+  reason: string | null;
+}
+
+export interface CostGrainSplitGroup {
+  product_name: string;
+  form_factor: string;
+  signal_kind: string;
+  base_recipe_id: number | null;
+  base_recipe_status: string | null;
+  sku_count: number;
+  variants: CostGrainSplitVariant[];
+  /** 1차 신호가 없거나 2차 대조가 어긋난 SKU — **자동으로 안 붙인다**. */
+  unassigned: {
+    internal_sku: string;
+    product_name: string | null;
+    cost_price: string | null;
+    reason: string | null;
+  }[];
+  matches_plan: boolean;
+  reason: string | null;
+}
+
+export interface CostGrainSplitPreview {
+  contract: string;
+  groups: CostGrainSplitGroup[];
+  plan_sku_total: number;
+  live_sku_total: number;
+  /** 계획표와 라이브가 전부 같은가 — 아니면 실행이 거부된다(§-1 Q3-B). */
+  safe_to_execute: boolean;
+  sentence: string;
+}
+
+export function fetchCostGrainSplitPreview(): Promise<CostGrainSplitPreview> {
+  return fetchApi("/api/cost/grain-split/preview");
+}
+
+/** 분할 실행. ★**계획을 보내지 않는다** — 변형·SKU 수·원가표 줄은 승인된 계약 §0-D에 있고,
+ *  화면이 그걸 실어 보내면 승인 대상이 요청 본문으로 옮겨 간다. */
+export function runCostGrainSplit(actor: string): Promise<{
+  created_recipes: { recipe_id: number; variant: string; form_factor: string }[];
+  moved_links: number;
+  preview_after: CostGrainSplitPreview;
+}> {
+  return fetchApi("/api/cost/grain-split", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope: "all", actor }),
+  });
 }
 
 export interface CostBoardRow {

@@ -352,6 +352,7 @@ def import_drafts(
         pin_report = _resolve_pins(db)
 
     created = updated = skipped_approved = unmatched = skipped_pinned = 0
+    skipped_split = 0
     groups = mapping.groups() if mapping is not None else {}
     report: list[dict] = []
 
@@ -394,14 +395,43 @@ def import_drafts(
             sku_count=len(skus),
         )
 
-        recipe = (
+        # ★★**분할된 묶음은 재수입이 되돌리지 않는다** (계약 D-CPP-67 §4 S4 셋째).
+        #
+        #   왜 `.first()`로는 안 되나: `variant` 축이 생긴 뒤로 (상품명, 폼팩터) 하나에
+        #   레시피가 **여럿**일 수 있다. `.first()`는 그중 아무거나 집어 오므로
+        #   ①어느 변형이 걸리는지가 정렬 운에 달리고 ②변형들만 있고 `variant=""`가 없는
+        #   묶음에서는 「없다」로 읽혀 **기본 레시피를 새로 만들고 SKU 링크를 도로 붙인다.**
+        #   그러면 갈라 놓은 92건이 한 번의 매핑 재업로드로 원래대로 돌아간다.
+        #   그래서 묶음 전체를 보고, 갈라진 묶음이면 **손대지 않고 자백한다.**
+        group = (
             db.query(CostRecipe)
             .filter(
                 CostRecipe.product_name == product_name,
                 CostRecipe.form_factor == form_factor,
             )
-            .first()
+            .order_by(CostRecipe.variant)
+            .all()
         )
+        split_group = len(group) > 1 or (len(group) == 1 and group[0].variant != "")
+        if split_group:
+            skipped_split += 1
+            report.append(
+                {
+                    "product_name": product_name,
+                    "form_factor": form_factor,
+                    "action": "skipped_split",
+                    "reason": (
+                        "구성·크기별로 갈라진 묶음이다(D-CPP-67) — 재수입이 분할을 되돌리지 "
+                        f"않는다. 변형 {len(group)}개: "
+                        + ", ".join(r.variant or "(기본)" for r in group)
+                    ),
+                    "sku_count": len(skus),
+                    "variants": [r.variant for r in group],
+                }
+            )
+            continue
+
+        recipe = group[0] if group else None
 
         if recipe is not None and recipe.status == "approved":
             skipped_approved += 1
@@ -547,6 +577,9 @@ def import_drafts(
         "recipes_updated": updated,
         "skipped_approved": skipped_approved,
         "skipped_pinned": skipped_pinned,
+        # ★분할된 묶음을 몇 개 건너뛰었나 (계약 D-CPP-67) — 0으로 세지 않고 «싣는다».
+        #   화면이 「왜 이 상품명이 보고서에 없나」를 물을 수 있어야 한다.
+        "skipped_split": skipped_split,
         "unmatched": unmatched,
         "materials_seen": len(materials),
         # ★참고값 갱신·모순 보류 리포트 (D-CPP-62 S1).
@@ -1740,6 +1773,9 @@ def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False)
         "id": recipe.id,
         "product_name": recipe.product_name,
         "form_factor": recipe.form_factor,
+        # ★grain의 셋째 축 (계약 D-CPP-67). 빈 문자열 = 「단일 그레인」이고 화면은 그걸
+        #   그리지 않는다 — 안 갈라진 레시피의 표시가 한 글자도 안 바뀌어야 한다(§4 S1).
+        "variant": recipe.variant,
         "status": recipe.status,
         "source": recipe.source,
         "recipe_kind": recipe.recipe_kind,
@@ -1762,7 +1798,14 @@ def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False)
     }
     if with_links:
         payload["links"] = [
-            {"internal_sku": l.internal_sku, "status": l.status, "source": l.source}
+            {
+                "internal_sku": l.internal_sku,
+                "status": l.status,
+                "source": l.source,
+                # ★귀속 근거 — 분할이 SKU를 옮길 때 남긴 문장(계약 D-CPP-67 §2-6).
+                #   payload에 없으면 근거가 DB에만 살아 화면에서 감사할 수 없다.
+                "note": l.note,
+            }
             for l in db.query(CostRecipeLink)
             .filter(CostRecipeLink.recipe_id == recipe.id)
             .order_by(CostRecipeLink.internal_sku)
@@ -1775,7 +1818,9 @@ def list_recipes(db: Session, *, form_factor: Optional[str] = None) -> list[dict
     q = _recipes_query(db)
     if form_factor:
         q = q.filter(CostRecipe.form_factor == form_factor)
-    rows = q.order_by(CostRecipe.product_name, CostRecipe.form_factor).all()
+    rows = q.order_by(
+        CostRecipe.product_name, CostRecipe.form_factor, CostRecipe.variant
+    ).all()
     return [recipe_payload(db, r) for r in rows]
 
 

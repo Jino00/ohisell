@@ -365,6 +365,8 @@ const RECIPE: CostRecipe = {
   form_source: "rule",
   status: "approved",
   source: "excel",
+  // 분할 «전» 레시피 = 단일 그레인. 빈 문자열은 사실이지 자리표시자가 아니다(D-CPP-67).
+  variant: "",
   recipe_kind: "assembly",
   anomaly_flag: null,
   approved_at: "2026-08-23T04:00:00",
@@ -440,6 +442,8 @@ const RECIPE_FLIP: CostRecipe = {
   form_source: "rule",
   status: "draft",
   source: "excel",
+  // 분할 «전» 레시피 = 단일 그레인. 빈 문자열은 사실이지 자리표시자가 아니다(D-CPP-67).
+  variant: "",
   recipe_kind: "assembly",
   anomaly_flag: null,
   approved_at: null,
@@ -459,6 +463,25 @@ const RECIPE_FLIP: CostRecipe = {
   },
 };
 
+// ★D-CPP-67 — 갈라진 레시피. 「변형 라벨이 목록에 선다」(§4 S1 둘째)를 재는 유일한 재료다.
+//   같은 상품명·폼팩터 안에서 구성이 갈리는 묶음이라, 라벨이 없으면 이 행과 위 `RECIPE_FLIP`이
+//   목록에서 **똑같이 보인다** — 그게 이 계약이 없애려는 상태 그 자체다.
+const RECIPE_VARIANT: CostRecipe = {
+  ...RECIPE_FLIP,
+  id: 108,
+  variant: "외3+내3+후2",
+  status: "approved",
+  link_count: 6,
+  links: [
+    {
+      internal_sku: "OHI-FL042",
+      status: "approved",
+      source: "excel",
+      note: "D-CPP-67 분할 — 1차 신호: 구성 지문 매수['2','3','3','3']·낱말['후면','내부','외부'] → 변형 「외3+내3+후2」 / 2차 대조: 현재 원가 4,483.00원 (변형 안에서 1종)",
+    },
+  ],
+};
+
 const RECIPE_OTHER_PRODUCT: CostRecipe = {
   picked: NOT_LOOKED_AT,
   id: 9,
@@ -467,6 +490,8 @@ const RECIPE_OTHER_PRODUCT: CostRecipe = {
   form_source: "rule",
   status: "draft",
   source: "excel",
+  // 분할 «전» 레시피 = 단일 그레인. 빈 문자열은 사실이지 자리표시자가 아니다(D-CPP-67).
+  variant: "",
   recipe_kind: "assembly",
   anomaly_flag: null,
   approved_at: null,
@@ -497,6 +522,8 @@ const RECIPE_NULL_FORM: CostRecipe = {
   form_source: "rule",
   status: "draft",
   source: "excel",
+  // 분할 «전» 레시피 = 단일 그레인. 빈 문자열은 사실이지 자리표시자가 아니다(D-CPP-67).
+  variant: "",
   recipe_kind: "assembly",
   anomaly_flag: null,
   approved_at: null,
@@ -748,7 +775,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCostLedgerMaterialLines: vi.fn(async () => ({ items: [LEDGER_ROW] })),
     fetchCostSettings: vi.fn(async () => ({ items: SETTINGS })),
     fetchCostRecipes: vi.fn(async () => ({
-      items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+      items: [RECIPE, RECIPE_FLIP, RECIPE_VARIANT, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
     })),
     fetchCostBoard: vi.fn(async () => BOARD),
     // ★D-CPP-60 — `load()`가 이 넷을 항상 부른다(탭과 무관). 오버라이드가 없으면 `actual`의
@@ -770,6 +797,15 @@ vi.mock("../lib/api", async (importOriginal) => {
     //   것인지 «끊겨서» 실패한 것인지 못 가른다(위 truth-board와 같은 함정).
     fetchCostCutoverPreview: vi.fn(async () => CUTOVER_PREVIEW),
     runCostCutover: vi.fn(async () => CUTOVER_RESULT),
+    // ★D-CPP-67 — `load()`가 분할 미리보기도 부른다. 없으면 전역 fetchSpy의 `{}`가 패널로
+    //   흘러 「형식이 다르다」 분기로 빠지고, 아래 배선 테스트가 «없어서» 실패한 것인지
+    //   «끊겨서» 실패한 것인지 못 가른다(위 컷오버와 같은 함정).
+    fetchCostGrainSplitPreview: vi.fn(async () => GRAIN_SPLIT_PREVIEW),
+    runCostGrainSplit: vi.fn(async () => ({
+      created_recipes: [{ recipe_id: 99, variant: "외3", form_factor: "fold" }],
+      moved_links: 21,
+      preview_after: GRAIN_SPLIT_PREVIEW,
+    })),
     fetchCostAutoRefreshRuns: vi.fn(async () => ({ items: [] })),
     fetchCostAutoRefreshQueue: vi.fn(async () => ({ items: [] })),
     runCostAutoRefreshNow: vi.fn(async () => ({
@@ -884,6 +920,37 @@ const CUTOVER_RESULT = {
   gap_closed: "5158.6",
   changed: [],
   skipped: [],
+};
+
+// ★D-CPP-67 — 그레인 분할 픽스처. 계약 §0-D 표의 한 묶음(폴드)만 담는다 —
+//   이 파일이 재는 것은 «판정»이 아니라 «패널이 화면에 도달하는가»다.
+const GRAIN_SPLIT_PREVIEW = {
+  contract: "D-CPP-67",
+  plan_sku_total: 92,
+  live_sku_total: 92,
+  safe_to_execute: true,
+  sentence: "계획표 12행과 라이브가 전부 같다 — 실행할 수 있다",
+  groups: [
+    {
+      product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
+      form_factor: "fold",
+      signal_kind: "composition",
+      base_recipe_id: 70,
+      base_recipe_status: "approved",
+      sku_count: 30,
+      matches_plan: true,
+      reason: null,
+      unassigned: [],
+      variants: [
+        {
+          variant: "외3", is_base: false, cost_table_item: "지문방지_외부3매",
+          cost_table_item_id: 36, cost_table_item_total: "2666.40",
+          expected_skus: 9, live_skus: 9, matches_plan: true,
+          recipe_id: null, recipe_status: null, reason: null,
+        },
+      ],
+    },
+  ],
 };
 
 // ★D-CPP-64 S2 — 정본 판별 픽스처. 세 유형을 한 벌에 담는다(계산값·보류·정본 없음):
@@ -1022,6 +1089,61 @@ describe("★정본 판별이 사람에게 닿는 경로 (계약 D-CPP-64 §4 S2
     await openTruthTab();
     expect(screen.getByTestId("cost-truth-census-held").textContent).toContain("보류 1");
     expect(screen.getByTestId("cost-truth-caveats").textContent).toContain("읽기 전용");
+  });
+
+  it("★분할 패널이 «정본 판별» 탭에 실제로 마운트된다 (D-CPP-67 §4 S1)", async () => {
+    // ★`costGrainSplitSurface.test.tsx`는 패널을 props로 직접 렌더하므로 **호출부를 못
+    //   잰다** — `<CostGrainSplitPanel …/>` 한 줄을 지워도 그 파일은 초록이다. 여기서만
+    //   죽는 변이: ①마운트 제거 ②`load()`의 `fetchCostGrainSplitPreview()` 제거
+    //   ③`setGrainSplit(gs)` 제거 ④`data={grainSplit}`를 `null`로 교체.
+    await openTruthTab();
+    const panel = await screen.findByTestId("cost-grain-split-panel");
+    // 「패널이 있다」만 보면 빈 리터럴 변이가 산다 — API가 준 내용까지 단언한다.
+    expect(within(panel).getByTestId("cost-grain-split-live-fold-외3").textContent).toBe("9");
+    expect(within(panel).getByTestId("cost-grain-split-live-total").textContent).toBe("92");
+    expect(panel.textContent).toContain("지문방지_외부3매");
+  });
+
+  it("★분할 버튼을 누르면 실제로 실행 API가 불리고 결과가 화면에 선다", async () => {
+    const api = await import("../lib/api");
+    await openTruthTab();
+    await screen.findByTestId("cost-grain-split-panel");
+    fireEvent.click(screen.getByTestId("cost-grain-split-run"));
+    await waitFor(() => expect(api.runCostGrainSplit).toHaveBeenCalledTimes(1));
+    // ★결과를 «화면»에 세운다 — 성공했는데 조용하면 사람이 한 번 더 누른다.
+    const done = await screen.findByTestId("cost-grain-split-result");
+    expect(done.textContent).toContain("1개");
+    expect(done.textContent).toContain("21건");
+  });
+
+  it("★변형 라벨이 «레시피 목록»에 선다 — 안 갈라진 행의 표시는 한 글자도 안 바뀐다", async () => {
+    // ★계약 §4 S1 둘째. 라벨이 없으면 갈라진 레시피와 안 갈라진 레시피가 목록에서
+    //   **똑같이 보인다** — 이 계약이 없애려는 상태 그 자체다. 그리고 「빈 변형은 안 그린다」의
+    //   후반(안 갈라진 행)까지 같이 재야 라벨을 «전건에» 그리는 변이가 죽는다.
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "레시피" }));
+    const split = await screen.findByTestId("recipe-row-108");
+    expect(within(split).getByTestId("recipe-row-variant-108").textContent).toContain("외3+내3+후2");
+    // 안 갈라진 레시피(variant "")엔 배지가 아예 없다.
+    expect(screen.queryByTestId("recipe-row-variant-8")).toBeNull();
+  });
+
+  it("★분할 실행 뒤 화면이 «다시 읽는다» — 안 그러면 옛 미리보기가 남아 한 번 더 누른다", async () => {
+    const api = await import("../lib/api");
+    await openTruthTab();
+    await screen.findByTestId("cost-grain-split-panel");
+    const before = (api.fetchCostGrainSplitPreview as unknown as { mock: { calls: unknown[] } })
+      .mock.calls.length;
+    fireEvent.click(screen.getByTestId("cost-grain-split-run"));
+    await waitFor(() => expect(api.runCostGrainSplit).toHaveBeenCalled());
+    // ★성공 «후» 재조회가 없으면 화면은 실행 전 숫자를 그대로 들고 있다.
+    await waitFor(() =>
+      expect(
+        (api.fetchCostGrainSplitPreview as unknown as { mock: { calls: unknown[] } }).mock.calls
+          .length,
+      ).toBeGreaterThan(before),
+    );
   });
 
   it("★다른 탭에선 이 표가 없다 — 항상 켜져 있으면 탭이 아니다", async () => {
@@ -1448,8 +1570,10 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         target: { value: "오하이 빛반사, 지문방지 매트 필름 3매" },
       });
       const summary = await screen.findByTestId("recipe-filter-summary");
-      // 전체 레시피 4건(RECIPE_NULL_FORM 포함) 중 그 제품 2건(bar·flip).
-      expect(summary.textContent).toContain("4건 중 2건 표시 중");
+      // 전체 레시피 5건(RECIPE_NULL_FORM 포함) 중 그 제품 3건(bar·flip·flip 변형).
+      // ★2026-09-02(D-CPP-67): 같은 상품명·폼팩터의 **변형** 레시피 1건이 픽스처에 늘어
+      //   4→5 / 2→3이 됐다. 필터 동작이 바뀐 것이 아니라 모집단이 늘어난 것이다.
+      expect(summary.textContent).toContain("5건 중 3건 표시 중");
     });
 
     it("레시피 탭 초기화를 누르면 필터가 전부 풀린다", async () => {
@@ -1707,7 +1831,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
       // ★다음 테스트로 오버라이드가 새지 않게 기본 목록으로 되돌린다 — 위와 같은 이유로
       // mockResolvedValue도 명시적으로 되돌려야 한다.
       vi.mocked(fetchCostRecipes).mockResolvedValue({
-        items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+        items: [RECIPE, RECIPE_FLIP, RECIPE_VARIANT, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
       });
     });
 
@@ -3128,7 +3252,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         expect(within(panel).getByText("단가 없음")).toBeTruthy();
       } finally {
         vi.mocked(fetchCostRecipes).mockResolvedValue({
-          items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+          items: [RECIPE, RECIPE_FLIP, RECIPE_VARIANT, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
         });
       }
     });
@@ -3155,7 +3279,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         expect(within(panel).queryByText("등록가")).toBeNull();
       } finally {
         vi.mocked(fetchCostRecipes).mockResolvedValue({
-          items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+          items: [RECIPE, RECIPE_FLIP, RECIPE_VARIANT, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
         });
       }
     });
@@ -3188,7 +3312,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
         expect(placeholder.textContent).not.toBe("왼쪽에서 레시피를 고른다.");
       } finally {
         vi.mocked(fetchCostRecipes).mockResolvedValue({
-          items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+          items: [RECIPE, RECIPE_FLIP, RECIPE_VARIANT, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
         });
       }
     });
@@ -3270,7 +3394,7 @@ describe("★「💰 원가」가 사람에게 닿는 경로 — 라우트·메�
   describe("★결함 수리 — 레시피 탭 배지가 App 경로로 닿는다 (적대 리뷰 1R P1-4)", () => {
     afterEach(() => {
       vi.mocked(fetchCostRecipes).mockResolvedValue({
-        items: [RECIPE, RECIPE_FLIP, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
+        items: [RECIPE, RECIPE_FLIP, RECIPE_VARIANT, RECIPE_OTHER_PRODUCT, RECIPE_NULL_FORM],
       });
     });
 

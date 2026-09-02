@@ -12,6 +12,7 @@
 //   `null`은 「—」이고, 그 자리에 0원을 그리면 미입력이 확정값으로 둔갑한다.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import type { CostGrainSplitPreview } from "../lib/api";
 
 import {
   addCostManualPrice,
@@ -67,6 +68,8 @@ import {
   type CostCutoverPreview,
   type CostCutoverResult,
   type CostTruthRow,
+  fetchCostGrainSplitPreview,
+  runCostGrainSplit,
 } from "../lib/api";
 import {
   costPageWidthClass,
@@ -546,6 +549,165 @@ const TRUTH_BADGE: Record<string, string> = {
  * ★**누르기 전엔 한 건도 안 움직인다.** 이 패널은 자동으로 아무것도 실행하지 않는다
  *   (계약 §4 S3 셋째 항목의 화면 쪽 절반).
  */
+/**
+ * 그레인 분할 패널 — 컷오버 문 «앞»에 서는 문 (계약 D-CPP-67 §4 S1·S2).
+ *
+ * ★왜 이 탭인가: 이 패널이 없애려는 것이 바로 옆 census의 「보류」 칩이다. 판별한 자리에서
+ *   그 보류의 «이유»와 «푸는 법»이 같이 보여야 한다.
+ * ★**계획과 다른 칸을 숨기지 않는다.** `matches_plan:false` 행과 `unassigned`를 같이 그린다 —
+ *   빼면 화면이 「이대로 누르면 끝」으로 읽히고, 그 순간 이 패널은 승인의 대리물이 아니라
+ *   승인의 «가림막»이 된다(계약 §-1 Q3-B가 요구하는 것은 정확히 그 반대다).
+ */
+export function CostGrainSplitPanel({
+  data,
+  busy,
+  error,
+  result,
+  onRun,
+}: {
+  /** null = 아직 안 불렀다(로딩). 「대상 0건」과 다른 사실이다. */
+  data: CostGrainSplitPreview | null;
+  busy: boolean;
+  error: string | null;
+  result: string | null;
+  onRun: () => void;
+}) {
+  if (data === null) {
+    return (
+      <div className="mt-4 text-xs text-gray-400" data-testid="cost-grain-split-loading">
+        그레인 분할 대상을 불러오는 중…
+      </div>
+    );
+  }
+  // 응답 형식이 깨져도 화면 전체가 하얘지지 않는다 — 옆 패널과 같은 규율이다.
+  const groups = Array.isArray(data.groups) ? data.groups : [];
+  if (groups.length === 0) {
+    return (
+      <section className="mt-4 border rounded-md p-3" data-testid="cost-grain-split-panel">
+        <div className="text-xs text-gray-500">분할 계획이 비었다 — 응답 형식을 확인할 것.</div>
+      </section>
+    );
+  }
+  const done = groups.every((g) => g.variants.every((v) => v.recipe_id !== null));
+
+  return (
+    <section className="mt-4 border rounded-md p-3" data-testid="cost-grain-split-panel">
+      <div className="flex items-start justify-between gap-2 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800">
+            그레인 분할 — 한 레시피에 섞인 구성·크기를 가른다
+          </h3>
+          <div className="text-xs text-gray-500 mt-0.5" data-testid="cost-grain-split-sentence">
+            {data.sentence} · 계획 {data.plan_sku_total}건 / 라이브{" "}
+            <span data-testid="cost-grain-split-live-total">{data.live_sku_total}</span>건
+          </div>
+        </div>
+        <button
+          type="button"
+          className="text-xs px-2 py-1 rounded border bg-violet-600 text-white disabled:opacity-40"
+          disabled={busy || !data.safe_to_execute || done}
+          onClick={onRun}
+          data-testid="cost-grain-split-run"
+        >
+          {busy ? "분할 중…" : done ? "이미 갈라져 있다" : "계획대로 분할"}
+        </button>
+      </div>
+
+      {!data.safe_to_execute ? (
+        <div
+          className="mt-2 text-xs rounded border border-amber-300 bg-amber-50 p-2 text-amber-800"
+          data-testid="cost-grain-split-blocked"
+        >
+          계획표와 다른 칸이 있어 실행이 막혀 있다 — 아래 다른 칸을 먼저 볼 것. 계획을 라이브에
+          맞춰 고치는 것이 아니라, 라이브가 왜 다른지를 묻는 자리다.
+        </div>
+      ) : null}
+      {error ? (
+        <div className="mt-2 text-xs text-red-600" data-testid="cost-grain-split-error">
+          {error}
+        </div>
+      ) : null}
+      {result ? (
+        <div className="mt-2 text-xs text-green-700" data-testid="cost-grain-split-result">
+          {result}
+        </div>
+      ) : null}
+
+      <div className="mt-2 space-y-3">
+        {groups.map((g) => (
+          <div key={`${g.product_name}-${g.form_factor}`} className="border rounded p-2">
+            <div className="text-xs font-medium text-gray-700">
+              {g.product_name}{" "}
+              <span className="text-gray-500">
+                · {formFactorLabel(g.form_factor)} · SKU {g.sku_count}건 ·{" "}
+                {g.signal_kind === "composition" ? "구성이 가른다" : "크기가 가른다"}
+              </span>
+            </div>
+            <table className="mt-1 w-full text-xs">
+              <thead className="text-gray-500">
+                <tr>
+                  <th className="text-left py-0.5 pr-2">변형</th>
+                  <th className="text-left py-0.5 pr-2">원가표 줄</th>
+                  <th className="text-right py-0.5 pr-2">제품원가</th>
+                  <th className="text-right py-0.5 pr-2">계획</th>
+                  <th className="text-right py-0.5 pr-2">라이브</th>
+                  <th className="text-left py-0.5">상태</th>
+                </tr>
+              </thead>
+              <tbody>
+                {g.variants.map((v) => (
+                  <tr
+                    key={v.variant}
+                    className={v.matches_plan ? "" : "bg-amber-50"}
+                    data-testid={`cost-grain-split-variant-${g.form_factor}-${v.variant}`}
+                  >
+                    <td className="py-0.5 pr-2">
+                      {v.variant}
+                      {v.is_base ? <span className="text-gray-400"> (기존)</span> : null}
+                    </td>
+                    <td className="py-0.5 pr-2 text-gray-600">{v.cost_table_item}</td>
+                    <td className="py-0.5 pr-2 text-right">
+                      {formatCostWon(v.cost_table_item_total)}
+                    </td>
+                    <td className="py-0.5 pr-2 text-right">{v.expected_skus}</td>
+                    <td
+                      className="py-0.5 pr-2 text-right"
+                      data-testid={`cost-grain-split-live-${g.form_factor}-${v.variant}`}
+                    >
+                      {v.live_skus}
+                    </td>
+                    <td className="py-0.5 text-gray-600">
+                      {v.matches_plan ? (v.recipe_id ? "레시피 있음" : "만들 것") : v.reason}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {g.unassigned.length > 0 ? (
+              <div
+                className="mt-1 text-xs text-amber-800"
+                data-testid={`cost-grain-split-unassigned-${g.form_factor}`}
+              >
+                <div className="font-medium">
+                  자동으로 못 붙이는 SKU {g.unassigned.length}건 — 사람이 봐야 한다
+                </div>
+                <ul className="mt-0.5 space-y-0.5 max-h-40 overflow-y-auto">
+                  {g.unassigned.map((u) => (
+                    <li key={u.internal_sku}>
+                      <span className="font-mono">{u.internal_sku}</span>{" "}
+                      {u.product_name ? `· ${u.product_name.slice(0, 40)}` : ""} — {u.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function CostCutoverPanel({
   data,
   result,
@@ -2366,7 +2528,19 @@ export function RecipeList({
                 {r.product_name}
               </span>
               <span className="text-xs text-gray-500 shrink-0">
+                {/* ★변형 라벨 (계약 D-CPP-67 §4 S1 둘째). **빈 변형은 그리지 않는다** —
+                    안 갈라진 레시피의 표시가 한 글자도 안 바뀌어야 한다. 갈라진 것만
+                    「폴드 · 외3+내3+후2」처럼 자기 구성을 말한다. */}
                 {formFactorLabel(r.form_factor)}
+                {r.variant ? (
+                  <span
+                    className="ml-1 px-1 rounded bg-violet-50 text-violet-700 border border-violet-200"
+                    data-testid={`recipe-row-variant-${r.id}`}
+                    title="한 상품명·폼팩터 안에서 구성(또는 크기)이 갈리는 묶음이다 — D-CPP-67"
+                  >
+                    {r.variant}
+                  </span>
+                ) : null}
               </span>
             </div>
             <div className="mt-1 flex items-center gap-2 flex-wrap">
@@ -2929,12 +3103,42 @@ export function RecipeDetail({
         <div>
           <h2 className="text-sm font-semibold text-gray-800">{recipe.product_name}</h2>
           <div className="text-xs text-gray-500 mt-0.5">
-            폼팩터 {formFactorLabel(recipe.form_factor)} · 구성 {recipe.line_count}종 · 링크된
-            SKU {recipe.link_count}건
+            폼팩터 {formFactorLabel(recipe.form_factor)}
+            {recipe.variant ? ` · 변형 ${recipe.variant}` : ""} · 구성 {recipe.line_count}종 ·
+            링크된 SKU {recipe.link_count}건
           </div>
         </div>
         <RecipeStatusBadge recipe={recipe} />
       </div>
+
+      {recipe.links && recipe.links.some((l) => l.note) ? (
+        <div
+          className="mt-3 text-xs border rounded p-2"
+          data-testid="recipe-link-attribution"
+        >
+          {/* ★★귀속 근거가 «화면»에 닿는 유일한 자리 (계약 D-CPP-67 §4 S1 넷째).
+              분할이 SKU를 옮기며 `note`에 「1차 신호 → 변형 / 2차 대조」를 남기는데,
+              payload에만 있고 화면이 안 그리면 「왜 이 SKU가 이 변형인가」를 감사할 길이
+              없다 — 이 저장소가 여덟 번 밟은 「값은 맞는데 사람이 못 본다」 그 자리다.
+              ★근거가 **있는 링크만** 그린다. 분할과 무관한 레시피에 빈 절이 서면 안 된다. */}
+          <div className="font-medium text-gray-600">
+            변형 귀속 근거 — 이 SKU들이 «왜» 이 레시피에 붙었나
+          </div>
+          <ul className="mt-1 space-y-0.5 max-h-48 overflow-y-auto">
+            {recipe.links
+              .filter((l) => l.note)
+              .map((l) => (
+                <li
+                  key={l.internal_sku}
+                  className="text-gray-600"
+                  data-testid={`recipe-link-note-${l.internal_sku}`}
+                >
+                  <span className="font-mono">{l.internal_sku}</span> — {l.note}
+                </li>
+              ))}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="mt-3 text-xs bg-gray-50 border rounded p-2 text-gray-700">
         <div className="font-medium text-gray-600">매칭 근거 (제안이지 확정이 아니다)</div>
@@ -3183,6 +3387,12 @@ export default function CostPage() {
   const [priceHistory, setPriceHistory] = useState<CostPriceHistoryList | null>(null);
   const [truthBoard, setTruthBoard] = useState<CostTruthBoard | null>(null);
   const [cutoverPreview, setCutoverPreview] = useState<CostCutoverPreview | null>(null);
+  // ── 그레인 분할 (계약 D-CPP-67) ────────────────────────────────────────
+  //   ★null = 아직 안 불렀다. 「대상 0건」과 다른 사실이라 패널이 둘을 갈라 그린다.
+  const [grainSplit, setGrainSplit] = useState<CostGrainSplitPreview | null>(null);
+  const [grainSplitBusy, setGrainSplitBusy] = useState(false);
+  const [grainSplitErr, setGrainSplitErr] = useState<string | null>(null);
+  const [grainSplitResult, setGrainSplitResult] = useState<string | null>(null);
   /** 마지막 컷오버 결과 — 「몇 건 바뀌었나」를 화면이 말한다. null = 아직 한 번도 안 눌렀다. */
   const [cutoverResult, setCutoverResult] = useState<CostCutoverResult | null>(null);
   const [cutoverBusy, setCutoverBusy] = useState<string | null>(null);
@@ -3407,7 +3617,7 @@ export default function CostPage() {
 
   const load = useCallback(async () => {
     try {
-      const [m, l, s, r, b, sh, ar, aq, ct, ph, tb, cp] = await Promise.all([
+      const [m, l, s, r, b, sh, ar, aq, ct, ph, tb, cp, gs] = await Promise.all([
         fetchCostMaterials(),
         fetchCostLedgerMaterialLines(),
         fetchCostSettings(),
@@ -3420,6 +3630,7 @@ export default function CostPage() {
         fetchCostPriceHistory({ limit: 100 }),
         fetchCostTruthBoard(),
         fetchCostCutoverPreview(),
+        fetchCostGrainSplitPreview(),
       ]);
       setMaterials(m.items);
       setLedgerLines(l.items);
@@ -3431,6 +3642,7 @@ export default function CostPage() {
       setPriceHistory(ph);
       setTruthBoard(tb);
       setCutoverPreview(cp);
+      setGrainSplit(gs);
       setAutoRefreshRuns(ar.items);
       setAutoRefreshQueue(aq.items);
       // ★부자재 선택도 여기서 건드리지 않는다(2026-08-23 N5) — 부자재 탭에도 필터가
@@ -3473,6 +3685,30 @@ export default function CostPage() {
     },
     [load],
   );
+
+  /**
+   * 분할 실행 (계약 D-CPP-67 §-1 Q3-B).
+   *
+   * ★**실행 뒤 반드시 `load()`** — 안 부르면 화면이 옛 미리보기를 그대로 들고 있어 사람이
+   *   「안 됐다」고 읽고 한 번 더 누른다. 옆 컷오버 콜백이 같은 이유로 같은 규율을 쓴다.
+   * ★실패를 삼키지 않는다 — 409(계획과 다름)가 조용하면 「됐다」로 읽힌다.
+   */
+  const runGrainSplit = useCallback(async () => {
+    setGrainSplitBusy(true);
+    setGrainSplitErr(null);
+    setGrainSplitResult(null);
+    try {
+      const res = await runCostGrainSplit("jino");
+      setGrainSplitResult(
+        `변형 레시피 ${res.created_recipes.length}개 신설 · SKU ${res.moved_links}건 이동`,
+      );
+      await load();
+    } catch (e) {
+      setGrainSplitErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrainSplitBusy(false);
+    }
+  }, [load]);
 
   // ★레시피와 같은 규율: 오른쪽 단가 이력 패널은 **필터된 목록 안에서만** 종을 찾는다.
   //   `materials`(전체 129종)에서 찾으면 필터 밖 종이 그대로 패널에 남아, 사람은 목록에
@@ -4361,6 +4597,15 @@ export default function CostPage() {
         <>
           {/* ★컷오버는 판별 «위»에 둔다 — 판별표는 963행이라 아래에 두면 스크롤 끝에 묻힌다.
               「정본이 무엇인가」를 본 자리에서 바로 갈아타는 것이 계약 §4 S3의 동선이다. */}
+          {/* ★분할은 컷오버 «앞»에 둔다 — 92건은 갈라지기 «전»엔 컷오버 대상이 될 수
+              없다(맞출 정본이 하나뿐이라 그렇다). 순서가 곧 설명이다. */}
+          <CostGrainSplitPanel
+            data={grainSplit}
+            busy={grainSplitBusy}
+            error={grainSplitErr}
+            result={grainSplitResult}
+            onRun={runGrainSplit}
+          />
           <CostCutoverPanel
             data={cutoverPreview}
             result={cutoverResult}

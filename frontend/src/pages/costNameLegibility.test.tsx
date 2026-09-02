@@ -207,6 +207,8 @@ const RECIPE: CostRecipe = {
   form_factor: "flip",
   status: "approved",
   source: "excel",
+  // 분할 «전» 레시피 = 단일 그레인. 빈 문자열은 사실이지 자리표시자가 아니다(D-CPP-67).
+  variant: "",
   recipe_kind: "assembly",
   form_source: "rule",
   anomaly_flag: null,

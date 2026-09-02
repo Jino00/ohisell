@@ -491,8 +491,19 @@ def truth_board(db: Session) -> dict:
             r = recipes.get(l.recipe_id)
             if r is None or r.status != "approved":
                 continue
-            if l.recipe_id not in standards:
-                continue
+            # ★★계산값이 «없는» 승인 레시피도 묶음에 싣는다 (D-CPP-67에서 고침).
+            #
+            #   종전엔 `l.recipe_id not in standards`면 여기서 버렸다. 그러면 그 SKU는
+            #   아래 `grounded_set`에도 안 들어가 **「레시피에 연결된 적이 없다」**로
+            #   분류된다 — 링크가 멀쩡히 있는데 화면이 거짓을 말한다. 그리고 그 거짓 탓에
+            #   바로 아래 `classify_group`의 `CAUSE_NO_STANDARD`(「승인된 레시피인데
+            #   계산값이 없다 — 재계산이 선행이다」) 분기가 **호출부에 의해 도달 불가**였다.
+            #   분기를 새로 만들지 않고 «닿게만» 한다(D-CPP-67 §2-3 · §3 금지선).
+            #
+            #   ⚠️prod 실측(2026-09-02): 승인 22개 전건이 계산값을 갖고 있어 오늘 이 변경의
+            #   행 단위 효과는 **0건**이다. 그런데도 고치는 이유는 D-CPP-67이 새 레시피를
+            #   세우기 때문이다 — 부자재 종에 단가가 없으면 계산값이 안 서고, 그 순간
+            #   방금 옮긴 SKU가 「연결된 적이 없다」고 말하게 된다.
             grounded_skus.setdefault(l.recipe_id, []).append(sku)
             break
 
