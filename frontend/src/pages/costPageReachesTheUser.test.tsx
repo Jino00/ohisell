@@ -35,6 +35,12 @@ import type {
 //   «자신»을 vi.fn()으로 잡아야 한다(아래 vi.mock 팩토리에서 오버라이드).
 //   fetchCostRecipes도 테스트별로 응답을 바꿔치기하려고 함께 들여온다.
 import { approveCostRecipe, fetchCostRecipes, unapproveCostRecipe } from "../lib/api";
+// ★2026-09-02 적대 리뷰 1R P1-1·2·3용 — 컷오버는 «패널 마운트»와 «CostPage의 runCutover
+//   콜백»이 둘 다 실행돼야 사람에게 닿는다. 순수 컴포넌트 테스트
+//   (`costCutoverSurface.test.tsx`)는 onRun을 vi.fn()으로 갈아끼우므로 그 콜백 «본체»를
+//   한 번도 안 밟는다 — 호출부·`await load()`·catch 블록을 통째로 지워도 초록이었다.
+//   그 셋을 여기서 잡으려면 이 둘을 vi.fn()으로 들여와야 한다.
+import { fetchCostCutoverPreview, fetchCostTruthBoard, runCostCutover } from "../lib/api";
 // ★2R(적대 리뷰) P1-1·P1-2용 — 부자재 탭의 「+ 종 추가」·「승인」·「+ 단가 입력·수정」이
 //   실제로 그 id·이름으로 백엔드를 부르는지 재려면 이 셋도 vi.fn()으로 잡아야 한다
 //   (위 approveCostRecipe와 같은 사정 — 아래 vi.mock 팩토리에서 오버라이드).
@@ -759,6 +765,11 @@ vi.mock("../lib/api", async (importOriginal) => {
     //   패널로 흘러 「형식이 다르다」 분기로 빠지고, 아래 배선 테스트가 «없어서» 실패한
     //   것인지 «끊겨서» 실패한 것인지 못 가른다.
     fetchCostTruthBoard: vi.fn(async () => TRUTH_BOARD),
+    // ★D-CPP-64 S3 — `load()`가 컷오버 미리보기도 부른다. 없으면 전역 fetchSpy의 `{}`가
+    //   패널로 흘러 「형식이 다르다」 분기로 빠지고, 아래 배선 테스트가 «없어서» 실패한
+    //   것인지 «끊겨서» 실패한 것인지 못 가른다(위 truth-board와 같은 함정).
+    fetchCostCutoverPreview: vi.fn(async () => CUTOVER_PREVIEW),
+    runCostCutover: vi.fn(async () => CUTOVER_RESULT),
     fetchCostAutoRefreshRuns: vi.fn(async () => ({ items: [] })),
     fetchCostAutoRefreshQueue: vi.fn(async () => ({ items: [] })),
     runCostAutoRefreshNow: vi.fn(async () => ({
@@ -816,6 +827,64 @@ const fetchSpy = vi.fn(async () => ({
   text: async () => "{}",
   json: async () => ({}),
 })) as unknown as typeof fetch;
+
+// ★D-CPP-64 S3 — 컷오버 픽스처. `not_eligible`을 반드시 담는다: 없으면 패널이 형식
+//   방어 분기로 빠져 아래 배선 테스트가 «끊김»이 아니라 «형식 다름»으로 죽는다.
+const CUTOVER_PREVIEW = {
+  total_sku_count: 2,
+  total_gap_sum: "5158.6",
+  groups: [
+    {
+      cause: "g2_parts_299",
+      cause_ref118: "G2",
+      reason: "엑셀이 부자재 4종을 안 세고 있다 — 격차가 정확히 +299.0원. 계산이 정본",
+      sku_count: 1,
+      gap_sum: "299.0",
+      items: [
+        {
+          internal_sku: "OHI-TRUTH-C",
+          product_name: "매트 필름 3매",
+          old_value: "2350.7",
+          new_value: "2649.7",
+          gap: "299.0",
+          truth_label: "계산값",
+        },
+      ],
+    },
+    {
+      cause: "g3_2_family_not_split",
+      cause_ref118: "G3-2",
+      reason: "계열 미분리 — 폴드 원가에 바폰 값이 붙어 있다",
+      sku_count: 1,
+      gap_sum: "4859.6",
+      items: [
+        {
+          internal_sku: "OHI-0584",
+          product_name: "자가복원 EPU 3매 Z폴드SE",
+          old_value: "3010.7",
+          new_value: "7870.3",
+          gap: "4859.6",
+          truth_label: "계산값",
+        },
+      ],
+    },
+  ],
+  not_eligible: {
+    held_count: 169,
+    none_count: 512,
+    sentence: "보류·정본 없음은 컷오버 대상이 아니다 — 맞출 «정본»이 아직 없다.",
+  },
+};
+
+const CUTOVER_RESULT = {
+  scope: "all",
+  requested_count: 2,
+  changed_count: 2,
+  skipped_count: 0,
+  gap_closed: "5158.6",
+  changed: [],
+  skipped: [],
+};
 
 // ★D-CPP-64 S2 — 정본 판별 픽스처. 세 유형을 한 벌에 담는다(계산값·보류·정본 없음):
 //   한 유형만 넣으면 「보류가 계산값으로 그려지는」 변이가 안 죽는다.
@@ -959,6 +1028,90 @@ describe("★정본 판별이 사람에게 닿는 경로 (계약 D-CPP-64 §4 S2
     await renderApp();
     await screen.findByRole("heading", { name: /원가/ });
     expect(screen.queryByTestId("cost-truth-table")).toBeNull();
+  });
+});
+
+describe("★컷오버가 사람에게 닿는 경로 (계약 D-CPP-64 §4 S3)", () => {
+  // ★★**이 묶음은 적대 리뷰 1R P1 3건이 신설시켰다** (2026-09-02).
+  //
+  //   `costCutoverSurface.test.tsx`는 `CostCutoverPanel`을 **props로 직접 렌더**하고
+  //   `onRun`을 `vi.fn()`으로 갈아끼운다. 그래서 «패널이 화면에 붙는가»도, «CostPage가
+  //   정의한 `runCutover` 콜백 본체»도 한 번도 안 밟는다. 리뷰어가 주입한 표면 변이
+  //   **셋이 전부 141건 초록으로 살아남았다**:
+  //
+  //     M-surface-1  `CostPage.tsx`의 `<CostCutoverPanel .../>` 호출부 제거
+  //     M-surface-2  `runCutover`의 `await load()` 제거   (값은 바뀌는데 화면은 옛 숫자)
+  //     M-surface-3  `runCutover`의 catch 블록을 빈 블록으로 (실패가 조용히 삼켜짐)
+  //
+  //   셋 다 「값은 맞는데 사람이 그걸 못 본다」 계열이고, 이 저장소가 최근 세션에서만
+  //   아홉 번 밟은 모양이다. 여기서만 죽는다.
+  async function openCutoverPanel() {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    fireEvent.click(screen.getByRole("button", { name: "정본 판별" }));
+    return screen.findByTestId("cost-cutover-panel");
+  }
+
+  it("탭을 누르면 컷오버 패널이 실제로 붙는다 — 호출부를 지우면 여기서 죽는다", async () => {
+    await openCutoverPanel();
+    // ★「패널이 있다」만 보면 `data={{groups:[]}}` 리터럴 변이가 산다 — 내용까지 단언한다.
+    expect(screen.getByTestId("cost-cutover-total").textContent).toContain("2건");
+    const row = screen.getByTestId("cost-cutover-item-OHI-0584").textContent ?? "";
+    expect(row).toContain("3,010.7");
+    expect(row).toContain("7,870.3");
+    // 컷오버로 «못» 고치는 것도 같은 화면에 있어야 한다.
+    expect(screen.getByTestId("cost-cutover-not-eligible").textContent).toContain("512");
+  });
+
+  it("★「전체 맞추기」를 누르면 실제 API가 scope=all로 불린다", async () => {
+    await openCutoverPanel();
+    fireEvent.click(screen.getByTestId("cost-cutover-run-all"));
+    await waitFor(() =>
+      expect(runCostCutover).toHaveBeenCalledWith({ scope: "all", actor: "jino" }),
+    );
+  });
+
+  it("★그룹 버튼은 그 사유만 보낸다 — 전건으로 새면 안 누른 그룹까지 움직인다", async () => {
+    await openCutoverPanel();
+    fireEvent.click(screen.getByTestId("cost-cutover-run-g3_2_family_not_split"));
+    await waitFor(() =>
+      expect(runCostCutover).toHaveBeenCalledWith({
+        scope: "cause",
+        cause: "g3_2_family_not_split",
+        actor: "jino",
+      }),
+    );
+  });
+
+  it("★성공 후 화면을 다시 읽는다 — `await load()`를 지우면 여기서 죽는다", async () => {
+    await openCutoverPanel();
+    const before = (fetchCostTruthBoard as unknown as { mock: { calls: unknown[] } }).mock.calls
+      .length;
+    fireEvent.click(screen.getByTestId("cost-cutover-run-all"));
+    // 재조회가 없으면 화면의 격차 열이 옛 숫자를 그대로 들고 있어 사람이 「안 됐다」고 읽는다.
+    await waitFor(() =>
+      expect(
+        (fetchCostTruthBoard as unknown as { mock: { calls: unknown[] } }).mock.calls.length,
+      ).toBeGreaterThan(before),
+    );
+    expect(screen.getByTestId("cost-cutover-result").textContent).toContain("2건");
+  });
+
+  it("★실패하면 화면이 실패라고 말한다 — catch를 비우면 여기서 죽는다", async () => {
+    (runCostCutover as unknown as { mockRejectedValueOnce: (e: Error) => void })
+      .mockRejectedValueOnce(new Error("500 컷오버 실패"));
+    await openCutoverPanel();
+    fireEvent.click(screen.getByTestId("cost-cutover-run-all"));
+    const box = await screen.findByTestId("cost-cutover-error");
+    expect(box.textContent).toContain("500");
+    // ★실패했는데 결과 상자가 서면 「됐다」로 읽힌다.
+    expect(screen.queryByTestId("cost-cutover-result")).toBeNull();
+  });
+
+  it("★다른 탭에선 컷오버 패널이 없다 — 항상 켜져 있으면 탭이 아니다", async () => {
+    await renderApp();
+    await screen.findByRole("heading", { name: /원가/ });
+    expect(screen.queryByTestId("cost-cutover-panel")).toBeNull();
   });
 });
 

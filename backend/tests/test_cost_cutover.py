@@ -138,6 +138,44 @@ def test_cutover_all_moves_cost_price_to_the_truth_value(client):
     assert _cost_price(client, "OHI-G32-1") == D("7870.30")
 
 
+def test_gap_closed_is_the_sum_of_the_gaps_actually_closed(client):
+    """★적대 리뷰 P2-1 — `gap_closed`의 값을 아무도 안 봤다(부호를 뒤집어도 18건 초록이었다).
+
+    화면이 「좁힌 격차 111,367.8원」이라고 말하는 근거가 이 값이다. 부호가 뒤집히면 사람은
+    「거꾸로 벌어졌나?」로 읽는다 — 숫자가 있는데 틀린 것이 없는 것보다 나쁘다.
+    """
+    before = _board(client)
+    expected = sum(
+        D(i["gap"])
+        for i in before["items"]
+        if i["gap"] is not None and i["truth_type"] in ("computed", "purchased")
+        and abs(D(i["gap"])) >= D("0.5")
+    )
+    body = client.post("/api/cost/cutover", json={"scope": "all"}).json()
+    assert D(body["gap_closed"]) == expected
+    assert D(body["gap_closed"]) == D(before["census"]["cutover_gap_sum"])
+
+
+def test_purchased_truth_is_cut_over_too_not_only_computed(client):
+    """★적대 리뷰 P2-2 — 매입가가 정본인 SKU도 실제로 움직이는가.
+
+    기존 단언은 `<= {"computed","purchased"}` 부분집합이라 **purchased가 0건이어도 통과**했다.
+    매입품엔 계산값이 원리적으로 없으므로(ref 119 §2-2) 이 경로가 죽으면 매입품 전체가
+    조용히 컷오버에서 빠진다.
+    """
+    board = _board(client)
+    purchased = [
+        i
+        for i in board["items"]
+        if i["truth_type"] == "purchased" and i["gap"] is not None and abs(D(i["gap"])) >= D("0.5")
+    ]
+    assert purchased, "픽스처에 컷오버 대상인 매입가 정본이 없다 — 이 단언이 아무것도 안 지킨다"
+
+    client.post("/api/cost/cutover", json={"scope": "all"})
+    for i in purchased:
+        assert _cost_price(client, i["internal_sku"]) == D(i["truth_value"])
+
+
 def test_cutover_writes_history_with_path_and_grounds(client):
     """계약 §4 S1-① — 「누가·언제·어느 문으로·무엇에서 무엇으로」가 남는다."""
     client.post("/api/cost/cutover", json={"scope": "all", "actor": "jino"})
