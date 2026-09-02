@@ -67,6 +67,8 @@ const STUCK: CostRecipe = {
   form_factor: "flip",
   status: "draft",
   source: "excel",
+  // 분할 «전» 레시피 = 단일 그레인. 빈 문자열은 사실이지 자리표시자가 아니다(D-CPP-67).
+  variant: "",
   recipe_kind: "assembly",
   // flip은 옵션명 규칙이 실제로 거는 값이다 — 폴백이 아니다(D-CPP-61 §4-Q2).
   form_source: "rule",

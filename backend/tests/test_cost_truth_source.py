@@ -159,6 +159,22 @@ def client():
         #   반례가 있어야 지켜진다 — 교훈 #381과 같은 결.
         _seed(s, recipe_id=95, name="임계 경계 필름", form="bar", kind="assembly",
               status="approved", calc="1002.0", lines=7, skus=[("OHI-EPS", "1000.0")])
+        # ★★적대 리뷰 2R P1 — 「가격은 1종인데 상품명 구성이 갈리는」 묶음.
+        #   `_seed`는 상품명을 `f"{name} · {sku}"`로 만들어 구성을 못 심으므로 직접 심는다.
+        #   이 모양이 없으면 `truth_board()`가 `name_grain_kinds`를 계산해 `RecipeGroup`에
+        #   실어 보내는 **배선 한 줄**을 지워도 전건 초록이다(리뷰어 변이 M-F 생존).
+        s.add(CostRecipe(id=91, product_name="구성 혼재 필름", form_factor="fold",
+                         status="approved", recipe_kind="assembly"))
+        s.add(CostStandard(recipe_id=91, price_rule=RULE, std_cost_inc_vat=D("5000.0"),
+                           std_cost_ex_vat=D("5000.0"), breakdown=_breakdown(8)))
+        for sku, pname in (
+            ("OHI-MIXA", "구성 혼재 필름 (외부액정3매+내부액정3매)"),
+            ("OHI-MIXB", "구성 혼재 필름 (외부액정3매)"),
+        ):
+            # ★현재 원가는 **같다** — 가격 게이트만으로는 안 걸린다.
+            s.add(ProductMaster(internal_sku=sku, product_name=pname, cost_price=D("4000.0")))
+            s.add(CostRecipeLink(internal_sku=sku, recipe_id=91, status="approved"))
+
         # draft 링크만 — 정본 없음(미분류).
         _seed(s, recipe_id=80, name="초안 레시피", form="bar", kind="assembly",
               status="draft", calc=None, lines=0, skus=[("OHI-DRAFT", "1000.0")])
@@ -227,7 +243,9 @@ def test_census_is_comparable_to_ref118_buckets(client):
     by_cause = body["census"]["by_cause"]
     assert by_cause[TS.CAUSE_PARTS_299] == 2          # G2  — r50의 SKU 2건
     assert by_cause[TS.CAUSE_FAMILY_NOT_SPLIT] == 1   # G3-2 — r52
-    assert by_cause[TS.CAUSE_GRAIN_MISMATCH] == 2     # G1  — r69의 SKU 2건
+    # G1 — r69의 SKU 2건(가격 2종) + r91의 SKU 2건(가격은 1종인데 상품명 구성 2종).
+    # ★뒤의 2건이 적대 리뷰 2R P1이 신설시킨 픽스처다 — 게이트 «둘»이 각각 한 묶음씩 잡는다.
+    assert by_cause[TS.CAUSE_GRAIN_MISMATCH] == 4
     assert by_cause[TS.CAUSE_IMPORTED_SINGLE_LINE] == 2   # r40(breakdown) + r38(폴백)
     assert by_cause[TS.CAUSE_MATCH] == 1
     assert by_cause[TS.CAUSE_RESIDUAL] == 5           # r44·r45·r34·r35·r95
@@ -235,13 +253,111 @@ def test_census_is_comparable_to_ref118_buckets(client):
     assert body["census"]["cause_ref118"][TS.CAUSE_GRAIN_MISMATCH] == "G1"
 
 
+def test_name_grain_signal_actually_reaches_the_board(client):
+    """★★적대 리뷰 2R P1 — 게이트가 «서 있는지»가 아니라 «실측이 닿는지»를 잰다.
+
+    1R 수리는 `classify_group`에 `name_grain_kinds > 1` 게이트를 넣고 단위 테스트 2종으로
+    지켰다. 그런데 리뷰어가 **배선 한 줄**만 끊었더니(`truth_board()`의 RecipeGroup 생성에서
+    `name_grain_kinds=1` 고정) **58건이 전건 초록**이었다 — 게이트는 서 있는데 실제
+    상품명이 거기 안 닿아도 아무도 안 운다.
+
+    ★그 커밋 메시지가 *"「한 번 확인했다」와 「구조로 막힌다」는 다르다"*고 적어 놓고
+    정작 구조의 절반(계산 로직)만 지키고 나머지 절반(그 계산이 실제로 쓰이는가)은
+    안 지켰다. 이 테스트가 그 나머지 절반이다 — **HTTP body를 통해** 잰다.
+    """
+    body = _body(client)
+    for sku in ("OHI-MIXA", "OHI-MIXB"):
+        row = _row(body, sku)
+        assert row["cause"] == TS.CAUSE_GRAIN_MISMATCH, (
+            f"{sku}: 현재 원가는 같지만 상품명 구성이 갈린다 — 보류여야 한다"
+        )
+        assert row["truth_type"] == TS.TRUTH_HELD, sku
+        assert row["truth_value"] is None, "정본값이 서면 컷오버가 집어간다"
+        assert "우연히" in (row["reason"] or ""), "왜 막혔는지가 화면 문장에 남아야 한다"
+
+
+def test_name_grain_gate_does_not_block_model_only_variation(client):
+    """★과차단 반례 — 기종만 다른 정상 묶음은 막히면 안 된다.
+
+    이 게이트가 EZ툴(아이폰15/16/17…)처럼 «기종만» 다른 묶음까지 막으면 D-CPP-66이
+    통째로 무의미해진다. 픽스처의 r40(EZ툴, SKU 1건)·r50(bar, SKU 2건)이 그 반례다.
+    """
+    body = _body(client)
+    assert _row(body, "OHI-G31-1")["truth_type"] == TS.TRUTH_COMPUTED
+    for sku in ("OHI-G2-1", "OHI-G2-2"):
+        assert _row(body, sku)["cause"] != TS.CAUSE_GRAIN_MISMATCH, sku
+
+
+def test_grain_mismatch_stays_held_even_after_the_d_cpp_66_release(client):
+    """★★D-CPP-66의 **안전장치**. 이게 이 개정에서 가장 비싼 자리다.
+
+    D-CPP-66은 「수입 완제품」·「잔여」의 보류를 풀었다. 두 갈래 다 **위쪽
+    `cost_price_kinds > 1` 분기를 이미 통과한 뒤**라, 한 계산값을 그 묶음 전건에 적용해도
+    안전하다 — SKU들이 현재 원가를 1종만 갖기 때문이다.
+
+    ★**그레인 불일치는 그 보장이 없다.** 한 레시피에 구성이 여러 개 섞여 있어(예: 태블릿
+    기본/플러스/울트라, 매트 필름 외부3매/내부3+외부3/+후면2) 계산값이 하나뿐이다. 이걸
+    풀면 **플러스 사이즈에 기본 사이즈 값이 박힌다** — 원가가 «지어진» 것이고, 이 계약이
+    없애려는 병 그 자체다.
+
+    라이브 실측(2026-09-02): 그런 SKU가 **92건**(태블릿 36 · 매트 30 · 매트 26)이다.
+    """
+    body = _body(client)
+    grain = [r for r in body["items"] if r["cause"] == TS.CAUSE_GRAIN_MISMATCH]
+    assert grain, "픽스처에 그레인 불일치가 없다 — 이 단언이 아무것도 안 지킨다"
+    for r in grain:
+        assert r["truth_type"] == TS.TRUTH_HELD, r["internal_sku"]
+        assert r["truth_value"] is None, "정본값이 서면 컷오버가 집어간다"
+        assert r["gap"] is None
+        assert r["owner"] == TS.OWNER_TRACK_A2
+
+
+def test_release_only_applies_where_the_group_has_one_current_cost(client):
+    """★해제된 두 갈래가 «그레인 보장» 위에 서 있음을 규칙으로 못 박는다.
+
+    정본이 선 행(계산값·매입가)은 **전건** 그 묶음의 현재 원가가 1종이어야 한다.
+    이 불변식이 깨지면 D-CPP-66의 해제 근거가 통째로 무너진다.
+    """
+    body = _body(client)
+    with client.testing_session() as s:
+        from app.models import CostRecipeLink, ProductMaster
+
+        for r in body["items"]:
+            if r["truth_type"] not in (TS.TRUTH_COMPUTED,):
+                continue
+            rid = r["recipe_id"]
+            if rid is None:
+                continue
+            skus = [
+                x.internal_sku
+                for x in s.query(CostRecipeLink).filter_by(recipe_id=rid, status="approved").all()
+            ]
+            kinds = {
+                p.cost_price
+                for p in s.query(ProductMaster).filter(ProductMaster.internal_sku.in_(skus)).all()
+            }
+            assert len(kinds) <= 1, (
+                f"r{rid}: 계산값이 정본인데 그 묶음의 현재 원가가 {len(kinds)}종이다 — "
+                "한 값을 전건에 박으면 서로 다른 구성에 같은 값이 들어간다"
+            )
+
+
 def test_cutover_ready_sums_only_computed_and_purchased_with_gap(client):
     """「즉시 가능」의 정의 — 정본이 서 있고 격차가 있는 것만."""
     body = _body(client)
     ready = body["census"]["cutover_ready_count"]
-    # G2 2건 + G3-2 1건 + 매입가 1건(45000→47000). 일치·보류·정본없음은 안 센다.
-    assert ready == 4
-    assert D(body["census"]["cutover_gap_sum"]) == D("299.0") * 2 + D("4859.6") + D("2000")
+    # ★D-CPP-66에서 수입 완제품·잔여의 보류가 풀려 대상이 늘었다. 개수를 손으로 세지 않고
+    #   «정의»로 다시 센다 — 손으로 적은 수는 규칙이 바뀔 때마다 갱신 대상이 되고,
+    #   그러면 이 단언이 「정의를 지키는 것」이 아니라 「숫자를 따라가는 것」이 된다.
+    expect = [
+        r for r in body["items"]
+        if r["truth_type"] in (TS.TRUTH_COMPUTED, TS.TRUTH_PURCHASED)
+        and r["gap"] is not None and abs(D(r["gap"])) >= TS.MATCH_EPSILON
+    ]
+    assert ready == len(expect)
+    assert D(body["census"]["cutover_gap_sum"]) == sum(D(r["gap"]) for r in expect)
+    # 일치·보류·정본없음은 한 건도 안 섞였다.
+    assert all(r["truth_type"] not in (TS.TRUTH_HELD, TS.TRUTH_NONE) for r in expect)
 
 
 def test_matched_row_is_not_a_cutover_target(client):
@@ -256,7 +372,13 @@ def test_matched_row_is_not_a_cutover_target(client):
     assert abs(D(row["gap"])) < TS.MATCH_EPSILON
     assert body["census"]["matched_count"] == 1
     # 「즉시 가능」 합계에 이 행의 격차가 안 실렸다.
-    assert D(body["census"]["cutover_gap_sum"]) == D("299.0") * 2 + D("4859.6") + D("2000")
+    total = D(body["census"]["cutover_gap_sum"])
+    assert total == sum(
+        D(r["gap"]) for r in body["items"]
+        if r["truth_type"] in (TS.TRUTH_COMPUTED, TS.TRUTH_PURCHASED)
+        and r["gap"] is not None and abs(D(r["gap"])) >= TS.MATCH_EPSILON
+    )
+    assert D(row["gap"]) not in (total,), "일치 행 하나가 합계 전부가 되어선 안 된다"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -296,11 +418,13 @@ def test_imported_single_line_says_it_is_a_kind_not_a_defect(client):
     이 종에 붙는다"*라고 적혀 있다. 「레시피 보강 필요」로 띄우면 화면이 거짓을 말한다.
     """
     row = _row(_body(client), "OHI-G31-1")
-    assert row["truth_type"] == TS.TRUTH_HELD
+    # ★D-CPP-66(2026-09-02 Jino 지시)로 **보류가 풀렸다** — 수입 완제품의 정본은
+    #   수입원장의 로트 단가이고 그 값이 구성 1줄에 이미 실려 있다.
+    assert row["truth_type"] == TS.TRUTH_COMPUTED
     assert row["cause"] == TS.CAUSE_IMPORTED_SINGLE_LINE
-    assert "결함이 아니라 종류" in row["reason"]
-    assert row["owner"] == TS.OWNER_DCPP63
-    assert "계약 §1" in row["reason"], "계약과 어긋난다는 사실이 화면에 남아야 한다"
+    assert "결함이 아니라 종류" in row["reason"], "「보강 필요」로 읽히면 안 된다"
+    assert row["owner"] == TS.OWNER_CUTOVER
+    assert row["truth_value"] is not None, "정본값이 서야 컷오버가 가능하다"
 
 
 def test_board_caveats_reach_the_body(client):
@@ -373,7 +497,8 @@ def test_family_rule_needs_different_calc_not_just_same_form_factor(client):
     assert _row(body, "OHI-G32-1")["cause"] == TS.CAUSE_FAMILY_NOT_SPLIT
     for sku in ("OHI-R44", "OHI-R45", "OHI-R34", "OHI-R35"):
         assert _row(body, sku)["cause"] == TS.CAUSE_RESIDUAL, sku
-        assert _row(body, sku)["truth_type"] == TS.TRUTH_HELD, sku
+        # ★D-CPP-66 — 잔여도 보류가 풀렸다(원인을 몰라도 정본은 계산값이다).
+        assert _row(body, sku)["truth_type"] == TS.TRUTH_COMPUTED, sku
 
 
 def test_line_count_falls_back_to_recipe_lines_when_breakdown_is_missing(client):
@@ -387,7 +512,7 @@ def test_line_count_falls_back_to_recipe_lines_when_breakdown_is_missing(client)
     assert row["cause"] == TS.CAUSE_IMPORTED_SINGLE_LINE, (
         "breakdown이 없는 1줄 레시피가 G3-1로 안 잡혔다 — 폴백이 0을 줬다는 뜻이다"
     )
-    assert row["truth_type"] == TS.TRUTH_HELD
+    assert row["truth_type"] == TS.TRUTH_COMPUTED  # D-CPP-66에서 수입 완제품 보류 해제
 
 
 def test_match_epsilon_boundary_is_pinned(client):
@@ -400,14 +525,19 @@ def test_match_epsilon_boundary_is_pinned(client):
     body = _body(client)
     row = _row(body, "OHI-EPS")
     assert row["cause"] == TS.CAUSE_RESIDUAL, "격차 2.0원이 「일치」로 판정됐다 — 임계가 넓어졌다"
-    assert row["truth_type"] == TS.TRUTH_HELD
-    assert row["truth_value"] is None
-    # 컷오버 대상에도 안 들어간다(보류이므로). 임계가 넓어지면 여기서도 갈린다.
-    assert all(
-        r["internal_sku"] != "OHI-EPS"
-        for r in body["items"]
+    assert row["truth_type"] == TS.TRUTH_COMPUTED  # D-CPP-66에서 잔여 보류 해제
+    assert row["truth_value"] is not None
+    # ★임계가 5.0으로 넓어지면 이 행은 「일치」가 되어 **컷오버 대상에서 빠진다.**
+    #   그러니 「대상에 «들어있다»」를 단언하는 것이 곧 임계를 지키는 것이다
+    #   (보류 해제 전에는 「안 들어있다」로 같은 것을 지켰다 — 방향만 뒤집혔다).
+    assert abs(D(row["gap"])) >= TS.MATCH_EPSILON
+    ready_skus = {
+        r["internal_sku"] for r in body["items"]
         if r["truth_type"] in (TS.TRUTH_COMPUTED, TS.TRUTH_PURCHASED)
-    )
+        and r["gap"] is not None and abs(D(r["gap"])) >= TS.MATCH_EPSILON
+    }
+    assert "OHI-EPS" in ready_skus
+    assert "OHI-MATCH" not in ready_skus, "격차 0.4원은 대상이 아니다"
     assert body["census"]["matched_count"] == 1, "일치는 r97 하나뿐이어야 한다"
 
 
