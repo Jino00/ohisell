@@ -42,6 +42,7 @@ from app.database import get_db
 from app.services import cost_price_history as CPH
 from app.services.cost_menu import auto_refresh as AR
 from app.services.cost_menu import cutover as CO
+from app.services.cost_menu import grain_split as GS
 from app.services.cost_menu import materials as M
 from app.services.cost_menu import recipes as R
 from app.services.cost_menu import purchased_price as PP
@@ -133,6 +134,20 @@ class AbsentIn(BaseModel):
     """
 
     note: Optional[str] = None
+
+
+class GrainSplitIn(BaseModel):
+    """분할 실행 요청 (계약 D-CPP-67 §4 S1·S2).
+
+    ★`scope`에 기본값을 두지 않는 이유는 `CutoverIn`과 같다 — 「아무것도 안 고름」이
+    「전건」으로 읽히지 않게 한다. 지금 어휘는 `all` 하나뿐이지만, 필수로 두면 나중에
+    부분 실행이 생겨도 옛 호출이 조용히 전건을 뜻하지 않는다.
+    ★**변형·SKU 수·원가표 줄 이름을 받지 않는다.** 그건 승인된 계획표(§0-D)에 있고,
+    클라이언트가 보낸 계획을 쓰면 승인 대상이 요청 본문으로 옮겨 간다.
+    """
+
+    scope: Literal["all"]
+    actor: str = Field(default="unknown", max_length=60)
 
 
 class CutoverIn(BaseModel):
@@ -592,6 +607,39 @@ def truth_source_board(db: Session = Depends(get_db)):
     ★**읽기 전용이다.** 쓰기는 컷오버 경로 한 벌(`POST /cutover`)의 몫이다(계약 §3-B).
     """
     return TS.truth_board(db)
+
+
+# ──────────────────────────────────────────────
+# 그레인 분할 — 한 레시피에 섞인 «변형»을 갈라 세운다 (계약 D-CPP-67 S1·S2)
+# ──────────────────────────────────────────────
+@router.get("/grain-split/preview")
+def grain_split_preview(db: Session = Depends(get_db)):
+    """클릭 «전»에 서는 것 — 계획표(D-CPP-67 §0-D 12행)와 라이브가 어디서 다른가.
+
+    ★읽기 전용이다. 그리고 **실행이 보는 것과 같은 함수**다 — 화면과 실행이 서로 다른
+    미리보기를 보면 「화면은 초록인데 실행은 다른 일을 한다」가 성립한다.
+    ★계획과 다른 칸(`matches_plan: false`·`unassigned`)도 **같이 싣는다** — 빼면 화면이
+    「이대로 누르면 끝」으로 읽힌다.
+    """
+    return GS.preview(db)
+
+
+@router.post("/grain-split")
+def grain_split_execute(body: GrainSplitIn, db: Session = Depends(get_db)):
+    """계획표를 실재하는 레시피로 만든다 — **값에는 안 닿는다**.
+
+    ★미리보기가 계획표와 한 칸이라도 다르면 **409로 거부한다**(계약 §-1 Q3-B — Jino가
+    승인한 자동 진행의 조건이 곧 이 거부다). 「되는 것만 하자」는 없다.
+    ★`cost_price`를 쓰는 것은 이 경로가 아니라 `POST /api/cost/cutover`다.
+    """
+    try:
+        result = GS.execute(db, actor=body.actor, scope=body.scope)
+    except GS.GrainSplitRefused as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except M.CostMenuError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.commit()
+    return result
 
 
 # ──────────────────────────────────────────────

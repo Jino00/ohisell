@@ -5037,6 +5037,26 @@ class CostRecipe(Base):
     absent_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     absent_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    #: ★grain의 셋째 축 — **변형** (계약 D-CPP-67, Jino 승인 2026-09-02).
+    #:
+    #: 왜 생겼나: 「상품명 × 폼팩터」로는 못 가르는 묶음이 **92 SKU** 실재했다(ref 124).
+    #: 같은 상품명·같은 폼팩터인데 **옵션이 구성을 바꾼다** — 「오하이 빛반사, 지문방지 매트
+    #: 필름 3매 / fold」 하나에 외3 · 외3+내3 · +후면2 · +후면2+힌지2 **넷**이 들어 있었고,
+    #: 태블릿은 같은 「2매」인데 **화면 크기**가 단가를 갈랐다(기본/13인치/울트라).
+    #: `CostStandard`가 `recipe_id + price_rule` 유니크라 **레시피당 계산값이 하나**이므로,
+    #: 축을 안 더하면 한 값밖에 못 담고 그 묶음은 영영 「그레인 불일치 — 보류」에 남는다.
+    #:
+    #: ★**키를 «바꾼» 것이 아니라 «더한» 것이다.** 위 두 Jino 원문은 그대로 산다 —
+    #: *"상품명이 같으면 들어가는 부품도 같거든"*은 92건에서 «틀린» 게 아니라 «부족»했고,
+    #: *"플립, 폴드 제품은 하나의 상품명에서 단가가 달라져"*로 폼팩터를 더했던 것과 같은 걸음이다.
+    #:
+    #: ★**빈 문자열은 「단일 그레인」이라는 사실이지 「모름」이 아니다.** NULL로 두지 않는 이유는
+    #: 위 `form_factor` 주석과 같다 — SQL에서 NULL끼리는 같지 않아 유니크가 중복을 못 막는다.
+    #: 갈리지 않은 레시피는 전건 `""`이고, 화면은 빈 변형을 **그리지 않는다**.
+    variant: Mapped[str] = mapped_column(
+        String(60), nullable=False, default="", server_default=""
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -5050,7 +5070,10 @@ class CostRecipe(Base):
     __table_args__ = (
         # ⚠️ SQL에서 NULL끼리는 같지 않다 — `form_factor`가 NULL인 행(수입 완제품·매입품)은
         #   이 제약이 **중복을 막지 못한다**. 상품명 단독 중복은 승인 화면이 판정한다.
-        UniqueConstraint("product_name", "form_factor", name="uq_cost_recipe_name_form"),
+        #   ★`variant`는 그 함정을 안 물려받는다 — NOT NULL `''`이라 NULL 비교가 없다.
+        UniqueConstraint(
+            "product_name", "form_factor", "variant", name="uq_cost_recipe_name_form_variant"
+        ),
     )
 
 
