@@ -1,6 +1,6 @@
 # 계약 — 원가 그레인 분할 (그레인 불일치 92건에 축을 하나 더한다)
 
-> 상태: **✅ 승인됨** (2026-09-02 20:2x KST · Jino — §-1 승인 기록 · §7 답 Q1=A / Q2=A / Q3=B) · 결정 번호 **D-CPP-67**
+> 상태: **✅ 승인·실행·판정 완료** — 완료 QA **종합 부분달성**(§7-B) · 계약 **13/14** · 원래 상태: (2026-09-02 20:2x KST · Jino — §-1 승인 기록 · §7 답 Q1=A / Q2=A / Q3=B) · 결정 번호 **D-CPP-67**
 > 작성: 2026-09-02 20:3x KST · 세션 `16610af6` · 체인 `sellc-원가-메뉴` n=28 · 워크트리 `feat/cost-menu-n28`
 > ★승인되면 이 문서가 **정본**이다 — 완료 QA는 §4 합격기준으로만 판정하고, §1 「안 하는 것」·§3 금지선을 넘으면 그 자체가 미달이다. **목표·합격기준을 바꾸는 것은 목적 전환이 아니라 새 계약이다**(전역 §1 승인 지점 ①).
 > 목표이름: **그레인 분할 목표**
@@ -225,7 +225,7 @@
 2. **모델** `backend/app/models.py` `CostRecipe`(4967행) — `variant` 컬럼 + `__table_args__` 교체 + docstring에 **D-CPP-67과 이 계약의 Jino 원문 2줄**을 그대로 옮긴다(키의 근거가 코드에 남는 관례 유지).
 3. **서비스** `backend/app/services/cost_menu/recipes.py` —
    - 신설 `preview_grain_split(db, recipe_id) -> dict`: 읽기 전용. 매트는 `truth_source.composition_signature`로, 태블릿은 신설 `size_grade_with_source(option_or_product_name)`(꼴은 `mapping_parser.propose_form_factor_with_source`와 같다 — **값과 출처를 함께** 돌려주고 폴백 등급은 없다)로 SKU를 변형에 묶고, 변형마다 `cost_price_kinds`·`name_grain_kinds`·후보 원가표 줄(같은 폼팩터 항목 중 이름 일치 — 제안일 뿐 픽 아님)을 실어 보낸다. 1차 신호 없는 SKU는 `unassigned`로 따로 싣는다.
-   - 신설 `split_recipe_grain(db, recipe_id, assignments: list[{variant, skus, basis}]) -> dict`: 기본 레시피는 **불변**(`variant=""` → 계열의 픽된 줄 이름을 변형 라벨로 «표시»만 하고 저장값은 비움 — 저장값을 바꾸면 유니크 재계산·재업로드 조회가 흔들린다) · 변형마다 `CostRecipe(product_name·form_factor 복사, variant=라벨, status='draft', source='manual')` 생성 · 지정 SKU의 `CostRecipeLink.recipe_id`를 옮기고 `status='draft'`·`note=basis`(빈 basis는 **거부**). `_sync_links`를 부르지 않는다. 커밋은 라우터가 한다(관례).
+   - 신설 `split_recipe_grain(db, recipe_id, assignments: list[{variant, skus, basis}]) -> dict`: ~~기본 레시피는 **불변**(`variant=""` → 변형 라벨로 «표시»만 하고 저장값은 비움 — 저장값을 바꾸면 유니크 재계산·재업로드 조회가 흔들린다)~~ **⚠️정정(완료 QA 2026-09-02 22:10 KST가 반증)**: 구현은 **저장값 자체를 바꾼다** — prod 실측에서 r69·r70·r98의 `variant`가 각각 `'외3+내3'`·`'외3+내3'`·`'기본'`으로 **저장돼 있다**(빈 문자열이 아니다). ★**문서가 코드에 진 자리다.** 저장하는 쪽이 옳다고 본다: ①빈 문자열로 남기면 그 계열에 「아직 안 갈라진 묶음」이 있는 것처럼 보여 `_base_recipe`·`import_drafts` 가드가 둘 다 «갈라짐»을 못 읽는다 ②표시만 바꾸면 라벨의 출처가 코드 상수가 되어 §2-2(원가표가 가른 줄을 그대로 따른다)를 어긴다. 초판 우려였던 「유니크 재계산·재업로드 조회가 흔들린다」는 **실측으로 반증됐다** — `uq_cost_recipe_name_form_variant` 위반 0건, `import_drafts` 분할 가드가 `variant != ""`를 정상 인식(테스트 `test_reupload_does_not_undo_the_split` 통과), `cost_standard`(3,746.40/6,220.30/5,088.40)·승인 상태·구성 줄 수 전부 §0-A 원값과 불변. §4 합격기준 문구(「r69·r70은 변형 「외3+내3」으로 **남고**」)는 표시/저장을 구분하지 않아 **미달이 아니다** · 변형마다 `CostRecipe(product_name·form_factor 복사, variant=라벨, status='draft', source='manual')` 생성 · 지정 SKU의 `CostRecipeLink.recipe_id`를 옮기고 `status='draft'`·`note=basis`(빈 basis는 **거부**). `_sync_links`를 부르지 않는다. 커밋은 라우터가 한다(관례).
    - `import_drafts()` 그룹 루프: `_sync_links` 호출 «전»에 같은 `(product_name, form_factor)`의 `variant != ""` 레시피에 붙은 SKU를 `skus`에서 뺀다(§4 S4 셋째의 집행 지점). `_match_draft`·`pick_cost_table_item`·`approve_recipe`는 **무변경**(픽·승인은 기존 경로를 그대로 쓴다).
    - `recipe_payload()` 링크 행에 `note` 추가 · `list_recipes()` 응답에 `variant`.
 4. **판정층** `backend/app/services/cost_menu/truth_source.py` — `RecipeGroup`에 `variant` 필드 1개 추가 · 행 dict에 `"variant"` 1키 추가. **`classify_group`·`composition_signature`·상수는 diff 0줄**(§2-3의 증거).
@@ -363,6 +363,49 @@ held 92 g1 92 ready 0 matched 358 none 512
 `SOURCE_PLUS`로 위장 / 빈 이름 흡수)는 재주입 없이 **구현자의 자체 확인을 신뢰**했다 ·
 프런트 전체 1,386건 재실행과 `npm run build` 재확인은 생략(1R에서 확인, 이번 diff가 그
 표면을 안 건드림).
+
+---
+
+## §7-B. 완료 QA 판정 (2026-09-02 22:10 KST · 별도 기 · 읽기 전용)
+
+**판정 원문 — 그대로 옮긴다:**
+
+> `판정(계약 §4 합격기준 14개): **부분달성** — 13/14를 재측으로 재확인(전건 일치), 14번째(재업로드
+> 비복귀)는 세션 스스로 미체크 상태이고 그 자백이 정확하다(테스트 증거만, prod 미검증은 §3 금지선
+> 준수의 결과)`
+>
+> `판정(Jino 지시 원문 — 92건 몫): **달성** — "실행해"(21:55 KST) 이후 92 SKU가 전부 엑셀 정본
+> 계산값으로 컷오버됐고 매출 대시보드까지 도달을 재확인했다. 단 이 지시는 92건 몫으로 좁혀 읽는다
+> (트랙 전체 원가 512건 「정본없음」은 이 계약의 범위 밖)`
+>
+> `판정(트랙 A2 원문): **부분달성** — "구성 이식 완료"는 92건에 한해 달성(라이브 재확인),
+> "cost_drift 대조 악화 0"은 신호 자체가 null이라 판정불능(세션의 자백이 정확) — 트랙 체크박스도
+> 실제로 `[ ]`인 채다`
+>
+> **종합 판정: 부분달성** — *"세 대조 모두 「자백한 미달·판정불능이 정확하다」로 확인됨 —
+> **과장도 축소도 발견 못 함**"*
+
+**QA가 직접 재측한 것**: 14항목 중 **12개를 prod 라이브로**, 1개(S4-1)는 판정불가임을, 1개(S4-3)는
+테스트로만임을 재확인. 부가로 백엔드 16 passed · 프론트 146 passed를 직접 실행.
+S4-2는 963행 전건 SKU 단위 diff로 **92건 밖 변경 0건**을 독립 재현했고, S3-2는 계약이 든 예시와
+**같은 SKU**(`3,746.40 × 15 = 56,196`)로 대시보드 도달을 재현했다.
+
+### ★QA가 반증한 것 1건 (경미 · §6 문서 오류)
+
+> §6 항목3이 *"기본 레시피는 **불변**(…표시만 하고 저장값은 비움)"*이라 적었으나 실제 코드·prod는
+> **저장값 자체를 바꾼다** — r69·r70·r98의 `variant`가 `'외3+내3'`·`'외3+내3'`·`'기본'`으로 저장돼 있다.
+
+**처분: 계약 §6을 정정했다**(그 자리에 취소선 + 정정문). 문서가 코드에 진 자리이고, **저장하는 쪽이
+옳다**고 본다 — 빈 문자열로 남기면 `_base_recipe`·`import_drafts` 가드가 둘 다 「갈라짐」을 못 읽는다.
+초판 우려(「유니크·재업로드 조회가 흔들린다」)는 실측으로 반증됐다. §4 합격기준 문구는 표시/저장을
+구분하지 않으므로 **미달이 아니다**(QA도 같은 판단).
+
+### QA가 확인 못 한 것 (원문 보존)
+
+- `cost_drift` 감시기가 92건 값 변화를 「낡음」으로 못 잡는가 — **신호가 구조적으로 null이라 원리적으로 검증 불가**(D-CPP-64 §4 S4 소관)
+- **태블릿 36건 전건의 기종명 낱말 유무 — 여전히 [미상]**(잔여 21건이라는 수로만 관측됨)
+- 프론트 전체 스위트 재실행 생략(지정 2파일 146건만 직접 재실행)
+- 마이그레이션의 「prod DDL 미니 DB 검증」 재현 불가 — prod가 이미 `grainv1s1a`라 원본 재현 대상이 사라졌다(라이브 결과로 대체 확인)
 
 ---
 
