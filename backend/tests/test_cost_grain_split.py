@@ -715,3 +715,15 @@ def test_decided_sku_note_does_not_claim_a_cross_check_it_skipped():
     assert "하지 않았다" in n_decided and "엑셀표가 기준" in n_decided, n_decided
     # 판정 «아닌» SKU는 구판 문장 그대로여야 한다 — 예외가 전건으로 새면 안 된다
     assert "변형 안에서 1종" in GS._note_for(plain, plan)
+
+
+def test_sentence_counts_plan_rows_instead_of_hardcoding():
+    """★문장에 행 수를 «박지» 않는다 — 표가 자라면 화면이 거짓말을 한다.
+
+    2026-09-03 라이브에서 「계획표 12행과 라이브가 전부 같다」로 굳어 있는 것을 잡았다
+    (그때 실제는 18행). 오늘 잡은 note 결함과 **같은 병**이다: 예외·확장을 넣을 때
+    «사람이 읽는 문장»까지 따라가지 않았다.
+    """
+
+    assert GS._plan_row_count() == sum(len(p.variants) for p in GS.PLAN)
+    assert GS._plan_row_count() != 12, "표가 자랐는데 12로 굳어 있으면 이 테스트가 존재할 이유가 없다"

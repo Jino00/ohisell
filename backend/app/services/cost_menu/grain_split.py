@@ -448,6 +448,14 @@ def _cross_check(
             r.conflict = f"2차 대조 불일치 — 변형 「{r.variant}」가 다른 변형과 현재 원가를 공유한다"
 
 
+def _plan_row_count() -> int:
+    """계획표의 «행» 수 = 변형의 총 개수. ★문장에 숫자를 박아 두면 표가 자랄 때
+    화면이 거짓말을 한다 — 2026-09-03 라이브에서 「12행」으로 굳어 있는 것을 잡았다
+    (그때 실제는 18행). 세어서 말한다."""
+
+    return sum(len(p.variants) for p in PLAN)
+
+
 def _plan_totals(db: Session, plan: GroupPlan) -> dict[str, Optional[Decimal]]:
     """변형 → 그 변형이 붙을 원가표 줄의 총액. 2차 대조가 「값이 같아서 못 가르는」
     경우를 알아보려면 «원가표가 뭐라 했는지»를 알아야 한다."""
@@ -509,7 +517,7 @@ def _note_for(row: _SkuRow, plan: GroupPlan) -> str:
 
 
 def preview(db: Session) -> dict:
-    """클릭 «전»에 서는 것 — 계획표 12행과 라이브가 어디서 다른가.
+    """클릭 «전»에 서는 것 — 계획표와 라이브가 어디서 다른가.
 
     ★읽기 전용이다. 이 payload가 곧 Q3-B의 「멈추는 조건」의 재료이고, 화면과 실행이
     **같은 함수**를 본다(둘이 갈라지면 화면이 초록인데 실행이 다른 일을 한다).
@@ -622,7 +630,7 @@ def preview(db: Session) -> dict:
         "residual_total": sum(g["residual_total"] for g in groups),
         "safe_to_execute": all_ok,
         "sentence": (
-            "계획표 12행과 라이브가 전부 같다 — 실행할 수 있다"
+            f"계획표 {_plan_row_count()}행과 라이브가 전부 같다 — 실행할 수 있다"
             if all_ok
             else "계획표와 다른 칸이 있다 — 실행은 거부된다. 다른 칸을 Jino에게 보여야 한다"
         ),
@@ -639,7 +647,7 @@ class GrainSplitRefused(CostMenuConflict):
 
 
 def execute(db: Session, *, actor: str = "unknown", scope: str = "all") -> dict:
-    """계획표 12행을 실재하는 레시피로 만든다.
+    """계획표를 실재하는 레시피로 만든다.
 
     ★**미리보기가 계획표와 한 칸이라도 다르면 거부한다.** 이것이 Jino가 승인한 자동 진행의
     조건이다(계약 §-1 Q3-B). 「대부분 맞으니 되는 것만 하자」는 없다 — 표가 승인 대상이고,
@@ -655,7 +663,7 @@ def execute(db: Session, *, actor: str = "unknown", scope: str = "all") -> dict:
     pre = preview(db)
     if not pre["safe_to_execute"]:
         raise GrainSplitRefused(
-            "계획표(D-CPP-67 §0-D 12행)와 라이브가 다르다 — 실행을 거부한다. "
+            f"계획표({_plan_row_count()}행)와 라이브가 다르다 — 실행을 거부한다. "
             "미리보기의 `matches_plan: false` 행과 `unassigned`를 Jino에게 보일 것."
         )
 
