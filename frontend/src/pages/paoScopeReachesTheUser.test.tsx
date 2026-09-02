@@ -24,6 +24,7 @@ import type { PaoScopeRoster } from "../lib/api";
 //   잡아야 한다(아래 vi.mock 팩토리가 오버라이드한다). 리뷰어의 표면 변이 SUR-5(호출 제거)가
 //   생존했던 이유가 정확히 이것 — 읽기 표면만 재고 쓰기 표면은 아무도 안 봤다.
 import { putPaoScopeAdgroup, putNaverCampaignAutoOperate } from "../lib/api";
+import { kstDate } from "../lib/periodRange";
 
 // ★로스터를 테스트마다 갈아끼운다 (D-NAO-267). vi.mock 팩토리는 호이스팅돼서 바깥 변수를
 //   그냥 참조하면 초기화 전 접근이 된다 — vi.hoisted가 그 순서 문제의 공식 해법이다.
@@ -578,5 +579,153 @@ describe("★설계서 §7½ 1단계 — 닿은 자리에서 「PAO」라고 부
     for (const old of ["우리·정지", "우리", "MOP", "우리 MOP", "원본 MOP", "가동"]) {
       expect(badgeTexts, `옛 라벨 「${old}」이(가) 배지에 되살아났다`).not.toContain(old);
     }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 기간 바 — Jino 2026-09-02 23:35: *"캘린더가 너무 부실하다. 대시보드에 있는 캘린더처럼 만들자"*
+//
+// ★이 화면은 `7일 / 21일 / 51일` 버튼 3개를 **자기가 따로** 들고 있었다. 공용
+//   `PeriodRangeBar`의 머리말이 스스로 적어 둔 이유가 그대로 적용된다 —
+//   *"같은 UI를 두 화면이 각자 들고 있으면 곧 갈라진다"*.
+// ★★그리고 날짜 입력을 주는 순간 새 위험이 생긴다: 서버가 `days`만 받으면 «고른 날짜»와
+//   «실제 조회 창»이 갈라진다. 그러면 화면은 **사용자가 고른 구간을 보여줬다고 믿게 만든다.**
+//   그래서 여기서 재는 것은 「달력이 예쁜가」가 아니라 **「고른 날짜가 요청에 실리는가」**다.
+describe("★기간 바 — 대시보드와 같은 물건을 쓴다", () => {
+  it("날짜 입력 두 칸과 프리셋이 뜬다", async () => {
+    await renderApp();
+    const inputs = await waitFor(() => {
+      const found = document.querySelectorAll<HTMLInputElement>('input[type="date"]');
+      expect(found.length).toBeGreaterThanOrEqual(2);
+      return found;
+    });
+    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    for (const label of ["어제", "7일", "30일"]) {
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("★고른 날짜가 «요청»에 실린다 — 안 실리면 화면이 거짓말한다", async () => {
+    const { fetchPaoScopeRoster } = await import("../lib/api");
+    await renderApp();
+    await waitFor(() => expect(vi.mocked(fetchPaoScopeRoster)).toHaveBeenCalled());
+    const [first] = vi.mocked(fetchPaoScopeRoster).mock.calls.at(-1)!;
+    expect(first, "요청에 날짜 구간이 없다 — 서버는 기본 창을 돌려준다").toEqual(
+      expect.objectContaining({ dateFrom: expect.any(String), dateTo: expect.any(String) }),
+    );
+
+    const [fromInput] = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="date"]'));
+    const before = vi.mocked(fetchPaoScopeRoster).mock.calls.length;
+    fireEvent.change(fromInput, { target: { value: "2026-08-10" } });
+    await waitFor(() =>
+      expect(vi.mocked(fetchPaoScopeRoster).mock.calls.length).toBeGreaterThan(before));
+    const [after] = vi.mocked(fetchPaoScopeRoster).mock.calls.at(-1)!;
+    expect(after).toEqual(expect.objectContaining({ dateFrom: "2026-08-10" }));
+  });
+
+  it("★서버가 창을 잘랐으면 «왜»가 화면에 뜬다 — 조용히 자르면 고른 날짜가 사라진 것과 같다", async () => {
+    hoisted.roster = {
+      ...ROSTER,
+      window: {
+        ...ROSTER.window, clamped: true,
+        note: "2026-09-02까지 고르셨지만 오늘은 전환이 아직 정착 전이라 총이익이 실제보다 적게 보입니다 — 2026-09-01까지로 보여드립니다.",
+      },
+    };
+    await renderApp();
+    // ★«정착 전»만 보면 안 된다 — 기간 바에 상시로 붙는 안내 문구에도 같은 말이 있어서
+    //   경고를 «안 그려도» 통과한다(내 초판이 그랬다). 서버 note에만 있는 말로 잰다.
+    await waitFor(() => expect(screen.getByText(/고르셨지만/)).toBeTruthy());
+    expect(screen.getByText(/보여드립니다/)).toBeTruthy();
+  });
+
+  it("★note가 있어도 clamped가 아니면 경고가 아니다 — 계약은 «잘랐을 때»만이다", async () => {
+    hoisted.roster = {
+      ...ROSTER,
+      window: { ...ROSTER.window, clamped: false, note: "고르셨지만 참고용 안내입니다" },
+    };
+    await renderApp();
+    await waitFor(() => expect(screen.getByText("01. 갤럭시_지문방지_TPU")).toBeTruthy());
+    expect(screen.queryByText(/고르셨지만/), "안 잘랐는데 경고가 떴다").toBeNull();
+  });
+
+  it("자르지 않았으면 경고를 띄우지 않는다 — 늘 뜨는 경고는 아무도 안 읽는다", async () => {
+    await renderApp();
+    // 기본 로스터(clamped 없음)가 그려질 때까지 기다린 뒤에 «없음»을 잰다 —
+    // 렌더 전에 재면 아무 경고도 없는 게 당연해서 아무것도 보증하지 않는다.
+    await waitFor(() => expect(screen.getByText("01. 갤럭시_지문방지_TPU")).toBeTruthy());
+    expect(screen.queryByText(/고르셨지만/), "안 잘랐는데 경고가 떴다").toBeNull();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 적대 리뷰 P1-1·P1-2 — 「무엇을 그리나」가 아니라 **「무엇을 요청하나」**를 잰다
+//
+// ★P1-1이 통과한 이유가 여기 있다: 방어선이 「목 로스터의 `clamped`를 화면이 그리나」에만
+//   서 있었고 **「이 화면이 실제로 어떤 창을 요청하나」에는 한 줄도 없었다.** 그래서 프리셋이
+//   전부 오늘을 보내 서버가 매번 창을 자르는데도 1,433건이 전건 초록이었다.
+// ★★그러면 「예외일 때만 뜨는 경고」가 상시 경고가 되고, 서버 자백문이 *"…까지 고르셨지만"*
+//   이라 **사용자가 하지 않은 입력을 사용자 탓으로** 돌린다. 버튼 라벨(7일)과 실제 창
+//   길이(6일)도 어긋난다.
+describe("★이 화면이 «실제로 요청하는 창» (적대 리뷰 P1-1·P1-2)", () => {
+  const lastArgs = async () => {
+    const { fetchPaoScopeRoster } = await import("../lib/api");
+    await waitFor(() => expect(vi.mocked(fetchPaoScopeRoster)).toHaveBeenCalled());
+    return vi.mocked(fetchPaoScopeRoster).mock.calls.at(-1)![0] as
+      { dateFrom?: string; dateTo?: string };
+  };
+  const daysBetween = (f: string, t: string) =>
+    Math.round((Date.parse(`${t}T00:00:00Z`) - Date.parse(`${f}T00:00:00Z`)) / 86_400_000) + 1;
+
+  it("★시작 창은 «어제로 끝나는 21일»이다 — 열자마자 보던 것이 안 바뀐다", async () => {
+    await renderApp();
+    const a = await lastArgs();
+    expect(a.dateTo, "창이 오늘로 끝난다 — D-0 제외 관례 위반").toBe(kstDate(-1));
+    expect(daysBetween(a.dateFrom!, a.dateTo!), "시작 창이 21일이 아니다").toBe(21);
+  });
+
+  it.each([
+    ["7일", 7], ["21일", 21], ["30일", 30], ["90일", 90],
+  ])("★프리셋 「%s」은 오늘을 안 보내고 길이가 라벨과 같다", async (label, want) => {
+    await renderApp();
+    const btn = await screen.findByRole("button", { name: label });
+    fireEvent.click(btn);
+    await waitFor(async () => {
+      const a = await lastArgs();
+      // ★오늘을 보내면 서버가 자르고 「예외 경고」가 상시가 된다 — 그게 P1-1이었다.
+      expect(a.dateTo, `${label}이 오늘을 보낸다`).toBe(kstDate(-1));
+      expect(daysBetween(a.dateFrom!, a.dateTo!), `${label} 창 길이가 라벨과 다르다`).toBe(want);
+    });
+  });
+
+  it("「어제」는 하루짜리 창이다", async () => {
+    await renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "어제" }));
+    await waitFor(async () => {
+      const a = await lastArgs();
+      expect([a.dateFrom, a.dateTo]).toEqual([kstDate(-1), kstDate(-1)]);
+    });
+  });
+
+  it("★누른 프리셋이 «눌린 것»으로 보인다 — 하이라이트와 동작이 같은 창을 써야 한다", async () => {
+    // ★적대 리뷰 2R F16: 하이라이트만 옛 창 함수로 되돌리는 변이가 1,440건을 통과했다.
+    //   그 경우 요청 창은 정확한데 **어떤 프리셋도 눌린 것처럼 안 보인다**(state는 어제-끝,
+    //   하이라이트 계산은 오늘-끝이라 영영 불일치). `21d`를 되살린 바로 그 이유가 무방비다.
+    //   이 컴포넌트는 예전에 그 병을 이미 한 번 앓았다(«쓰는 창»과 «보이는 창»이 두 사본).
+    const on = (name: string) =>
+      screen.getByRole("button", { name }).className.includes("bg-blue-600");
+    await renderApp();
+    await screen.findByRole("button", { name: "21일" });
+    // 시작 창이 21일이므로 열자마자 그 버튼이 켜져 있어야 한다.
+    expect(on("21일"), "열자마자 어느 프리셋도 안 눌려 보인다").toBe(true);
+    expect(on("7일")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "90일" }));
+    await waitFor(() => expect(on("90일"), "누른 프리셋이 안 켜진다").toBe(true));
+    expect(on("21일")).toBe(false);
+  });
+
+  it("★축 이름이 화면에 있다 — 안 적으면 사용자는 자기가 아는 축으로 읽는다", async () => {
+    await renderApp();
+    expect(await screen.findByText("성과 발생일")).toBeTruthy();
   });
 });

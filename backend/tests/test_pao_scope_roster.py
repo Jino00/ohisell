@@ -787,3 +787,85 @@ def test_day_class_split_reports_real_roas_per_bucket(client_and_session):
     # 집행이 없는 칸은 0이 아니라 None — 「ROAS 0」은 「적자」라는 거짓 사실이다
     assert split["holiday"]["cost"] == 0
     assert split["holiday"]["roas"] is None
+
+
+# ══════════════ 날짜 구간 선택 (Jino 2026-09-02 23:35 «대시보드 캘린더처럼») ══════════════
+#
+# ★왜 서버가 구간을 받아야 하나: 화면에 날짜 입력을 주면서 서버가 `days`만 받으면
+#   «고른 날짜»와 «실제 조회 창»이 갈라진다 — 사용자는 자기가 고른 구간을 봤다고 믿는데
+#   아니다. 그게 이 저장소가 반복해 밟은 「조용히 거짓이 되는 화면」이다.
+
+_T = date(2026, 9, 2)          # 오늘
+_LATEST = date(2026, 9, 1)     # 창 관례상 마지막 날(오늘 제외)
+
+
+@pytest.fixture
+def sess(client_and_session):
+    """창 계산만 볼 때 쓰는 세션 — 이 파일의 기존 픽스처를 그대로 쓴다(정의를 늘리지 않는다)."""
+    _, s = client_and_session
+    return s
+
+
+def _win(sess, **kw):
+    """창만 본다 — 창 계산을 재는 헬퍼."""
+    return pao_scope_roster.build_roster(sess, today=_T, **kw)["window"]
+
+
+def test_picked_range_is_the_window_that_is_actually_queried(sess):
+    """★고른 날짜가 곧 조회 창이다. 어긋나면 화면이 거짓말한다."""
+    w = _win(sess, date_from_in=date(2026, 8, 10), date_to_in=date(2026, 8, 20))
+    assert (w["date_from"], w["date_to"]) == ("2026-08-10", "2026-08-20")
+    assert w["days"] == 11, "구간 길이가 곧 days여야 한다"
+    assert w["clamped"] is False and w["note"] is None
+
+
+def test_days_path_is_unchanged(sess):
+    """종전 `days` 경로는 한 글자도 안 바뀐다 — 어제로 끝나는 N일."""
+    w = _win(sess, days=21)
+    assert w["date_to"] == _LATEST.isoformat()
+    assert w["date_from"] == (_LATEST - timedelta(days=20)).isoformat()
+    assert w["days"] == 21 and w["clamped"] is False
+
+
+def test_today_is_clamped_and_the_screen_is_told_why(sess):
+    """★오늘을 고르면 자르되 **왜 잘랐는지** 말한다.
+
+    조용히 자르면 「내가 고른 날짜가 안 나왔다」가 되고, 안 자르면 당일 전환이 정착 전이라
+    총이익이 실제보다 적게 나온다 — 둘 다 거짓이다."""
+    w = _win(sess, date_from_in=date(2026, 8, 30), date_to_in=_T)
+    assert w["date_to"] == _LATEST.isoformat(), "오늘이 창에 남았다"
+    assert w["clamped"] is True
+    assert w["note"] and "2026-09-01" in w["note"] and "총이익" in w["note"]
+
+
+def test_reversed_range_is_fixed_and_confessed(sess):
+    """시작일이 종료일보다 뒤면 지어내지 않고 바로잡고 말한다."""
+    w = _win(sess, date_from_in=date(2026, 8, 20), date_to_in=date(2026, 8, 10))
+    assert w["date_from"] == w["date_to"] == "2026-08-10"
+    assert w["clamped"] is True and "시작일" in w["note"]
+
+
+def test_range_longer_than_the_cap_is_clamped_and_confessed(sess):
+    """상한(180일)을 넘겨 고르면 자르고 그 사실을 말한다."""
+    w = _win(sess, date_from_in=date(2025, 1, 1), date_to_in=date(2026, 8, 31))
+    assert w["days"] == pao_scope_roster.MAX_WINDOW_DAYS
+    assert w["clamped"] is True and "상한" in w["note"]
+
+
+def test_only_one_end_given_still_yields_a_sane_window(sess):
+    """한쪽만 주면 나머지는 관례로 채우되 창은 여전히 정합적이다."""
+    w = _win(sess, date_to_in=date(2026, 8, 20))
+    assert w["date_to"] == "2026-08-20"
+    assert w["days"] == pao_scope_roster.DEFAULT_WINDOW_DAYS
+    w2 = _win(sess, date_from_in=date(2026, 8, 25))
+    assert w2["date_from"] == "2026-08-25" and w2["date_to"] == _LATEST.isoformat()
+
+
+def test_api_accepts_the_range_and_returns_it(client_and_session):
+    """★창구까지 실제로 간다 — 서비스만 고치고 라우터를 안 이으면 화면은 그대로다."""
+    client, _ = client_and_session
+    r = client.get("/api/naver/ad/scope/roster",
+                   params={"date_from": "2026-08-10", "date_to": "2026-08-20"})
+    assert r.status_code == 200
+    w = r.json()["window"]
+    assert (w["date_from"], w["date_to"], w["days"]) == ("2026-08-10", "2026-08-20", 11)

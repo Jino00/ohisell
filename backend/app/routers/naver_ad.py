@@ -1158,6 +1158,11 @@ def campaign_ignition_preflight(
 def pao_scope_roster_get(
     campaign_id: str | None = None,
     days: int = pao_scope_roster.DEFAULT_WINDOW_DAYS,
+    # ★날짜 구간(가산). 화면이 날짜를 직접 고를 수 있게 되면서 필요해졌다 — 서버가 `days`만
+    #   받으면 «고른 날짜»와 «실제 조회 창»이 갈라지고, 사용자는 자기가 고른 구간을 봤다고
+    #   믿는다. 안 주면 종전 `days` 경로 그대로다(기존 소비처 불변).
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """PAO 스코프 대시보드 — 캠페인 × 광고그룹 횡단 로스터(읽기 전용).
@@ -1167,7 +1172,10 @@ def pao_scope_roster_get(
     `gross_profit=null` + `profit_status='bep_unknown'` — **0원과 «모름»을 구분한다**
     (숫자를 지어내면 그 숫자가 그대로 판정에 쓰인다).
     """
-    return pao_scope_roster.build_roster(db, campaign_id=campaign_id, days=days)
+    return pao_scope_roster.build_roster(
+        db, campaign_id=campaign_id, days=days,
+        date_from_in=date_from, date_to_in=date_to,
+    )
 
 
 class AdgroupScopeIn(BaseModel):

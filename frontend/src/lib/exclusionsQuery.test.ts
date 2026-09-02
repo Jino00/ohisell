@@ -16,7 +16,7 @@
 // 바로 그 병이고, **백엔드 쪽 같은 배선엔 테스트가 있는데 프론트만 무방비였다.**
 // 백엔드 테스트가 있다는 것이 프론트 배선의 보증이 아니다.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchNaverSearchTermExclusions } from "./api";
+import { fetchNaverSearchTermExclusions, fetchPaoScopeRoster } from "./api";
 
 let seen: string[];
 
@@ -66,5 +66,28 @@ describe("★조회 파라미터가 URL까지 간다 — 함수 인자가 아니
   it("경로가 이 창구를 가리킨다", async () => {
     await fetchNaverSearchTermExclusions({ adgroupId: "grp-1" });
     expect(seen[0]).toContain("/api/naver/ad/search-term/exclusions");
+  });
+});
+
+describe("★스코프 로스터도 «나가는 URL»을 잰다 — 화면 테스트는 api를 모킹해 이 구간을 못 본다", () => {
+  // ★같은 병이 직전 라운드에 이미 한 번 났다(적대 리뷰 P1-3): 화면이 `{ adgroupId }`를
+  //   «인자»로 넘기는 것만 재고 URL에 실리는지는 아무도 안 봤다. 날짜 구간도 똑같다 —
+  //   안 실리면 서버가 기본 창(어제로 끝나는 21일)을 돌려주는데, 화면은 사용자가 고른
+  //   구간을 보여줬다고 믿게 만든다.
+  it("date_from·date_to가 쿼리에 실린다", async () => {
+    await fetchPaoScopeRoster({ dateFrom: "2026-08-10", dateTo: "2026-08-20" });
+    expect([qs().get("date_from"), qs().get("date_to")]).toEqual(["2026-08-10", "2026-08-20"]);
+  });
+
+  it("안 주면 그 키가 아예 없다 — 빈 값으로 서버 기본 창이 조용히 바뀌면 안 된다", async () => {
+    await fetchPaoScopeRoster({ days: 21 });
+    expect(qs().has("date_from")).toBe(false);
+    expect(qs().has("date_to")).toBe(false);
+    expect(qs().get("days")).toBe("21");
+  });
+
+  it("경로가 로스터 창구를 가리킨다", async () => {
+    await fetchPaoScopeRoster({ dateFrom: "2026-08-10" });
+    expect(seen[0]).toContain("/api/naver/ad/scope/roster");
   });
 });

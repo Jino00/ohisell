@@ -239,17 +239,58 @@ def build_roster(
     *,
     campaign_id: str | None = None,
     days: int = DEFAULT_WINDOW_DAYS,
+    date_from_in: date | None = None,
+    date_to_in: date | None = None,
     today: date | None = None,
 ) -> dict:
     """캠페인 × 광고그룹 횡단 로스터.
 
     campaign_id를 주면 그 캠페인만, 안 주면 창 안에 집행이 있었던 전 캠페인.
     창은 D-0(오늘) 제외 — 당일 전환이 정착 전이라 총이익이 과소로 보인다(창 관례).
+
+    창을 정하는 길은 둘이다:
+      ① `days` — 종전 경로. 「어제로 끝나는 N일」.
+      ② `date_from_in`/`date_to_in` — 화면이 날짜를 직접 고른 경우(공용 `PeriodRangeBar`).
+    ★②가 필요한 이유: 화면에 날짜 입력을 주면서 서버가 `days`만 받으면 «고른 날짜»와
+      «실제 조회 창»이 갈라진다 — 사용자는 자기가 고른 구간을 봤다고 믿는데 아니다.
+    ★오늘(D-0)을 고르면 **자르고 그 사실을 말한다**(`window.clamped`·`window.note`).
+      조용히 자르면 「내가 고른 날짜가 안 나왔다」가 되고, 안 자르면 총이익이 과소로 나온다.
     """
-    days = max(1, min(int(days), MAX_WINDOW_DAYS))
     today = today or kst_today()
-    date_to = today - timedelta(days=1)
-    date_from = date_to - timedelta(days=days - 1)
+    latest = today - timedelta(days=1)          # 창 관례상 마지막으로 쓸 수 있는 날
+    clamped = False
+    note: str | None = None
+
+    if date_from_in is not None or date_to_in is not None:
+        date_to = date_to_in or latest
+        date_from = date_from_in or (date_to - timedelta(days=DEFAULT_WINDOW_DAYS - 1))
+        # ★뒤집힘은 **clamp «전»에** 본다. clamp 뒤에 보면, 두 칸에 오늘을 똑같이 넣었을 때
+        #   `date_to`만 하루 당겨져 「시작일이 종료일보다 뒤」가 되고 화면이 **사용자가 하지
+        #   않은 실수를 사용자 탓으로** 말한다(적대 리뷰 P2-1 실측).
+        if date_from > date_to:
+            clamped = True
+            note = "시작일이 종료일보다 뒤여서 하루짜리 창으로 봅니다."
+            date_from = date_to
+        if date_to > latest:
+            clamped = True
+            note = (note + " " if note else "") + (
+                f"{date_to.isoformat()}까지 고르셨지만 오늘({today.isoformat()})은 전환이 아직 "
+                f"정착 전이라 총이익이 실제보다 적게 보입니다 — {latest.isoformat()}까지로 "
+                f"보여드립니다."
+            )
+            date_to = latest
+            if date_from > date_to:             # 시작일도 미래였으면 같이 당긴다
+                date_from = date_to
+        span = (date_to - date_from).days + 1
+        if span > MAX_WINDOW_DAYS:
+            clamped = True
+            note = (note + " " if note else "") + f"창 상한 {MAX_WINDOW_DAYS}일까지만 봅니다."
+            date_from = date_to - timedelta(days=MAX_WINDOW_DAYS - 1)
+        days = (date_to - date_from).days + 1
+    else:
+        days = max(1, min(int(days), MAX_WINDOW_DAYS))
+        date_to = latest
+        date_from = date_to - timedelta(days=days - 1)
 
     # 보정계수 — profit_scorecard와 같은 소스(fail-open: 산출 불가면 1.0 무보정)
     # ★구간 양끝을 «둘 다» 가져온다(Jino 지시 2026-08-24 — 표시엔 단일 보정값을 쓰지 않는다).
@@ -424,6 +465,9 @@ def build_roster(
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
             "days": days,
+            # ★가산 — 고른 창을 그대로 못 준 경우 «왜»가 화면에 뜬다. 조용히 자르지 않는다.
+            "clamped": clamped,
+            "note": note,
         },
         # ★단일 "value"를 없앴다 — 화면이 하나만 집어 들면 그게 사실처럼 읽힌다.
         "correction_factor": {

@@ -7245,7 +7245,13 @@ export interface PaoScopeCampaign {
 }
 
 export interface PaoScopeRoster {
-  window: { date_from: string; date_to: string; days: number };
+  window: {
+    date_from: string; date_to: string; days: number;
+    /** 고른 창을 그대로 못 준 경우 true — 조용히 자르지 않는다. */
+    clamped?: boolean;
+    /** 왜 잘랐는지. 화면이 그대로 렌더한다(문구를 프론트가 새로 짓지 않는다). */
+    note?: string | null;
+  };
   /** ★단일 value가 아니라 «구간»이다 — 하나만 집어 들면 그게 사실처럼 읽힌다.
    *  하한 = inflowPath 「광고>」5종 근거 · 상한 = 채널 매출 전액을 광고 공으로 돌린 «가정» */
   correction_factor: { low: number; high: number; source: string | null };
@@ -7292,10 +7298,16 @@ export interface PaoScopeDayClassSplit {
   reference: string;
 }
 
-export function fetchPaoScopeRoster(params: { campaignId?: string; days?: number } = {}): Promise<PaoScopeRoster> {
+export function fetchPaoScopeRoster(
+  params: { campaignId?: string; days?: number; dateFrom?: string; dateTo?: string } = {},
+): Promise<PaoScopeRoster> {
   const q = new URLSearchParams();
   if (params.campaignId) q.set("campaign_id", params.campaignId);
   if (params.days) q.set("days", String(params.days));
+  // ★날짜 구간(가산). 화면이 날짜를 직접 고르면 서버도 그 구간을 받아야 한다 —
+  //   `days`만 보내면 «고른 날짜»와 «실제 조회 창»이 갈라져 화면이 거짓말한다.
+  if (params.dateFrom) q.set("date_from", params.dateFrom);
+  if (params.dateTo) q.set("date_to", params.dateTo);
   const qs = q.toString();
   return fetchApi<PaoScopeRoster>(`/api/naver/ad/scope/roster${qs ? `?${qs}` : ""}`);
 }
