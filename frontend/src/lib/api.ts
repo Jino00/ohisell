@@ -757,6 +757,8 @@ export interface SchedulerHealthExclusionSlots {
   rows: {
     adgroup_id: string;
     campaign_id: string;
+    /** ★그룹 이름만으론 «어느 캠페인 것인지» 모른다. 못 찾으면 "" — 화면이 id로 폴백한다. */
+    campaign_name: string;
     name: string;
     state: string; // exhausted | unknown | stale | ok
     used: number | null; // null = 못 셌다
@@ -5019,6 +5021,11 @@ export interface NaverSearchTermExclusionRow {
   status: string;
   cycle: number;
   source: string | null;
+  /** 우리 원장에 들어온 시각. ★`source='console_import'`면 이건 «편입 시각»이지
+   *  「대행사가 언제 걸었나」가 아니다 — 그대로 보여 주면 「오늘 자른 것」으로 읽힌다. */
+  excluded_at: string | null;
+  /** 콘솔이 알려준 «실제» 제외 시각(D-NAO-177). null = 모름 — 추정으로 메우지 않는다. */
+  console_excluded_at: string | null;
   next_review_at: string | null;
   probation_until: string | null;
   reopen_block_reason: string | null;
@@ -5036,10 +5043,14 @@ export interface NaverSearchTermExclusionList {
 /** 제외 상태기계 목록. ★백엔드는 오래전부터 있었는데 **프론트 호출부가 0건**이었다 — H1의
  *  preflight와 같은 병이다(만드는 층은 있는데 닿는 층이 없다). */
 export function fetchNaverSearchTermExclusions(params: {
-  campaignId?: string; status?: string; limit?: number; excludeConsoleImport?: boolean;
+  campaignId?: string; adgroupId?: string; status?: string; limit?: number;
+  excludeConsoleImport?: boolean;
 }): Promise<NaverSearchTermExclusionList> {
   const q = new URLSearchParams();
   if (params.campaignId) q.set("campaign_id", params.campaignId);
+  // ★그룹 단위로 좁힌다 — 캠페인으로만 내리면 한 캠페인의 수십 그룹이 `limit`을 채워
+  //   정작 보려던 그룹 몫이 잘리고 화면엔 「없다」로 보인다.
+  if (params.adgroupId) q.set("adgroup_id", params.adgroupId);
   if (params.status) q.set("status", params.status);
   if (params.limit) q.set("limit", String(params.limit));
   // ★`limit` «전»에 걸려야 한다 — 화면에서 거르면 페이지가 콘솔 편입분으로 차서 정작 열 수 있는

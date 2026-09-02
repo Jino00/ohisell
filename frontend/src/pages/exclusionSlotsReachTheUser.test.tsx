@@ -22,9 +22,9 @@
 //   규율대로 unknown을 먼저 돌려주기 때문이다. 그래서 «얼마나 오래»가 카운터에 안 잡히고,
 //   그 사실을 화면이 말해야 한다.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
-import { getSearchTermExclusionSlots } from "../lib/api";
-import { sweepLabel } from "../lib/exclusionSlots";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { getSearchTermExclusionSlots, fetchNaverSearchTermExclusions } from "../lib/api";
+import { sweepLabel, termTitle } from "../lib/exclusionSlots";
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
@@ -35,10 +35,12 @@ vi.mock("../lib/api", async (importOriginal) => ({
   getSearchTermExclusionList: vi.fn(() => new Promise(() => {})),
   getSearchTermExclusionSurvival: vi.fn(() => new Promise(() => {})),
   getSearchTermExclusionScorecard: vi.fn(() => new Promise(() => {})),
+  fetchNaverSearchTermExclusions: vi.fn(),
 }));
 
 const row = (o: Record<string, unknown>) => ({
-  adgroup_id: "grp-1", campaign_id: "cmp-1", name: "02. S23FE", state: "ok",
+  adgroup_id: "grp-1", campaign_id: "cmp-1", campaign_name: "● 02. 갤럭시_보급형_M",
+  name: "02. S23FE", state: "ok",
   used: 10, cap: 70, remaining: 60, usage_pct: 14.3,
   ours: 0, agency: 10, other_source: 0, unattributed: 0, grades: {},
   inflow_30d: 0, inflow_30d_ours: 0, inflow_30d_agency: 0,
@@ -67,8 +69,23 @@ const LIVE = {
   reclaim_note: "대행사 칸은 우리가 반납하지 않는다 — 소유권 분리 협의 전엔 금지선이다.",
 };
 
+const term = (o: Record<string, unknown> = {}) => ({
+  id: 1, campaign_id: "cmp-1", adgroup_id: "grp-full", search_term: "S23보호필름",
+  status: "excluded", cycle: 1, source: "console_import",
+  excluded_at: "2026-08-13T10:00:00",            // ★우리가 «편입한» 시각
+  console_excluded_at: "2024-08-27T09:00:00",    // ★대행사가 «실제로 건» 시각
+  next_review_at: null, probation_until: null, reopen_block_reason: null,
+  ...o,
+});
+
+const drill = (rows: unknown[]) => ({
+  total: rows.length, summary_by_status: { excluded: rows.length },
+  today_excluded: 0, today_opened: 0, today_restored: 0, rows,
+});
+
 beforeEach(() => {
   vi.mocked(getSearchTermExclusionSlots).mockResolvedValue(LIVE as never);
+  vi.mocked(fetchNaverSearchTermExclusions).mockResolvedValue(drill([term()]) as never);
   window.history.pushState({}, "", "/naver-ad/exclusion-list");
 });
 afterEach(cleanup);
@@ -169,5 +186,115 @@ describe("★대행사 칸 반납 금지선이 화면에 남는다", () => {
     await renderApp();
     const p = await panel();
     expect(p.textContent).toContain("대행사 칸은 우리가 반납하지 않는다");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// Jino 지적 2건 (2026-09-02 21:31) — 둘 다 «화면을 실제로 봐야» 드러난 것이다
+// ══════════════════════════════════════════════════════════════════
+
+describe("★어느 캠페인의 그룹인지 화면이 말한다", () => {
+  // Jino 원문: *"어느 광고캠페인에 속해있는 광고그룹인지 알 수 없어"*
+  // 「01. TEST_S20」 같은 그룹 이름은 캠페인을 모르면 어디 것인지 가려낼 수 없다.
+  it("캠페인 이름이 그룹과 같은 행에 뜬다", async () => {
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    expect(within(row).getByText("● 02. 갤럭시_보급형_M")).toBeTruthy();
+  });
+
+  it("캠페인 이름을 못 찾으면 id로 폴백한다 — 지어내지 않는다", async () => {
+    vi.mocked(getSearchTermExclusionSlots).mockResolvedValue({
+      ...LIVE,
+      rows: [{ ...LIVE.rows[2], campaign_name: "", campaign_id: "cmp-이름없음" }],
+    } as never);
+    await renderApp();
+    const p = await panel();
+    expect(within(p).getByText("cmp-이름없음")).toBeTruthy();
+  });
+});
+
+describe("★펼치면 «그 행 바로 밑»에 열린다", () => {
+  // Jino 원문: *"접기, 펼치기를 눌러도 그것만 바뀔 뿐 아무 정보가 나오지 않아"*
+  // 초판은 패널을 표 «아래»에 붙였다 — 내용은 렌더됐지만 저 멀리 생겨서 안 보였다.
+  // **붙는 자리가 곧 기능이다.** 그래서 «존재»가 아니라 «인접»을 잰다.
+  const openFirst = async () => {
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    return row;
+  };
+
+  it("펼침 내용이 그 행의 «바로 다음 형제»다", async () => {
+    await renderApp();
+    const row = await openFirst();
+    const next = row.nextElementSibling as HTMLElement;
+    expect(next, "행 바로 뒤에 아무것도 없다 — 패널이 표 밖에 붙었다").toBeTruthy();
+    await waitFor(() => expect(next.textContent).toContain("걸린 검색어"));
+  });
+
+  it("펼치면 실제 검색어가 뜬다 — 버튼 글자만 바뀌지 않는다", async () => {
+    await renderApp();
+    await openFirst();
+    await waitFor(() => expect(screen.getByText("S23보호필름")).toBeTruthy());
+    expect(vi.mocked(fetchNaverSearchTermExclusions)).toHaveBeenCalledWith(
+      expect.objectContaining({ adgroupId: "grp-full" }),
+    );
+  });
+
+  it("다시 누르면 접힌다", async () => {
+    await renderApp();
+    const row = await openFirst();
+    await waitFor(() => expect(screen.getByText("S23보호필름")).toBeTruthy());
+    fireEvent.click(within(row).getByRole("button", { name: /접기/ }));
+    await waitFor(() => expect(screen.queryByText("S23보호필름")).toBeNull());
+  });
+});
+
+describe("★아는 것과 모르는 것을 갈라서 말한다", () => {
+  it("라이브 칸 수와 «우리가 아는 수»를 같은 줄에서 말한다", async () => {
+    // 라이브 70칸인데 원장이 아는 건 1개 ⇒ 69칸은 무엇인지 모른다.
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    await waitFor(() => expect(screen.getByText("S23보호필름")).toBeTruthy());
+    const box = row.nextElementSibling as HTMLElement;
+    // ★느슨하게 «모릅니다|미귀속»만 보면 안 된다 — 문장을 지워도 옆의 "(미귀속)" 글자가
+    //   남아 통과한다(변이 F1이 그렇게 살아남았다). **모르는 칸 수 자체**를 잰다:
+    //   라이브 70칸 − 원장이 아는 1개 = 69칸.
+    expect(box.textContent).toContain("70");
+    expect(box.textContent).toContain("69");
+    expect(box.textContent).toContain("무엇인지 모릅니다");
+  });
+
+  it("★원장이 0건이면 «제외가 없다»가 아니라 «모른다»고 말한다", async () => {
+    // 2026-09-02 실측: 70/70 소진 6그룹 중 5개가 원장 0건이다. 칸은 찼는데 우리가 모른다.
+    vi.mocked(fetchNaverSearchTermExclusions).mockResolvedValue(drill([]) as never);
+    await renderApp();
+    const p = await panel();
+    const row = within(p).getByText("02. S23FE").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /펼치기/ }));
+    const box = row.nextElementSibling as HTMLElement;
+    await waitFor(() => expect(box.textContent).toContain("한 건도 없습니다"));
+    expect(box.textContent).toContain("칸은 찼는데");
+    expect(box.textContent).not.toMatch(/제외가 없습니다/);
+  });
+});
+
+describe("★대행사 편입분의 날짜는 «편입 시각»이 아니다 (D-NAO-177)", () => {
+  it("콘솔이 알려준 실제 시각을 쓴다 — 편입 시각을 쓰면 「오늘 잘랐다」로 읽힌다", () => {
+    expect(termTitle(term() as never)).toContain("2024-08-27");
+    expect(termTitle(term() as never)).not.toContain("2026-08-13");
+  });
+
+  it("실제 시각이 없으면 «모름»이라 쓴다 — 편입 시각으로 메우지 않는다", () => {
+    const t = termTitle(term({ console_excluded_at: null }) as never);
+    expect(t).toContain("모름");
+    expect(t).not.toContain("2026-08-13");
+  });
+
+  it("우리 실행분은 우리 시각을 쓴다", () => {
+    expect(termTitle(term({ source: null }) as never)).toContain("우리 실행분");
   });
 });

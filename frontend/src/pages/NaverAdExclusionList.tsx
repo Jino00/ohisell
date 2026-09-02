@@ -8,17 +8,18 @@
 //
 // ★문구는 새로 짓지 않는다 — reason/why/impact/revert_howto는 백엔드 문장을 그대로 렌더한다.
 //   문구 정본이 두 벌이 되면 갈라진다(백엔드 SA docstring 참조).
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Card, Table, Th, Td, Badge, Button, LayerNav, Loading, EmptyState } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num, won, roasX, NO_DATA } from "../lib/format";
-import { sweepLabel } from "../lib/exclusionSlots";
+import { sweepLabel, termTitle } from "../lib/exclusionSlots";
 import {
   getSearchTermExclusionList, getSearchTermExclusionSurvival, getSearchTermExclusionSlots,
   getSearchTermExclusionScorecard, postSearchTermExecution, postSearchTermExecutionDetect,
   type NaverExclusionListResponse, type NaverExclusionCandidate, type NaverExclusionSurvival,
   type NaverSearchTermScorecard, type NaverExclusionVerdict, type NaverSearchTermExecutionResultKind,
   type NaverSearchTermDetectResult, type NaverExclusionSlots,
+  fetchNaverSearchTermExclusions, type NaverSearchTermExclusionRow,
 } from "../lib/api";
 
 /** 「라이브에서 자동 발견」 실행 결과 한 줄.
@@ -667,6 +668,7 @@ function CandidateTable({
 // ══════════════════════════════════════════════════════════════════
 
 function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
+  const [open, setOpenGroup] = useState<string | null>(null);
   const t = slots.totals;
   // ★분모는 라이브 총계다. 귀속 네 칸의 합이 라이브와 같아야 한다 — 백엔드가 그렇게 낸다.
   const pct = (n: number) => (t.used > 0 ? `${((n * 100) / t.used).toFixed(1)}%` : NO_DATA);
@@ -740,15 +742,22 @@ function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
           <Table
             head={
               <>
-                <Th>광고그룹</Th><Th>상태</Th><Th right>찬 칸</Th><Th right>남은 칸</Th>
-                <Th>우리 / 대행사 / 미귀속</Th><Th>소진 예상</Th>
+                <Th>광고캠페인</Th><Th>광고그룹</Th><Th>상태</Th><Th right>찬 칸</Th><Th right>남은 칸</Th>
+                <Th>우리 / 대행사 / 미귀속</Th><Th>소진 예상</Th><Th>걸린 검색어</Th>
               </>
             }
           >
             {slots.rows.map((r) => {
                 const full = r.used !== null && r.used >= r.cap;
+                const isOpen = open === r.adgroup_id;
                 return (
-                  <tr key={r.adgroup_id} className={full ? "bg-red-50" : undefined}>
+                  <Fragment key={r.adgroup_id}>
+                  <tr className={full ? "bg-red-50" : undefined}>
+                    {/* ★캠페인을 «왼쪽 첫 칸»에 둔다 — 「01. TEST_S20」 같은 그룹 이름은
+                        캠페인을 모르면 어디 것인지 가려낼 수 없다(Jino 2026-09-02). */}
+                    <Td>
+                      <span className="text-xs text-gray-600">{r.campaign_name || r.campaign_id}</span>
+                    </Td>
                     <Td>{r.name || r.adgroup_id}</Td>
                     <Td>
                       {full ? <Badge tone="bad">소진</Badge>
@@ -776,7 +785,30 @@ function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
                             {r.exhaust_eta_days === 0 ? "이미 소진" : `${r.exhaust_eta_days}일 이내(상한)`}
                           </span>}
                     </Td>
+                    <Td>
+                      {/* ★Jino 2026-09-02: *"그 광고그룹에 등록된 제외키워드들이 보여야
+                          하는거 아니야?"* — 「몇 칸」만으론 무엇이 걸렸는지 알 수 없다. */}
+                      <button
+                        type="button"
+                        className="text-xs text-blue-600 hover:underline whitespace-nowrap"
+                        onClick={() => setOpenGroup(open === r.adgroup_id ? null : r.adgroup_id)}
+                      >
+                        {isOpen ? "접기 ▲" : "펼치기 ▼"}
+                      </button>
+                    </Td>
                   </tr>
+                  {/* ★펼침은 «그 행 바로 밑»에 열린다. 초판은 표 «아래»에 붙였는데, 그러면
+                      행을 눌러도 내용이 저 멀리 생겨서 화면엔 버튼 글자만 바뀐 것처럼 보인다
+                      — Jino가 그걸 그대로 겪었다(2026-09-02: *"접기, 펼치기를 눌러도 그것만
+                      바뀔 뿐 아무 정보가 나오지 않아"*). 붙는 자리가 곧 기능이다. */}
+                  {isOpen && (
+                    <tr>
+                      <td colSpan={8} className="px-4 pb-3 border-b border-gray-100 bg-gray-50">
+                        <GroupTermsPanel adgroupId={r.adgroup_id} row={r} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
           </Table>
@@ -795,5 +827,86 @@ function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
         </p>
       </div>
     </Card>
+  );
+}
+
+/** 한 광고그룹에 «실제로 걸려 있는» 제외 검색어.
+ *
+ *  ★이 패널의 존재 이유는 Jino의 지적이다(2026-09-02 21:23): *"광고그룹이 나와야 할꺼고
+ *  그 광고그룹에 등록된 제외키워드들이 보여야 하는거 아니야?"* — 슬롯 요약은 「몇 칸 찼나」만
+ *  말하지 「무엇이 걸렸나」를 말하지 못했다.
+ *
+ *  ★★그리고 여기가 이 화면에서 가장 조심할 자리다: **우리는 걸린 것을 다 알지 못한다.**
+ *  라이브 스윕은 «개수»만 적재하고(`restrict_keyword_count`) 키워드 텍스트는 저장하지
+ *  않는다. 텍스트가 있는 건 우리 원장뿐이다. 2026-09-02 실측: 70/70 소진 6그룹 중 원장이
+ *  검색어를 아는 건 **1그룹**이고 나머지 5개는 **0건**이다.
+ *  ⇒ 목록을 그냥 그리면 「이 그룹엔 3개 걸려 있다」로 읽힌다. 실제로는 70칸이 찼고 우리가
+ *    아는 게 3개다. 그래서 **아는 수와 모르는 수를 같은 줄에서 말한다.** */
+function GroupTermsPanel({ adgroupId, row }: {
+  adgroupId: string;
+  row: NaverExclusionSlots["rows"][number];
+}) {
+  const { data, error } = useAsyncData(
+    () => fetchNaverSearchTermExclusions({ adgroupId, status: "excluded", limit: 200 }),
+    [adgroupId],
+  );
+  const known = data?.rows.length ?? 0;
+  // ★모르는 칸 = 라이브 − 아는 것. used가 null(못 셈)이면 «모른다»조차 셀 수 없다.
+  const unknown = row.used === null ? null : Math.max(row.used - known, 0);
+
+  return (
+    <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3">
+      <p className="text-xs font-medium text-gray-700">
+        {row.name || adgroupId} — 걸린 검색어
+      </p>
+      {error && <p className="mt-2 text-xs text-judge-bad">불러오지 못했습니다: {String(error)}</p>}
+      {!error && !data && <Loading />}
+      {data && (
+        <>
+          <p className="mt-1 text-xs text-gray-600">
+            {row.used === null ? (
+              <>라이브 사용량을 <b>못 셌습니다</b> — 우리 원장이 아는 것은 <b>{num(known)}개</b>이고,
+                실제로 몇 칸이 찼는지는 모릅니다.</>
+            ) : (
+              <>라이브 <b>{num(row.used)}칸</b> 중 우리 원장이 아는 것은 <b>{num(known)}개</b>
+                {unknown ? <> · 나머지 <b className="text-amber-700">{num(unknown)}칸은 무엇인지 모릅니다</b>(미귀속)</>
+                         : <> · 전부 압니다</>}
+              </>
+            )}
+          </p>
+          {known === 0 ? (
+            // ★0건을 「제외가 없다」로 쓰지 않는다 — 칸은 찼는데 우리가 모르는 것이다.
+            <p className="mt-2 text-xs text-gray-500">
+              우리 원장에 이 그룹의 검색어가 <b>한 건도 없습니다</b>.
+              {row.used ? " 칸은 찼는데 누가 무엇을 걸었는지 우리 기록엔 없습니다 — 대행사 콘솔에서 직접 확인해야 합니다." : ""}
+            </p>
+          ) : (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {data.rows.map((e: NaverSearchTermExclusionRow) => (
+                <span
+                  key={`${e.adgroup_id ?? ""}/${e.search_term ?? ""}`}
+                  title={termTitle(e)}
+                  className={`px-2 py-0.5 rounded text-xs border ${
+                    e.source === "console_import"
+                      ? "bg-white border-gray-300 text-gray-600"
+                      : "bg-blue-50 border-blue-200 text-blue-800"
+                  }`}
+                >
+                  {e.search_term}
+                </span>
+              ))}
+            </div>
+          )}
+          {data.total > data.rows.length && (
+            <p className="mt-2 text-xs text-gray-500">
+              {num(data.total)}건 중 {num(data.rows.length)}건만 보여줍니다.
+            </p>
+          )}
+          <p className="mt-2 text-[11px] text-gray-500">
+            파란 칩 = 우리 실행분 · 흰 칩 = 대행사 축적분. 칩에 마우스를 올리면 등급과 날짜가 뜹니다.
+          </p>
+        </>
+      )}
+    </div>
   );
 }

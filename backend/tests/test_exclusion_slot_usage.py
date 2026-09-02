@@ -478,3 +478,71 @@ def test_existing_keys_are_untouched(db):
         assert k in out, f"기존 키 {k} 가 사라졌다"
     for k in ("used", "ours", "agency", "capacity"):
         assert k in out["totals"], f"기존 totals 키 {k} 가 사라졌다"
+
+
+# ══════════════ G. 광고그룹 드릴다운 — «무엇이 걸려 있나» (Jino 2026-09-02 21:23) ══════════════
+#
+# Jino 원문: *"광고그룹이 나와야 할꺼고 그 광고그룹에 등록된 제외키워드들이 보여야 하는거 아니야?"*
+# ★슬롯 화면은 「몇 칸 찼나」만 말했다. 「무엇이 걸려 있나」는 이 창구가 답한다.
+# ★필터가 캠페인 단위뿐이면 한 캠페인에 그룹이 수십 개라 `limit` 안에서 그 그룹 몫이 잘려
+#   「없다」로 보인다 — `exclude_console_import`가 이미 한 번 밟은 병과 같은 모양이다.
+
+def test_drilldown_can_narrow_to_one_adgroup(db):
+    """그룹 단위로 좁혀진다 — 캠페인 단위로만 되면 옆 그룹 것이 섞인다."""
+    db.add(_excl(adgroup_id="grp-A", search_term="이쪽"))
+    db.add(_excl(adgroup_id="grp-B", search_term="저쪽"))
+    db.commit()
+    c = _client(db)
+    r = c.get("/api/naver/ad/search-term/exclusions", params={"adgroup_id": "grp-A"})
+    assert r.status_code == 200
+    terms = [x["search_term"] for x in r.json()["rows"]]
+    assert terms == ["이쪽"], f"그룹 필터가 안 걸렸다: {terms}"
+
+
+def test_drilldown_keeps_the_source_so_attribution_survives(db):
+    """검색어마다 «누가 걸었나»가 같이 온다 — 출처가 없으면 화면의 귀속 3분할과 갈라진다."""
+    db.add(_excl(adgroup_id="grp-A", search_term="우리것"))
+    db.add(_excl(adgroup_id="grp-A", search_term="대행사것", source="console_import"))
+    db.commit()
+    c = _client(db)
+    rows = c.get("/api/naver/ad/search-term/exclusions",
+                 params={"adgroup_id": "grp-A"}).json()["rows"]
+    by = {x["search_term"]: x.get("source") for x in rows}
+    assert by == {"우리것": None, "대행사것": "console_import"}
+
+
+def test_drilldown_is_empty_when_the_ledger_knows_nothing(db):
+    """★라이브가 70칸이어도 원장이 모르면 «0건»이다 — 지어내지 않는다.
+
+    2026-09-02 실측: 70/70 소진 6그룹 중 원장이 검색어를 아는 건 **1그룹뿐**이고
+    나머지 5개(TEST_ 그룹)는 원장 0건이다. 그 차이가 곧 「미귀속」이다."""
+    db.add(_target(adgroup_id="grp-full", restrict_keyword_count=70))
+    db.commit()
+    out = esu.slot_usage(db, now=NOW)
+    assert out["rows"][0]["used"] == 70
+    assert out["rows"][0]["unattributed"] == 70, "원장이 0이면 70칸 전부가 미귀속이다"
+    rows = _client(db).get("/api/naver/ad/search-term/exclusions",
+                           params={"adgroup_id": "grp-full"}).json()["rows"]
+    assert rows == []
+
+
+def test_row_carries_campaign_name_so_the_screen_can_place_the_group(db):
+    """★그룹 이름만으론 «어느 캠페인 것인지» 모른다.
+
+    Jino 2026-09-02: *"어느 광고캠페인에 속해있는 광고그룹인지 알 수 없어"*.
+    「01. TEST_S20」 같은 이름은 캠페인을 모르면 어디 것인지 가려낼 수 없다."""
+    from app.models import NaverEntity
+    db.add(_target())
+    db.add(NaverEntity(entity_type="campaign", entity_id=CAMPAIGN, name="01. 갤럭시_지문방지_TPU"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id=GROUP, name="02. S23FE"))
+    db.commit()
+    r = esu.slot_usage(db, now=NOW)["rows"][0]
+    assert r["campaign_name"] == "01. 갤럭시_지문방지_TPU"
+    assert r["name"] == "02. S23FE"
+
+
+def test_missing_campaign_name_is_blank_not_invented(db):
+    """이름을 못 찾으면 빈 문자열이다 — 프론트가 id로 폴백한다. 지어내지 않는다."""
+    db.add(_target())
+    db.commit()
+    assert esu.slot_usage(db, now=NOW)["rows"][0]["campaign_name"] == ""

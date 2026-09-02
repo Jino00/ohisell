@@ -183,12 +183,18 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
     ledger = _ledger_by_group(db, now)
 
     names: dict[str, str] = {}
+    # ★캠페인 이름도 같이 받는다(가산). 그룹 이름만 있으면 화면에서 «어느 캠페인의 그룹인가»를
+    #   알 수 없다 — 「01. TEST_S20」 같은 이름은 캠페인을 모르면 어디 것인지 가려낼 수 없다.
+    #   (Jino 2026-09-02: *"어느 광고캠페인에 속해있는 광고그룹인지 알 수 없어"*)
+    camp_names: dict[str, str] = {}
     try:
         from app.models import NaverEntity  # noqa: PLC0415 — 이름은 «있으면 좋은» 정보다
-        for e in db.query(NaverEntity).filter(NaverEntity.entity_type == "adgroup").all():
-            names[e.entity_id] = e.name
+        for e in db.query(NaverEntity).filter(
+            NaverEntity.entity_type.in_(("adgroup", "campaign"))
+        ).all():
+            (names if e.entity_type == "adgroup" else camp_names)[e.entity_id] = e.name
     except Exception:  # noqa: BLE001 — 이름을 못 얻어도 사용률 판정은 그대로 서야 한다
-        log.warning("[제외슬롯] 광고그룹 이름 조회 실패 — id로만 표기한다", exc_info=True)
+        log.warning("[제외슬롯] 엔티티 이름 조회 실패 — id로만 표기한다", exc_info=True)
 
     rows: list[dict] = []
     counts = {STATE_EXHAUSTED: 0, STATE_UNKNOWN: 0, STATE_STALE: 0, STATE_OK: 0}
@@ -225,6 +231,8 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
         rows.append({
             "adgroup_id": t.adgroup_id,
             "campaign_id": t.campaign_id,
+            # ★못 찾으면 빈 문자열이다 — 프론트가 id로 폴백한다(지어내지 않음).
+            "campaign_name": camp_names.get(t.campaign_id, ""),
             "name": names.get(t.adgroup_id, ""),
             "state": state,
             "used": used,                       # ★None = 못 셌다(0 아님)

@@ -1,3 +1,5 @@
+import type { NaverSearchTermExclusionRow } from "./api";
+
 // exclusionSlots.ts — 제외 슬롯 화면의 순수 헬퍼 (설계서 §5-4)
 //
 // ★왜 컴포넌트 파일에서 뺐나: 화면 파일이 컴포넌트 «말고» 다른 것을 export 하면
@@ -21,4 +23,16 @@ export function sweepLabel(from: string | null, to: string | null, now: Date = n
   const ageDays = Math.floor((now.getTime() - new Date(from).getTime()) / 86_400_000);
   if (from.slice(0, 10) === to.slice(0, 10)) return base;
   return `${base} — 다만 가장 오래된 관측은 ${fmt(from)}로 ${ageDays}일째입니다(그 그룹들은 최근 스윕에서 못 봤습니다)`;
+}
+
+/** 칩 툴팁. ★대행사 편입분의 날짜는 `console_excluded_at`(콘솔이 알려준 실제 시각)을 쓴다 —
+ *  `excluded_at`은 «우리가 편입한» 시각이라 그걸 쓰면 「오늘 잘랐다」로 읽힌다(D-NAO-177).
+ *  그 값이 없으면 「걸린 시점 모름」이라고 쓴다. 모르는 것을 날짜로 메우지 않는다. */
+export function termTitle(e: NaverSearchTermExclusionRow): string {
+  if (e.source === "console_import") {
+    const when = e.console_excluded_at?.slice(0, 10);
+    return `대행사 축적분 · ${when ? `${when}에 걸림` : "걸린 시점 모름(콘솔이 안 알려줌)"}`;
+  }
+  const when = e.excluded_at?.slice(0, 10);
+  return `우리 실행분${when ? ` · ${when}` : ""}`;
 }
