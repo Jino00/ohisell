@@ -12,12 +12,13 @@ import { useEffect, useState } from "react";
 import { Card, Table, Th, Td, Badge, Button, LayerNav, Loading, EmptyState } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num, won, roasX, NO_DATA } from "../lib/format";
+import { sweepLabel } from "../lib/exclusionSlots";
 import {
-  getSearchTermExclusionList, getSearchTermExclusionSurvival,
+  getSearchTermExclusionList, getSearchTermExclusionSurvival, getSearchTermExclusionSlots,
   getSearchTermExclusionScorecard, postSearchTermExecution, postSearchTermExecutionDetect,
   type NaverExclusionListResponse, type NaverExclusionCandidate, type NaverExclusionSurvival,
   type NaverSearchTermScorecard, type NaverExclusionVerdict, type NaverSearchTermExecutionResultKind,
-  type NaverSearchTermDetectResult,
+  type NaverSearchTermDetectResult, type NaverExclusionSlots,
 } from "../lib/api";
 
 /** 「라이브에서 자동 발견」 실행 결과 한 줄.
@@ -111,6 +112,12 @@ export default function NaverAdExclusionList() {
     () => getSearchTermExclusionScorecard(),
     [refreshTick],
   );
+  // ★설계서 §5-4 — 「우리가 건 제외가 아직 걸려 있나」(생존)와 **반대 방향의 질문**:
+  //   더 걸 «칸»이 남았나. 백엔드는 D-NAO-264부터 있었는데 프론트 호출이 0이었다.
+  const { data: slots, error: slotsError } = useAsyncData(
+    () => getSearchTermExclusionSlots(),
+    [refreshTick],
+  );
 
   // 캠페인 필터 옵션 — 별도 목록 API가 없어 「전체」 조회 응답의 candidates에서 뽑는다.
   //   특정 캠페인으로 필터를 걸어놓은 동안엔 목록이 그 하나로 줄어들지 않도록,
@@ -166,6 +173,15 @@ export default function NaverAdExclusionList() {
       </Card>
 
       {/* ① 조치 생존 카드 */}
+      {/* 제외 슬롯 In/Out — Jino 요구 ③(2026-09-02 09:57) · 설계서 §5-4 */}
+      {slotsError && (
+        <Card title="제외 슬롯 In/Out">
+          <p className="p-4 text-sm text-judge-bad">불러오지 못했습니다: {String(slotsError)}</p>
+        </Card>
+      )}
+      {!slotsError && !slots && <Card title="제외 슬롯 In/Out"><Loading /></Card>}
+      {slots && <SlotUsagePanel slots={slots} />}
+
       <Card title="조치 생존 — 우리가 건 제외가 아직 걸려 있는가">
         {survivalError ? (
           <EmptyState
@@ -633,6 +649,151 @@ function CandidateTable({
           })}
         </Table>
       )}
+    </Card>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 제외 슬롯 In/Out — Jino 요구 ③ *"제외키워드 셋팅의 In/out 현황도 보여야해"* (2026-09-02 09:57)
+// 규격 정본: 설계서 §5-4 (`docs/references/122_pao_console_uiux_design_20260902.md`)
+//
+// ★§5-4가 못 박은 것: 아래 넷 중 **하나라도 빠지면 화면이 거짓말을 한다.**
+//   ①정본은 라이브다 — 원장만 보면 70/70 그룹이 「43칸」으로 보인다
+//   ②원장↔라이브 차이를 같이 보인다 — 그 차이가 곧 「우리가 모르는 남의 칸」이다
+//   ③귀속 3분할(우리/대행사/미귀속) — **미귀속을 0으로 뭉개지 않는다**
+//   ④소진 예상일은 **상한**이다 — 우리 유입이 0으로 관측되므로 점화하면 짧아진다
+// ★70/70은 문턱 없이 무조건 빨강 — 그 그룹의 음의 레버가 그 순간 소멸한 것이다.
+// ★네이버 추가 호출 0 — 일일 스윕 적재분만 읽는다. 그래서 「마지막 스윕 시각 기준」을 쓴다.
+// ══════════════════════════════════════════════════════════════════
+
+function SlotUsagePanel({ slots }: { slots: NaverExclusionSlots }) {
+  const t = slots.totals;
+  // ★분모는 라이브 총계다. 귀속 네 칸의 합이 라이브와 같아야 한다 — 백엔드가 그렇게 낸다.
+  const pct = (n: number) => (t.used > 0 ? `${((n * 100) / t.used).toFixed(1)}%` : NO_DATA);
+  return (
+    <Card title="제외 슬롯 In/Out — 더 걸 칸이 남았는가">
+      <div className="p-4 space-y-4">
+        {/* 기준 시각 + 절단 자백 */}
+        <p className="text-xs text-gray-500">
+          {sweepLabel(slots.observed_from, slots.observed_to)} · 네이버 추가 호출 없이 적재분만 읽습니다.
+        </p>
+
+        {/* 계정 요약 — 70/70이 하나라도 있으면 빨강 */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className={`rounded border p-3 ${slots.exhausted > 0 ? "border-red-300 bg-red-50" : "border-gray-200"}`}>
+            <div className="text-xs text-gray-500">{slots.cap}/{slots.cap} 소진 그룹</div>
+            <div className={`text-xl font-semibold ${slots.exhausted > 0 ? "text-judge-bad" : "text-gray-900"}`}>
+              {num(slots.exhausted)}개
+            </div>
+            <div className="text-[11px] text-gray-500 mt-1">
+              {slots.exhausted > 0
+                ? "이 그룹들은 더 이상 제외를 걸 수 없습니다 — 음의 레버가 소멸했습니다"
+                : "소진된 그룹이 없습니다"}
+            </div>
+          </div>
+          <div className={`rounded border p-3 ${slots.unknown > 0 ? "border-amber-300 bg-amber-50" : "border-gray-200"}`}>
+            {/* ★«모름»을 «여유»로 읽으면 조회가 죽은 그룹이 「잔여 70칸」으로 보인다 */}
+            <div className="text-xs text-gray-500">못 센 그룹</div>
+            <div className="text-xl font-semibold text-gray-900">{num(slots.unknown)}개</div>
+            <div className="text-[11px] text-gray-500 mt-1">모름이지 여유가 아닙니다</div>
+          </div>
+          <div className="rounded border border-gray-200 p-3">
+            <div className="text-xs text-gray-500">관측 지연 그룹</div>
+            <div className="text-xl font-semibold text-gray-900">{num(slots.stale)}개</div>
+          </div>
+          <div className="rounded border border-gray-200 p-3">
+            <div className="text-xs text-gray-500">전체 그룹</div>
+            <div className="text-xl font-semibold text-gray-900">{num(slots.groups)}개</div>
+            <div className="text-[11px] text-gray-500 mt-1">
+              찬 칸 {num(t.used)} / 총 {num(t.capacity)}
+            </div>
+          </div>
+        </div>
+
+        {/* §5-4 ②③ — 원장↔라이브 차이 = 미귀속. 3분할을 나란히 둔다. */}
+        <div>
+          <p className="text-xs font-medium text-gray-700 mb-1">
+            찬 칸 {num(t.used)}개는 누가 걸었나 <span className="font-normal text-gray-500">(정본은 라이브 — 원장은 편입 누락·대행사 신규분만큼 적게 나옵니다)</span>
+          </p>
+          <div className="flex h-3 w-full overflow-hidden rounded bg-gray-100">
+            <div className="bg-owner-ours" style={{ width: t.used ? `${(t.ours * 100) / t.used}%` : "0%" }} title="우리 실행분" />
+            <div className="bg-owner-mop" style={{ width: t.used ? `${(t.agency * 100) / t.used}%` : "0%" }} title="대행사 축적분" />
+            <div className="bg-gray-400" style={{ width: t.used ? `${(t.other_source * 100) / t.used}%` : "0%" }} title="기타 출처" />
+            <div className="bg-amber-400" style={{ width: t.used ? `${(t.unattributed * 100) / t.used}%` : "0%" }} title="미귀속" />
+          </div>
+          <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+            <div><span className="inline-block w-2 h-2 rounded-sm bg-owner-ours mr-1" />우리 실행분 <b>{num(t.ours)}</b> ({pct(t.ours)})</div>
+            <div><span className="inline-block w-2 h-2 rounded-sm bg-owner-mop mr-1" />대행사 축적분 <b>{num(t.agency)}</b> ({pct(t.agency)})</div>
+            <div><span className="inline-block w-2 h-2 rounded-sm bg-gray-400 mr-1" />기타 출처 <b>{num(t.other_source)}</b> ({pct(t.other_source)})</div>
+            <div><span className="inline-block w-2 h-2 rounded-sm bg-amber-400 mr-1" />미귀속 <b>{num(t.unattributed)}</b> ({pct(t.unattributed)})</div>
+          </div>
+          <p className="mt-1 text-[11px] text-gray-500">
+            미귀속 = 라이브 총계 − 원장 귀속분. 우리 원장이 모르는 남의 칸입니다 — 0으로 뭉개지 않습니다.
+          </p>
+          {slots.reclaim_note && (
+            <p className="mt-1 text-[11px] text-gray-500">⚠️ {slots.reclaim_note}</p>
+          )}
+        </div>
+
+        {/* 그룹별 — 찬 칸/70, 70/70은 빨강 */}
+        <div>
+          <Table
+            head={
+              <>
+                <Th>광고그룹</Th><Th>상태</Th><Th right>찬 칸</Th><Th right>남은 칸</Th>
+                <Th>우리 / 대행사 / 미귀속</Th><Th>소진 예상</Th>
+              </>
+            }
+          >
+            {slots.rows.map((r) => {
+                const full = r.used !== null && r.used >= r.cap;
+                return (
+                  <tr key={r.adgroup_id} className={full ? "bg-red-50" : undefined}>
+                    <Td>{r.name || r.adgroup_id}</Td>
+                    <Td>
+                      {full ? <Badge tone="bad">소진</Badge>
+                        : r.state === "unknown" ? <Badge tone="neutral">못 셈</Badge>
+                        : r.state === "stale" ? <Badge tone="neutral">지연</Badge>
+                        : <Badge tone="good">여유</Badge>}
+                    </Td>
+                    {/* ★null은 0이 아니다 — 못 센 것을 0으로 그리면 「70칸 비었다」가 된다 */}
+                    <Td right>
+                      <span className={full ? "text-judge-bad font-semibold" : undefined}>
+                        {r.used === null ? NO_DATA : `${num(r.used)}/${num(r.cap)}`}
+                      </span>
+                    </Td>
+                    <Td right>{r.remaining === null ? NO_DATA : num(r.remaining)}</Td>
+                    <Td>
+                      <span className="text-xs text-gray-600">
+                        {num(r.ours)} / {num(r.agency)} / {r.unattributed === null ? NO_DATA : num(r.unattributed)}
+                      </span>
+                    </Td>
+                    {/* ★§5-4 ④ — 예상일은 «상한»이다. 값만 두면 화면이 거짓말을 한다. */}
+                    <Td>
+                      {r.exhaust_eta_days === null
+                        ? <span className="text-xs text-gray-500">{r.exhaust_eta_reason}</span>
+                        : <span className="text-xs" title={r.exhaust_eta_reason}>
+                            {r.exhaust_eta_days === 0 ? "이미 소진" : `${r.exhaust_eta_days}일 이내(상한)`}
+                          </span>}
+                    </Td>
+                  </tr>
+                );
+              })}
+          </Table>
+          {/* ★잘렸다는 사실을 숨기지 않는다 — 20건만 보고 「전부 여유」라 읽으면 안 된다 */}
+          {slots.rows_truncated > 0 && (
+            <p className="mt-2 text-xs text-gray-500">
+              위 목록은 {num(slots.rows.length)}건만 보여줍니다 — 나머지 {num(slots.rows_truncated)}개 그룹은
+              여기 없습니다(심각한 순으로 정렬됨). 계정 전체 판단은 위 요약 칸을 보세요.
+            </p>
+          )}
+        </div>
+
+        <p className="text-[11px] text-gray-500">
+          ★소진 예상일은 <b>상한</b>입니다 — 지금 우리 실집행이 멈춰 우리 쪽 유입이 0으로 관측되므로,
+          대행사 유입만 반영된 값입니다. PAO를 점화하면 더 짧아집니다.
+        </p>
+      </div>
     </Card>
   );
 }

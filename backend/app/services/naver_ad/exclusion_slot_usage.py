@@ -175,7 +175,9 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
     """제외 슬롯 사용률·소진 예상일 요약 (읽기 전용 · 외부 호출 0).
 
     반환: {cap, as_of, groups, exhausted, unknown, stale, healthy, rows, rows_truncated,
-           totals, reclaim_note}
+           observed_from, observed_to, totals, reclaim_note}
+    ★`as_of`는 «응답 생성 시각»이고 `observed_from/to`가 «라이브를 마지막으로 본 창»이다.
+      화면에 붙일 기준 시각은 후자다.
     """
     now = now or kst_now()
     ledger = _ledger_by_group(db, now)
@@ -190,7 +192,17 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
 
     rows: list[dict] = []
     counts = {STATE_EXHAUSTED: 0, STATE_UNKNOWN: 0, STATE_STALE: 0, STATE_OK: 0}
-    used_sum = ours_sum = agency_sum = 0
+    used_sum = ours_sum = agency_sum = other_sum = 0
+    # ★미귀속을 «계정 수준»에서도 낸다. 여태 totals엔 ours·agency뿐이라 화면이 3분할을
+    #   그리려면 `used - ours - agency`로 추정할 수밖에 없었는데, 그건 other_source를
+    #   미귀속에 뭉개는 계산이다 — 이 모듈 머리말이 «0으로 뭉개지 않는다»고 적어 둔 바로
+    #   그 값을 화면이 뭉개게 된다. 그래서 행에서 이미 재고 있는 것을 누계로도 낸다.
+    unattributed_sum = 0
+    # ★스윕 시각 창. `as_of`는 «이 응답을 만든 시각»이지 «라이브를 마지막으로 본 시각»이
+    #   아니다(호출할 때마다 바뀐다). 화면이 as_of를 「기준 시각」으로 쓰면 09:35에 본 것을
+    #   20:00 기준이라고 말하는 거짓말이 된다 — 그래서 관측 시각의 범위를 따로 실어 보낸다.
+    observed_min: datetime | None = None
+    observed_max: datetime | None = None
 
     for t in db.query(NaverAdgroupTargetCurrent).all():
         used = t.restrict_keyword_count
@@ -200,10 +212,16 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
         ours, agency = g.get("ours", 0), g.get("agency", 0)
         remaining = None if used is None else max(EXCLUSION_SLOT_CAP - used, 0)
         eta_days, eta_reason = _eta(remaining, g.get("inflow", 0))
+        other = g.get("other_source", 0)
         if used is not None:
             used_sum += used
+            unattributed_sum += used - ours - agency - other
         ours_sum += ours
         agency_sum += agency
+        other_sum += other
+        if t.observed_at is not None:
+            observed_min = t.observed_at if observed_min is None else min(observed_min, t.observed_at)
+            observed_max = t.observed_at if observed_max is None else max(observed_max, t.observed_at)
         rows.append({
             "adgroup_id": t.adgroup_id,
             "campaign_id": t.campaign_id,
@@ -216,10 +234,10 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
             # ── 귀속 3분 표기 (ref 66 §5-3) ──
             "ours": ours,
             "agency": agency,
-            "other_source": g.get("other_source", 0),
+            "other_source": other,
             # ★라이브 총계에서 원장 귀속분을 뺀 나머지. 양수 = 원장이 모르는 남의 칸,
             #   음수 = 원장이 라이브보다 많다(우리 조치가 지워졌을 수 있다 — 생존감시 소관).
-            "unattributed": None if used is None else used - ours - agency - g.get("other_source", 0),
+            "unattributed": None if used is None else used - ours - agency - other,
             "grades": g.get("grades", {}),
             "inflow_30d": g.get("inflow", 0),
             "inflow_30d_ours": g.get("inflow_ours", 0),
@@ -248,10 +266,16 @@ def slot_usage(db: Session, *, now: datetime | None = None) -> dict:
         "rows": shown,
         # ★잘렸다는 사실이 숨지 않게 총계를 따로 낸다(exclusion_survival과 같은 규율).
         "rows_truncated": max(len(rows) - len(shown), 0),
+        # ★스윕 시각 창(가산). 화면은 `as_of`가 아니라 이것을 「기준 시각」으로 쓴다.
+        "observed_from": observed_min.isoformat() if observed_min else None,
+        "observed_to": observed_max.isoformat() if observed_max else None,
         "totals": {
             "used": used_sum,
             "ours": ours_sum,
             "agency": agency_sum,
+            # ★가산 2개 — 계정 수준 귀속 3분할이 추정 없이 서게 한다.
+            "other_source": other_sum,
+            "unattributed": unattributed_sum,
             "capacity": len(rows) * EXCLUSION_SLOT_CAP,
         },
         "reclaim_note": RECLAIM_NOTE,

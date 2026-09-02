@@ -406,3 +406,75 @@ def test_preflight_writes_nothing(db):
     row = db.query(NaverCampaignSettings).filter_by(campaign_id=CAMPAIGN).first()
     assert (row.optimizer, bool(row.auto_operate)) == ("none", False)
     assert db.query(NaverAdgroupScope).count() == 0
+
+
+# ══════════════ F. 계정 수준 귀속 3분할 · 스윕 시각 (슬라이스 2) ══════════════
+#
+# ★왜 필요했나: 설계서 §5-4가 「귀속 3분할 — 미귀속을 0으로 뭉개지 않는다」를 요구하는데,
+#   `totals`엔 ours·agency뿐이라 화면이 `used - ours - agency`로 «추정»할 수밖에 없었다.
+#   그 추정은 other_source를 미귀속에 뭉갠다 — 이 모듈 머리말이 뭉개지 말라고 적은 바로
+#   그 값을 화면이 뭉개게 된다. 그래서 누계를 모듈이 직접 낸다.
+
+def test_totals_carry_the_third_bucket_so_the_screen_need_not_guess(db):
+    """미귀속이 «추정»이 아니라 «집계»로 나온다 — other_source와 섞이지 않는다."""
+    db.add(_target(restrict_keyword_count=70))
+    db.add(_excl(search_term="우리1"))                              # ours
+    db.add(_excl(search_term="대행사1", source="console_import"))    # agency
+    db.add(_excl(search_term="기타1", source="somewhere_else"))      # other_source
+    db.commit()
+    t = esu.slot_usage(db, now=NOW)["totals"]
+    assert t["used"] == 70
+    assert (t["ours"], t["agency"], t["other_source"]) == (1, 1, 1)
+    # 70 − 1 − 1 − 1 = 67. other_source를 미귀속에 뭉갰다면 68이 된다.
+    assert t["unattributed"] == 67, "other_source가 미귀속에 뭉개졌다"
+    assert t["ours"] + t["agency"] + t["other_source"] + t["unattributed"] == t["used"], \
+        "네 칸의 합이 라이브 총계와 같아야 한다 — 아니면 어딘가가 새고 있다"
+
+
+def test_unknown_group_does_not_inflate_unattributed(db):
+    """못 센 그룹(used=None)은 미귀속을 부풀리지 않는다 — «모름»은 «남의 칸»이 아니다."""
+    db.add(_target(adgroup_id="grp-known", restrict_keyword_count=10))
+    db.add(_target(adgroup_id="grp-unknown", restrict_keyword_count=None, probe_status=404))
+    db.commit()
+    t = esu.slot_usage(db, now=NOW)["totals"]
+    assert t["used"] == 10
+    assert t["unattributed"] == 10, "못 센 그룹이 미귀속에 섞였다"
+
+
+def test_sweep_window_is_reported_apart_from_response_time(db):
+    """★`as_of`는 «응답을 만든 시각»이다. 화면이 그걸 기준 시각이라 하면 09:35에 본 것을
+    20:00 기준이라 말하는 거짓말이 된다 — 그래서 관측 창을 따로 낸다."""
+    early = NOW - timedelta(hours=3)
+    db.add(_target(adgroup_id="grp-early", observed_at=early))
+    db.add(_target(adgroup_id="grp-late", observed_at=NOW))
+    db.commit()
+    out = esu.slot_usage(db, now=NOW)
+    assert out["observed_from"] == early.isoformat()
+    assert out["observed_to"] == NOW.isoformat()
+    assert out["observed_to"] != out["as_of"] or early != NOW  # 둘은 다른 개념이다
+
+
+def test_sweep_window_is_null_when_there_is_nothing_to_observe(db):
+    """관측 행이 하나도 없으면 시각을 «지어내지» 않는다 — null이지 now가 아니다.
+
+    ★초판은 `observed_at=None`인 행을 넣어 이걸 재려 했는데 그 열은
+    `Mapped[datetime]` + `server_default=func.now()`라 **None이 될 수 없다**(실측으로
+    드러났다). 즉 「관측 시각이 빈 행」은 이 스키마에서 불가능한 상태이고, 실제로 창이
+    비는 경우는 «행이 없을 때»뿐이다. 못 일어나는 일을 재는 테스트는 통과해도 아무것도
+    보증하지 않는다."""
+    out = esu.slot_usage(db, now=NOW)
+    assert out["groups"] == 0
+    assert out["observed_from"] is None and out["observed_to"] is None
+    assert out["totals"]["unattributed"] == 0
+
+
+def test_existing_keys_are_untouched(db):
+    """가산이다 — 기존 소비처가 읽던 키가 하나도 사라지지 않았다."""
+    db.add(_target())
+    db.commit()
+    out = esu.slot_usage(db, now=NOW)
+    for k in ("cap", "as_of", "groups", "exhausted", "unknown", "stale",
+              "healthy", "rows", "rows_truncated", "totals", "reclaim_note"):
+        assert k in out, f"기존 키 {k} 가 사라졌다"
+    for k in ("used", "ours", "agency", "capacity"):
+        assert k in out["totals"], f"기존 totals 키 {k} 가 사라졌다"

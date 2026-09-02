@@ -23,6 +23,9 @@ const h = vi.hoisted(() => {
 vi.mock("../lib/api", () => ({
   getSearchTermExclusionList: () => h.pending(),
   getSearchTermExclusionSurvival: () => h.pending(),
+  // ★설계서 §5-4 슬롯 패널이 이 페이지에 붙으면서 생긴 의존 — 이 파일이 보는 것과는
+  //   무관하지만, 화이트리스트 mock이라 빠지면 페이지가 통째로 터진다.
+  getSearchTermExclusionSlots: () => h.pending(),
   getSearchTermExclusionScorecard: () => Promise.resolve(h.scorecard),
   postSearchTermExecution: () => h.pending(),
   postSearchTermExecutionDetect: () => h.pending(),
