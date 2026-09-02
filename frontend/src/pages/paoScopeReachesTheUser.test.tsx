@@ -515,3 +515,68 @@ describe("★H1 엔진 스위치 — 켜는 손·끄는 손이 실제로 있고,
     ).toEqual([]);
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 설계서 §7½ 1단계 「도달과 이름」 (PR #665 · 적대 리뷰 P2-2)
+//
+// ★왜 여기에 더하나: 리뷰가 주입한 M8b(배지가 상수 대신 하드코딩으로 갈라짐)·M8c(배지 렌더
+//   제거)가 **전부 초록으로 살아남았다.** 이 파일은 28건이나 있으면서 배지 «낱말»은 한 번도
+//   안 봤고, `paoNamingAndReach.test.tsx`의 전수 grep은 'MOP'를 «안 넣는» 되돌림
+//   (「가동」·「우리·정지」)을 원리적으로 못 본다. 둘 사이의 틈이 그 자리다.
+// ★그리고 「상수를 import 하는가」로는 못 잡는다 — import는 남기고 사용처만 갈라지면 그만이다.
+//   **존재 게이트는 성숙 게이트가 아니다.** 그래서 렌더로 잰다.
+const OPTIMIZER_ROSTER: PaoScopeRoster = {
+  ...ROSTER,
+  campaigns: (
+    [
+      ["cmp-ours-on", "맡기고 가동중", "ours", true],
+      ["cmp-ours-off", "맡겼으나 멈춤", "ours", false],
+      ["cmp-third", "제3자 소유", "mop", false],
+      ["cmp-manual", "손으로만", "none", false],
+    ] as const
+  ).map(([campaign_id, name, optimizer, auto_operate]) => ({
+    ...ROSTER.campaigns[0],
+    campaign_id, name, optimizer, auto_operate,
+    has_scope: false, scoped_count: 0, adgroups: [],
+  })),
+};
+
+// ★타임아웃을 명시한다(기본 1s → 5s): 이 세 묶음은 `App`을 통째로 렌더하므로 CI처럼
+//   부하가 걸린 곳에서 기본값이 아슬아슬하다. 완료 QA가 전체 스위트 8회 중 1회
+//   `findAllByText("PAO 가동")` 타임아웃을 관측했다(단독 실행 땐 재현 안 됨).
+//   **거짓 빨강은 진짜 빨강보다 나쁘다** — 몇 번 겪으면 사람이 빨강을 안 보게 된다.
+describe("★설계서 §7½ 1단계 — 탭바에서 이 화면에 «닿는다»", () => {
+  it("SUR-12: 상단 탭바에 「PAO 스코프」 링크가 있고 이 화면을 가리킨다", async () => {
+    // ★이 화면은 라우트도 컴포넌트도 **이미 다 있었는데** 탭에 링크가 없어서 아무도 못 갔다.
+    //   광고그룹 On/Off 스위치가 안 쓰인 이유가 기능 부재가 아니라 도달 불능이었다(§7-1 실측).
+    await renderApp();
+    expect(
+      (await screen.findByRole("link", { name: "PAO 스코프" }, { timeout: 5000 })).getAttribute("href"),
+    ).toBe("/naver-ad/scope");
+  });
+});
+
+describe("★설계서 §7½ 1단계 — 닿은 자리에서 「PAO」라고 부른다", () => {
+  it.each([
+    ["PAO 가동", "ours ∧ auto_operate"],
+    ["PAO 정지", "ours 인데 멈춤 — 「맡김」과 「손댐」은 다른 상태다(§7-3)"],
+    ["제3자(대행사)", "mop = 제3자 소유, 우리는 안 건드림"],
+    ["수동", "none — 이미 멀쩡했으므로 그대로 둔다"],
+  ])("SUR-13: 관할 배지가 「%s」로 뜬다 (%s)", async (label) => {
+    hoisted.roster = OPTIMIZER_ROSTER;
+    await renderApp();
+    expect((await screen.findAllByText(label, {}, { timeout: 5000 })).length).toBeGreaterThan(0);
+  });
+
+  it("SUR-14: ★옛 라벨은 배지에 한 글자도 없다 — 하드코딩으로 갈라지면 여기서 죽는다", async () => {
+    hoisted.roster = OPTIMIZER_ROSTER;
+    const { container } = await renderApp();
+    await screen.findAllByText("PAO 가동", {}, { timeout: 5000 });
+    // 캠페인 «이름»에 든 낱말은 데이터라 셈에서 빼고, 배지가 쓰는 라벨만 본다.
+    const badgeTexts = [...container.querySelectorAll("span")]
+      .map((el) => el.textContent?.trim() ?? "");
+    for (const old of ["우리·정지", "우리", "MOP", "우리 MOP", "원본 MOP", "가동"]) {
+      expect(badgeTexts, `옛 라벨 「${old}」이(가) 배지에 되살아났다`).not.toContain(old);
+    }
+  });
+});
