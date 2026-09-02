@@ -159,6 +159,22 @@ def client():
         #   반례가 있어야 지켜진다 — 교훈 #381과 같은 결.
         _seed(s, recipe_id=95, name="임계 경계 필름", form="bar", kind="assembly",
               status="approved", calc="1002.0", lines=7, skus=[("OHI-EPS", "1000.0")])
+        # ★★적대 리뷰 2R P1 — 「가격은 1종인데 상품명 구성이 갈리는」 묶음.
+        #   `_seed`는 상품명을 `f"{name} · {sku}"`로 만들어 구성을 못 심으므로 직접 심는다.
+        #   이 모양이 없으면 `truth_board()`가 `name_grain_kinds`를 계산해 `RecipeGroup`에
+        #   실어 보내는 **배선 한 줄**을 지워도 전건 초록이다(리뷰어 변이 M-F 생존).
+        s.add(CostRecipe(id=91, product_name="구성 혼재 필름", form_factor="fold",
+                         status="approved", recipe_kind="assembly"))
+        s.add(CostStandard(recipe_id=91, price_rule=RULE, std_cost_inc_vat=D("5000.0"),
+                           std_cost_ex_vat=D("5000.0"), breakdown=_breakdown(8)))
+        for sku, pname in (
+            ("OHI-MIXA", "구성 혼재 필름 (외부액정3매+내부액정3매)"),
+            ("OHI-MIXB", "구성 혼재 필름 (외부액정3매)"),
+        ):
+            # ★현재 원가는 **같다** — 가격 게이트만으로는 안 걸린다.
+            s.add(ProductMaster(internal_sku=sku, product_name=pname, cost_price=D("4000.0")))
+            s.add(CostRecipeLink(internal_sku=sku, recipe_id=91, status="approved"))
+
         # draft 링크만 — 정본 없음(미분류).
         _seed(s, recipe_id=80, name="초안 레시피", form="bar", kind="assembly",
               status="draft", calc=None, lines=0, skus=[("OHI-DRAFT", "1000.0")])
@@ -227,12 +243,49 @@ def test_census_is_comparable_to_ref118_buckets(client):
     by_cause = body["census"]["by_cause"]
     assert by_cause[TS.CAUSE_PARTS_299] == 2          # G2  — r50의 SKU 2건
     assert by_cause[TS.CAUSE_FAMILY_NOT_SPLIT] == 1   # G3-2 — r52
-    assert by_cause[TS.CAUSE_GRAIN_MISMATCH] == 2     # G1  — r69의 SKU 2건
+    # G1 — r69의 SKU 2건(가격 2종) + r91의 SKU 2건(가격은 1종인데 상품명 구성 2종).
+    # ★뒤의 2건이 적대 리뷰 2R P1이 신설시킨 픽스처다 — 게이트 «둘»이 각각 한 묶음씩 잡는다.
+    assert by_cause[TS.CAUSE_GRAIN_MISMATCH] == 4
     assert by_cause[TS.CAUSE_IMPORTED_SINGLE_LINE] == 2   # r40(breakdown) + r38(폴백)
     assert by_cause[TS.CAUSE_MATCH] == 1
     assert by_cause[TS.CAUSE_RESIDUAL] == 5           # r44·r45·r34·r35·r95
     assert body["census"]["cause_ref118"][TS.CAUSE_PARTS_299] == "G2"
     assert body["census"]["cause_ref118"][TS.CAUSE_GRAIN_MISMATCH] == "G1"
+
+
+def test_name_grain_signal_actually_reaches_the_board(client):
+    """★★적대 리뷰 2R P1 — 게이트가 «서 있는지»가 아니라 «실측이 닿는지»를 잰다.
+
+    1R 수리는 `classify_group`에 `name_grain_kinds > 1` 게이트를 넣고 단위 테스트 2종으로
+    지켰다. 그런데 리뷰어가 **배선 한 줄**만 끊었더니(`truth_board()`의 RecipeGroup 생성에서
+    `name_grain_kinds=1` 고정) **58건이 전건 초록**이었다 — 게이트는 서 있는데 실제
+    상품명이 거기 안 닿아도 아무도 안 운다.
+
+    ★그 커밋 메시지가 *"「한 번 확인했다」와 「구조로 막힌다」는 다르다"*고 적어 놓고
+    정작 구조의 절반(계산 로직)만 지키고 나머지 절반(그 계산이 실제로 쓰이는가)은
+    안 지켰다. 이 테스트가 그 나머지 절반이다 — **HTTP body를 통해** 잰다.
+    """
+    body = _body(client)
+    for sku in ("OHI-MIXA", "OHI-MIXB"):
+        row = _row(body, sku)
+        assert row["cause"] == TS.CAUSE_GRAIN_MISMATCH, (
+            f"{sku}: 현재 원가는 같지만 상품명 구성이 갈린다 — 보류여야 한다"
+        )
+        assert row["truth_type"] == TS.TRUTH_HELD, sku
+        assert row["truth_value"] is None, "정본값이 서면 컷오버가 집어간다"
+        assert "우연히" in (row["reason"] or ""), "왜 막혔는지가 화면 문장에 남아야 한다"
+
+
+def test_name_grain_gate_does_not_block_model_only_variation(client):
+    """★과차단 반례 — 기종만 다른 정상 묶음은 막히면 안 된다.
+
+    이 게이트가 EZ툴(아이폰15/16/17…)처럼 «기종만» 다른 묶음까지 막으면 D-CPP-66이
+    통째로 무의미해진다. 픽스처의 r40(EZ툴, SKU 1건)·r50(bar, SKU 2건)이 그 반례다.
+    """
+    body = _body(client)
+    assert _row(body, "OHI-G31-1")["truth_type"] == TS.TRUTH_COMPUTED
+    for sku in ("OHI-G2-1", "OHI-G2-2"):
+        assert _row(body, sku)["cause"] != TS.CAUSE_GRAIN_MISMATCH, sku
 
 
 def test_grain_mismatch_stays_held_even_after_the_d_cpp_66_release(client):
