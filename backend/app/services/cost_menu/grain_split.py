@@ -56,6 +56,33 @@ SOURCE_RESIDUAL = "잔여 — 크기 낱말이 하나도 안 걸렸다"
 SOURCE_NONE = "상품명이 비었다"
 SOURCE_COMPOSITION = "구성 지문"
 
+#: ★**BLC 줄에만 있는 예외** — 원가표 「…_울트라_BLC, TabS10FE+」(항목 45·51·54)는
+#: 갤럭시탭S10FE플러스를 울트라 칸에 넣는다. 비-BLC 줄(46·47·48)엔 이 표기가 **없다**.
+#: 그래서 이 규칙을 `tablet_size_grade_with_source`에 넣으면 안 된다 —
+#: 넣는 순간 **이미 승인·컷오버된** `OHI-0111`(r108 `variant=플러스`)이 조용히 울트라로
+#: 옮겨 간다(2026-09-02 23:5x 실측: S10FE플러스 SKU 3건 중 1건이 그 자리에 있다).
+#: 규칙이 원가표 줄마다 다르므로 **신호도 군마다 다르다**.
+TABLET_S10FE_ULTRA_WORDS = ("S10FE플러스",)
+SOURCE_S10FE_ULTRA = "원가표 「울트라, TabS10FE+」가 지목한 TabS10FE+"
+
+#: ★**Jino가 판정한 SKU** — 2차 대조가 이 SKU에게는 «되묻지 않는다».
+#:
+#: 왜 필요한가: 2차 대조는 「1차 신호가 옳았나」를 현재 원가에게 되묻는 장치인데,
+#: 현재 원가 자체가 틀렸다고 **사람이 판정한 자리**에서는 되물을 상대가 없다.
+#: 그 판정을 코드에 «묻어» 두면 다음 사람이 근거를 못 찾으므로 원문째 남긴다.
+#:
+#: Jino 원문 (2026-09-03 00:1x KST):
+#:   *"초기 원가표 단계에서는 엑셀표가 기준이야. 그러니까 원가표대로 울트라가 맞지"*
+#:
+#: 대상은 「갤럭시탭S10FE플러스」 2건뿐이다. 원가표 BLC 줄이 `TabS10FE+`를 울트라 칸에
+#: 적어 두었는데 현재 원가는 플러스 값이라, 두 신호가 어긋난다. 원가표가 정본이므로
+#: 등급은 울트라이고 **현재 원가가 틀린 쪽**이다 — 그 값은 컷오버가 고친다.
+#: ★비-BLC 군의 `OHI-0111`은 **여기 없다** — 그 군의 원가표 줄엔 `TabS10FE+`가 없다.
+DECIDED_BY_JINO: dict[str, str] = {
+    "OHI-0876": "울트라",  # 강화유리코팅 6H BLC · 갤럭시탭S10FE플러스
+    "OHI-0074": "울트라",  # 종이질감 저반사 BLC · 갤럭시탭S10FE플러스
+}
+
 
 def tablet_size_grade_with_source(product_name: Optional[str]) -> tuple[Optional[str], str]:
     """태블릿 상품명 → (크기 등급, **그 등급을 어떻게 얻었나**).
@@ -86,6 +113,33 @@ def tablet_size_grade_with_source(product_name: Optional[str]) -> tuple[Optional
     return ("기본", SOURCE_RESIDUAL)
 
 
+def tablet_size_grade_blc_with_source(
+    product_name: Optional[str],
+) -> tuple[Optional[str], str]:
+    """BLC 태블릿 상품명 → (크기 등급, 출처). **비-BLC 함수와 갈라 두는 것이 요점이다.**
+
+    `tablet_size_grade_with_source`와 다른 점은 한 줄뿐이다 — 「울트라」 다음, 「플러스」
+    앞에서 `S10FE플러스`를 본다. 원가표 BLC 줄이 `TabS10FE+`를 울트라 칸에 적어 두었기
+    때문이고(항목 45·51·54), 순서가 규칙의 일부다: 「갤럭시탭S10FE플러스」는 「플러스」를
+    품고 있어서 뒤에 두면 영영 안 걸린다.
+
+    ★**왜 함수를 복제하지 않고 갈랐나**: 공용 함수에 이 낱말을 더하면 비-BLC 군
+    (`지문방지 PET 2매_플러스,12.9형,13인치`)까지 규칙이 새고, 그 군의 `OHI-0111`은
+    **이미 승인·컷오버된 행**이다. 「고치면 안 되는 것을 조용히 고치는」 변경이 된다.
+    """
+
+    name = product_name or ""
+    if not name.strip():
+        return (None, SOURCE_NONE)
+    if any(w in name for w in TABLET_ULTRA_WORDS):
+        return ("울트라", SOURCE_ULTRA)
+    if any(w in name for w in TABLET_S10FE_ULTRA_WORDS):
+        return ("울트라", SOURCE_S10FE_ULTRA)
+    if any(w in name for w in TABLET_PLUS_WORDS):
+        return ("플러스", SOURCE_PLUS)
+    return ("기본", SOURCE_RESIDUAL)
+
+
 def composition_key_with_source(product_name: Optional[str]) -> tuple[tuple, str]:
     """매트 상품명 → (구성 지문, 출처). `truth_source`의 지문 함수를 **그대로 쓴다**.
 
@@ -98,7 +152,7 @@ def composition_key_with_source(product_name: Optional[str]) -> tuple[tuple, str
 
 
 # ──────────────────────────────────────────────
-# 계획표 — 계약 §0-D 12행 (승인된 결정)
+# 계획표 — 계약 §0-D 12행(승인된 결정) + D-CPP-68의 6행(2026-09-03 저술, 승인 대기)
 # ──────────────────────────────────────────────
 
 
@@ -182,12 +236,41 @@ PLAN: tuple[GroupPlan, ...] = (
             VariantSpec("울트라", "울트라", "지문방지 PET 2매_울트라", 4),
         ),
     ),
+    # ── 새 계약 D-CPP-68 §0-D 6행 (2026-09-03 · ref 125·126) ──────
+    # ★위 12행과 «같은 자격»이 아니다: 위는 Jino가 2026-09-02에 승인한 표이고, 아래 6행은
+    #   이번 세션이 라이브 실측으로 «저술»한 표다. 승인은 미리보기를 보고 Jino가 누르는
+    #   「실행해」이며, 그때까지 `execute`는 계획↔라이브가 어긋나면 여전히 거부한다.
+    # ★신호가 `tablet_size_blc`인 이유는 위 상수 주석 참조 — 비-BLC 군으로 새면
+    #   이미 컷오버된 `OHI-0111`이 조용히 옮겨 간다.
+    GroupPlan(
+        product_name="강화유리코팅 고투명 6H 블루라이트 차단 액정보호필름 2매",
+        form_factor="tablet",
+        signal_kind="tablet_size_blc",
+        cost_table_section="태블릿 필름",
+        variants=(
+            VariantSpec("기본", "기본", "6H 강화유리코팅 BLC_기본", 15, is_base=True),
+            VariantSpec("플러스", "플러스", "6H 강화유리코팅 BLC_플러스,12.9형,13인치", 11),
+            VariantSpec("울트라", "울트라", "6H 강화유리코팅 BLC_울트라, TabS10FE+", 5),
+        ),
+    ),
+    GroupPlan(
+        product_name="종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매",
+        form_factor="tablet",
+        signal_kind="tablet_size_blc",
+        cost_table_section="태블릿 필름",
+        variants=(
+            VariantSpec("기본", "기본", "종이질감 PET 2매_기본_BLC", 26, is_base=True),
+            VariantSpec("플러스", "플러스", "종이질감 PET 2매_플러스,12.9형,13인치_BLC", 12),
+            VariantSpec("울트라", "울트라", "종이질감 PET 2매_울트라_BLC, TabS10FE+", 6),
+        ),
+    ),
 )
 
 #: 상품명 → (1차 신호 값, 그 값의 출처). **출처를 버리지 마라** — 위 주석 참조.
 _SIGNAL_FN: dict[str, Callable[[Optional[str]], tuple[object, str]]] = {
     "composition": composition_key_with_source,
     "tablet_size": tablet_size_grade_with_source,
+    "tablet_size_blc": tablet_size_grade_blc_with_source,
 }
 
 
@@ -308,17 +391,34 @@ def _collect_skus(db: Session, plan: GroupPlan, recipes: dict[str, CostRecipe]) 
     return rows
 
 
-def _cross_check(rows: list[_SkuRow]) -> None:
+def _cross_check(
+    rows: list[_SkuRow], plan_totals: Optional[dict[str, Optional[Decimal]]] = None
+) -> None:
     """2차 대조 — 1차 신호가 가른 묶음이 현재 원가와 «1:1»인가.
 
     ★값으로 «붙이지» 않는다. 값은 1차 신호가 옳았는지 되묻는 데만 쓴다(계약 §2-4).
     어긋나면 그 SKU에 `conflict`가 서고 실행이 거부된다 — 조용히 넘어가지 않는다.
+
+    ★★**되물을 수 없는 두 경우가 있다** (D-CPP-68 §-1, Jino 2026-09-03 판정).
+      ⑴ **사람이 이미 판정한 SKU** (`DECIDED_BY_JINO`) — 현재 원가가 틀렸다고
+         판정된 자리라 그 값을 근거로 되묻는 것이 앞뒤가 안 맞는다. 값 집합에서 뺀다.
+      ⑵ **두 변형의 «원가표 총액이 같은» 경우** — 값이 같으니 값으로 가를 수가 없고,
+         가를 필요도 없다(어느 쪽에 붙어도 계산값이 같다). Jino 원문:
+         *"이 제품의 경우만을 봤을때는 두 옵션이 가격이 같아. 대조불가가 아니라
+         각각의 옵션에 단가를 붙이는거지."* — 그래서 **충돌로 세우지 않는다.**
+         `plan_totals`가 없으면(=총액을 모르면) 구판 그대로 충돌로 센다.
+
+    ⚠️둘 다 «가드 완화»가 아니라 **적용 범위의 정정**이다. 원가표 총액이 서로 «다른»
+    변형끼리 현재 원가를 공유하면 여전히 충돌이다 — 이미 실행된 12행은 값이 전부 달라
+    이 변경의 영향을 받지 않는다(2026-09-03 회귀로 확인).
     """
 
     prices_by_variant: dict[str, set] = {}
     for r in rows:
         if r.variant is None:
             continue
+        if r.internal_sku in DECIDED_BY_JINO:
+            continue  # ⑴ 되물을 상대가 없다
         prices_by_variant.setdefault(r.variant, set()).add(
             None if r.cost_price is None else Decimal(str(r.cost_price))
         )
@@ -330,18 +430,44 @@ def _cross_check(rows: list[_SkuRow]) -> None:
     shared: set[str] = set()
     for variant, ps in prices_by_variant.items():
         for p in ps:
-            if p in seen and seen[p] != variant:
-                shared.add(variant)
-                shared.add(seen[p])
+            other = seen.get(p)
+            if other is not None and other != variant:
+                if not _same_plan_total(plan_totals, variant, other):
+                    shared.add(variant)
+                    shared.add(other)
             seen[p] = variant
 
     for r in rows:
+        if r.internal_sku in DECIDED_BY_JINO:
+            continue  # ⑴ 사람이 판정했다 — 되묻지 않는다
         if r.variant is None:
             r.conflict = "1차 신호 없음 — 상품명이 변형을 말하지 않는다(사람이 지정해야 한다)"
         elif r.variant in multi:
             r.conflict = f"2차 대조 불일치 — 변형 「{r.variant}」 안에서 현재 원가가 여러 종이다"
         elif r.variant in shared:
             r.conflict = f"2차 대조 불일치 — 변형 「{r.variant}」가 다른 변형과 현재 원가를 공유한다"
+
+
+def _plan_totals(db: Session, plan: GroupPlan) -> dict[str, Optional[Decimal]]:
+    """변형 → 그 변형이 붙을 원가표 줄의 총액. 2차 대조가 「값이 같아서 못 가르는」
+    경우를 알아보려면 «원가표가 뭐라 했는지»를 알아야 한다."""
+
+    out: dict[str, Optional[Decimal]] = {}
+    for spec in plan.variants:
+        item = _cost_table_item(db, plan, spec)
+        out[spec.variant] = item.total_inc_vat if item is not None else None
+    return out
+
+
+def _same_plan_total(
+    plan_totals: Optional[dict[str, Optional[Decimal]]], a: str, b: str
+) -> bool:
+    """두 변형의 원가표 총액이 «같다»고 말할 수 있는가. 모르면 False(=충돌로 센다)."""
+
+    if not plan_totals:
+        return False
+    ta, tb = plan_totals.get(a), plan_totals.get(b)
+    return ta is not None and tb is not None and ta == tb
 
 
 def _note_for(row: _SkuRow, plan: GroupPlan) -> str:
@@ -385,7 +511,7 @@ def preview(db: Session) -> dict:
         recipes = _group_recipes(db, plan)
         base = _base_recipe(db, plan)
         rows = _collect_skus(db, plan, recipes)
-        _cross_check(rows)
+        _cross_check(rows, _plan_totals(db, plan))
 
         counted: dict[str, int] = {}
         # ★잔여 귀속(=1차 낱말이 하나도 안 걸려 «남은 등급»으로 간 것)을 **센다**
@@ -531,7 +657,7 @@ def execute(db: Session, *, actor: str = "unknown", scope: str = "all") -> dict:
         base = _base_recipe(db, plan)
         assert base is not None  # preview가 이미 막았다
         rows = _collect_skus(db, plan, recipes)
-        _cross_check(rows)
+        _cross_check(rows, _plan_totals(db, plan))
 
         base_spec = next(v for v in plan.variants if v.is_base)
         by_variant: dict[str, CostRecipe] = {}
