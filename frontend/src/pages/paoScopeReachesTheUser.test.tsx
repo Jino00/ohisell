@@ -706,6 +706,24 @@ describe("★이 화면이 «실제로 요청하는 창» (적대 리뷰 P1-1·P
     });
   });
 
+  it("★누른 프리셋이 «눌린 것»으로 보인다 — 하이라이트와 동작이 같은 창을 써야 한다", async () => {
+    // ★적대 리뷰 2R F16: 하이라이트만 옛 창 함수로 되돌리는 변이가 1,440건을 통과했다.
+    //   그 경우 요청 창은 정확한데 **어떤 프리셋도 눌린 것처럼 안 보인다**(state는 어제-끝,
+    //   하이라이트 계산은 오늘-끝이라 영영 불일치). `21d`를 되살린 바로 그 이유가 무방비다.
+    //   이 컴포넌트는 예전에 그 병을 이미 한 번 앓았다(«쓰는 창»과 «보이는 창»이 두 사본).
+    const on = (name: string) =>
+      screen.getByRole("button", { name }).className.includes("bg-blue-600");
+    await renderApp();
+    await screen.findByRole("button", { name: "21일" });
+    // 시작 창이 21일이므로 열자마자 그 버튼이 켜져 있어야 한다.
+    expect(on("21일"), "열자마자 어느 프리셋도 안 눌려 보인다").toBe(true);
+    expect(on("7일")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "90일" }));
+    await waitFor(() => expect(on("90일"), "누른 프리셋이 안 켜진다").toBe(true));
+    expect(on("21일")).toBe(false);
+  });
+
   it("★축 이름이 화면에 있다 — 안 적으면 사용자는 자기가 아는 축으로 읽는다", async () => {
     await renderApp();
     expect(await screen.findByText("성과 발생일")).toBeTruthy();
