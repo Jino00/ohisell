@@ -130,7 +130,14 @@ const SOURCES = import.meta.glob("../../**/*.{ts,tsx}", {
   query: "?raw", import: "default", eager: true,
 }) as Record<string, string>;
 
-describe("이름 — 'MOP'는 화면에 쓰지 않는다 (전 소스 전수)", () => {
+// ★범위를 이름에 정직하게 적는다 — 이 검사가 훑는 것은 **프론트 소스뿐**이다(`frontend/src`).
+//   적대 리뷰 P2-1이 실증했듯 «화면»에는 백엔드가 내려주는 문자열도 뜬다:
+//   `backend/app/services/naver_ad/entity_sync.py`가 `rationale`에 「외부(MOP/사람)」을 쓰고
+//   커맨드 센터 표 셀이 그걸 그대로 렌더한다. 그래서 이 초록은 **「화면에 MOP가 없다」가
+//   아니라 「프론트 소스에 MOP가 없다」**만 뜻한다 — 그 백엔드 몫은 §7½ 합격면(라벨·확인창·
+//   title) 밖이라 이번 범위가 아니고, 소관은 PAO 최적화 트랙으로 넘겼다.
+//   ⚠️이름이 범위보다 넓으면 초록이 «안 잰 것»까지 보증하는 것처럼 읽힌다.
+describe("이름 — 'MOP'는 프론트 소스 어디에도 쓰지 않는다 (frontend/src 전수)", () => {
   it("★어떤 소스 파일의 주석 밖에도 'MOP'가 없다", () => {
     // 'MOP'는 **경쟁 상용 도구**의 이름이다. 코드의 optimizer='mop'은 「제3자 소유」라는 뜻이라
     // Jino가 말하는 「MOP=우리 시스템」과 정반대다 — 그 세 글자가 라벨에 들어가는 순간
