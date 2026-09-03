@@ -2978,6 +2978,8 @@ def performance_campaigns(db: Session = Depends(get_db)) -> dict:
 @router.get("/performance/ownership-bands")
 def performance_ownership_bands(
     days: int = Query(30, ge=1, le=_MAX_PERFORMANCE_LOOKBACK_DAYS, description="최근 N일"),
+    date_from: date | None = Query(None, description="조회 시작일(KST, 포함). date_to와 함께"),
+    date_to: date | None = Query(None, description="조회 종료일(KST, 포함). date_from과 함께"),
     db: Session = Depends(get_db),
 ) -> dict:
     """관할 밴드 — 전체 / PAO가 돌린 광고 / 안 돌린 광고 (+ 전환일·모름).
@@ -2991,7 +2993,29 @@ def performance_ownership_bands(
 
     ★오늘치는 안 들어간다 — `naver_ad_daily`가 D-1 확정 적재라 오늘 행이 없고, 오늘 카드가
     쓰는 시간별 스냅샷엔 광고그룹 축이 아예 없다. `window.truncated`가 그 사실을 말한다.
+
+    ★`date_from`/`date_to` **가산**(2026-09-03, PAO 캘린더 통일 — Jino *"새로 만든 캘린더를
+    Pao내의 모든 캘린더에 똑같이 만들어줘"*). 종전 `days` 경로는 **한 글자도 안 바뀐다**
+    (그 경로의 「확정 N일」 기준점 규칙이 위 `recent()` docstring의 적대 리뷰 P1-2 수리다).
+    왜 필요한가: 화면이 날짜 두 칸을 주는데 API가 `days`만 받으면 **고른 날짜와 실제 창이
+    갈라진다** — 스코프 화면이 같은 자리에서 겪은 것이고(PR #677), 프리셋 라벨과 실제 창이
+    어긋나는 형태로 사용자에게 드러난다.
     """
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(
+            status_code=422,
+            detail="date_from과 date_to는 함께 지정해야 합니다.",
+        )
+    if date_from is not None and date_to is not None:
+        if date_from > date_to:
+            raise HTTPException(status_code=422, detail="date_from이 date_to보다 늦습니다.")
+        span = (date_to - date_from).days + 1
+        if span > _MAX_PERFORMANCE_LOOKBACK_DAYS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"조회 구간은 최대 {_MAX_PERFORMANCE_LOOKBACK_DAYS}일입니다.",
+            )
+        return perf_ownership_bands.bands(db, date_from, date_to)
     return perf_ownership_bands.recent(db, days)
 
 

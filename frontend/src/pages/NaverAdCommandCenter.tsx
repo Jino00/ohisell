@@ -13,9 +13,11 @@
 // 없어(백엔드 _serialize_settings가 안 줌) campaign_id만 표시한다 — 추측으로 필드를 만들지 않는다.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav, OptimizerSwitch, LossPolicySwitch, PeriodTabs } from "../components/ui";
+import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav, OptimizerSwitch, LossPolicySwitch } from "../components/ui";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+import { presetWindowKeepingToday } from "../lib/periodRange";
 import type { DateRange } from "../lib/periodRange";
-import { usePeriod } from "../lib/usePeriod";
+import { usePeriodRange } from "../lib/usePeriod";
 import { num, won, roasX, pctFromFraction, NO_DATA } from "../lib/format";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
@@ -596,6 +598,14 @@ function TargetCell({ row }: { row: NaverChangeLogRow }) {
 // 옮겼다(「수정 사항」 화면이 같은 규칙을 필요로 한다 — 복사하면 두 화면이 서로 다른 규칙으로
 // 같은 백엔드를 호출하게 되고 한쪽만 422 원문을 흘린다). 순수 로직은 `lib/periodRange`.
 // ══════════════════════════════════════════════════════════════════
+//
+// 2026-09-03 — Jino *"새로 만든 캘린더를 Pao내의 모든 캘린더에 똑같이 만들어줘"*.
+// 두 패널의 탭을 공용 `PeriodRangeBar`(날짜 두 칸 + 프리셋)로 바꿨다. **패널마다 독립
+// 상태**라는 D-NAO-54 결정은 그대로다(외부 감지는 하루 1회라 우리 집행과 자연스러운 창이
+// 다르다 — Jino 2026-07-17). `PeriodTabs`는 PAO 밖(쿠팡 광고 변경)이 계속 쓴다.
+
+/** 두 패널의 프리셋 — 종전 탭 넷(당일·어제·7일·30일)에 90일·1년을 더한다(API 상한 365일). */
+const CC_PERIOD_PRESETS: PeriodPreset[] = ["today", "yesterday", "7d", "30d", "90d", "1y"];
 
 /** 변경 칸. ★실패 행은 before/after가 **둘 다 없다**(writer를 부르지도 않았거나 예외로 끊겼다)
  *  — describeChange에 그대로 넘기면 "입찰가 — → —"가 되어 데이터 결손처럼 보인다.
@@ -634,10 +644,16 @@ function ChangeLogPane() {
   // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
   //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
   //   별도 관심사라 여기 섞지 않는다 — 그 피드는 ExternalChangesPane(바로 아래)이 그린다.
-  const p = usePeriod();
+  const p = usePeriodRange();
   return (
     <>
-      <PeriodTabs p={p} />
+      <PeriodRangeBar
+        label="우리가 조작한 날"
+        from={p.from} to={p.to} onFrom={p.setFrom} onTo={p.setTo}
+        presets={CC_PERIOD_PRESETS}
+        windowFor={presetWindowKeepingToday}
+        note="우리 엔진이 실제로 쓴 기록만 셉니다 — 외부가 바꾼 것은 아래 패널이 따로 그립니다."
+      />
       {/* ★조회 컴포넌트를 분리해 **잘못된 구간에서는 마운트조차 안 한다**. 이전 판은
           `p.error ? Promise.resolve({total:0, rows:[]}) : fetch(...)`로 훅에 가짜 빈 데이터를
           먹였는데, 그게 정확히 useAsyncData가 존재해서 금지하는 패턴이다("실패를 빈 데이터로
@@ -696,10 +712,16 @@ function ExternalChangesPane() {
   // diff 밸브가 DB에만 쌓이고 어디서도 안 보인다 — 정확히 "수집은 풍부한데 화면엔 없음"
   // (스펙 §1-4)의 재발이다. ChangeLogPane과 구조는 같지만 관심사가 반대다:
   // 그쪽=우리가 한 일(인과), 이쪽=외부(제3자·사람)가 바꾼 걸 우리가 관측한 것(감지).
-  const p = usePeriod();
+  const p = usePeriodRange();
   return (
     <>
-      <PeriodTabs p={p} />
+      <PeriodRangeBar
+        label="외부 변경을 관측한 날"
+        from={p.from} to={p.to} onFrom={p.setFrom} onTo={p.setTo}
+        presets={CC_PERIOD_PRESETS}
+        windowFor={presetWindowKeepingToday}
+        note="제3자·사람이 바꾼 것을 우리가 관측한 날입니다 — 외부 감지는 하루 1회(07:35)라 실제 조작일보다 늦을 수 있습니다."
+      />
       {p.error
         ? <EmptyState reason={p.error} hint="기간을 다시 선택하세요." />
         : <ExternalChangesTable range={p.range} label={p.label} />}

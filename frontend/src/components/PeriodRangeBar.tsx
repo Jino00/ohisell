@@ -18,12 +18,15 @@ import { Button, Card } from "./ui";
 
 // ★"15d"는 운영 패널(쿠팡·스마트스토어)이 원래 갖고 있던 버튼이다 — 그 화면들을 이 공용
 //   바로 옮기면서 프리셋 하나가 조용히 사라지면 그건 기능 회귀다. 여기에 더해 공유한다.
+// ★"180d"는 성과 화면의 「누가 돌린 광고인가」가 원래 갖고 있던 버튼이다(30·90·180).
+//   그 화면을 이 공용 바로 옮기면서 프리셋 하나가 조용히 사라지면 그건 기능 회귀다 —
+//   "15d"를 더한 것과 **같은 이유**로 여기에 더해 공유한다.
 export type PeriodPreset =
-  | "today" | "yesterday" | "7d" | "15d" | "21d" | "30d" | "90d" | "1y";
+  | "today" | "yesterday" | "7d" | "15d" | "21d" | "30d" | "90d" | "180d" | "1y";
 
 const PRESET_LABEL: Record<PeriodPreset, string> = {
   today: "오늘", yesterday: "어제", "7d": "7일", "15d": "15일", "21d": "21일",
-  "30d": "30일", "90d": "90일", "1y": "1년",
+  "30d": "30일", "90d": "90일", "180d": "180일", "1y": "1년",
 };
 
 /** 프리셋이 가리키는 **실제 창**(시작일·종료일). 순수 함수 — 테스트가 여기를 못박는다.
@@ -48,6 +51,7 @@ export function presetWindow(k: PeriodPreset, today: string = kstDate(0)): { f: 
     case "21d":       return { f: shift(-20), t: today };
     case "30d":       return { f: shift(-29), t: today };
     case "90d":       return { f: shift(-89), t: today };
+    case "180d":      return { f: shift(-179), t: today };
     case "1y":        return { f: shift(-364), t: today };
   }
 }

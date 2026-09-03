@@ -181,12 +181,25 @@ describe("관할 밴드 섹션이 화면에 있다", () => {
 
   it("기간 버튼 30/90/180일이 있다", async () => {
     renderPage();
-    // ★페이지 다른 곳에도 「30일」 버튼(추이 기간)이 있으므로 밴드 섹션 안으로 범위를 좁힌다 —
+    // ★페이지 다른 곳에도 「30일」 버튼(추이 기간)이 있으므로 **이 바 안으로** 범위를 좁힌다 —
     //   전역으로 찾으면 «다른 버튼이 있어서» 통과하는 가짜 초록이 된다.
-    const section = (await screen.findByText("누가 돌린 광고인가")).closest("section")!;
+    // 2026-09-03: 기간 선택이 카드 안 버튼 셋에서 공용 `PeriodRangeBar`로 바뀌어 바가 카드
+    //   **바깥**(형제)에 산다. 그래서 카드 제목이 아니라 이 바에만 있는 안내문으로 좁힌다 —
+    //   프리셋 셋은 그대로여야 한다(하나라도 빠지면 기능 회귀다).
+    const bar = (await screen.findByText(/오늘치는 아직 적재 전이라 창에서 빠집니다/))
+      .closest("section")!;
     for (const d of ["30일", "90일", "180일"]) {
-      expect(within(section).getByRole("button", { name: d })).toBeTruthy();
+      expect(within(bar).getByRole("button", { name: d })).toBeTruthy();
     }
+  });
+
+  it("날짜 두 칸이 생겼고 시작일이 종료일보다 뒤면 조회 자체를 안 한다", async () => {
+    // ★새 캘린더의 «추가된 기능»을 재는 자리. 버튼만 재면 날짜 칸이 통째로 사라져도 초록이다.
+    renderPage();
+    const bar = (await screen.findByText(/오늘치는 아직 적재 전이라 창에서 빠집니다/))
+      .closest("section")!;
+    const dateInputs = within(bar).getAllByDisplayValue(/^\d{4}-\d{2}-\d{2}$/);
+    expect(dateInputs.length).toBe(2);
   });
 });
 

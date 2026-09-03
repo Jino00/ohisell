@@ -15,6 +15,9 @@
 // ★모바일 우선: Jino가 폰으로 본다. 카드 1열(모바일) → 2열(태블릿) → 3열(데스크톱).
 import { useState } from "react";
 import { Card, Stat, Badge, EmptyState, Loading, LayerNav, Table, Th, Td } from "../components/ui";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+import { kstDate, presetWindowExcludingToday } from "../lib/periodRange";
+import { usePeriodRange } from "../lib/usePeriod";
 import { PerfBudgetCurveChart } from "../components/PerfBudgetCurveChart";
 import { PerfCampaignTrendChart } from "../components/PerfCampaignTrendChart";
 import { num, won, roasX, pctFromFraction, isoKST, NO_DATA } from "../lib/format";
@@ -234,7 +237,9 @@ const BAND_ACCENT: Record<NaverOwnershipBandName, string> = {
   unknown: "border-gray-200",
 };
 
-const BAND_WINDOWS = [30, 90, 180];
+/** ★종전 버튼 셋(30·90·180일)을 **하나도 빼지 않고** 프리셋으로 옮긴다 — 프리셋이 조용히
+ *  사라지면 그건 기능 회귀다(`PeriodRangeBar`가 "15d"를 더하며 스스로 못 박은 규칙). */
+const BAND_PERIOD_PRESETS: PeriodPreset[] = ["30d", "90d", "180d"];
 
 function BandTile({ b, isTotal }: { b: NaverOwnershipBand; isTotal?: boolean }) {
   const share = b.share_of_cost;
@@ -255,32 +260,39 @@ function BandTile({ b, isTotal }: { b: NaverOwnershipBand; isTotal?: boolean }) 
 }
 
 function OwnershipBandSection() {
-  const [days, setDays] = useState(30);
-  const { data, error } = useAsyncData(() => fetchNaverOwnershipBands(days), [days]);
+  // ★기본 창은 종전 기본값과 같은 30일이고 **오늘을 뺀다** — `naver_ad_daily`가 D-1 확정
+  //   적재라 오늘 행이 아예 없다. 기본 `presetWindow`(오늘로 끝남)를 쓰면 프리셋을 누를
+  //   때마다 서버가 창을 잘라 「예외 경고」가 상시 경고가 된다(스코프 화면 적대 리뷰 P1-1).
+  const p = usePeriodRange({ from: kstDate(-30), to: kstDate(-1) });
+  const { data, error } = useAsyncData(
+    () => (p.error ? Promise.resolve(null) : fetchNaverOwnershipBands(30, p.range)),
+    [p.range.from, p.range.to, p.error],
+  );
 
-  const windowButtons = (
-    <div className="flex gap-1">
-      {BAND_WINDOWS.map((d) => (
-        <button
-          key={d}
-          type="button"
-          onClick={() => setDays(d)}
-          className={`rounded px-2 py-0.5 text-xs ${
-            d === days ? "bg-gray-800 text-white" : "bg-gray-100 text-gray-600"
-          }`}
-        >
-          {d}일
-        </button>
-      ))}
-    </div>
+  const periodBar = (
+    <PeriodRangeBar
+      label="성과 발생일"
+      from={p.from} to={p.to} onFrom={p.setFrom} onTo={p.setTo}
+      presets={BAND_PERIOD_PRESETS}
+      windowFor={presetWindowExcludingToday}
+      note="확정 데이터만 셉니다 — 오늘치는 아직 적재 전이라 창에서 빠집니다."
+    />
   );
 
   const title = "누가 돌린 광고인가";
+  if (p.error) {
+    return (
+      <>
+        {periodBar}
+        <Card title={title}><EmptyState reason={p.error} hint="기간을 다시 선택하세요." /></Card>
+      </>
+    );
+  }
   if (error) {
-    return <Card title={title} right={windowButtons}><EmptyState reason={`불러오지 못했습니다: ${error}`} /></Card>;
+    return <>{periodBar}<Card title={title}><EmptyState reason={`불러오지 못했습니다: ${error}`} /></Card></>;
   }
   if (data === null) {
-    return <Card title={title} right={windowButtons}><Loading rows={3} /></Card>;
+    return <>{periodBar}<Card title={title}><Loading rows={3} /></Card></>;
   }
 
   const main = data.bands.filter((b) => b.band === "pao" || b.band === "not_pao");
@@ -291,7 +303,9 @@ function OwnershipBandSection() {
   };
 
   return (
-    <Card title={title} right={windowButtons}>
+    <>
+      {periodBar}
+      <Card title={title}>
       <div className="p-4 space-y-3">
         {data.window.date_to && (
           <p className="text-xs text-gray-500 tabular-nums">
@@ -338,7 +352,8 @@ function OwnershipBandSection() {
           </p>
         )}
       </div>
-    </Card>
+      </Card>
+    </>
   );
 }
 
