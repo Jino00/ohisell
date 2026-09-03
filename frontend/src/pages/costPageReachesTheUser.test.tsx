@@ -928,12 +928,12 @@ const CUTOVER_RESULT = {
 // ★D-CPP-67 — 그레인 분할 픽스처. 계약 §0-D 표의 한 묶음(폴드)만 담는다 —
 //   이 파일이 재는 것은 «판정»이 아니라 «패널이 화면에 도달하는가»다.
 const GRAIN_SPLIT_PREVIEW = {
-  contract: "D-CPP-67",
+  contracts: ["D-CPP-67"],
   plan_sku_total: 92,
   live_sku_total: 92,
   residual_total: 0,
   safe_to_execute: true,
-  sentence: "계획표 12행과 라이브가 전부 같다 — 실행할 수 있다",
+  sentence: "계획표 18행과 라이브가 전부 같다 — 실행할 수 있다",
   groups: [
     {
       product_name: "오하이 빛반사, 지문방지 매트 필름 3매",

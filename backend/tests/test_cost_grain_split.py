@@ -832,3 +832,32 @@ def test_p2_4_5_note_does_not_claim_an_uncomputed_comparison_or_a_stale_present_
         assert "현재 원가" not in n, n
         assert "분할 당시 원가" in n, n
     assert "다른 SKU와 다르며" not in n_dec, n_dec
+
+
+def test_n3_decided_sku_with_wrong_variant_does_not_hide_its_price():
+    """★2R 생존 변이 N3 — P2-3 수리의 «나머지 절반»을 테스트가 지키게 한다.
+
+    1차 루프의 가드가 값-일치(`DECIDED_BY_JINO.get(sku) == r.variant`)가 아니라
+    멤버십(`sku in DECIDED_BY_JINO`)이면, **판정과 어긋난 SKU의 가격이 값 집합에서 빠진다.**
+    그러면 그 SKU가 잘못 들어간 변형의 «다른» SKU들이 `multi`(변형 안 원가 여러 종)에
+    안 걸려 **조용히 통과한다** — 「판정 불일치」 한 줄은 서지만 오염 전파는 안 보인다.
+    """
+
+    # OHI-0074의 Jino 판정은 「울트라」인데 신호가 「플러스」를 냈다(사고).
+    # 그 값(9,999)이 값 집합에 남아야 플러스 군의 동료가 「여러 종」으로 선다.
+    wrong = _row("OHI-0074", "플러스", "9999.00")
+    peer = _row("PEER1", "플러스", "4504.50")
+    GS._cross_check([wrong, peer], {"플러스": D("4504.50"), "울트라": D("6044.50")})
+    assert wrong.conflict and "판정 불일치" in wrong.conflict, wrong.conflict
+    assert peer.conflict and "여러 종" in peer.conflict, (
+        "판정과 어긋난 SKU의 가격이 값 집합에서 빠져 동료의 오염이 안 보인다 — 변이 N3의 자리"
+    )
+
+
+def test_group_plan_still_requires_its_identity_fields():
+    """★2R 범위 밖 관찰 — `contract`를 맨 앞에 두면 뒤 필드가 전부 기본값을 얻어
+    `GroupPlan()`이 합법이 되고 `product_name=""`인 계획이 만들어진다."""
+
+    with pytest.raises(TypeError):
+        GS.GroupPlan()  # type: ignore[call-arg]
+    assert all(p.product_name and p.form_factor and p.variants for p in GS.PLAN)

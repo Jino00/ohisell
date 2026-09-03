@@ -6822,7 +6822,11 @@ export interface CostGrainSplitGroup {
 }
 
 export interface CostGrainSplitPreview {
-  contract: string;
+  /** 이 표를 승인한 계약들 — 표가 여러 계약의 행을 담으므로 «배열»이다(D-CPP-68).
+   *  구판은 `contract: string`이었고, 백엔드가 배열로 바꾼 뒤에도 타입만 남아
+   *  «사실과 어긋난 채» 있었다(적대 리뷰 2R 범위 밖 관찰). 읽는 코드가 없어
+   *  `tsc`도 안 잡았다 — 타입이 거짓말하는 것도 문장이 거짓말하는 것과 같다. */
+  contracts: string[];
   groups: CostGrainSplitGroup[];
   plan_sku_total: number;
   live_sku_total: number;

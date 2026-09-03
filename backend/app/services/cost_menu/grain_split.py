@@ -173,15 +173,17 @@ class VariantSpec:
 
 @dataclass(frozen=True)
 class GroupPlan:
+    product_name: str
+    form_factor: str
+    #: `"composition"` | `"tablet_size"` | `"tablet_size_blc"`
+    signal_kind: str
+    cost_table_section: str
+    variants: tuple[VariantSpec, ...]
     #: ★이 «행»을 승인한 계약. 근거 문장이 이 이름을 달고 나가므로 틀리면 감사자가
     #: 그 행이 없는 표에 도착한다(적대 리뷰 P1-2a). 기본값은 최초 12행의 계약이다.
+    #: ★**맨 뒤에 둔다** — 앞에 두면 뒤 필드가 전부 기본값을 얻어 `GroupPlan()`이
+    #: 합법이 되고 `product_name=""`인 계획이 만들어진다(2R 범위 밖 관찰).
     contract: str = "D-CPP-67"
-    product_name: str = ""
-    form_factor: str = ""
-    #: `"composition"` | `"tablet_size"` | `"tablet_size_blc"`
-    signal_kind: str = ""
-    cost_table_section: str = ""
-    variants: tuple[VariantSpec, ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:
