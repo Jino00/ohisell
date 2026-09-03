@@ -47,6 +47,8 @@ from app.services.cost_menu import grain_split as GS
 RULE = "latest"
 MATTE = "오하이 빛반사, 지문방지 매트 필름 3매"
 TABLET = "저반사 지문방지 PET 깨지지 않는 태블릿 액정보호필름 2매"
+BLC6H = "강화유리코팅 고투명 6H 블루라이트 차단 액정보호필름 2매"
+BLCPAPER = "종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매"
 
 # ── 계약 §0-D 표를 «테스트 쪽에서 다시» 적는다 ────────────────────────────
 #   ★일부러 `GS.PLAN`을 읽지 않는다. 계획표를 소스에서 가져오면 「계획이 계획과 같다」는
@@ -57,6 +59,30 @@ FLIP_ROWS = [("외3+내3", 7, "3480.40"), ("외3", 7, "1412.40"),
              ("외3+내3+후2", 6, "4483.00"), ("외3+내3+후2+힌2", 5, "4883.00"),
              ("내3", 1, "2558.00")]
 TABLET_ROWS = [("기본", 21, "4902.70"), ("플러스", 11, "5430.70"), ("울트라", 4, "7652.70")]
+
+# ── D-CPP-68 §0-D의 6행 (2026-09-03 저술 · 라이브 실측 ref 125) ──────
+#   ★비-BLC 표(TABLET_ROWS)와 «따로» 적는다 — 두 군의 울트라 규칙이 다르고,
+#     그 다름이 이 파일이 지켜야 할 것이다.
+BLC6H_ROWS = [("기본", 15, "4352.70"), ("플러스", 11, "4352.70"), ("울트라", 5, "5892.70")]
+BLCPAPER_ROWS = [("기본", 26, "4352.70"), ("플러스", 12, "4572.70"), ("울트라", 6, "5892.70")]
+
+
+def _blc_models(rows):
+    """등급별 모델명. **기본은 크기 낱말이 하나도 없어야** 잔여로 들어간다(라이브가 그렇다).
+
+    ★울트라 마지막 한 칸은 반드시 「갤럭시탭S10FE플러스」다 — 원가표 BLC 줄이
+      `TabS10FE+`를 울트라 칸에 적어 두었고, 그 낱말이 「플러스」를 품고 있어서
+      순서가 틀리면 조용히 플러스로 샌다. 이 픽스처가 그 자리를 지킨다.
+    """
+    out = {}
+    for variant, count, _ in rows:
+        if variant == "기본":
+            out[variant] = [f"갤럭시탭B{i}" for i in range(count)]
+        elif variant == "플러스":
+            out[variant] = [f"갤럭시탭P{i}플러스" for i in range(count)]
+        else:
+            out[variant] = [f"갤럭시탭U{i}울트라" for i in range(count - 1)] + ["갤럭시탭S10FE플러스"]
+    return out
 
 _SUFFIX = {
     "외3": "(외부액정3매)",
@@ -93,6 +119,14 @@ COST_TABLE = [
     ("태블릿 필름", "지문방지 PET 2매_기본", "tablet", "5054.50"),
     ("태블릿 필름", "지문방지 PET 2매_플러스,12.9형,13인치", "tablet", "5582.50"),
     ("태블릿 필름", "지문방지 PET 2매_울트라", "tablet", "7804.50"),
+    # D-CPP-68 — BLC 줄. ★기본과 플러스의 «총액이 같다»(4504.50). 그래도 종이 다르므로
+    #   원가표가 두 줄로 두었고, 그 두 줄을 따르는 것이 「엑셀 정합」이다.
+    ("태블릿 필름", "6H 강화유리코팅 BLC_기본", "tablet", "4504.50"),
+    ("태블릿 필름", "6H 강화유리코팅 BLC_플러스,12.9형,13인치", "tablet", "4504.50"),
+    ("태블릿 필름", "6H 강화유리코팅 BLC_울트라, TabS10FE+", "tablet", "6044.50"),
+    ("태블릿 필름", "종이질감 PET 2매_기본_BLC", "tablet", "4504.50"),
+    ("태블릿 필름", "종이질감 PET 2매_플러스,12.9형,13인치_BLC", "tablet", "4504.50"),
+    ("태블릿 필름", "종이질감 PET 2매_울트라_BLC, TabS10FE+", "tablet", "6044.50"),
 ]
 
 
@@ -100,9 +134,12 @@ def _sku(prefix: str, n: int) -> str:
     return f"OHI-{prefix}{n:03d}"
 
 
-def _seed_group(s, *, recipe_id: int, form: str, rows, base_variant: str, start: int):
+def _seed_group(s, *, recipe_id: int, form: str, rows, base_variant: str, start: int,
+                product_name: str = None, models: dict = None):
     """base 레시피 1개 + 그 묶음의 SKU 전건. **분할 «전»의 prod 모양 그대로다.**"""
-    s.add(CostRecipe(id=recipe_id, product_name=MATTE if form != "tablet" else TABLET,
+    pname = product_name or (MATTE if form != "tablet" else TABLET)
+    mmap = models if models is not None else _TABLET_MODEL
+    s.add(CostRecipe(id=recipe_id, product_name=pname,
                      form_factor=form, status="approved", recipe_kind="assembly", variant=""))
     s.add(CostStandard(recipe_id=recipe_id, price_rule=RULE,
                        std_cost_inc_vat=D("6220.30"), std_cost_ex_vat=D("6220.30"),
@@ -116,8 +153,8 @@ def _seed_group(s, *, recipe_id: int, form: str, rows, base_variant: str, start:
             sku = _sku(form[:2].upper(), n)
             n += 1
             if form == "tablet":
-                model = _TABLET_MODEL[variant][i]
-                name = f"{TABLET}, {model}"
+                model = mmap[variant][i]
+                name = f"{pname}, {model}"
             else:
                 dev = "갤럭시Z폴드" if form == "fold" else "갤럭시Z플립"
                 name = f"{MATTE}, {dev}{i + 1} {_SUFFIX[variant]}"
@@ -168,7 +205,11 @@ def client():
                 s.add(mat)
         n = _seed_group(s, recipe_id=70, form="fold", rows=FOLD_ROWS, base_variant="외3+내3", start=1)
         n = _seed_group(s, recipe_id=69, form="flip", rows=FLIP_ROWS, base_variant="외3+내3", start=n)
-        _seed_group(s, recipe_id=98, form="tablet", rows=TABLET_ROWS, base_variant="기본", start=n)
+        n = _seed_group(s, recipe_id=98, form="tablet", rows=TABLET_ROWS, base_variant="기본", start=n)
+        n = _seed_group(s, recipe_id=11, form="tablet", rows=BLC6H_ROWS, base_variant="기본",
+                        start=n, product_name=BLC6H, models=_blc_models(BLC6H_ROWS))
+        _seed_group(s, recipe_id=99, form="tablet", rows=BLCPAPER_ROWS, base_variant="기본",
+                    start=n, product_name=BLCPAPER, models=_blc_models(BLCPAPER_ROWS))
 
         # ── 92건 «밖» — S4-② 대조군. 손대면 안 되는 것들 ──────────────────
         s.add(CostRecipe(id=50, product_name="자가복원 고투명 EPU 3매", form_factor="bar",
@@ -202,9 +243,17 @@ def _recipes(client) -> list[dict]:
     return r.json()["items"]
 
 
-def _group(prev: dict, form: str) -> dict:
-    hit = [g for g in prev["groups"] if g["form_factor"] == form]
-    assert hit, f"{form} 묶음이 미리보기에 없다"
+def _group(prev: dict, form: str, product_name: str = None) -> dict:
+    """★`form_factor`만으로 고르면 안 된다 — D-CPP-68 이후 태블릿 군이 **셋**이다.
+
+    이름을 안 주면 그 폼팩터의 군이 둘 이상일 때 **일부러 터진다**. 조용히 첫 칸을
+    집으면 「지문방지를 검사한다고 믿으면서 BLC를 검사하는」 테스트가 된다.
+    """
+
+    hit = [g for g in prev["groups"] if g["form_factor"] == form
+           and (product_name is None or g["product_name"] == product_name)]
+    assert hit, f"{form}/{product_name} 묶음이 미리보기에 없다"
+    assert len(hit) == 1, f"{form} 묶음이 {len(hit)}개다 — product_name으로 지목할 것"
     return hit[0]
 
 
@@ -230,15 +279,20 @@ def test_variant_axis_exists_and_defaults_to_single_grain(client):
 def test_preview_reproduces_the_approved_plan_table(client):
     prev = _preview(client)
     assert prev["safe_to_execute"] is True, prev["sentence"]
-    assert prev["live_sku_total"] == 92
-    assert prev["plan_sku_total"] == 92
+    # ★12행 몫 92 + D-CPP-68 몫 75(r11 31 · r99 44) = 167. 둘을 «따로» 적어 두어야
+    #   나중에 한쪽만 틀어졌을 때 어느 쪽인지 보인다.
+    assert prev["live_sku_total"] == 92 + 75
+    assert prev["plan_sku_total"] == 92 + 75
 
-    for form, rows in (("fold", FOLD_ROWS), ("flip", FLIP_ROWS), ("tablet", TABLET_ROWS)):
-        g = _group(prev, form)
+    for form, rows, pname in (("fold", FOLD_ROWS, MATTE), ("flip", FLIP_ROWS, MATTE),
+                              ("tablet", TABLET_ROWS, TABLET),
+                              ("tablet", BLC6H_ROWS, BLC6H),
+                              ("tablet", BLCPAPER_ROWS, BLCPAPER)):
+        g = _group(prev, form, pname)
         assert g["matches_plan"] is True, g["reason"]
         assert g["unassigned"] == []
         got = {v["variant"]: v["live_skus"] for v in g["variants"]}
-        assert got == {v: c for v, c, _ in rows}, f"{form} SKU 수가 계획표와 다르다"
+        assert got == {v: c for v, c, _ in rows}, f"{pname}/{form} SKU 수가 계획표와 다르다"
         for v in g["variants"]:
             assert v["cost_table_item_id"] is not None, f"{v['variant']}: 원가표 줄을 못 찾았다"
             assert v["matches_plan"] is True
@@ -276,7 +330,7 @@ def test_execute_refuses_when_live_differs_from_plan(client):
     body = _split(client, expect=409)
     assert "거부" in body["detail"]
     with client.testing_session() as s:
-        assert s.query(CostRecipe).count() == 4, "거부됐는데 레시피가 생겼다"
+        assert s.query(CostRecipe).count() == 6, "거부됐는데 레시피가 생겼다"
 
 
 def test_execute_refuses_when_a_sku_has_no_signal(client):
@@ -303,24 +357,34 @@ def test_execute_refuses_when_a_sku_has_no_signal(client):
 # ═══════════════════════════════════════════════════════════════════
 def test_split_creates_variant_recipes_and_moves_links(client):
     out = _split(client)
-    assert len(out["created_recipes"]) == 9, out["created_recipes"]
-    assert out["moved_links"] == 92 - (9 + 7 + 21), "base에 남을 SKU까지 옮겼다"
+    # 12행이 만드는 9개 + D-CPP-68이 만드는 4개(r11 플러스·울트라 · r99 플러스·울트라)
+    assert len(out["created_recipes"]) == 9 + 4, out["created_recipes"]
+    #   base에 남는 것: 매트 fold 9 · flip 7 · 태블릿 21 · BLC6H 15 · BLC종이 26
+    assert out["moved_links"] == (92 + 75) - (9 + 7 + 21 + 15 + 26), "base에 남을 SKU까지 옮겼다"
     assert {r["variant"] for r in out["renamed_base"]} == {"외3+내3", "기본"}
 
     rows = _recipes(client)
-    assert len(rows) == 4 + 9
-    got = {(r["form_factor"], r["variant"]): r["link_count"] for r in rows if r["form_factor"] != "bar"}
-    expected = {("fold", v): c for v, c, _ in FOLD_ROWS}
-    expected |= {("flip", v): c for v, c, _ in FLIP_ROWS}
-    expected |= {("tablet", v): c for v, c, _ in TABLET_ROWS}
+    assert len(rows) == 6 + (9 + 4)
+    # ★키에 상품명을 넣는다 — 태블릿 군이 셋이라 (폼팩터, 변형)은 더 이상 고유하지 않다
+    got = {(r["product_name"], r["form_factor"], r["variant"]): r["link_count"]
+           for r in rows if r["form_factor"] != "bar"}
+    expected = {(MATTE, "fold", v): c for v, c, _ in FOLD_ROWS}
+    expected |= {(MATTE, "flip", v): c for v, c, _ in FLIP_ROWS}
+    expected |= {(TABLET, "tablet", v): c for v, c, _ in TABLET_ROWS}
+    expected |= {(BLC6H, "tablet", v): c for v, c, _ in BLC6H_ROWS}
+    expected |= {(BLCPAPER, "tablet", v): c for v, c, _ in BLCPAPER_ROWS}
     assert got == expected, "레시피 탭의 link_count가 계획표와 다르다"
 
     # 새 레시피가 «자기» 원가표 줄을 픽했다
-    picked = {(r["form_factor"], r["variant"]): (r.get("picked") or {}).get("item_name")
+    picked = {(r["product_name"], r["variant"]): (r.get("picked") or {}).get("item_name")
               for r in rows if r["variant"] and r["form_factor"] != "bar"}
-    assert picked[("fold", "외3")] == "지문방지_외부3매"
-    assert picked[("flip", "내3")] == "지문방지_내부3매"
-    assert picked[("tablet", "울트라")] == "지문방지 PET 2매_울트라"
+    assert picked[(MATTE, "외3")] == "지문방지_외부3매"
+    assert picked[(TABLET, "울트라")] == "지문방지 PET 2매_울트라"
+    # ★D-CPP-68 — BLC 두 군이 «자기» 줄을 집었는가. 이름이 비슷해 섞이기 쉬운 자리다.
+    assert picked[(BLC6H, "울트라")] == "6H 강화유리코팅 BLC_울트라, TabS10FE+"
+    assert picked[(BLC6H, "플러스")] == "6H 강화유리코팅 BLC_플러스,12.9형,13인치"
+    assert picked[(BLCPAPER, "울트라")] == "종이질감 PET 2매_울트라_BLC, TabS10FE+"
+    assert picked[(BLCPAPER, "플러스")] == "종이질감 PET 2매_플러스,12.9형,13인치_BLC"
 
 
 def test_attribution_reason_reaches_the_screen(client):
@@ -343,8 +407,8 @@ def test_attribution_reason_reaches_the_screen(client):
 # ═══════════════════════════════════════════════════════════════════
 def test_hold_releases_itself_after_split(client):
     before = client.get("/api/cost/truth-board").json()["census"]
-    assert before["by_cause"].get("g1_grain_mismatch") == 92
-    assert before["held_count"] == 92
+    assert before["by_cause"].get("g1_grain_mismatch") == 92 + 75
+    assert before["held_count"] == 92 + 75
     none_before = before["none_count"]
 
     _split(client)
@@ -427,7 +491,7 @@ def test_split_is_idempotent(client):
     assert second["moved_links"] == 0
     assert second["preview_after"]["safe_to_execute"] is True
     with client.testing_session() as s:
-        assert s.query(CostRecipe).count() == 4 + 9
+        assert s.query(CostRecipe).count() == 6 + (9 + 4)
     assert first["created_recipes"], "첫 실행이 아무것도 안 만들었다면 이 테스트는 공허하다"
 
 
@@ -474,12 +538,13 @@ def test_variant_without_standard_says_recompute_not_unlinked(client):
 # ═══════════════════════════════════════════════════════════════════
 def test_tablet_residual_is_counted_not_silent(client):
     prev = _preview(client)
-    g = _group(prev, "tablet")
+    g = _group(prev, "tablet", TABLET)
     base = next(v for v in g["variants"] if v["variant"] == "기본")
     # 라이브 21건 전건이 낱말 없이 기본에 든다 — 그 사실이 «수»로 보여야 한다
     assert base["residual_skus"] == 21, base
     assert g["residual_total"] == 21
-    assert prev["residual_total"] == 21
+    # 잔여 = 태블릿 21 + BLC6H 기본 15 + BLC종이 기본 26 (셋 다 «크기 낱말 없음»이 정상)
+    assert prev["residual_total"] == 21 + 15 + 26
     assert "잔여" in (g["residual_sentence"] or "")
     # 울트라·플러스는 낱말이 실제로 걸린다 — 잔여가 아니다
     for v in g["variants"]:
@@ -491,7 +556,7 @@ def test_tablet_residual_note_does_not_invent_a_word(client):
     """★근거 문장이 «있지도 않은 낱말»을 있다고 적지 않는다."""
     _split(client)
     target = next(r for r in _recipes(client)
-                  if r["form_factor"] == "tablet" and r["variant"] == "기본")
+                  if r["product_name"] == TABLET and r["variant"] == "기본")
     body = client.get(f"/api/cost/recipes/{target['id']}").json()
     notes = [l["note"] for l in body["links"]]
     assert notes and all(n for n in notes)
@@ -501,7 +566,7 @@ def test_tablet_residual_note_does_not_invent_a_word(client):
         assert "크기 낱말 「기본」" not in n, n
     # 울트라는 낱말이 실제로 걸렸으므로 잔여라고 적으면 안 된다
     ultra = next(r for r in _recipes(client)
-                 if r["form_factor"] == "tablet" and r["variant"] == "울트라")
+                 if r["product_name"] == TABLET and r["variant"] == "울트라")
     ubody = client.get(f"/api/cost/recipes/{ultra['id']}").json()
     for l in ubody["links"]:
         assert "울트라 낱말" in l["note"], l["note"]
@@ -523,7 +588,7 @@ def test_unknown_tablet_model_is_visible_as_residual(client):
         s.commit()
 
     prev = _preview(client)
-    g = _group(prev, "tablet")
+    g = _group(prev, "tablet", TABLET)
     base = next(v for v in g["variants"] if v["variant"] == "기본")
     assert base["residual_skus"] == 21          # 여전히 21 — 이 SKU도 잔여였다
     assert base["live_skus"] == 21              # 개수 게이트는 안 걸린다(리뷰어 지적 그대로)
@@ -531,7 +596,7 @@ def test_unknown_tablet_model_is_visible_as_residual(client):
 
     _split(client)
     target = next(r for r in _recipes(client)
-                  if r["form_factor"] == "tablet" and r["variant"] == "기본")
+                  if r["product_name"] == TABLET and r["variant"] == "기본")
     body = client.get(f"/api/cost/recipes/{target['id']}").json()
     hit = [l for l in body["links"] if "뉴패드" in (l["note"] or "") or l["internal_sku"]]
     note = next(l["note"] for l in body["links"] if l["note"])
@@ -551,6 +616,248 @@ def test_empty_product_name_has_no_signal_at_all(client):
         s.commit()
     prev = _preview(client)
     assert prev["safe_to_execute"] is False
-    g = _group(prev, "tablet")
+    g = _group(prev, "tablet", TABLET)
     assert any("1차 신호 없음" in (u["reason"] or "") for u in g["unassigned"]), g["unassigned"]
     _split(client, expect=409)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# D-CPP-68 — Jino 판정 둘 (2026-09-03)
+#
+#   ★이 묶음이 지켜야 할 것은 «통과»가 아니라 **좁혔지 없애지 않았다**는 사실이다.
+#     가드를 지우면 아래 3·4번이 초록으로 남고, 그러면 이 파일은 거짓말을 한다.
+# ═══════════════════════════════════════════════════════════════════
+def _row(sku, variant, price, *, source=GS.SOURCE_RESIDUAL):
+    return GS._SkuRow(internal_sku=sku, product_name=f"{sku} 이름", cost_price=D(price),
+                      signal=variant, signal_source=source, variant=variant,
+                      link_status="approved")
+
+
+def test_equal_cost_table_totals_are_not_a_conflict():
+    """Jino 원문: *"두 옵션이 가격이 같아. 대조불가가 아니라 각각의 옵션에 단가를 붙이는거지."*
+
+    r11이 정확히 이 모양이다 — 원가표가 「기본」과 「플러스」를 총액 4,504.50으로 «같게»
+    두었고 현재 원가도 같다. 값으로 가를 수 없는 게 정상이지 충돌이 아니다.
+    """
+
+    rows = [_row("A1", "기본", "4352.70"), _row("A2", "플러스", "4352.70")]
+    GS._cross_check(rows, {"기본": D("4504.50"), "플러스": D("4504.50")})
+    assert [r.conflict for r in rows] == [None, None]
+
+
+def test_different_cost_table_totals_still_conflict():
+    """★가드가 살아 있다 — 원가표 총액이 «다른» 두 변형이 현재 원가를 공유하면 충돌이다.
+
+    이미 실행된 12행이 전부 이 세계에 있다(값이 서로 다르다). 이 테스트가 빨개지면
+    D-CPP-68이 가드를 좁힌 게 아니라 «없앤» 것이다.
+    """
+
+    rows = [_row("B1", "기본", "4352.70"), _row("B2", "플러스", "4352.70")]
+    GS._cross_check(rows, {"기본": D("5054.50"), "플러스": D("5582.50")})
+    assert all(r.conflict and "현재 원가를 공유" in r.conflict for r in rows), rows
+
+
+def test_unknown_totals_still_conflict():
+    """원가표 총액을 «모르면» 구판 그대로 충돌로 센다 — 모름을 통과로 바꾸지 않는다."""
+
+    rows = [_row("C1", "기본", "4352.70"), _row("C2", "플러스", "4352.70")]
+    GS._cross_check(rows, None)
+    assert all(r.conflict for r in rows), rows
+
+
+def test_jino_decided_sku_is_not_requestioned():
+    """Jino 원문: *"초기 원가표 단계에서는 엑셀표가 기준이야. 그러니까 원가표대로 울트라가 맞지"*
+
+    `OHI-0074`는 현재 원가가 플러스 값인데 원가표는 울트라 칸에 적었다. 사람이
+    「원가표가 맞다」고 판정했으므로 2차 대조가 그 SKU에게 **되묻지 않는다** —
+    되물을 상대(현재 원가)가 틀렸다고 이미 판정됐기 때문이다.
+    """
+
+    assert GS.DECIDED_BY_JINO.get("OHI-0074") == "울트라"
+    rows = [_row("OHI-0074", "울트라", "4572.70"), _row("D2", "울트라", "5892.70")]
+    GS._cross_check(rows, {"울트라": D("6044.50")})
+    assert [r.conflict for r in rows] == [None, None], rows
+
+    # ★판정 목록에 «없는» SKU였다면 여전히 충돌이다 — 예외가 목록에 매여 있음을 증명한다
+    rows2 = [_row("D1", "울트라", "4572.70"), _row("D2", "울트라", "5892.70")]
+    GS._cross_check(rows2, {"울트라": D("6044.50")})
+    assert all(r.conflict and "여러 종" in r.conflict for r in rows2), rows2
+
+
+def test_s10fe_ultra_rule_does_not_leak_to_non_blc():
+    """★비-BLC 군의 등급이 한 글자도 안 바뀐다.
+
+    원가표에서 `TabS10FE+`는 BLC 줄(45·51·54)에만 있다. 전역으로 고쳤다면
+    **이미 승인·컷오버된** `OHI-0111`(r108 `variant=플러스`)이 조용히 울트라로 옮겨 간다.
+    """
+
+    name = f"{TABLET}, 갤럭시탭S10FE플러스"
+    assert GS.tablet_size_grade_with_source(name)[0] == "플러스"
+    assert GS.tablet_size_grade_blc_with_source(name)[0] == "울트라"
+    assert "OHI-0111" not in GS.DECIDED_BY_JINO
+
+
+def test_decided_sku_note_does_not_claim_a_cross_check_it_skipped():
+    """★판정 SKU의 근거 문장이 「변형 안에서 1종」이라 말하면 **거짓**이다.
+
+    그 묶음은 실제로 2종이고, 그 SKU를 값 집합에서 뺐기 때문에 1종처럼 보였을 뿐이다.
+    이 세션의 첫 prod 배포가 정확히 그렇게 적었고 라이브에서 잡혔다 —
+    적대 리뷰 1R P1-1(「있지도 않은 근거를 적지 않는다」)의 재발이다.
+    """
+
+    plan = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    assert plan is not None
+    decided = _row("OHI-0074", "울트라", "4572.70", source=GS.SOURCE_S10FE_ULTRA)
+    plain = _row("OTHER", "울트라", "5892.70", source=GS.SOURCE_ULTRA)
+
+    n_decided = GS._note_for(decided, plan)
+    assert "변형 안에서 1종" not in n_decided, n_decided
+    assert "하지 않았다" in n_decided and "엑셀표가 기준" in n_decided, n_decided
+    # 판정 «아닌» SKU는 구판 문장 그대로여야 한다 — 예외가 전건으로 새면 안 된다
+    assert "변형 안에서 1종" in GS._note_for(plain, plan)
+
+
+def test_sentence_counts_plan_rows_instead_of_hardcoding():
+    """★문장에 행 수를 «박지» 않는다 — 표가 자라면 화면이 거짓말을 한다.
+
+    2026-09-03 라이브에서 「계획표 12행과 라이브가 전부 같다」로 굳어 있는 것을 잡았다
+    (그때 실제는 18행). 오늘 잡은 note 결함과 **같은 병**이다: 예외·확장을 넣을 때
+    «사람이 읽는 문장»까지 따라가지 않았다.
+    """
+
+    assert GS._plan_row_count() == sum(len(p.variants) for p in GS.PLAN)
+    assert GS._plan_row_count() != 12, "표가 자랐는데 12로 굳어 있으면 이 테스트가 존재할 이유가 없다"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 적대 리뷰 1R 지적 수리 (2026-09-03) — 리뷰어의 «재현»을 테스트로 옮긴다
+# ═══════════════════════════════════════════════════════════════════
+def test_p1_1_decided_sku_still_reports_missing_primary_signal():
+    """★P1-1 — 예외의 범위는 「되묻기」이지 「보이기」가 아니다.
+
+    구판은 판정 SKU에서 루프를 통째로 `continue` 해 「1차 신호 없음」 판정까지 껐다.
+    그러면 상품명이 빈 판정 SKU가 화면 `unassigned` 목록에서 **사라진다** —
+    하필 사람이 손으로 판정해 둔, 가장 눈이 필요한 자리에서.
+    """
+
+    decided = GS._SkuRow(internal_sku="OHI-0074", product_name="", cost_price=D("4572.70"),
+                         signal=None, signal_source=GS.SOURCE_NONE, variant=None,
+                         link_status="approved")
+    plain = GS._SkuRow(internal_sku="OHI-9999", product_name="", cost_price=D("4572.70"),
+                       signal=None, signal_source=GS.SOURCE_NONE, variant=None,
+                       link_status="approved")
+    GS._cross_check([decided, plain], {"울트라": D("6044.50")})
+    assert decided.conflict and "1차 신호 없음" in decided.conflict, decided.conflict
+    assert plain.conflict == decided.conflict
+
+
+def test_p2_3_decided_sku_whose_signal_disagrees_is_not_silently_exempt():
+    """★P2-3 — 판정 목록은 «멤버십»이 아니라 «값»이다.
+
+    낱말 순서가 틀어져 판정과 다른 변형이 나오면, 예외가 그 사고를 덮어선 안 된다.
+    """
+
+    r = _row("OHI-0074", "플러스", "4572.70")  # Jino 판정은 「울트라」
+    GS._cross_check([r], {"플러스": D("4504.50"), "울트라": D("6044.50")})
+    assert r.conflict and "판정 불일치" in r.conflict, r.conflict
+
+
+def test_p2_1_unknown_total_for_one_variant_is_not_treated_as_equal():
+    """★P2-1 — 「모름」을 「같음」으로 바꾸지 않는다. 적대 리뷰에서 **생존한 변이**의 자리다.
+
+    원가표 줄이 이름 변경·삭제로 사라지면 `plan_totals`의 «값»이 `None`이 된다
+    (딕셔너리 자체가 없는 경우는 기존 테스트가 덮는다).
+    """
+
+    rows = [_row("E1", "기본", "4352.70"), _row("E2", "플러스", "4352.70")]
+    GS._cross_check(rows, {"기본": None, "플러스": None})
+    assert all(r.conflict and "현재 원가를 공유" in r.conflict for r in rows), rows
+    # 한쪽만 모르는 경우도 마찬가지다
+    rows2 = [_row("F1", "기본", "4352.70"), _row("F2", "플러스", "4352.70")]
+    GS._cross_check(rows2, {"기본": D("4504.50"), "플러스": None})
+    assert all(r.conflict for r in rows2), rows2
+
+
+def test_p2_2_three_variants_sharing_one_price_all_surface():
+    """★P2-2 — 값 하나에 변형이 셋이면 셋 다 서야 한다.
+
+    구판은 `seen[p] = variant`로 덮어써 사슬이 끊겼고, 같은-총액 예외가 그 한 칸을
+    소비하면 **한 변형이 조용히 빠졌다**.
+    """
+
+    rows = [_row("G1", "기본", "4538.40"), _row("G2", "플러스", "4538.40"),
+            _row("G3", "울트라", "4538.40")]
+    GS._cross_check(rows, {"기본": D("4504.50"), "플러스": D("4504.50"),
+                           "울트라": D("6044.50")})
+    # 기본↔플러스는 총액이 같아 면제지만, 둘 다 울트라와는 총액이 다르다 ⇒ 셋 다 선다
+    assert [r.conflict is not None for r in rows] == [True, True, True], [r.conflict for r in rows]
+
+
+def test_p1_2a_note_names_the_contract_that_approved_this_row():
+    """★P1-2a — 근거 문장이 «그 행을 승인한 계약»을 말한다.
+
+    구판은 새 6행에도 「D-CPP-67 분할」이라 적었다. D-CPP-67 §0-D는 12행뿐이라,
+    감사자가 근거를 따라가면 **그 행이 없는 표**에 도착한다.
+    """
+
+    blc = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    old = GS.plan_for(TABLET, "tablet")
+    assert blc is not None and old is not None
+    assert blc.contract == "D-CPP-68" and old.contract == "D-CPP-67"
+    assert GS._note_for(_row("X1", "울트라", "5892.70", source=GS.SOURCE_ULTRA), blc).startswith("D-CPP-68 분할")
+    assert GS._note_for(_row("X2", "울트라", "7652.70", source=GS.SOURCE_ULTRA), old).startswith("D-CPP-67 분할")
+
+
+def test_p1_2b_residual_note_lists_the_words_this_group_actually_searched():
+    """★P1-2b — 「찾은 낱말」이 군마다 다르다. BLC 군은 `S10FE플러스`도 찾는다.
+
+    고정 목록을 적으면 「이 군에서 그 낱말이 검사됐나」에 **틀린 답**을 주는 문장이 된다.
+    """
+
+    blc = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    old = GS.plan_for(TABLET, "tablet")
+    r = _row("Y1", "기본", "4352.70")  # source=SOURCE_RESIDUAL
+    assert "S10FE플러스" in GS._note_for(r, blc), GS._note_for(r, blc)
+    assert "S10FE플러스" not in GS._note_for(r, old), GS._note_for(r, old)
+
+
+def test_p2_4_5_note_does_not_claim_an_uncomputed_comparison_or_a_stale_present_tense():
+    """★P2-4·P2-5 — 「이 변형의 다른 SKU와 다르며」는 계산하지 않은 비교였고,
+    「현재 원가」는 컷오버가 값을 바꾸면 낡은 값을 「현재」라 부른다(라이브 관측)."""
+
+    blc = GS.plan_for("종이질감 저반사 지문방지 블루라이트 차단 액정보호필름 2매", "tablet")
+    n_dec = GS._note_for(_row("OHI-0074", "울트라", "4572.70", source=GS.SOURCE_S10FE_ULTRA), blc)
+    n_plain = GS._note_for(_row("Z1", "울트라", "5892.70", source=GS.SOURCE_ULTRA), blc)
+    for n in (n_dec, n_plain):
+        assert "현재 원가" not in n, n
+        assert "분할 당시 원가" in n, n
+    assert "다른 SKU와 다르며" not in n_dec, n_dec
+
+
+def test_n3_decided_sku_with_wrong_variant_does_not_hide_its_price():
+    """★2R 생존 변이 N3 — P2-3 수리의 «나머지 절반»을 테스트가 지키게 한다.
+
+    1차 루프의 가드가 값-일치(`DECIDED_BY_JINO.get(sku) == r.variant`)가 아니라
+    멤버십(`sku in DECIDED_BY_JINO`)이면, **판정과 어긋난 SKU의 가격이 값 집합에서 빠진다.**
+    그러면 그 SKU가 잘못 들어간 변형의 «다른» SKU들이 `multi`(변형 안 원가 여러 종)에
+    안 걸려 **조용히 통과한다** — 「판정 불일치」 한 줄은 서지만 오염 전파는 안 보인다.
+    """
+
+    # OHI-0074의 Jino 판정은 「울트라」인데 신호가 「플러스」를 냈다(사고).
+    # 그 값(9,999)이 값 집합에 남아야 플러스 군의 동료가 「여러 종」으로 선다.
+    wrong = _row("OHI-0074", "플러스", "9999.00")
+    peer = _row("PEER1", "플러스", "4504.50")
+    GS._cross_check([wrong, peer], {"플러스": D("4504.50"), "울트라": D("6044.50")})
+    assert wrong.conflict and "판정 불일치" in wrong.conflict, wrong.conflict
+    assert peer.conflict and "여러 종" in peer.conflict, (
+        "판정과 어긋난 SKU의 가격이 값 집합에서 빠져 동료의 오염이 안 보인다 — 변이 N3의 자리"
+    )
+
+
+def test_group_plan_still_requires_its_identity_fields():
+    """★2R 범위 밖 관찰 — `contract`를 맨 앞에 두면 뒤 필드가 전부 기본값을 얻어
+    `GroupPlan()`이 합법이 되고 `product_name=""`인 계획이 만들어진다."""
+
+    with pytest.raises(TypeError):
+        GS.GroupPlan()  # type: ignore[call-arg]
+    assert all(p.product_name and p.form_factor and p.variants for p in GS.PLAN)

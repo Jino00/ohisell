@@ -22,12 +22,12 @@ import type { CostGrainSplitPreview } from "../lib/api";
 afterEach(() => cleanup());
 
 const CLEAN: CostGrainSplitPreview = {
-  contract: "D-CPP-67",
+  contracts: ["D-CPP-67"],
   plan_sku_total: 92,
   live_sku_total: 92,
   residual_total: 0,
   safe_to_execute: true,
-  sentence: "계획표 12행과 라이브가 전부 같다 — 실행할 수 있다",
+  sentence: "계획표 18행과 라이브가 전부 같다 — 실행할 수 있다",
   groups: [
     {
       product_name: "오하이 빛반사, 지문방지 매트 필름 3매",
