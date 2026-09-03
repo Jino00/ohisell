@@ -357,7 +357,11 @@ function OwnershipBandSection() {
   );
 }
 
-function CampaignDetailSection({ campaignId, days }: { campaignId: string; days: number }) {
+/** ★export 이유: 잠긴 캘린더의 성공 렌더 경로를 표면 테스트가 직접 잰다(완료 QA가 이
+ *  자리의 「추이 기간」 버튼이 미전환으로 남은 것을 잡았다). */
+export function CampaignDetailSection({ campaignId, days, onDays }: {
+  campaignId: string; days: number; onDays: (n: number) => void;
+}) {
   const { data, error } = useAsyncData(
     () => fetchNaverPerformanceCampaign(campaignId, days), [campaignId, days],
   );
@@ -367,19 +371,44 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
     () => fetchNaverPerformanceTimeline({ days, campaignId: campaignId || undefined }),
     [campaignId, days],
   );
+  // 기간 바 — PAO 화면 공통(Jino 2026-09-03 11:15 *"성과 화면 안쪽 기간 버튼도 같이
+  // 통일해줘"*). 종전엔 카드 «밖»에 일반 버튼 넷이 떠 있었다.
+  // ★날짜 두 칸은 **잠겨 있다**: 이 창의 끝점을 서버가 정한다(확정 적재까지만 센다).
+  //   보여주는 날짜는 서버 응답 `window`다 — 프론트가 days로 지어내지 않는다.
+  const periodBar = (
+    <PeriodRangeBar
+      title="이 카드의 조회 조건"
+      label="성과 발생일"
+      from={data?.window.from ?? ""} to={data?.window.to ?? ""}
+      onFrom={() => {}} onTo={() => {}}
+      datesReadOnly
+      presets={TREND_PERIOD_PRESETS}
+      activePreset={TREND_PRESET_FOR_DAYS[days]}
+      onPreset={(k) => onDays(TREND_DAYS_FOR_PRESET[k] ?? days)}
+      note="창의 길이만 고를 수 있습니다 — 끝점은 서버가 정합니다(확정 적재까지만 셉니다)."
+    />
+  );
+
   if (error) {
     return (
-      <Card title="이 광고 자세히 보기">
-        <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="잠시 후 다시 시도하세요." />
-      </Card>
+      <>
+        {periodBar}
+        <Card title="이 광고 자세히 보기">
+          <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="잠시 후 다시 시도하세요." />
+        </Card>
+      </>
     );
   }
-  if (data === null) return <Card title="이 광고 자세히 보기"><Loading rows={4} /></Card>;
+  if (data === null) {
+    return <>{periodBar}<Card title="이 광고 자세히 보기"><Loading rows={4} /></Card></>;
+  }
 
   const events = timelineData ? toChartMarkers(timelineData.timeline, data.series.map((p) => p.date)) : [];
 
   return (
-    <Card
+    <>
+      {periodBar}
+      <Card
       title={`${data.name} — 최근 ${data.window.days}일 흐름`}
       right={
         <span className="flex items-center gap-2">
@@ -434,7 +463,8 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
           )}
         </div>
       </div>
-    </Card>
+      </Card>
+    </>
   );
 }
 
@@ -1025,7 +1055,12 @@ function CompareSection({ base, against, campaignId }: {
 }
 
 // ── 페이지 ────────────────────────────────────────────────────────
-const TREND_DAY_OPTIONS = [7, 14, 30, 90] as const;
+/** ★종전 「추이 기간」 버튼 넷(7·14·30·90일)을 **하나도 안 빼고** 프리셋으로 옮긴다
+ *  (Jino 2026-09-03 11:15 *"성과 화면 안쪽 기간 버튼도 같이 통일해줘"* — 완료 QA가
+ *  이 묶음이 남아 있는 것을 잡았다). */
+const TREND_PERIOD_PRESETS: PeriodPreset[] = ["7d", "14d", "30d", "90d"];
+const TREND_DAYS_FOR_PRESET: Record<string, number> = { "7d": 7, "14d": 14, "30d": 30, "90d": 90 };
+const TREND_PRESET_FOR_DAYS: Record<number, PeriodPreset> = { 7: "7d", 14: "14d", 30: "30d", 90: "90d" };
 
 export default function NaverAdPerformance() {
   const today = isoKST(new Date());
@@ -1284,20 +1319,9 @@ export default function NaverAdPerformance() {
       {/* ③ 캠페인 상세 — 광고를 골랐을 때만 연다(전체 46개 추이는 질문이 아니다). */}
       {campaignId ? (
         <>
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-500">추이 기간</span>
-            {TREND_DAY_OPTIONS.map((d) => (
-              <button key={d} type="button" onClick={() => setTrendDays(d)}
-                className={`px-2 py-1 text-xs rounded border ${
-                  trendDays === d
-                    ? "bg-blue-600 text-white border-blue-600"
-                    : "text-gray-600 border-gray-300 hover:bg-gray-50"
-                }`}>
-                {d}일
-              </button>
-            ))}
-          </div>
-          <CampaignDetailSection campaignId={campaignId} days={trendDays} />
+          <CampaignDetailSection
+            campaignId={campaignId} days={trendDays} onDays={setTrendDays}
+          />
         </>
       ) : (
         <Card title="이 광고 자세히 보기">

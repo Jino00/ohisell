@@ -25,6 +25,9 @@ const h = vi.hoisted(() => {
     pending,
     listCalls: [] as unknown[],
     timelineCalls: [] as unknown[],
+    campaignCalls: [] as number[],
+    chosenDays: 0,
+    onDays: (n: number) => { h.chosenDays = n; },
   };
 });
 
@@ -43,10 +46,14 @@ vi.mock("../lib/api", async (importOriginal) => ({
     h.timelineCalls.push(p);
     return Promise.resolve(TIMELINE);
   },
+  fetchNaverPerformanceCampaign: (_id: string, days: number) => {
+    h.campaignCalls.push(days);
+    return Promise.resolve(DETAIL);
+  },
 }));
 
 import NaverAdExclusionList from "./NaverAdExclusionList";
-import { ImprovementTimelineSection } from "./NaverAdPerformance";
+import { CampaignDetailSection, ImprovementTimelineSection } from "./NaverAdPerformance";
 
 const bucket = (terms: number, cost: number) => ({ terms, cost });
 
@@ -91,9 +98,22 @@ const TIMELINE = {
   data_note: "관찰입니다.",
 };
 
+/** ★캠페인 상세도 창을 서버가 정한다 — 여기도 days와 «안 맞는» 창을 일부러 준다. */
+const DETAIL = {
+  campaign_id: "cmp-1", name: "Z폴드8 와이드", type_label: "쇼핑검색",
+  managed_by_label: "우리가 자동으로 운영", managed_by_us: true, not_ours_note: null,
+  window: { from: "2026-07-02", to: "2026-08-30", days: 30 },
+  change_window_days: 7,
+  lines: { target_roas: null, bep_roas: null },
+  series: [], series_note: "관찰입니다.", groups: [],
+  totals: { cost: 0, conv_amt: 0, roas: null, clk: 0 },
+  actions: [], budget_note: null,
+};
+
 beforeEach(() => {
   h.listCalls = [];
   h.timelineCalls = [];
+  h.campaignCalls = [];
 });
 afterEach(cleanup);
 
@@ -201,5 +221,52 @@ describe("개선 타임라인 — 잠긴 캘린더", () => {
     for (const d of ["30일", "90일", "180일"]) {
       expect(within(b).getByRole("button", { name: d })).toBeTruthy();
     }
+  });
+});
+
+describe("캠페인 상세(추이 기간) — 잠긴 캘린더", () => {
+  // ★완료 QA가 잡은 자리: Jino 11:15 *"성과 화면 안쪽 기간 버튼도 같이 통일해줘"*인데
+  //   이 묶음(7·14·30·90일)만 일반 버튼으로 남아 있었다. 같은 결함이 세 번째면 모양을
+  //   고쳐야 하므로, 옮긴 자리도 여기서 지킨다.
+  const renderSection = () =>
+    render(
+      <MemoryRouter>
+        <CampaignDetailSection campaignId="cmp-1" days={30} onDays={h.onDays} />
+      </MemoryRouter>,
+    );
+
+  const bar = async () =>
+    (await screen.findByText(/확정 적재까지만 셉니다/, {}, { timeout: 5000 }))
+      .closest("section")!;
+
+  it("① 데이터 로드 성공 뒤에도 기간 바가 화면에 있다", async () => {
+    renderSection();
+    expect(await screen.findByText(/Z폴드8 와이드/, {}, { timeout: 5000 })).toBeTruthy();
+    expect(screen.getByText(/확정 적재까지만 셉니다/)).toBeTruthy();
+  });
+
+  it("② 종전 버튼 넷(7·14·30·90일)이 하나도 안 사라졌다", async () => {
+    renderSection();
+    const b = await bar();
+    for (const d of ["7일", "14일", "30일", "90일"]) {
+      expect(within(b).getByRole("button", { name: d })).toBeTruthy();
+    }
+  });
+
+  it("③ 날짜 칸은 **서버가 낸 창**이고 잠겨 있다", async () => {
+    renderSection();
+    const b = await bar();
+    // days=30인데 창은 2026-07-02~08-30이다 — 프론트가 계산하면 이 값이 안 나온다.
+    for (const v of ["2026-07-02", "2026-08-30"]) {
+      const input = within(b).getByDisplayValue(v) as HTMLInputElement;
+      expect(input.disabled).toBe(true);
+    }
+  });
+
+  it("④ 프리셋을 누르면 창의 길이가 바뀐다(부모에게 올라간다)", async () => {
+    renderSection();
+    const b = await bar();
+    fireEvent.click(within(b).getByRole("button", { name: "90일" }));
+    await waitFor(() => expect(h.chosenDays).toBe(90));
   });
 });
