@@ -15,6 +15,9 @@
 |---|---:|---|---|
 | `slice1_74/` | 9 | 조립품 74 중 **59 SKU** 확정 요청 본문 (D-CPP-69) | 59/59 written · skipped 0 (11:35:22 KST) |
 | `slice2_273/` | 47 | 매입 완제품·기타 **273 SKU** 확정 요청 본문 (D-CPP-70) | 273/273 written · skipped 0 (12:01:53 KST) |
+| `slice3_50/` | 14 | 남은 51 SKU 확정 요청 본문 (Jino 지시 12:31 「없는 원가를 업데이트 하고 전부 확정해버리자」) | **50 written · 1 skipped** (12:32:32 KST) |
+
+★슬라이스 3의 **거부 1건은 결함이 아니라 금지선의 작동**이다: `OHI-0577`(도어락 2매+간편부착)은 구성이 있는 조립품이라 서버가 *「조립품 — 구성이 있는 레시피다(우리 계산이 정본, 파일 값 금지)」*로 돌려보냈다.
 
 각 파일은 `POST /api/cost/purchased-prices/confirm`에 **그대로 보낸 본문**이다:
 `internal_skus` · `price` · `source_file` · `source_names`(SKU별 근거명) · `note`(Jino 판정 원문).
