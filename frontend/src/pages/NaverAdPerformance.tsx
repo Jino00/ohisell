@@ -798,7 +798,10 @@ function TimelineDayCard({ day }: { day: NaverPerformanceTimelineDay }) {
   );
 }
 
-function ImprovementTimelineSection({ campaignId }: { campaignId: string }) {
+/** ★export 이유: 잠긴 캘린더의 «성공 렌더 경로»를 표면 테스트가 직접 잰다(적대 리뷰 1R
+ *  P1-2 — 이 자리의 기간 바를 지워도 1,442건이 전부 초록이었다). 컴포넌트를 내보내는 것은
+ *  `react-refresh/only-export-components`에 걸리지 않는다(경고 상한 96이 정확한 상한이다). */
+export function ImprovementTimelineSection({ campaignId }: { campaignId: string }) {
   const [days, setDays] = useState<number>(90);
   const [showAll, setShowAll] = useState(false);
   const { data, error } = useAsyncData(
