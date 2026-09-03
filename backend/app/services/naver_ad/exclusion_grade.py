@@ -421,6 +421,7 @@ def grade_review_audit(db: Session, *, today: date) -> dict:
           "ok": int,
           "repairable": [ {...}, ... ],  # 규칙대로 고치면 되는 것
           "pending_decision": [ {...} ], # 사람이 정해야 하는 것(오컷의심)
+          "due_untouched": [ {...} ],    # 이미 도래 — 세되 고치지 않는다(P1-1)
           "ungraded": int,               # 등급 자체가 없는 행 — 별 문제, 여기선 세기만
         }
 
@@ -429,7 +430,8 @@ def grade_review_audit(db: Session, *, today: date) -> dict:
     """
     rows = db.query(NaverSearchTermExclusion).all()
     out: dict = {
-        "checked": 0, "ok": 0, "repairable": [], "pending_decision": [], "ungraded": 0,
+        "checked": 0, "ok": 0, "repairable": [], "pending_decision": [],
+        "due_untouched": [], "ungraded": 0,
     }
     for row in rows:
         grade = row.grade
@@ -438,6 +440,18 @@ def grade_review_audit(db: Session, *, today: date) -> dict:
             continue
         out["checked"] += 1
         actual = row.next_review_at
+        # ★★**도래한 행은 손대지 않는다** (적대 리뷰 P1-1, 2026-09-03).
+        #   `next_review_at <= today`인 행은 **다음 08:50 레인의 개방 대상**이고
+        #   `ignition_preflight.WARN_REOPEN_DUE`가 그걸로 점화 경고를 낸다. 감사가 그 값을
+        #   건드리면 «아무것도 해결하지 않은 채 경고만 꺼진다» — 이 저장소가 반복해서
+        #   자기 병으로 지목한 「모름=괜찮음」과 같은 모양이다. 세되, 고치지 않는다.
+        if actual is not None and actual <= today:
+            out["due_untouched"].append({
+                "id": row.id, "campaign_id": row.campaign_id, "grade": grade,
+                "search_term": row.search_term, "next_review_at": actual,
+            })
+            continue
+
         if grade in HOLD_UNTIL_OWNERSHIP_SPLIT:
             # 규칙상 「오늘」이지만 집행이 소유권 분리에 묶였다. NULL이 **정상 보류**이고,
             # 날짜가 이미 박혀 있으면 그건 누군가 예약을 걸어 둔 것이라 그것도 알린다.
@@ -452,13 +466,24 @@ def grade_review_audit(db: Session, *, today: date) -> dict:
         #   이미 None을 반환하므로 일반 경로가 같은 답을 낸다. 특례 분기를 뒀다가
         #   변이 M3(분기 무력화)이 **전건 초록으로 생존**해 중복임이 드러나 지웠다
         #   (2026-09-03). 만료일을 «정하는» 자리는 `default_next_review_at` 하나다.
-        should = default_next_review_at(grade, cycle=max(int(row.cycle or 1), 1), today=today)
-        if actual == should:
+        #   ★cycle 방어도 안 겹친다 — `default_next_review_at`이 `max(cycle,1)`을 하고
+        #   `cycle`은 DB NOT NULL이다(적대 리뷰 P2-1: `max(int(row.cycle or 1),1)`이 M3와
+        #   **같은 모양의 중복**이라 벗겼다 — 지운 자리에 같은 것을 새로 넣고 있었다).
+        should = default_next_review_at(grade, cycle=row.cycle, today=today)
+
+        # ★★**«NULL인가»만 본다 — 이미 박힌 날짜의 «값»은 비교하지 않는다** (P1-1).
+        #   `should`는 «오늘» 기준으로 계산되는데 `next_review_at`은 «등급이 붙던 날»
+        #   기준으로 박힌 값이다. 값을 비교하면 **규칙에 완벽히 부합하는 행**(07-22 등급
+        #   + 30일 = 08-21)이 전건 「어긋남」으로 뜨고, 수리가 그걸 미래로 민다.
+        #   prod 실측 위양성 2건이 정확히 그 모양이었고, 그중 하나가 위 「도래」 행이다.
+        #   ⇒ 이 감사가 고칠 수 있는 병은 **NULL 정합성 한 방향뿐**이다.
+        if (actual is None) == (should is None):
             out["ok"] += 1
         else:
             out["repairable"].append({
                 "id": row.id, "grade": grade, "actual": actual, "should": should,
-                "why": "등급이 정한 만료일과 다르다",
+                "why": ("규칙은 만료일을 요구하는데 비어 있다" if actual is None
+                        else "규칙이 NULL(영구/보류)인데 날짜가 박혀 있다"),
             })
     return out
 
@@ -489,10 +514,16 @@ def repair_grade_review(
         if commit:
             db.commit()
     log.info(
-        "exclusion_grade.repair_grade_review: repaired=%d pending_decision=%d ungraded=%d",
-        len(by_id), len(audit["pending_decision"]), audit["ungraded"],
+        "exclusion_grade.repair_grade_review: repaired=%d pending_decision=%d "
+        "due_untouched=%d ungraded=%d",
+        len(by_id), len(audit["pending_decision"]), len(audit["due_untouched"]),
+        audit["ungraded"],
     )
-    return {"dry_run": False, "repaired": len(by_id), **audit}
+    # ★수리 «후»의 상태를 반환한다 (적대 리뷰 P2-5) — 초판은 수리 전 감사를 그대로
+    #   실어 방금 고친 행이 여전히 `repairable`로 나갔다. 화면이 그걸 그리면 수리가
+    #   안 된 것처럼 보인다.
+    after = grade_review_audit(db, today=today)
+    return {"dry_run": False, "repaired": len(by_id), **after}
 
 
 def distribution_report(db: Session) -> dict:
