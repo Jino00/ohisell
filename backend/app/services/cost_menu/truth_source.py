@@ -134,6 +134,31 @@ CAUSE_REF118 = {
     CAUSE_MATCH: "(일치)",
 }
 
+#: 사유 코드 → **사람이 읽는 짧은 말**. 배너처럼 한 줄짜리 표면이 쓴다.
+#: ★왜 `CAUSE_REF118`로는 안 되나(적대 리뷰 2R 관측, 2026-09-03): 그 표는 ref 118의
+#:   «버킷 이름»(G1·G3-3·4·5)이라 사람 말이 아니고, 애초에 드리프트의 지배적 사유인
+#:   `purchased_approved`가 **키에 없다.** 그래서 배너가 `purchased_approved 141건`처럼
+#:   영문 스네이크를 한국어 문장 사이에 박고 있었다.
+#: ★`reason`(긴 설명 문장)과 다르다 — 저건 표 한 칸용이고 이건 배너 한 줄용이다.
+#: ★없는 코드는 **지어내지 않는다** — 부르는 쪽이 코드 그대로 낸다(빈 라벨보다 낫다).
+CAUSE_LABELS_KO: dict[str, str] = {
+    CAUSE_MATCH: "정본과 일치",
+    CAUSE_PURCHASED_APPROVED: "매입가 정본",
+    CAUSE_PURCHASED_SINGLE_LINE: "매입품(구성 1줄)",
+    CAUSE_IMPORTED_SINGLE_LINE: "수입품(구성 1줄)",
+    CAUSE_INCOMPLETE_SINGLE_LINE: "부자재 미보강",
+    CAUSE_GRAIN_MISMATCH: "그레인 불일치",
+    CAUSE_PARTS_299: "부자재 299 격차",
+    CAUSE_FAMILY_NOT_SPLIT: "계열 미분할",
+    CAUSE_RESIDUAL: "잔여 격차",
+    CAUSE_NO_STANDARD: "표준원가 없음",
+    CAUSE_TWO_GROUNDS: "근거가 둘",
+    CAUSE_DRAFT_LINK: "초안 레시피만 연결됨",
+    CAUSE_NO_LINK_DUPE: "중복 표지",
+    CAUSE_NO_LINK_APPAREL: "의류",
+    CAUSE_NO_LINK_OTHER: "레시피 연결 없음",
+}
+
 #: 소관 — 「이 행을 움직일 수 있는 곳」. 빈 칸을 남기지 않는다(계약 §4 S2-2).
 OWNER_TRACK_A2 = "트랙 A2 — 그레인 정의"
 OWNER_TRACK_A1A2 = "트랙 A1·A2 — 레시피·구성"

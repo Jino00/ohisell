@@ -119,16 +119,14 @@ export type { CostTab };
 // 순수 표시 규칙 (테스트가 이 함수들을 직접 잡는다)
 // ══════════════════════════════════════════════════════════════════
 
-/** 단가 표시. **`null`은 「—」다 — 0원으로 그리지 않는다**(계약 §2-7).
- *
- * 「단가를 아직 모른다」와 「단가가 0원이다」는 다른 사실이고, 화면이 둘을 같게 그리면
- * 그게 `cost_price` NOT NULL default 0이 만든 혼동의 재생산이다. */
-export function formatCostWon(value: string | null | undefined): string {
-  if (value === null || value === undefined || value === "") return "—";
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "—";
-  return `${n.toLocaleString("ko-KR", { maximumFractionDigits: 2 })}원`;
-}
+// ★규칙 본체는 `lib/money.ts`로 내려갔다(2026-09-03, 적대 리뷰 P2-3) — 전역 배너가 같은
+//   포맷을 써야 하는데 페이지를 import 하면 번들이 딸려온다. 여기서는 **다시 내보내기만**
+//   한다(기존 소비처·테스트가 이 경로를 계속 쓴다 — 사본을 만들지 않는 것이 요점이다).
+// ★`export … from`은 이름을 **모듈 스코프로 안 들여온다** — 그렇게 뒀더니 이 파일 안의
+//   사용처가 전부 `ReferenceError`로 죽었다(자체 회귀에서 207건 적발, 2026-09-03).
+//   import + 재export 둘 다 필요하다.
+import { formatCostWon } from "../lib/money";
+export { formatCostWon };
 
 /** 승인 상태 라벨. 미승인은 **미승인이라고 말한다** — 침묵하지 않는다(계약 §2-2). */
 export function materialStatusLabel(status: string): string {

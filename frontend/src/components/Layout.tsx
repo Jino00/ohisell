@@ -14,6 +14,7 @@ import {
   type CollectionStatus,
 } from "../lib/api";
 import { buildCollectionFreshnessBanner } from "./collectionFreshnessBanner";
+import { formatCostWon } from "../lib/money";
 import { runStreamsRefresh, describeOutcome, specsForKeys } from "../lib/streamRefresh";
 
 // 전역 헬스 배너 요약 빌더 (순수 함수 — 테스트 대상).
@@ -79,13 +80,21 @@ export function buildPipelineHealthBanner(
   //      드리프트가 묻힌다. 셋 다 보려면 API 응답(cost_drift)이나 CLI를 본다.
   if (health.cost_drift && health.cost_drift.count > 0) {
     const d = health.cost_drift;
-    // 버퍼 라벨을 많은 순으로 붙인다 — 어느 계열이 되돌아왔는지가 원인 추정의 첫 단서다.
-    const which = Object.entries(d.by_buffer)
-      .map(([label, n]) => `${label} ${n}건`)
+    // ★★2026-09-03 전환: 「옛 매핑 엑셀 업로드 의심」이라는 **원인 추정을 문구에서 뺐다.**
+    //   그 문장은 판정 근거가 08-07판 엑셀 스냅샷 하나였을 때만 성립했고, 실제로 그날
+    //   **최신 원가표대로 올린 값을 「옛 값 복귀」로 신고**했다(오탐 7건). 이제 판정은
+    //   SKU별 정본 판별표가 하므로 배너는 **관측한 것만** 말한다: 어긋난 건수와 금액.
+    //   원인은 화면(`/cost` 「정본 판별」)에서 사유별로 본다 — 배너가 추측하지 않는다.
+    // ★사유 코드를 사람 말로 옮긴다 — 한국어 문장 사이에 `purchased_approved`를 박지 않는다
+    //   (적대 리뷰 P2-7). 라벨이 없는 코드는 코드 그대로 낸다(지어내지 않는다).
+    const which = Object.entries(d.by_cause)
+      .map(([cause, n]) => `${d.cause_labels?.[cause] ?? cause} ${n}건`)
       .join(", ");
+    // ★금액은 다른 화면(`/cost` 컷오버)과 **같은 포맷터**를 쓴다 — 한쪽만 원문자열이면
+    //   같은 수가 두 화면에서 다르게 보인다(적대 리뷰 P2-3).
     push(0,
       `원가가 정본과 다름 ${d.count}건${which ? ` (${which})` : ""}` +
-        " — 옛 매핑 엑셀 업로드 의심",
+        ` — 격차 합 ${formatCostWon(d.gap_sum)} · 원가 메뉴에서 컷오버 필요`,
     );
   }
 
@@ -95,6 +104,15 @@ export function buildPipelineHealthBanner(
   //      ref 119 §3-2), 그때 `cost_drift`도 null이 되어 **「어긋남 0건」과 화면에서 똑같이
   //      생긴다.** 그 상태로 배너가 침묵하면 「감시 중」이라는 화면의 약속이 통째로 거짓이 된다.
   //    ★등급 0이다 — 가드가 꺼진 채 옛 엑셀이 올라오면 정확히 «돈이 조용히 새는» 경로다.
+  // 4-c) 판별표 «판정기»가 꺼졌다 — 적대 리뷰 1R P1-1 (2026-09-03).
+  //   ★위 4)와 짝이다: 위는 «어긋남을 찾았다», 이건 **«찾을 수가 없었다»**. 판정 근거를
+  //     엑셀 스냅샷에서 SKU별 정본 판별표로 옮기면서 이 신호가 한 번 끊겼고, 그 사이
+  //     「판별표 고장」과 「어긋남 0건」이 응답에서 구분되지 않았다(리뷰어가 재현).
+  if (health.cost_board_guard && health.cost_board_guard.active === false) {
+    const why = health.cost_board_guard.reason;
+    push(0, `원가 정본 판정 미작동${why ? ` (${why})` : ""} — 「어긋남 0건」이 아니다`);
+  }
+
   if (health.cost_guard && health.cost_guard.active === false) {
     const why = health.cost_guard.reason;
     push(0, `원가 가드 미작동 — 스냅샷 부재${why ? ` (${why})` : ""}`);

@@ -611,6 +611,12 @@ class SchedulerHealthOut(BaseModel):
     #   그 둘이 겉으로 같아 보이는 것이 이 필드를 만든 이유고, 그래서 여기 선언이 필수다
     #   (위 세 필드와 같은 사고: 선언이 없으면 response_model이 판정을 응답에서 지운다).
     cost_guard: dict | None = None
+    # 판별표 «판정기»가 작동했나 — 바로 위 `cost_guard`(업로드 경로 전용)와 **다른 것**이다.
+    # ★적대 리뷰 1R P1-1(2026-09-03): `cost_drift`의 근거를 엑셀 스냅샷에서 SKU별 정본
+    #   판별표로 옮기면서 「검사기가 꺼졌다」를 알리던 인과가 끊겼다 — `truth_board`가 터져도
+    #   `cost_guard.active`는 True로 남고 `cost_drift`만 None이 되어 **「어긋남 0건」과
+    #   구분되지 않는다**(리뷰어가 재현). `active:false`면 `cost_drift`의 None을 믿으면 안 된다.
+    cost_board_guard: dict | None = None
     # 쿠팡 판매분석 보존식(Σ옵션 GMV == 요약축 GMV) 대조 결과. 정상이면 mismatch=[], 대조 자체를
     # 못 했으면 None. ★위 cost_drift 주석의 사고를 그대로 되풀이하지 않으려고 **먼저** 넣었다 —
     # 서비스층이 판정을 내도 이 줄이 없으면 response_model이 응답에서 지운다. 짝이 되는 테스트는
