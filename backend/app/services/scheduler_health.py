@@ -653,6 +653,14 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
             {
                 "count": len(gap_rows),
                 "by_cause": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
+                # ★★**하위호환 별칭 — 지울 때가 정해져 있다.**
+                #   prod 프론트가 아직 옛 코드일 수 있고, 그 코드는 `d.by_buffer`를 읽어
+                #   `Object.entries(...)`에 넘긴다. 키가 없으면 **TypeError로 배너가 통째로
+                #   터진다.** 지금은 어긋남이 0건이라 그 분기가 안 돌지만, 한 건이라도
+                #   생기는 순간 화면이 깨진다 — 「지금은 안 터진다」에 기대지 않는다.
+                #   ⇒ 새 프론트가 prod에 올라간 뒤 이 줄을 지운다(그때까지 배너는 사유 코드를
+                #     버퍼 라벨 자리에 표시하는데, 그건 문구가 어색할 뿐 거짓은 아니다).
+                "by_buffer": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
                 "sample": [
                     {
                         "internal_sku": r["internal_sku"],

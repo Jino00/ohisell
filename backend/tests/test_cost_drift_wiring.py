@@ -141,6 +141,24 @@ def test_compute_health_detects_master_value_that_differs_from_its_truth(db):
     assert "정본 판별표" in d["source"]
 
 
+def test_by_buffer_alias_exists_until_the_new_frontend_is_deployed(db):
+    """★prod 프론트가 아직 옛 코드면 `d.by_buffer`를 읽는다 — 키가 없으면 배너가 **터진다**.
+
+    `Object.entries(undefined)`는 TypeError고, 그 배너는 레이아웃 전역에 있다. 지금은
+    어긋남이 0건이라 그 분기가 안 돌지만 **「지금은 안 터진다」에 기대지 않는다**
+    (2026-09-03: 백엔드는 배포됐는데 프론트는 다른 세션의 미푸시 커밋 탓에 CAS로 막혔다).
+
+    ★이 테스트는 «지울 때 멈추게» 하는 장치다 — 새 프론트가 prod에 올라간 뒤
+      별칭을 지우면 여기서 죽고, 지우는 사람이 위 문장을 읽게 된다.
+    """
+    _seed(db, [("OHI-0001", "정본과 어긋남", _DRIFTED_VALUE, _TRUTH_VALUE)])
+    d = compute_scheduler_health(db, _FakeScheduler(), NOW)["cost_drift"]
+    assert d["by_buffer"] == d["by_cause"], (
+        "by_buffer 별칭이 사라졌다 — prod 프론트가 새 코드인지 먼저 확인할 것. "
+        "옛 프론트가 남아 있으면 어긋남이 생기는 순간 배너가 TypeError로 터진다."
+    )
+
+
 def test_compute_health_is_silent_when_master_matches_truth(db):
     """★깨끗하면 **아무 말도 안 한다** — 상시 켜진 경고는 안 켜진 것과 같다.
 
