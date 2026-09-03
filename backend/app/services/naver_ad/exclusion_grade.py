@@ -383,6 +383,149 @@ CONTRACT_EXPECTED: dict[str, int] = {
 }
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 등급 ↔ 만료일 정합성 (D-NAO-285, 계약 「목적관철」 P2 · 기능 #1의 (b))
+# ══════════════════════════════════════════════════════════════════════════
+#
+# ★왜 필요한가 (2026-09-03 prod 실측): 등급은 붙었는데 **그 등급이 정한 만료일이 안 붙은**
+#   행이 20건 있었다 — `오컷의심` 13(규칙=오늘) · `성과미달` 4(규칙=+백오프)가 전부
+#   `next_review_at IS NULL`이고, 반대로 `미검증` 1건은 규칙이 NULL인데 날짜가 박혀 있었다.
+#   원인은 결함이 아니라 **백필의 설계**다: `set_grade(keep_review_at=True)`가 라벨만 붙이고
+#   만료일을 일부러 안 건드렸다(그 판단 자체는 옳다 — 3,987행에 예정일을 한꺼번에 주면
+#   그게 곧 재개방 «실행»의 예약이 된다).
+#
+#   문제는 그 «일부러»가 어디까지였는지를 **아무도 세고 있지 않았다**는 것이다. 라벨은
+#   붙었고 집행은 안 됐는데, 그 간극을 보는 표면이 0이었다. 이 절이 그 표면이다.
+#
+# ★두 종류를 반드시 가른다 — 안 가르면 3,970건이 매일 「결함」으로 뜬다:
+#   ① **의도된 NULL** — `무관`(영구) · `미검증`(보류, 재료 도래 시 재분류). 규칙이 NULL이다.
+#      ★이건 여기서 특례로 처리하지 않는다 — `default_next_review_at`이 이미 None을 낸다.
+#   ② **의도된 «보류»** — `오컷의심`. 규칙은 「오늘(즉시 도래)」이지만 이 모듈 머리말이
+#      *"단 «대상 목록»에 오를 뿐, **실행은 소유권 분리 후**(계약 §1-2)"*라 못 박았다.
+#      소유권 분리는 북극성 §8-② **Jino 결정 대기**다. ⇒ 날짜를 채우면 다음 08:50 레인이
+#      실제로 네이버 제외키워드를 삭제한다. **채우지 않는다.** 대신 «목록»으로 낸다.
+#   ⇒ 자동 수리 대상은 ①②를 뺀 나머지뿐이다. 「고칠 수 있는 것」과 「사람이 정할 것」을
+#      같은 통에 넣으면 그 통은 아무도 안 본다.
+
+#: 규칙은 날짜를 지정하지만 **집행이 상위 결정에 묶여** 보류 중인 등급.
+#: 자동 수리하지 않고 `pending_decision`으로 «목록»에만 낸다.
+HOLD_UNTIL_OWNERSHIP_SPLIT: frozenset[str] = frozenset({GRADE_MISCUT})
+
+
+def grade_review_audit(db: Session, *, today: date) -> dict:
+    """등급 ↔ `next_review_at` 정합성 관측. **읽기 전용 — 아무것도 고치지 않는다.**
+
+    반환:
+        {
+          "checked": int,                # 등급이 붙은 행 수(미분류는 세지 않는다)
+          "ok": int,
+          "repairable": [ {...}, ... ],  # 규칙대로 고치면 되는 것
+          "pending_decision": [ {...} ], # 사람이 정해야 하는 것(오컷의심)
+          "due_untouched": [ {...} ],    # 이미 도래 — 세되 고치지 않는다(P1-1)
+          "ungraded": int,               # 등급 자체가 없는 행 — 별 문제, 여기선 세기만
+        }
+
+    ★`repairable` 항목의 `should`는 **이 모듈의 규칙이 계산한 값**이다. 호출부가 날짜를
+      새로 만들지 않는다 — 값을 발명하는 순간 이 감사가 정책이 되어 버린다.
+    """
+    rows = db.query(NaverSearchTermExclusion).all()
+    out: dict = {
+        "checked": 0, "ok": 0, "repairable": [], "pending_decision": [],
+        "due_untouched": [], "ungraded": 0,
+    }
+    for row in rows:
+        grade = row.grade
+        if not grade:
+            out["ungraded"] += 1
+            continue
+        out["checked"] += 1
+        actual = row.next_review_at
+        # ★★**도래한 행은 손대지 않는다** (적대 리뷰 P1-1, 2026-09-03).
+        #   `next_review_at <= today`인 행은 **다음 08:50 레인의 개방 대상**이고
+        #   `ignition_preflight.WARN_REOPEN_DUE`가 그걸로 점화 경고를 낸다. 감사가 그 값을
+        #   건드리면 «아무것도 해결하지 않은 채 경고만 꺼진다» — 이 저장소가 반복해서
+        #   자기 병으로 지목한 「모름=괜찮음」과 같은 모양이다. 세되, 고치지 않는다.
+        if actual is not None and actual <= today:
+            out["due_untouched"].append({
+                "id": row.id, "campaign_id": row.campaign_id, "grade": grade,
+                "search_term": row.search_term, "next_review_at": actual,
+            })
+            continue
+
+        if grade in HOLD_UNTIL_OWNERSHIP_SPLIT:
+            # 규칙상 「오늘」이지만 집행이 소유권 분리에 묶였다. NULL이 **정상 보류**이고,
+            # 날짜가 이미 박혀 있으면 그건 누군가 예약을 걸어 둔 것이라 그것도 알린다.
+            out["pending_decision"].append({
+                "id": row.id, "campaign_id": row.campaign_id, "grade": grade,
+                "search_term": row.search_term, "next_review_at": actual,
+                "scheduled": actual is not None,
+                "reason": row.grade_reason,
+            })
+            continue
+        # ★`무관`·`미검증`을 특례로 빼지 않는다 — `default_next_review_at`이 그 둘에
+        #   이미 None을 반환하므로 일반 경로가 같은 답을 낸다. 특례 분기를 뒀다가
+        #   변이 M3(분기 무력화)이 **전건 초록으로 생존**해 중복임이 드러나 지웠다
+        #   (2026-09-03). 만료일을 «정하는» 자리는 `default_next_review_at` 하나다.
+        #   ★cycle 방어도 안 겹친다 — `default_next_review_at`이 `max(cycle,1)`을 하고
+        #   `cycle`은 DB NOT NULL이다(적대 리뷰 P2-1: `max(int(row.cycle or 1),1)`이 M3와
+        #   **같은 모양의 중복**이라 벗겼다 — 지운 자리에 같은 것을 새로 넣고 있었다).
+        should = default_next_review_at(grade, cycle=row.cycle, today=today)
+
+        # ★★**«NULL인가»만 본다 — 이미 박힌 날짜의 «값»은 비교하지 않는다** (P1-1).
+        #   `should`는 «오늘» 기준으로 계산되는데 `next_review_at`은 «등급이 붙던 날»
+        #   기준으로 박힌 값이다. 값을 비교하면 **규칙에 완벽히 부합하는 행**(07-22 등급
+        #   + 30일 = 08-21)이 전건 「어긋남」으로 뜨고, 수리가 그걸 미래로 민다.
+        #   prod 실측 위양성 2건이 정확히 그 모양이었고, 그중 하나가 위 「도래」 행이다.
+        #   ⇒ 이 감사가 고칠 수 있는 병은 **NULL 정합성 한 방향뿐**이다.
+        if (actual is None) == (should is None):
+            out["ok"] += 1
+        else:
+            out["repairable"].append({
+                "id": row.id, "grade": grade, "actual": actual, "should": should,
+                "why": ("규칙은 만료일을 요구하는데 비어 있다" if actual is None
+                        else "규칙이 NULL(영구/보류)인데 날짜가 박혀 있다"),
+            })
+    return out
+
+
+def repair_grade_review(
+    db: Session, *, today: date, dry_run: bool = True, commit: bool = True,
+) -> dict:
+    """`grade_review_audit`의 `repairable`만 규칙값으로 되돌린다.
+
+    ★`pending_decision`(오컷의심)은 **건드리지 않는다** — 그 처분은 Jino 몫이고,
+      여기서 날짜를 주면 다음 레인이 네이버에 실쓰기를 한다.
+    ★`dry_run=True`가 기본이다. 이 원장에는 삭제 라우트가 없고 행은 학습 사슬까지
+      흘러가므로, 쓰기는 호출부가 **명시적으로** 켜야 한다.
+    """
+    audit = grade_review_audit(db, today=today)
+    if dry_run:
+        return {"dry_run": True, "would_repair": len(audit["repairable"]), **audit}
+
+    by_id = {r["id"]: r for r in audit["repairable"]}
+    if by_id:
+        rows = (
+            db.query(NaverSearchTermExclusion)
+            .filter(NaverSearchTermExclusion.id.in_(list(by_id)))
+            .all()
+        )
+        for row in rows:
+            row.next_review_at = by_id[row.id]["should"]
+        if commit:
+            db.commit()
+    log.info(
+        "exclusion_grade.repair_grade_review: repaired=%d pending_decision=%d "
+        "due_untouched=%d ungraded=%d",
+        len(by_id), len(audit["pending_decision"]), len(audit["due_untouched"]),
+        audit["ungraded"],
+    )
+    # ★수리 «후»의 상태를 반환한다 (적대 리뷰 P2-5) — 초판은 수리 전 감사를 그대로
+    #   실어 방금 고친 행이 여전히 `repairable`로 나갔다. 화면이 그걸 그리면 수리가
+    #   안 된 것처럼 보인다.
+    after = grade_review_audit(db, today=today)
+    return {"dry_run": False, "repaired": len(by_id), **after}
+
+
 def distribution_report(db: Session) -> dict:
     """등급 분포 + 계약 기대치 대조 + 이탈 사유 (계약 §4-C S2-a의 «Jino가 보는 것»).
 
