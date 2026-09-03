@@ -123,7 +123,9 @@ describe("buildPipelineHealthBanner", () => {
         truth: "2350.70",
       },
     ],
-    gap_sum: "-46958.10",
+    gap_sum: "46958.10",
+    gap_sum_signed: "-46958.10",
+    cause_labels: { purchased_approved: "매입가 정본", g3_residual: "G3-3·4·5" },
     with_truth: 504,
     no_truth: 459,
     held: 11,
@@ -135,9 +137,23 @@ describe("buildPipelineHealthBanner", () => {
     const banner = buildPipelineHealthBanner(makeHealth({ cost_drift: drift() }));
     expect(banner!.summary).toContain("원가가 정본과 다름 177건");
     // ★어느 사유로 어긋났는지가 첫 단서다 — 건수만 있으면 어디를 볼지 모른다.
-    expect(banner!.summary).toContain("purchased_approved 141건");
+    // ★사유 코드가 아니라 **사람 말**이 나온다(적대 리뷰 P2-7)
+    expect(banner!.summary).toContain("매입가 정본 141건");
     // ★사람이 다음에 할 일을 적는다. 「드리프트」만 쓰면 무슨 조치를 해야 할지 알 수 없다.
     expect(banner!.summary).toContain("컷오버 필요");
+    // ★금액은 `/cost` 화면과 **같은 포맷터**를 쓴다 — 한쪽만 원문자열이면 같은 수가
+    //   두 화면에서 다르게 보인다(적대 리뷰 P2-3). 이 단언이 그 결합을 지킨다.
+    expect(banner!.summary).toContain("46,958.1원");
+  });
+
+  it("★판정기가 꺼졌으면 「어긋남 0건이 아니다」라고 말한다 (적대 리뷰 1R P1-1)", () => {
+    // 판정 근거를 옮기면서 「검사기가 꺼졌다」 신호가 한 번 끊겼고, 그동안 판별표 고장과
+    // 깨끗한 상태가 응답에서 구분되지 않았다. 이 분기가 그 구분을 화면까지 가져온다.
+    const banner = buildPipelineHealthBanner(
+      makeHealth({ cost_board_guard: { active: false, reason: "정본 판별표 조회 실패: RuntimeError" } }),
+    );
+    expect(banner!.summary).toContain("원가 정본 판정 미작동");
+    expect(banner!.summary).toContain("「어긋남 0건」이 아니다");
   });
 
   it("★원인을 «추측»하지 않는다 — 「옛 매핑 엑셀 업로드 의심」을 말하지 않는다", () => {

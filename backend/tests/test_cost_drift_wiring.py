@@ -14,6 +14,7 @@
 #   «통과하는데 아무것도 안 지키는 테스트»가 된다.
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal
 
@@ -157,6 +158,150 @@ def test_by_buffer_alias_exists_until_the_new_frontend_is_deployed(db):
         "by_buffer 별칭이 사라졌다 — prod 프론트가 새 코드인지 먼저 확인할 것. "
         "옛 프론트가 남아 있으면 어긋남이 생기는 순간 배너가 TypeError로 터진다."
     )
+
+
+# ═══ 적대 리뷰 1R이 살아남은 변이로 지목한 자리들 (2026-09-03) ═══
+
+
+def test_held_is_not_counted_as_having_truth(db):
+    """★P1-2: 「보류」는 `truth_value=None`이다 — **정본이 있는 것으로 세면 안 된다.**
+
+    이 PR이 없애려는 병이 바로 그것(«판정 불가»를 «정상»으로 세기)인데, 같은 dict 안에서
+    되풀이하고 있었다. 리뷰어가 `two_grounds`(계산값+매입가 동시)로 재현했다.
+    """
+    from app.models import CostRecipe, CostRecipeLink, CostStandard
+
+    _seed(db, [
+        ("OHI-DRIFT", "정본과 어긋남", _DRIFTED_VALUE, _TRUTH_VALUE),
+        ("OHI-HELD", "근거가 둘", Decimal("1000"), Decimal("1000")),
+    ])
+    r = CostRecipe(product_name="근거가 둘", form_factor="bar", status="approved",
+                   source="excel", recipe_kind="assembly")
+    db.add(r); db.flush()
+    db.add(CostRecipeLink(recipe_id=r.id, internal_sku="OHI-HELD", status="approved", source="excel"))
+    db.add(CostStandard(recipe_id=r.id, std_cost_ex_vat=Decimal("909.09"),
+                        std_cost_inc_vat=Decimal("1000"), breakdown=json.dumps([{"label": "x"}])))
+    db.commit()
+
+    d = compute_scheduler_health(db, _FakeScheduler(), NOW)["cost_drift"]
+    assert d["held"] == 1, "보류 행이 안 만들어졌다 — 이 테스트의 전제가 깨졌다"
+    assert d["with_truth"] == 1, (
+        f"with_truth={d['with_truth']} — 보류(정본값 None)를 「정본 있음」에 셌다. "
+        "sku_count - none_count - held_count 여야 한다."
+    )
+
+
+def test_gap_sum_is_absolute_so_opposite_signs_do_not_cancel(db):
+    """★P2-2: 부호 있는 합이면 +5,000과 −5,000이 만나 **「격차 합 0원」**이 된다.
+
+    배너가 새로 얻은 유일한 정량 정보가 「걸린 돈이 없다」로 읽힌다 — 리뷰어가 재현했다.
+    """
+    _seed(db, [
+        ("OHI-UP", "정본이 더 크다", Decimal("1000"), Decimal("6000")),
+        ("OHI-DOWN", "정본이 더 작다", Decimal("6000"), Decimal("1000")),
+    ])
+    d = compute_scheduler_health(db, _FakeScheduler(), NOW)["cost_drift"]
+    assert d["count"] == 2
+    assert Decimal(d["gap_sum"]) == Decimal("10000"), (
+        f"gap_sum={d['gap_sum']} — 부호가 상쇄됐다. 배너가 「0원」이라 말한다."
+    )
+    # 부호 있는 합도 «따로» 남긴다 — 컷오버 화면과 같은 수를 대조할 수 있어야 한다.
+    assert Decimal(d["gap_sum_signed"]) == Decimal("0")
+
+
+def test_drift_count_equals_cutover_ready_count(db):
+    """★P2-4: 「드리프트 = 컷오버 대상」이라 주장했으면 **그 일치를 지켜야** 한다.
+
+    임계를 `>= MATCH_EPSILON`에서 `> 0`으로 바꾸면 반올림 잔차 행이 배너에만 세어져
+    두 화면이 다른 수를 말한다. 리뷰어의 변이 M02가 그렇게 살아남았다.
+    """
+    from app.services.cost_menu import truth_source as ts
+
+    _seed(db, [
+        ("OHI-A", "경계 밖", Decimal("1000"), Decimal("1000.5")),   # gap 0.5 = 임계
+        ("OHI-B", "경계 안", Decimal("1000"), Decimal("1000.4")),   # gap 0.4 < 임계
+        ("OHI-C", "정본 없음", Decimal("1000")),
+    ])
+    h = compute_scheduler_health(db, _FakeScheduler(), NOW)
+    census = ts.truth_board(db)["census"]
+    assert h["cost_drift"]["count"] == census["cutover_ready_count"], (
+        "배너와 컷오버 화면이 다른 수를 말한다 — 임계가 갈라졌다."
+    )
+
+
+def test_by_cause_is_sorted_by_count_desc(db):
+    """★P2-5: 배너는 앞에서부터 읽는다 — 「많은 순」이 뒤집히면 우선순위가 조용히 바뀐다.
+
+    옛 테스트에 있던 이 보증이 전환하면서 **대체 없이 사라졌다**(변이 M08 생존).
+    """
+    from app.models import CostRecipe, CostRecipeLink, CostStandard
+
+    rows = [(f"OHI-P{i}", "매입가 어긋남", _DRIFTED_VALUE, _TRUTH_VALUE) for i in range(3)]
+    rows.append(("OHI-R1", "계산값 어긋남", Decimal("5000")))
+    _seed(db, rows)
+    r = CostRecipe(product_name="계산값 어긋남", form_factor="bar", status="approved",
+                   source="excel", recipe_kind="assembly")
+    db.add(r); db.flush()
+    db.add(CostRecipeLink(recipe_id=r.id, internal_sku="OHI-R1", status="approved", source="excel"))
+    # ★구성이 **1줄**이면 판별표가 `g3_1_*`(보류)로 보내 드리프트 행이 안 생긴다 —
+    #   초판은 그래서 사유가 하나뿐이었고 **정렬이 뒤집혀도 통과하는 테스트**였다
+    #   (자체 변이 주입으로 발견, 2026-09-03). 3줄로 둬야 `computed`가 되어 사유가 갈린다.
+    db.add(CostStandard(recipe_id=r.id, std_cost_ex_vat=Decimal("7272.73"),
+                        std_cost_inc_vat=Decimal("8000"),
+                        breakdown=json.dumps([{"label": "a"}, {"label": "b"}, {"label": "c"}])))
+    db.commit()
+
+    d = compute_scheduler_health(db, _FakeScheduler(), NOW)["cost_drift"]
+    assert len(d["by_cause"]) >= 2, (
+        f"사유가 하나뿐이면 정렬을 검사할 수 없다 — 시드가 깨졌다: {d['by_cause']}"
+    )
+    counts = list(d["by_cause"].values())
+    assert counts == sorted(counts, reverse=True), f"많은 순이 아니다: {d['by_cause']}"
+    assert d["by_cause"]["purchased_approved"] == 3
+    # ★사유 라벨이 함께 실린다 — 배너가 영문 스네이크를 한국어 문장에 박지 않게(P2-7)
+    assert set(d["cause_labels"]) == set(d["by_cause"])
+
+
+def test_board_guard_says_the_judge_is_off_not_just_silent(db, monkeypatch):
+    """★★P1-1: 판정기가 **꺼졌다**를 「어긋남 0건」과 구분해 말한다.
+
+    판정 근거를 엑셀 스냅샷에서 SKU별 정본 판별표로 옮기면서, 「검사기가 꺼졌다」를
+    알리던 `cost_guard`와의 인과가 끊겼다 — `truth_board`가 터져도 `cost_guard.active`는
+    True로 남고 `cost_drift`만 None이 되어 **깨끗한 상태와 응답이 똑같아졌다**.
+    리뷰어가 그 구분 불가를 재현했다(1R P1-1).
+    """
+    from app.services.cost_menu import truth_source
+
+    clean = compute_scheduler_health(db, _FakeScheduler(), NOW)
+    assert clean["cost_drift"] is None
+    assert clean["cost_board_guard"]["active"] is True
+
+    def boom(*a, **kw):
+        raise RuntimeError("정본 판별표 조회 실패")
+
+    monkeypatch.setattr(truth_source, "truth_board", boom)
+    broken = compute_scheduler_health(db, _FakeScheduler(), NOW)
+    assert broken["cost_drift"] is None
+    assert broken["cost_board_guard"]["active"] is False, (
+        "판별표가 터졌는데 응답이 깨끗한 상태와 똑같다 — 감시가 조용히 꺼진다."
+    )
+    assert broken["cost_board_guard"]["reason"]
+    # ★healthy에도 물려야 배너가 뜬다 — 판정에만 있고 표시가 없으면 통째로 숨는다.
+    h = build_health([], [], set(), True, NOW, cost_board_guard={"active": False, "reason": "x"})
+    assert h["healthy"] is False
+
+
+def test_health_route_returns_cost_board_guard(db):
+    """★스키마가 지우지 않는가 — 이 리포가 `cost_drift`로 이미 한 번 당한 자리다."""
+    _seed(db, [("OHI-0001", "정본과 어긋남", _DRIFTED_VALUE, _TRUTH_VALUE)])
+    try:
+        body = _client(db).get("/api/scheduler/health").json()
+        assert "cost_board_guard" in body, "response_model이 지웠다 — 화면까지 안 간다"
+        assert body["cost_board_guard"]["active"] is True
+        assert body["cost_drift"]["cause_labels"] is not None
+    finally:
+        from app.main import app
+        app.dependency_overrides.clear()
 
 
 def test_compute_health_is_silent_when_master_matches_truth(db):

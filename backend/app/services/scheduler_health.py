@@ -246,6 +246,7 @@ def build_health(
     disk_snapshots: Iterable[dict] = (),
     cost_drift: dict | None = None,
     cost_guard: dict | None = None,
+    cost_board_guard: dict | None = None,
     vendor_item_conservation: dict | None = None,
     exclusion_survival: dict | None = None,
     exclusion_slots: dict | None = None,
@@ -379,6 +380,7 @@ def build_health(
     #   아니다. 「모른다」를 비정상으로 세는 것은 위 dict를 **만든 쪽**의 몫이고, 만든 쪽은
     #   조회 실패 시 `active: False`를 명시적으로 넣는다.
     cost_guard_off = bool(cost_guard) and not cost_guard.get("active", True)
+    cost_board_off = bool(cost_board_guard and cost_board_guard.get("active") is False)
 
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
@@ -398,6 +400,13 @@ def build_health(
         #   된다. 배너는 healthy=false일 때만 뜨므로, 여기 안 넣으면 화면이 영영 침묵한다
         #   (2026-08-10 `disk_low`가 판정에만 있고 표시가 없어 통째로 숨었던 것의 거울상).
         and not cost_guard_off
+        # ★★**판별표 판정기가 꺼졌다**(적대 리뷰 1R P1-1, 2026-09-03). `cost_drift`의 근거를
+        #   엑셀 스냅샷에서 SKU별 정본 판별표로 옮기면서, 「검사기가 꺼졌다」를 알리던
+        #   `cost_guard`와의 인과가 **끊겼다** — 이제 `truth_board`가 터져도 `cost_guard.active`는
+        #   True로 남고 `cost_drift`만 None이 되어 「어긋남 0건」과 겉모습이 같아진다.
+        #   리뷰어가 재현했다: 깨끗한 DB와 판별표 고장이 응답에서 **구분 불가**였다.
+        #   ⇒ 새 판정기에는 새 «꺼짐» 신호를 붙인다. `cost_guard`가 08-31에 받은 처분과 같다.
+        and not cost_board_off
         # ★보존식 어긋남도 cost_drift와 같은 종류다 — 파이프라인은 살아 있는데 «값»이 틀렸다.
         and not conservation_mismatch
         # ★조치 생존 — 파이프라인도 값도 정상인데 **우리가 한 조치만** 사라질 수 있다.
@@ -429,6 +438,9 @@ def build_health(
         # 원가 가드 작동 여부. 키는 항상 있다(위 cost_drift와 같은 이유). `active:false`면
         # **바로 위 `cost_drift`의 값을 믿으면 안 된다** — 검사기가 꺼진 채 낸 0건이다.
         "cost_guard": cost_guard,
+        # 판별표 «판정기»가 작동했나 — 위 `cost_guard`(업로드 경로 전용)와 **다른 것**이다.
+        # `active:false`면 `cost_drift`의 None을 「어긋남 0건」으로 읽으면 안 된다.
+        "cost_board_guard": cost_board_guard,
         # 판매분석 두 축의 보존식 대조. 어긋남이 없으면 mismatch=[]이고, 대조 자체를 못 했으면
         # None이다(키는 항상 있다 — cost_drift와 같은 이유: 없는 키와 0건이 같아 보이면
         # «판정 안 함»이 «이상 없음»으로 읽힌다).
@@ -637,6 +649,7 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
     #   배운 규율: 판정 안 함과 이상 없음이 같아 보이면 안 된다).
     # ★try/except: 위 둘과 같은 이유. 판별표가 터져도 헬스 API 전체를 죽이지 않는다.
     cost_drift: dict | None = None
+    cost_board_guard: dict | None = {"active": True, "reason": None}
     try:
         from app.services.cost_menu import truth_source as _ts
 
@@ -658,8 +671,12 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
                 #   `Object.entries(...)`에 넘긴다. 키가 없으면 **TypeError로 배너가 통째로
                 #   터진다.** 지금은 어긋남이 0건이라 그 분기가 안 돌지만, 한 건이라도
                 #   생기는 순간 화면이 깨진다 — 「지금은 안 터진다」에 기대지 않는다.
-                #   ⇒ 새 프론트가 prod에 올라간 뒤 이 줄을 지운다(그때까지 배너는 사유 코드를
-                #     버퍼 라벨 자리에 표시하는데, 그건 문구가 어색할 뿐 거짓은 아니다).
+                #   ⇒ 새 프론트가 prod에 올라간 뒤 이 줄을 지운다.
+                #   ★**정정(적대 리뷰 P2-1)**: 초판 주석은 「문구가 어색할 뿐 거짓은 아니다」라고
+                #     썼는데 **그게 거짓이었다.** 옛 프론트는 라벨만 바꿔 붙이는 게 아니라
+                #     이 PR이 「거짓이라 뺐다」고 선언한 **「— 옛 매핑 엑셀 업로드 의심」 문장을
+                #     그대로 이어 붙인다**(리뷰어가 옛 코드를 전사해 재현했다). 즉 프론트가
+                #     prod에 올라가기 전까지 이 PR의 헤드라인 목표는 화면에서 달성되지 않는다.
                 "by_buffer": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
                 "sample": [
                     {
@@ -670,18 +687,31 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
                     }
                     for r in gap_rows[:3]
                 ],
-                "gap_sum": census["cutover_gap_sum"],
-                "with_truth": board["sku_count"] - census["none_count"],
+                # ★**절대합이다**(적대 리뷰 P2-2). `census["cutover_gap_sum"]`은 부호 있는 합이라
+                #   +5,000과 −5,000이 만나면 「격차 합 0원」이 된다 — 배너가 얻은 유일한 정량
+                #   정보가 「걸린 돈이 없다」로 읽힌다(리뷰어가 재현했다).
+                "gap_sum": str(sum(abs(Decimal(str(r["gap"]))) for r in gap_rows)),
+                "gap_sum_signed": census["cutover_gap_sum"],
+                # ★**`held`를 빼야 한다**(적대 리뷰 P1-2). 보류는 `truth_value=None`이다 —
+                #   「정본을 못 정한 것」을 「정본이 있는 것」에 세면, 이 PR이 없애려던 병
+                #   («판정 불가»를 «정상»으로 세기)을 같은 dict 안에서 되풀이한다.
+                "with_truth": board["sku_count"] - census["none_count"] - census["held_count"],
                 "no_truth": census["none_count"],
                 "held": census["held_count"],
+                # ★사유 코드를 사람 말로 옮길 표 — 배너가 `purchased_approved` 같은 영문
+                #   스네이크를 한국어 문장 사이에 박지 않게 한다(적대 리뷰 P2-7).
+                "cause_labels": {c: _ts.CAUSE_REF118.get(c) or c for c in by_cause},
                 "source": "SKU별 정본 판별표 — 원가표(cost_table_item) + 매입가 원장(cost_purchased_price)",
             }
             if gap_rows
             else None
         )
-    except Exception:
+    except Exception as exc:
         log.exception("[워치독] 원가 정본 대조 실패 — cost_drift 감시만 생략(헬스 API는 유지)")
         cost_drift = None
+        # ★fail-soft의 대가를 **응답에 남긴다**(적대 리뷰 1R P1-1). 이 줄이 없으면
+        #   「판별표가 터져서 못 봤다」와 「봤는데 0건」이 응답에서 똑같이 생긴다.
+        cost_board_guard = {"active": False, "reason": f"정본 판별표 조회 실패: {type(exc).__name__}"}
 
     # ★가드가 «작동 중인가» — 위 주석이 자백한 ⚠️의 처분이다 (계약 D-CPP-64 §4 S1-③).
     #   업로드 경로의 드리프트 가드는 정본 스냅샷을 못 찾으면 **조용히 통과한다**
@@ -828,6 +858,7 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         WATCHDOG_JOBS, states, registered, running, now,
         cookies=cookies, data_snapshots=data_snapshots, disk_snapshots=disk_snapshots,
         cost_drift=cost_drift,
+        cost_board_guard=cost_board_guard,
         cost_guard=cost_guard,
         vendor_item_conservation=vendor_item_conservation,
         exclusion_survival=exclusion_survival,

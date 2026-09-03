@@ -697,7 +697,9 @@ export interface SchedulerHealthCostDrift {
   count: number;                        // 정본과 어긋난 건수
   by_cause: Record<string, number>;     // {사유코드: 건수} — 많은 순
   sample: { internal_sku: string; product_name: string | null; cost_price: string | null; truth: string | null }[];
-  gap_sum: string;                      // 어긋난 금액의 합
+  gap_sum: string;                      // ★어긋난 금액의 **절대합**(부호 상쇄로 「0원」이 되지 않게)
+  gap_sum_signed: string;               // 부호 있는 합(컷오버 화면과 같은 수)
+  cause_labels: Record<string, string>; // {사유코드: 사람 말} — 배너가 영문 스네이크를 안 박게
   with_truth: number;                   // 정본이 있는 SKU 수
   no_truth: number;                     // ★«정본 없음»을 «이상 없음»에 합치지 않는다 — 어긋날 수가 없어 자동으로 조용해지므로 따로 센다
   held: number;                         // 보류
@@ -707,6 +709,13 @@ export interface SchedulerHealthCostDrift {
 //   업로드 경로의 가드는 정본 스냅샷을 못 찾으면 **조용히 통과한다**(fail-open, ref 119 §3-2).
 //   ★`active:false`면 바로 위 `cost_drift`를 **믿으면 안 된다** — 검사기가 꺼진 채 낸 0건이고,
 //     그건 「어긋남이 없다」와 화면에서 똑같이 생겼다. 그 둘을 가르는 것이 이 필드의 전부다.
+// cost_board_guard: 판별표 «판정기»가 작동했나 — 아래 `cost_guard`(업로드 경로)와 다른 것.
+//   ★적대 리뷰 1R P1-1(2026-09-03): 판정 근거를 옮기면서 「검사기가 꺼졌다」 신호가 끊겼다.
+//     `active:false`면 `cost_drift`의 null을 「어긋남 0건」으로 읽으면 안 된다.
+export interface SchedulerHealthCostBoardGuard {
+  active: boolean;
+  reason: string | null;
+}
 export interface SchedulerHealthCostGuard {
   active: boolean;
   reason: string | null;        // active=false일 때 «왜 꺼졌나»(사람이 읽는 문장)
@@ -823,6 +832,7 @@ export interface SchedulerHealth {
   cost_drift?: SchedulerHealthCostDrift | null; // 구백엔드 안전을 위해 optional · 정상이면 null
   // 구백엔드 안전을 위해 optional · 가드가 켜져 있으면 active=true(정상)
   cost_guard?: SchedulerHealthCostGuard | null;
+  cost_board_guard?: SchedulerHealthCostBoardGuard | null;
   // 구백엔드 안전을 위해 optional · 대조 불가면 null · 정상이면 mismatch=[]
   vendor_item_conservation?: SchedulerHealthConservation | null;
   // 구백엔드 안전을 위해 optional · monitored=0(대상 없음)이어도 healthy=true로 온다
