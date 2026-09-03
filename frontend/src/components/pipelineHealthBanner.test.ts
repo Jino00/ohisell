@@ -125,7 +125,9 @@ describe("buildPipelineHealthBanner", () => {
     ],
     gap_sum: "46958.10",
     gap_sum_signed: "-46958.10",
-    cause_labels: { purchased_approved: "매입가 정본", g3_residual: "G3-3·4·5" },
+    // ★백엔드가 «실제로» 내는 값이다(`truth_source.CAUSE_LABELS_KO`) — 적대 리뷰 2R가
+    //   초판 픽스처는 백엔드가 내지 않는 라벨을 가정하고 있었다고 지적했다.
+    cause_labels: { purchased_approved: "매입가 정본", g3_residual: "잔여 격차" },
     with_truth: 504,
     no_truth: 459,
     held: 11,

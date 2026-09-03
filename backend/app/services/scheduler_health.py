@@ -700,7 +700,7 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
                 "held": census["held_count"],
                 # ★사유 코드를 사람 말로 옮길 표 — 배너가 `purchased_approved` 같은 영문
                 #   스네이크를 한국어 문장 사이에 박지 않게 한다(적대 리뷰 P2-7).
-                "cause_labels": {c: _ts.CAUSE_REF118.get(c) or c for c in by_cause},
+                "cause_labels": {c: _ts.CAUSE_LABELS_KO.get(c) or c for c in by_cause},
                 "source": "SKU별 정본 판별표 — 원가표(cost_table_item) + 매입가 원장(cost_purchased_price)",
             }
             if gap_rows

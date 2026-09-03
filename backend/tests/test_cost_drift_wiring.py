@@ -260,6 +260,10 @@ def test_by_cause_is_sorted_by_count_desc(db):
     assert d["by_cause"]["purchased_approved"] == 3
     # ★사유 라벨이 함께 실린다 — 배너가 영문 스네이크를 한국어 문장에 박지 않게(P2-7)
     assert set(d["cause_labels"]) == set(d["by_cause"])
+    # ★★**라벨이 코드와 달라야 의미가 있다**(적대 리뷰 2R 관측): 초판은 `CAUSE_REF118`을
+    #   썼는데 그 표엔 지배적 사유 `purchased_approved`가 **없어서** 코드 그대로 폴백했다.
+    #   즉 「라벨을 붙였다」고 하면서 화면엔 영문 스네이크가 그대로 떴다.
+    assert d["cause_labels"]["purchased_approved"] == "매입가 정본"
 
 
 def test_board_guard_says_the_judge_is_off_not_just_silent(db, monkeypatch):
