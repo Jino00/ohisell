@@ -79,13 +79,17 @@ export function buildPipelineHealthBanner(
   //      드리프트가 묻힌다. 셋 다 보려면 API 응답(cost_drift)이나 CLI를 본다.
   if (health.cost_drift && health.cost_drift.count > 0) {
     const d = health.cost_drift;
-    // 버퍼 라벨을 많은 순으로 붙인다 — 어느 계열이 되돌아왔는지가 원인 추정의 첫 단서다.
-    const which = Object.entries(d.by_buffer)
-      .map(([label, n]) => `${label} ${n}건`)
+    // ★★2026-09-03 전환: 「옛 매핑 엑셀 업로드 의심」이라는 **원인 추정을 문구에서 뺐다.**
+    //   그 문장은 판정 근거가 08-07판 엑셀 스냅샷 하나였을 때만 성립했고, 실제로 그날
+    //   **최신 원가표대로 올린 값을 「옛 값 복귀」로 신고**했다(오탐 7건). 이제 판정은
+    //   SKU별 정본 판별표가 하므로 배너는 **관측한 것만** 말한다: 어긋난 건수와 금액.
+    //   원인은 화면(`/cost` 「정본 판별」)에서 사유별로 본다 — 배너가 추측하지 않는다.
+    const which = Object.entries(d.by_cause)
+      .map(([cause, n]) => `${cause} ${n}건`)
       .join(", ");
     push(0,
       `원가가 정본과 다름 ${d.count}건${which ? ` (${which})` : ""}` +
-        " — 옛 매핑 엑셀 업로드 의심",
+        ` — 격차 합 ${d.gap_sum}원 · 원가 메뉴에서 컷오버 필요`,
     );
   }
 

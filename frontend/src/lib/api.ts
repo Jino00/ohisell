@@ -686,17 +686,22 @@ export interface SchedulerHealthDataStale {
   impact: string;          // 돈 영향 한글 라벨 (그대로 노출)
   reason?: string;
 }
-// cost_drift: 원가 정본 드리프트(2026-08-10 배선). `product_master.cost_price`가
-//   «원가표 정본 + 알려진 버퍼»인 건수. 드리프트가 없으면 백엔드가 **null**을 준다.
+// cost_drift: 원가 정본 드리프트. `product_master.cost_price`가 **그 SKU의 정본**과 다른 건수.
+//   어긋남이 없으면 백엔드가 **null**을 준다.
 //   ★다른 항목과 종류가 다르다 — 나머지는 «파이프라인이 살아 있나», 이건 «값이 맞나»다.
-//     옛 매핑 엑셀을 올리면 177건이 조용히 되돌아오고 이익만 줄어든다(에러가 안 난다).
+//   ★★2026-09-03 전환: 종전엔 엑셀 스냅샷 한 벌(08-07판)에 대고 «값이 그 목록 어딘가와
+//     같은가»만 봤다. 그래서 새 원가표가 나오면 스냅샷이 낡아 **최신 값을 「옛 값 복귀」로
+//     신고**했다(그날 오탐 7건). 이제 **SKU별 정본 판별표**를 본다 — 원가표 업로드·매입가
+//     확정을 그대로 따라가므로 낡을 수가 없다.
 export interface SchedulerHealthCostDrift {
-  count: number;                        // 버퍼가 얹힌 건수
-  by_buffer: Record<string, number>;    // {버퍼라벨: 건수} — 많은 순
-  sample: { internal_sku: string; product_name: string | null; cost_price: number; truth: number }[];
-  ok: number;                           // 정본과 일치
-  undetermined: number;                 // ★«정상»에 합치지 않는다 — 합치면 드리프트가 묻힌다
-  source: string;                       // 어느 원가표로 판정했나 (파일명 + sha)
+  count: number;                        // 정본과 어긋난 건수
+  by_cause: Record<string, number>;     // {사유코드: 건수} — 많은 순
+  sample: { internal_sku: string; product_name: string | null; cost_price: string | null; truth: string | null }[];
+  gap_sum: string;                      // 어긋난 금액의 합
+  with_truth: number;                   // 정본이 있는 SKU 수
+  no_truth: number;                     // ★«정본 없음»을 «이상 없음»에 합치지 않는다 — 어긋날 수가 없어 자동으로 조용해지므로 따로 센다
+  held: number;                         // 보류
+  source: string;                       // 무엇에 대고 판정했나
 }
 // cost_guard: 위 드리프트 «검사기가 켜져 있나»(계약 D-CPP-64 §4 S1-③, 2026-08-31 배선).
 //   업로드 경로의 가드는 정본 스냅샷을 못 찾으면 **조용히 통과한다**(fail-open, ref 119 §3-2).

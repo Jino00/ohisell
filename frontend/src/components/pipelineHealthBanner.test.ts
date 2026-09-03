@@ -114,28 +114,43 @@ describe("buildPipelineHealthBanner", () => {
 
   const drift = (over: Partial<NonNullable<SchedulerHealth["cost_drift"]>> = {}) => ({
     count: 177,
-    by_buffer: { 폰: 141, "도어락·플립": 18, 폴드: 18 },
+    by_cause: { purchased_approved: 141, g3_residual: 36 },
     sample: [
-      { internal_sku: "OHI-0688", product_name: "지문방지 필름", cost_price: 2616, truth: 2350.7 },
+      {
+        internal_sku: "OHI-0688",
+        product_name: "지문방지 필름",
+        cost_price: "2616.00",
+        truth: "2350.70",
+      },
     ],
-    ok: 313,
-    undetermined: 459,
-    source: "MD_원가 계산_Jino_260807.xlsx (sha 7ed336b4c55ea71b)",
+    gap_sum: "-46958.10",
+    with_truth: 504,
+    no_truth: 459,
+    held: 11,
+    source: "SKU별 정본 판별표 — 원가표(cost_table_item) + 매입가 원장(cost_purchased_price)",
     ...over,
   });
 
-  it("드리프트가 있으면 건수 + 버퍼 계열 + 원인 단서를 낸다", () => {
+  it("드리프트가 있으면 건수 + 사유 + 금액 + 할 일을 낸다", () => {
     const banner = buildPipelineHealthBanner(makeHealth({ cost_drift: drift() }));
     expect(banner!.summary).toContain("원가가 정본과 다름 177건");
-    // ★어느 계열이 되돌아왔는지가 원인 추정의 첫 단서다 — 건수만 있으면 어디를 볼지 모른다.
-    expect(banner!.summary).toContain("폰 141건");
+    // ★어느 사유로 어긋났는지가 첫 단서다 — 건수만 있으면 어디를 볼지 모른다.
+    expect(banner!.summary).toContain("purchased_approved 141건");
     // ★사람이 다음에 할 일을 적는다. 「드리프트」만 쓰면 무슨 조치를 해야 할지 알 수 없다.
-    expect(banner!.summary).toContain("옛 매핑 엑셀");
+    expect(banner!.summary).toContain("컷오버 필요");
+  });
+
+  it("★원인을 «추측»하지 않는다 — 「옛 매핑 엑셀 업로드 의심」을 말하지 않는다", () => {
+    // ★★2026-09-03: 그 문장은 판정 근거가 08-07판 엑셀 스냅샷 하나였을 때만 성립했고,
+    //   실제로 **최신 원가표대로 올린 값을 「옛 값 복귀」로 신고**했다(오탐 7건).
+    //   이제 배너는 관측한 것만 말한다 — 원인은 `/cost` 「정본 판별」에서 사유별로 본다.
+    const banner = buildPipelineHealthBanner(makeHealth({ cost_drift: drift() }));
+    expect(banner!.summary).not.toContain("옛 매핑 엑셀");
   });
 
   it("★count=0이면 아무 말도 안 한다 — 0건을 경고로 띄우면 배너가 상시 켜져 무시된다", () => {
     expect(
-      buildPipelineHealthBanner(makeHealth({ cost_drift: drift({ count: 0, by_buffer: {} }) })),
+      buildPipelineHealthBanner(makeHealth({ cost_drift: drift({ count: 0, by_cause: {} }) })),
     ).toBeNull();
   });
 
@@ -144,10 +159,10 @@ describe("buildPipelineHealthBanner", () => {
     expect(buildPipelineHealthBanner(makeHealth({ cost_drift: undefined }))).toBeNull();
   });
 
-  it("★«판정 불가 459건»을 배너에 섞지 않는다 — 한 줄에서 드리프트가 묻힌다", () => {
+  it("★«정본 없음 459건»을 배너에 섞지 않는다 — 한 줄에서 드리프트가 묻힌다", () => {
     const banner = buildPipelineHealthBanner(makeHealth({ cost_drift: drift() }));
     expect(banner!.summary).not.toContain("459");
-    expect(banner!.summary).not.toContain("313");
+    expect(banner!.summary).not.toContain("504");
   });
 
   // ═══ 원가 «가드»가 꺼졌다 (계약 D-CPP-64 §4 S1-③, 2026-08-31 배선) ═══

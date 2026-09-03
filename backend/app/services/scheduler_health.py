@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 import os
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Optional, Sequence
@@ -619,33 +620,57 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 디스크 조회 실패 — disk_low 감시만 생략(헬스 API는 유지)")
         disk_snapshots = []
 
-    # 원가 정본 드리프트 — `product_master.cost_price`가 «정본 + 알려진 버퍼»인가.
-    # ★2026-08-10 이전엔 이 판정이 CLI(`scripts/audit_cost_buffer.py`)에만 있어 **아무도
-    #   안 불렀다.** 옛 매핑 엑셀을 올리면 177건이 조용히 되돌아오고 이익만 줄어든다
-    #   — 에러가 안 나므로 다른 어떤 감시에도 안 걸린다(ref 54 §7-6).
-    # ★try/except: 위 둘과 같은 이유. 스냅샷 파일이 없거나 스키마가 달라도 헬스 API 전체를
-    #   죽이면 안 된다. 실패 시 이 감시만 생략한다(= None = 배너 침묵).
-    #   ⚠️그래서 «스냅샷이 없어서 못 봤다»와 «봤는데 0건»이 겉으로 같다 — 로그로만 갈린다.
+    # 원가 정본 드리프트 — `product_master.cost_price`가 **그 SKU의 정본**과 다른가.
+    #
+    # ★★**2026-09-03 전환 (Jino 지시)**: 종전엔 `cost_truth_audit`이 **엑셀 스냅샷 한 벌**
+    #   (`MD_원가 계산_Jino_260807.xlsx`)을 들고 **값이 그 목록 어딘가와 같은가**만 봤다.
+    #   상품 이름을 안 보므로 «어느 상품의 원가가 얼마여야 하나»엔 답하지 못했고, 새 원가표가
+    #   나오면 **스냅샷이 낡아 최신 값을 「옛 값 복귀」로 신고**했다. 실제로 2026-09-03에
+    #   그 오탐이 났다 — 신판 원가표대로 올린 7건이 「옛 매핑 엑셀 업로드 의심」으로 떴고,
+    #   두 파일을 대조하니 이어진 24항목이 **전부 달랐다**(같음 0건).
+    #   ⇒ 이제 **SKU별 정본 판별표**(`cost_menu.truth_source`)에 붙인다. 그 표는 원가표
+    #   업로드·매입가 확정을 그대로 따라가므로 **낡을 수가 없다**. 재는 것도 정확해진다:
+    #   「값이 어딘가에 있나」가 아니라 **「이 SKU의 정본과 지금 값이 같은가」**다.
+    #
+    # ★**「정본이 없다」를 「어긋남 0」에 섞지 않는다.** 정본이 없는 SKU는 어긋날 수가 없어
+    #   자동으로 조용해진다 — 그래서 `no_truth`를 **같이 싣는다**(이 파일이 다른 넷에서
+    #   배운 규율: 판정 안 함과 이상 없음이 같아 보이면 안 된다).
+    # ★try/except: 위 둘과 같은 이유. 판별표가 터져도 헬스 API 전체를 죽이지 않는다.
     cost_drift: dict | None = None
     try:
-        from app.models import ProductMaster
-        from app.services import cost_truth_audit as _cta
+        from app.services.cost_menu import truth_source as _ts
 
-        truth = _cta.load_truth()
-        rows = (
-            db.query(
-                ProductMaster.internal_sku, ProductMaster.product_name, ProductMaster.cost_price
-            )
-            # ★이 필터는 지금 **도달 불가**다 — `cost_price`가 모델·prod DDL 둘 다 NOT NULL이고
-            #   prod NULL 행은 0건이다(2026-08-10 실측). 그래서 «지워도 테스트가 안 죽는다»
-            #   (적대 리뷰 변이 M04). 그럼에도 남기는 이유: nullable로 바뀌는 날
-            #   `float(None)`이 터지고 아래 fail-soft가 그걸 삼켜 **감시가 조용히 꺼진다.**
-            #   전제가 바뀌면 test_cost_price_is_not_nullable_so_the_null_filter_is_a_dormant_guard
-            #   가 울린다 — 도달 불가 코드를 «검증했다»고 말하지 않기 위한 짝이다.
-            .filter(ProductMaster.cost_price.isnot(None))
-            .all()
+        board = _ts.truth_board(db)
+        census = board["census"]
+        gap_rows = [
+            r for r in board["items"]
+            if r.get("gap") is not None and abs(Decimal(str(r["gap"]))) >= _ts.MATCH_EPSILON
+        ]
+        by_cause: dict[str, int] = {}
+        for r in gap_rows:
+            by_cause[r["cause"]] = by_cause.get(r["cause"], 0) + 1
+        cost_drift = (
+            {
+                "count": len(gap_rows),
+                "by_cause": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
+                "sample": [
+                    {
+                        "internal_sku": r["internal_sku"],
+                        "product_name": r["product_name"],
+                        "cost_price": r["current_cost_price"],
+                        "truth": r["truth_value"],
+                    }
+                    for r in gap_rows[:3]
+                ],
+                "gap_sum": census["cutover_gap_sum"],
+                "with_truth": board["sku_count"] - census["none_count"],
+                "no_truth": census["none_count"],
+                "held": census["held_count"],
+                "source": "SKU별 정본 판별표 — 원가표(cost_table_item) + 매입가 원장(cost_purchased_price)",
+            }
+            if gap_rows
+            else None
         )
-        cost_drift = _cta.summarize_drift(_cta.classify_rows(rows, truth), truth)
     except Exception:
         log.exception("[워치독] 원가 정본 대조 실패 — cost_drift 감시만 생략(헬스 API는 유지)")
         cost_drift = None
