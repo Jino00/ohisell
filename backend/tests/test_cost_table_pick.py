@@ -982,3 +982,37 @@ def test_board_excel_gap_uses_the_picked_items_current_total(client, db_session)
     assert row["excel_total_inc_vat"] == "3102.70"
     # 얼린 12.20으로 나누면 격차가 «수천 %»로 뜬다 — 그게 「진짜 이상」으로 오해된 값이다.
     assert row["excel_gap_pct"] is None or abs(row["excel_gap_pct"]) < 1000
+
+
+def test_absent_confirmation_clears_the_dead_cost_table_traces(db_session):
+    """「원가표에 없음」을 확인하면 **항목의 흔적이 함께 거둬진다** (적대 리뷰 1R P1).
+
+    핀이 끊긴 뒤(`pin_lost`) 화면이 시키는 대로 「없음」을 확인하면, `picked`는 정직하게
+    `absent`를 말하는데 `match`는 **얼린 항목 이름과 값을 그대로** 들고 있었다 — 이 PR이
+    없애려던 증상(「한 자리가 두 말을 한다」)이 다른 상태 전이로 재발한다.
+    `unpick_cost_table_item`은 이미 셋을 거두는데 이 경로만 짝이 없었다.
+    """
+
+    _reimport(db_session, _cost_rows())
+    item = db_session.query(CostTableItem).one()
+    recipe = _recipe(db_session, form_factor="flip")
+    db_session.commit()
+    R.pick_cost_table_item(db_session, recipe.id, item.id)
+    db_session.commit()
+    # 픽이 항목의 흔적을 note에 실었다 — 여기서 출발한다.
+    assert R._note_dict(R.get_recipe(db_session, recipe.id))["cost_table_item"]
+
+    # 재업로드가 그 항목을 없애 핀이 끊긴다.
+    _reimport(db_session, _cost_rows(item_name="완전히 다른 품목"))
+    db_session.expire_all()
+    assert R.get_recipe(db_session, recipe.id).anomaly_flag == R.PIN_LOST
+
+    after = R.confirm_cost_table_absent(db_session, recipe.id, "원가표에서 빠졌다")
+    db_session.commit()
+
+    payload = R.recipe_payload(db_session, after)
+    assert payload["picked"]["state"] == "absent"
+    # ★셋 다 거둬져야 한다 — 하나라도 남으면 화면이 「없다」면서 그 항목을 말한다.
+    assert payload["match"]["excel_total_inc_vat"] is None
+    assert payload["match"]["cost_table_item"] is None
+    assert payload["match"]["cost_table_section"] is None

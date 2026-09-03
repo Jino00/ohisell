@@ -1372,8 +1372,22 @@ def confirm_cost_table_absent(
     recipe.absent_note = (note_text or "").strip() or None
 
     note = _note_dict(recipe)
-    note["match_reason"] = "원가표에 없음 — 사람이 확인함" + (
-        f" ({recipe.absent_note})" if recipe.absent_note else ""
+    note.update(
+        {
+            "match_reason": "원가표에 없음 — 사람이 확인함"
+            + (f" ({recipe.absent_note})" if recipe.absent_note else ""),
+            # ★「없음」을 확인했으면 **항목의 흔적을 함께 거둔다** — `unpick_cost_table_item`이
+            #   이미 하는 것과 같은 처분이고, 여기만 짝이 없었다(적대 리뷰 1R P1).
+            #
+            #   안 거두면 `state=absent`인데 화면은 「원가표 «오타오_투명 강화유리» ·
+            #   제품원가(+VAT) 12.2원」을 계속 말한다 — 방금 「원가표에 없다」고 판정한
+            #   그 자리에서 항목 이름과 얼린 값을 동시에 말하는, 서로 모순인 화면이다.
+            #   그리고 `_excel_total_inc_vat`의 폴백이 그 죽은 값을 되살려 보드의
+            #   `excel_gap_pct`까지 옛 값으로 나누게 된다.
+            "cost_table_item": None,
+            "cost_table_section": None,
+            "excel_total_inc_vat": None,
+        }
     )
     recipe.note = json.dumps(note, ensure_ascii=False)
     # ★커밋은 **라우터가 한다** (적대 리뷰 1R P2-2 채택) — `approve_recipe`·`adopt_excel_prices`와
