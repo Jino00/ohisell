@@ -115,6 +115,7 @@ export function presetWindowExcludingToday(
     case "15d":       return back(15);
     case "21d":       return back(21);
     case "30d":       return back(30);
+    case "60d":       return back(60);
     case "90d":       return back(90);
     case "180d":      return back(180);
     case "1y":        return back(365);

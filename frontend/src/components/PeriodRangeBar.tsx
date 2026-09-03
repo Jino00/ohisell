@@ -22,11 +22,11 @@ import { Button, Card } from "./ui";
 //   그 화면을 이 공용 바로 옮기면서 프리셋 하나가 조용히 사라지면 그건 기능 회귀다 —
 //   "15d"를 더한 것과 **같은 이유**로 여기에 더해 공유한다.
 export type PeriodPreset =
-  | "today" | "yesterday" | "7d" | "14d" | "15d" | "21d" | "30d" | "90d" | "180d" | "1y";
+  | "today" | "yesterday" | "7d" | "14d" | "15d" | "21d" | "30d" | "60d" | "90d" | "180d" | "1y";
 
 const PRESET_LABEL: Record<PeriodPreset, string> = {
   today: "오늘", yesterday: "어제", "7d": "7일", "14d": "14일", "15d": "15일", "21d": "21일",
-  "30d": "30일", "90d": "90일", "180d": "180일", "1y": "1년",
+  "30d": "30일", "60d": "60일", "90d": "90일", "180d": "180일", "1y": "1년",
 };
 
 /** 프리셋이 가리키는 **실제 창**(시작일·종료일). 순수 함수 — 테스트가 여기를 못박는다.
@@ -51,6 +51,7 @@ export function presetWindow(k: PeriodPreset, today: string = kstDate(0)): { f: 
     case "15d":       return { f: shift(-14), t: today };
     case "21d":       return { f: shift(-20), t: today };
     case "30d":       return { f: shift(-29), t: today };
+    case "60d":       return { f: shift(-59), t: today };
     case "90d":       return { f: shift(-89), t: today };
     case "180d":      return { f: shift(-179), t: today };
     case "1y":        return { f: shift(-364), t: today };
@@ -61,7 +62,7 @@ export function PeriodRangeBar({
   label, from, to, onFrom, onTo,
   presets = ["today", "yesterday", "7d", "30d", "90d", "1y"],
   windowFor = presetWindow,
-  note, right, title = "조회 조건",
+  note, right, title = "조회 조건", datesReadOnly = false, onPreset, activePreset,
 }: {
   /** 날짜 축 이름 — 「발주일」·「판매일」처럼 **무엇의 날짜인지**. 화면마다 다르다. */
   label: string;
@@ -75,6 +76,22 @@ export function PeriodRangeBar({
   note?: ReactNode;
   /** 화면 고유 필터(체크박스 등)를 오른쪽에 붙이는 슬롯. */
   right?: ReactNode;
+  /** 날짜 두 칸을 **못 고치게** 한다 — 서버가 창의 끝점을 규칙으로 정하는 화면용.
+   *
+   *  ★왜 필요한가 (2026-09-03, Jino ⓐ): 「제외 후보」·「개선 타임라인」은 기간이
+   *    «무엇을 보여줄까»가 아니라 **판정·집계의 입력**이고, 서버가 끝점을 스스로 정한다
+   *    (제외는 전환 성숙 지연만큼 당기고, 타임라인은 D-0이 확정 적재 전이라 뺀다).
+   *    거기에 자유 날짜 칸을 열면 화면이 **고를 수 없는 것을 고르라고** 하고, 고른 값과
+   *    실제 창이 갈라진다 — 이 통일 작업이 없애려던 바로 그 병이다.
+   *  ⇒ 칸은 **같은 자리에 같은 모양으로 남기되** 서버가 실제로 쓴 창을 보여주고 잠근다.
+   *    모양은 통일되고, 유일하게 다른 점(못 고름)은 `note`가 이유를 말한다. */
+  datesReadOnly?: boolean;
+  /** `datesReadOnly`일 때 프리셋을 누르면 부를 것 — 날짜가 아니라 **창의 «길이»**를 바꾼다.
+   *  (서버가 끝점을 정하므로 화면이 정할 수 있는 건 길이뿐이다.) */
+  onPreset?: (k: PeriodPreset) => void;
+  /** `datesReadOnly`일 때 눌린 것으로 보일 프리셋. 날짜 비교로는 못 정한다 —
+   *  서버 창은 성숙 지연만큼 당겨져 있어 어떤 프리셋 창과도 문자로 같지 않기 때문이다. */
+  activePreset?: PeriodPreset;
   title?: string;
 }) {
   const today = kstDate(0);
@@ -87,6 +104,12 @@ export function PeriodRangeBar({
   //   날짜 엔진마저 달랐다(문자열 UTC 산술 vs `kstDate`). 이 파일 헤더가 «정의를 늘리지
   //   않는다»고 못박았는데 그 수정이 오히려 한 벌 늘렸었다.
   const apply = (k: PeriodPreset) => {
+    // ★읽기 전용 모드에선 날짜를 못 쓴다 — 서버가 끝점을 정하므로 화면은 «길이»만 바꾼다.
+    //   여기서 onFrom/onTo를 부르면 화면이 서버 창을 덮어써 «고른 값 ≠ 실제 창»이 된다.
+    if (datesReadOnly) {
+      onPreset?.(k);
+      return;
+    }
     const w = windowFor(k, today);
     onFrom(w.f);
     onTo(w.t);
@@ -105,12 +128,20 @@ export function PeriodRangeBar({
         <label className="text-xs text-gray-500">{label}</label>
         <input
           type="date" value={from} onChange={(e) => onFrom(e.target.value)}
-          className="rounded border border-gray-300 px-2 py-1 text-sm"
+          readOnly={datesReadOnly} disabled={datesReadOnly}
+          aria-label={datesReadOnly ? `${label} 시작 — 서버가 정한 창이라 고칠 수 없습니다` : undefined}
+          className={`rounded border px-2 py-1 text-sm ${
+            datesReadOnly ? "border-gray-200 bg-gray-100 text-gray-500" : "border-gray-300"
+          }`}
         />
         <span className="text-gray-400">~</span>
         <input
           type="date" value={to} onChange={(e) => onTo(e.target.value)}
-          className="rounded border border-gray-300 px-2 py-1 text-sm"
+          readOnly={datesReadOnly} disabled={datesReadOnly}
+          aria-label={datesReadOnly ? `${label} 종료 — 서버가 정한 창이라 고칠 수 없습니다` : undefined}
+          className={`rounded border px-2 py-1 text-sm ${
+            datesReadOnly ? "border-gray-200 bg-gray-100 text-gray-500" : "border-gray-300"
+          }`}
         />
         {/* ★지금 걸린 기간과 같은 프리셋은 눌린 상태로 보인다 — 어느 창을 보고 있는지가
             날짜 두 개를 읽어야만 알 수 있으면 오독한다. */}
@@ -118,7 +149,10 @@ export function PeriodRangeBar({
           {presets.map((k) => (
             <Button
               key={k}
-              variant={active(SPEC[k].f, SPEC[k].t) ? "primary" : "secondary"}
+              variant={
+                (datesReadOnly ? activePreset === k : active(SPEC[k].f, SPEC[k].t))
+                  ? "primary" : "secondary"
+              }
               onClick={SPEC[k].go}
             >
               {PRESET_LABEL[k]}

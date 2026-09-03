@@ -5549,6 +5549,8 @@ export interface NaverPerformanceTimelineDay {
 export interface NaverPerformanceTimeline {
   as_of: string;
   days: number;
+  /** 서버가 실제로 쓴 창. ★화면이 as_of·days로 지어내지 않게 서버가 직접 낸다. */
+  window: { from: string; to: string };
   campaign_id: string | null;
   /** false여도 에러가 아니다 — 트랙 결정 목록 없이 라이브 변경만 나온다는 뜻. */
   catalog_available: boolean;

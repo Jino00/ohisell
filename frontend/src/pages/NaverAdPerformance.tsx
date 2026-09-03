@@ -707,7 +707,10 @@ function vatDivisorLabel(n: number): string {
 // ★정직 규약(계획서 §3-3·원칙22): "개선됐습니다"류 단정 문구를 이 섹션에서 만들지 않는다.
 //   sentence/data_note는 백엔드가 준 문장을 그대로 렌더한다. campaign_id·ref_key는 화면에
 //   렌더하지 않는다(ref_key는 React key로만 쓴다).
-const TIMELINE_WINDOW_OPTIONS = [30, 90, 180] as const;
+/** 종전 버튼 셋(30·90·180일)을 **하나도 안 빼고** 프리셋으로 옮긴다. */
+const TIMELINE_PERIOD_PRESETS: PeriodPreset[] = ["30d", "90d", "180d"];
+const TIMELINE_DAYS_FOR_PRESET: Record<string, number> = { "30d": 30, "90d": 90, "180d": 180 };
+const TIMELINE_PRESET_FOR_DAYS: Record<number, PeriodPreset> = { 30: "30d", 90: "90d", 180: "180d" };
 const TIMELINE_INITIAL_SHOWN = 10;
 
 function TimelineEventRow({ ev }: { ev: NaverPerformanceTimelineEvent }) {
@@ -804,29 +807,35 @@ function ImprovementTimelineSection({ campaignId }: { campaignId: string }) {
   );
   const title = "우리가 바꾼 것들과 그 전후";
 
-  const windowButtons = (
-    <div className="flex items-center gap-1">
-      {TIMELINE_WINDOW_OPTIONS.map((d) => (
-        <button key={d} type="button" onClick={() => setDays(d)}
-          className={`px-2 py-1 text-xs rounded border ${
-            days === d
-              ? "bg-blue-600 text-white border-blue-600"
-              : "text-gray-600 border-gray-300 hover:bg-gray-50"
-          }`}>
-          {d}일
-        </button>
-      ))}
-    </div>
+  // 기간 바 — PAO 화면 공통(Jino 2026-09-03 ⓐ + "성과 화면 안쪽 기간 버튼도 같이 통일해줘").
+  // ★날짜 두 칸은 **잠겨 있다**: 이 창의 끝점은 서버가 정한다(D-0은 확정 적재 전이라 뺀다).
+  //   자유 날짜를 열면 고른 값과 실제 창이 갈라진다 — 통일이 없애려던 바로 그 병이다.
+  //   보여주는 날짜는 서버 응답 `window`다(as_of·days로 프론트가 지어내지 않는다).
+  const periodBar = (
+    <PeriodRangeBar
+      title="이 카드의 조회 조건"
+      label="변경이 있었던 날"
+      from={data?.window.from ?? ""} to={data?.window.to ?? ""}
+      onFrom={() => {}} onTo={() => {}}
+      datesReadOnly
+      presets={TIMELINE_PERIOD_PRESETS}
+      activePreset={TIMELINE_PRESET_FOR_DAYS[days]}
+      onPreset={(k) => setDays(TIMELINE_DAYS_FOR_PRESET[k] ?? days)}
+      note="창의 길이만 고를 수 있습니다 — 끝점은 서버가 정합니다(오늘은 확정 적재 전이라 빠집니다)."
+    />
   );
 
   if (error) {
     return (
-      <Card title={title} right={windowButtons}>
-        <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="잠시 후 다시 시도하세요." />
-      </Card>
+      <>
+        {periodBar}
+        <Card title={title}>
+          <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="잠시 후 다시 시도하세요." />
+        </Card>
+      </>
     );
   }
-  if (data === null) return <Card title={title} right={windowButtons}><Loading rows={4} /></Card>;
+  if (data === null) return <>{periodBar}<Card title={title}><Loading rows={4} /></Card></>;
 
   // 최신이 위 — timeline은 오름차순으로 오므로 역순으로 뒤집는다.
   const reversed = [...data.timeline].reverse();
@@ -834,15 +843,14 @@ function ImprovementTimelineSection({ campaignId }: { campaignId: string }) {
   const remaining = reversed.length - shown.length;
 
   return (
-    <Card
+    <>
+      {periodBar}
+      <Card
       title={title}
       right={
-        <div className="flex items-center gap-2">
-          {windowButtons}
-          <span className="text-xs text-gray-400 tabular-nums">
-            {data.as_of} 기준 · {data.days}일 창
-          </span>
-        </div>
+        <span className="text-xs text-gray-400 tabular-nums">
+          {data.as_of} 기준 · {data.days}일 창
+        </span>
       }
     >
       <div className="p-4 space-y-3">
@@ -890,7 +898,8 @@ function ImprovementTimelineSection({ campaignId }: { campaignId: string }) {
           </p>
         )}
       </div>
-    </Card>
+      </Card>
+    </>
   );
 }
 
