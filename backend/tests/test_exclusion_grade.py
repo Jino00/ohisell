@@ -492,3 +492,122 @@ def test_화면이_BEP_미상을_숨기지_않는다(db, monkeypatch, capsys):
 
     assert "[미상]" in out, "BEP를 못 구했는데 화면이 그 사실을 안 알린다"
     assert "BEP미상" in out, "BEP 미상으로 판정을 포기한 행의 사유가 화면에 없다"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 등급 ↔ 만료일 정합성 (D-NAO-285 · 기능 #1의 (b))
+# ══════════════════════════════════════════════════════════════════════════
+#
+# ★이 절이 지키는 것은 «감사가 도는가»가 아니라 **«무엇을 안 고치는가»**다.
+#   prod 실측(2026-09-03)에서 어긋난 20건 중 13건이 `오컷의심`이었고, 그 13건에 만료일을
+#   주면 다음 08:50 레인이 **네이버 제외키워드를 실제로 삭제**한다. 모듈 머리말이
+#   「실행은 소유권 분리 후」라 못 박았고 그 결정은 Jino 대기다 — 그래서 자동 수리가
+#   그 등급을 **건드리면 테스트가 빨개진다**. 「고칠 수 있는 것」과 「사람이 정할 것」이
+#   같은 통에 들어가는 순간 그 통은 아무도 안 본다.
+
+
+def _row(db, *, grade, review_at, cycle=1, term="t", adgroup="ag-1"):
+    row = eg.new_exclusion(
+        campaign_id="cmp-1", adgroup_id=adgroup, search_term=term,
+        grade=grade, now=NOW, cycle=cycle,
+    )
+    row.next_review_at = review_at  # 규칙값을 일부러 어긋내 감사 대상을 만든다
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_audit_counts_intentional_null_as_ok(db):
+    """`무관`·`미검증`의 NULL은 결함이 아니다 — 규칙이 NULL을 지정한다.
+
+    이걸 «어긋남»으로 세면 prod 3,970건이 매일 결함으로 떠서 감사가 소음이 된다.
+    """
+    _row(db, grade=eg.GRADE_IRRELEVANT, review_at=None, term="a")
+    _row(db, grade=eg.GRADE_UNVERIFIED, review_at=None, term="b")
+    out = eg.grade_review_audit(db, today=TODAY)
+    assert out["ok"] == 2
+    assert out["repairable"] == []
+    assert out["pending_decision"] == []
+
+
+def test_audit_flags_underperform_with_null_review(db):
+    """`성과미달`인데 만료일이 비었으면 어긋남 — prod 실측 4건이 이 모양이었다."""
+    _row(db, grade=eg.GRADE_UNDERPERFORM, review_at=None, term="c")
+    out = eg.grade_review_audit(db, today=TODAY)
+    assert len(out["repairable"]) == 1
+    item = out["repairable"][0]
+    assert item["actual"] is None
+    # 규칙이 정한 값 — 테스트가 날짜를 «다시 계산»하지 않고 모듈에 물어본다.
+    assert item["should"] == eg.default_next_review_at(
+        eg.GRADE_UNDERPERFORM, cycle=1, today=TODAY
+    )
+
+
+def test_audit_flags_unverified_with_date(db):
+    """반대 방향 어긋남 — 규칙이 NULL인데 날짜가 박혀 있다(prod 실측 1건)."""
+    _row(db, grade=eg.GRADE_UNVERIFIED, review_at=TODAY + timedelta(days=15), term="d")
+    out = eg.grade_review_audit(db, today=TODAY)
+    assert len(out["repairable"]) == 1
+    assert out["repairable"][0]["should"] is None
+
+
+def test_miscut_goes_to_pending_decision_not_repairable(db):
+    """★핵심 — `오컷의심`은 **자동 수리 대상이 아니다**.
+
+    규칙은 「오늘(즉시 도래)」이지만 집행이 소유권 분리(Jino 결정)에 묶여 있다.
+    `repairable`에 들어가면 자동 수리가 날짜를 채우고, 그러면 다음 레인이 네이버에 쓴다.
+    """
+    _row(db, grade=eg.GRADE_MISCUT, review_at=None, term="e")
+    out = eg.grade_review_audit(db, today=TODAY)
+    assert out["repairable"] == []
+    assert len(out["pending_decision"]) == 1
+    assert out["pending_decision"][0]["scheduled"] is False
+
+
+def test_repair_never_touches_miscut(db):
+    """★절단 변이 대비 — 수리를 실제로 돌려도 `오컷의심` 행의 만료일은 NULL로 남는다."""
+    _row(db, grade=eg.GRADE_MISCUT, review_at=None, term="f")
+    _row(db, grade=eg.GRADE_UNDERPERFORM, review_at=None, term="g")
+    eg.repair_grade_review(db, today=TODAY, dry_run=False)
+    miscut = db.query(NaverSearchTermExclusion).filter_by(search_term="f").one()
+    under = db.query(NaverSearchTermExclusion).filter_by(search_term="g").one()
+    assert miscut.next_review_at is None, "오컷의심에 날짜가 들어갔다 — 네이버 실쓰기가 예약된다"
+    assert under.next_review_at == eg.default_next_review_at(
+        eg.GRADE_UNDERPERFORM, cycle=1, today=TODAY
+    )
+
+
+def test_repair_is_dry_run_by_default(db):
+    """쓰기는 호출부가 «명시적으로» 켜야 한다 — 이 원장엔 삭제 라우트가 없다."""
+    _row(db, grade=eg.GRADE_UNDERPERFORM, review_at=None, term="h")
+    out = eg.repair_grade_review(db, today=TODAY)
+    assert out["dry_run"] is True and out["would_repair"] == 1
+    row = db.query(NaverSearchTermExclusion).filter_by(search_term="h").one()
+    assert row.next_review_at is None, "dry_run인데 DB가 바뀌었다"
+
+
+def test_audit_counts_ungraded_separately(db):
+    """등급 자체가 없는 행은 «어긋남»이 아니라 별 문제다 — 두 통을 섞지 않는다."""
+    row = eg.new_exclusion(
+        campaign_id="cmp-1", adgroup_id="ag-1", search_term="i",
+        grade=eg.GRADE_UNVERIFIED, now=NOW,
+    )
+    row.grade = None
+    db.add(row)
+    db.commit()
+    out = eg.grade_review_audit(db, today=TODAY)
+    assert out["ungraded"] == 1 and out["checked"] == 0
+
+
+def test_repair_actually_commits(db):
+    """수리가 **커밋까지** 하는지 — 같은 세션에서 읽으면 트랜잭션 안의 값이 보여서
+    `db.commit()`을 지워도 초록이었다(변이 M8 생존, 2026-09-03). `rollback()` 뒤에
+    읽으면 커밋된 것만 남는다: 커밋했으면 no-op, 안 했으면 값이 사라져 빨개진다.
+    """
+    _row(db, grade=eg.GRADE_UNDERPERFORM, review_at=None, term="j")
+    eg.repair_grade_review(db, today=TODAY, dry_run=False)
+    db.rollback()
+    row = db.query(NaverSearchTermExclusion).filter_by(search_term="j").one()
+    assert row.next_review_at == eg.default_next_review_at(
+        eg.GRADE_UNDERPERFORM, cycle=1, today=TODAY
+    ), "커밋 안 됨 — 프로세스가 죽으면 수리가 통째로 사라진다"
