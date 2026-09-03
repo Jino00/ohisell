@@ -181,6 +181,14 @@ def build_timeline(
     return {
         "as_of": day.isoformat(),
         "days": days,
+        # ★창을 «수»가 아니라 «날짜»로도 낸다(2026-09-03, PAO 캘린더 통일). 화면이 날짜
+        #   두 칸을 보여주는데 응답에 날짜가 없으면 프론트가 as_of·days로 **지어내야** 하고,
+        #   그 순간 「화면이 말하는 창」과 「서버가 쓴 창」이 두 벌이 된다. 여기서 낸다.
+        #   값은 `improvement_events.collect`가 실제로 쓰는 경계 그대로다(since = day - days).
+        "window": {
+            "from": (day - timedelta(days=days)).isoformat(),
+            "to": day.isoformat(),
+        },
         "campaign_id": campaign_id,
         "catalog_available": collected["catalog_available"],
         "undated_catalog_count": collected["undated_catalog_count"],

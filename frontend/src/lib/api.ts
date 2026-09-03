@@ -5549,6 +5549,8 @@ export interface NaverPerformanceTimelineDay {
 export interface NaverPerformanceTimeline {
   as_of: string;
   days: number;
+  /** 서버가 실제로 쓴 창. ★화면이 as_of·days로 지어내지 않게 서버가 직접 낸다. */
+  window: { from: string; to: string };
   campaign_id: string | null;
   /** false여도 에러가 아니다 — 트랙 결정 목록 없이 라이브 변경만 나온다는 뜻. */
   catalog_available: boolean;
@@ -7671,9 +7673,17 @@ export interface NaverOwnershipBands {
   empty: boolean;
 }
 
-export function fetchNaverOwnershipBands(days: number): Promise<NaverOwnershipBands> {
+/** 관할 밴드. `range`를 주면 그 창을 그대로 쓰고, 없으면 종전 「최근 N일」 경로다.
+ *  ★두 경로를 같이 두는 이유: `days` 경로는 창 기준점이 «최신 확정일»이라 「확정 N일」을
+ *    보장한다(적대 리뷰 P1-2 수리). 날짜를 직접 고른 사용자에겐 그 보정이 오히려 거짓말이다. */
+export function fetchNaverOwnershipBands(
+  days: number, range?: { from: string; to: string },
+): Promise<NaverOwnershipBands> {
+  const qs = range
+    ? `date_from=${range.from}&date_to=${range.to}`
+    : `days=${days}`;
   return fetchApi<NaverOwnershipBands>(
-    `/api/naver/ad/performance/ownership-bands?days=${days}`,
+    `/api/naver/ad/performance/ownership-bands?${qs}`,
   );
 }
 

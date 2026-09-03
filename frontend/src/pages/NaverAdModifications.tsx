@@ -10,9 +10,11 @@
 //   네이버 API 쓰기 0).
 import { useCallback, useState } from "react";
 import {
-  Card, Table, Th, Td, Badge, Pager, Loading, EmptyState, LayerNav, PeriodTabs,
+  Card, Table, Th, Td, Badge, Pager, Loading, EmptyState, LayerNav,
 } from "../components/ui";
-import { usePeriod } from "../lib/usePeriod";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+import { presetWindowKeepingToday } from "../lib/periodRange";
+import { usePeriodRange } from "../lib/usePeriod";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
 import {
@@ -25,8 +27,15 @@ import {
 
 const PAGE = 50;
 
+/** 종전 `PeriodTabs`의 넷(당일·어제·7일·30일)을 그대로 옮긴다. 이 API 상한은 365일이라
+ *  90일·1년까지 붙여도 프론트 검증(`customRangeError` 기본 상한 = MAX_SPAN_DAYS)과 어긋나지 않는다. */
+const MODIFICATION_PERIOD_PRESETS: PeriodPreset[] = ["today", "yesterday", "7d", "30d", "90d", "1y"];
+
 export default function NaverAdModifications() {
-  const p = usePeriod();
+  // ★기본 창은 종전 `usePeriod()`의 기본값(당일)과 같다 — 이 화면은 「그날 누가 만졌나」가
+  //   존재 이유라 열자마자 오늘을 봐야 한다.
+  const p = usePeriodRange();
+  const { from, to, setFrom, setTo } = p;
   const [actor, setActor] = useState<NaverModificationActor | "">("");
   // 정정 후 목록을 다시 불러오기 위한 버전 카운터. ★로컬 상태로 낙관적 갱신하지 않는다 —
   // 저장이 실패해도 화면만 바뀌면 "고쳤다"고 착각한다(서버가 진실이다).
@@ -71,7 +80,15 @@ export default function NaverAdModifications() {
           </div>
         }
       >
-        <PeriodTabs p={p} />
+        {/* 기간 바 — PAO 화면 공통(Jino 2026-09-03). ★「당일」은 당일 그대로다 —
+            이 화면의 존재 이유가 「오늘 누가 만졌나」라 오늘을 못 고르면 기능이 사라진다. */}
+        <PeriodRangeBar
+          label="수정이 일어난 날"
+          from={from} to={to} onFrom={setFrom} onTo={setTo}
+          presets={MODIFICATION_PERIOD_PRESETS}
+          windowFor={presetWindowKeepingToday}
+          note="두 원천(우리 기록 ∪ 대행사 감지)을 합친 날짜입니다. 대행사 조작은 다음날 아침 감지되는 것이 있어 그 행은 감지 시각이 함께 붙습니다."
+        />
         {p.error ? (
           <EmptyState reason={p.error} hint="기간을 다시 선택하세요." />
         ) : (

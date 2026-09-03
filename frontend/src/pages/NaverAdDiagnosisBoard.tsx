@@ -10,6 +10,10 @@ import {
 } from "../lib/api";
 import { isoKST, num, won, pctFromFraction, roasX, NO_DATA } from "../lib/format";
 import { LayerNav } from "../components/ui";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+
+/** 이 화면의 프리셋 — 15일이 실측 베이스라인 창이라 반드시 남는다(빠지면 기능 회귀). */
+const DIAGNOSIS_PERIOD_PRESETS: PeriodPreset[] = ["7d", "15d", "30d", "90d"];
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
@@ -130,18 +134,17 @@ export default function NaverAdDiagnosisBoard() {
   return (
     <div className="space-y-6">
       <LayerNav />
-      {/* 필터바 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm text-gray-600">진단 창(출혈·승자·확장버킷·쇼핑BEP)</span>
-          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-            className="text-sm border border-gray-300 rounded px-2 py-1" />
-          <span className="text-gray-400">~</span>
-          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-            className="text-sm border border-gray-300 rounded px-2 py-1" />
-          <span className="text-xs text-gray-400 ml-2">기본 15일 — 실측 베이스라인과 동일 창</span>
-        </div>
-      </div>
+      {/* 기간 바 — 공용 `PeriodRangeBar`(Jino 2026-09-03 *"새로 만든 캘린더를 Pao내의 모든
+          캘린더에 똑같이 만들어줘"*). 종전엔 이 화면만 생 `<input type="date">` 두 칸을
+          들고 있어 프리셋이 없었다.
+          ★이 화면의 창은 **오늘을 포함한다** — 진단은 확정 전 당일치도 보고 판단하는
+            자리라 스코프(D-0 제외)와 관례가 다르다. 그래서 기본 `presetWindow`를 쓴다. */}
+      <PeriodRangeBar
+        label="성과 발생일"
+        from={dateFrom} to={dateTo} onFrom={setDateFrom} onTo={setDateTo}
+        presets={DIAGNOSIS_PERIOD_PRESETS}
+        note="진단 창(출혈·승자·확장버킷·쇼핑BEP) — 기본 15일은 실측 베이스라인과 같은 창입니다. 오늘은 확정 전이라 값이 나중에 바뀔 수 있습니다."
+      />
 
       {error && <div className="bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg p-3">{error}</div>}
 

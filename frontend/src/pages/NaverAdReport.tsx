@@ -23,6 +23,7 @@ import {
   type NaverAdKpis,
   type NaverAdTrendRow,
 } from "../lib/api";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
 import { isoKST, num, won, pctFromFraction, roasX, NO_DATA } from "../lib/format";
 import { LayerNav } from "../components/ui";
 
@@ -176,11 +177,9 @@ const GRAIN_TABS: { key: NaverAdGrain; label: string }[] = [
   { key: "hour", label: "시간대" },
 ];
 
-const QUICK_RANGES = [
-  { label: "지난 7일", from: daysAgo(6), to: daysAgo(0) },
-  { label: "지난 14일", from: daysAgo(13), to: daysAgo(0) },
-  { label: "지난 30일", from: daysAgo(29), to: daysAgo(0) },
-];
+/** 종전 빠른 구간 셋(지난 7·14·30일, 전부 오늘로 끝남)을 **하나도 안 빼고** 프리셋으로
+ *  옮긴다 — 프리셋이 조용히 사라지면 그건 기능 회귀다. 그래서 공용 바에 "14d"를 더했다. */
+const REPORT_PERIOD_PRESETS: PeriodPreset[] = ["7d", "14d", "30d"];
 
 function isHourlyRows(_rows: NaverAdReportData["rows"], grain: NaverAdGrain): _rows is NaverAdHourlyRow[] {
   return grain === "hour";
@@ -287,38 +286,39 @@ export default function NaverAdReport() {
         <p className="text-xs text-gray-400">D-NAO-15: 읽기 전용 리포트 코어 (제안·쓰기 없음)</p>
       </div>
 
-      {/* 필터바 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm text-gray-600">조회 기간</span>
-          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-            className="text-sm border border-gray-300 rounded px-2 py-1" />
-          <span className="text-gray-400">~</span>
-          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-            className="text-sm border border-gray-300 rounded px-2 py-1" />
-          {QUICK_RANGES.map((q) => (
-            <button key={q.label} onClick={() => { setDateFrom(q.from); setDateTo(q.to); }}
-              className="px-2 py-1 text-xs text-blue-600 border border-blue-200 rounded hover:bg-blue-50">
-              {q.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
+      {/* 기간 바 — PAO 화면 공통(Jino 2026-09-03 *"새로 만든 캘린더를 Pao내의 모든 캘린더에
+          똑같이 만들어줘"*). 종전엔 이 화면만 자체 필터바(생 날짜 두 칸 + 파란 링크 버튼 셋)를
+          들고 있었다.
+          ★이 화면의 창은 **오늘을 포함한다** — 종전 「지난 7·14·30일」이 전부 오늘로 끝났고
+            리포트는 진행 중인 당일도 함께 보는 자리다. 그래서 기본 `presetWindow`를 쓴다.
+          ★비교 기간은 **기능이라 그대로 남긴다** — 체크박스를 켜면 직전 동일 길이 구간이
+            자동으로 채워지고 KPI 8칸에 증감%가 붙는다. 캘린더 모양만 바꾸는 이번 변경이
+            그 기능을 건드리면 안 된다. */}
+      <PeriodRangeBar
+        label="성과 발생일"
+        from={dateFrom} to={dateTo} onFrom={setDateFrom} onTo={setDateTo}
+        presets={REPORT_PERIOD_PRESETS}
+        note="광고비·전환이 일어난 날입니다. 오늘은 아직 진행 중이라 값이 계속 올라갑니다."
+        right={
           <label className="flex items-center gap-1.5 text-sm text-gray-600">
             <input type="checkbox" checked={compareOn} onChange={(e) => onToggleCompare(e.target.checked)} />
             비교 기간
           </label>
-          {compareOn && (
-            <>
-              <input type="date" value={compareFrom} onChange={(e) => setCompareFrom(e.target.value)}
-                className="text-sm border border-gray-300 rounded px-2 py-1" />
-              <span className="text-gray-400">~</span>
-              <input type="date" value={compareTo} onChange={(e) => setCompareTo(e.target.value)}
-                className="text-sm border border-gray-300 rounded px-2 py-1" />
-            </>
-          )}
+        }
+      />
+      {compareOn && (
+        <div className="bg-white rounded-lg border border-gray-200 p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm text-gray-600">비교할 기간</span>
+            <input type="date" value={compareFrom} onChange={(e) => setCompareFrom(e.target.value)}
+              className="text-sm border border-gray-300 rounded px-2 py-1" />
+            <span className="text-gray-400">~</span>
+            <input type="date" value={compareTo} onChange={(e) => setCompareTo(e.target.value)}
+              className="text-sm border border-gray-300 rounded px-2 py-1" />
+            <span className="text-xs text-gray-400">체크할 때 직전 동일 길이 구간이 자동으로 채워집니다 — 그대로 고쳐도 됩니다.</span>
+          </div>
         </div>
-      </div>
+      )}
 
       {error && <div className="bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg p-3">{error}</div>}
 

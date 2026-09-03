@@ -111,10 +111,31 @@ export function presetWindowExcludingToday(
     case "today":
     case "yesterday": return { f: shift(-1), t: shift(-1) };
     case "7d":        return back(7);
+    case "14d":       return back(14);
     case "15d":       return back(15);
     case "21d":       return back(21);
     case "30d":       return back(30);
+    case "60d":       return back(60);
     case "90d":       return back(90);
+    case "180d":      return back(180);
     case "1y":        return back(365);
   }
+}
+
+/** 「당일」은 당일 그대로, 여러 날 프리셋만 어제로 끝나는 창.
+ *
+ *  왜 셋째 자가 필요한가 (2026-09-03, PAO 캘린더 통일): 커맨드 센터·수정 사항·소재는
+ *  **당일 활동을 보는 것이 화면의 존재 이유**라 「당일」 프리셋이 실제 기능이다(D-NAO-54의
+ *  `PERIOD_PRESETS`가 today..today로 못 박아 왔다). 그런데 여러 날 창은 그 화면들도
+ *  당일을 안 넣는다(`kstDate(-7)..kstDate(-1)`).
+ *  ⇒ `presetWindow`(전부 오늘로 끝남)도 `presetWindowExcludingToday`(오늘을 어제로 접음)도
+ *    이 관례가 아니다. 접으면 「당일」 버튼이 어제를 가리켜 **기능이 조용히 사라진다.**
+ *  ★이 파일에 두는 이유는 이미 두 자가 여기 있고 테스트가 여기를 못박기 때문이다 —
+ *    화면마다 인라인으로 두면 「쓰는 창」과 「눌린 것처럼 보이는 창」이 갈라진다(2R P1-1).
+ */
+export function presetWindowKeepingToday(
+  k: PeriodPreset, today: string = kstDate(0),
+): { f: string; t: string } {
+  if (k === "today") return { f: today, t: today };
+  return presetWindowExcludingToday(k, today);
 }

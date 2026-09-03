@@ -7,16 +7,24 @@
 // ★BEP를 모르면 "판정 불가"라고 말한다. 모르는 걸 '미달'로 그리면 매핑 결손이 적자로 둔갑한다.
 // ★조회 전용이다. 이 화면에서 광고를 조작하는 기능은 없다(D-NAO-140 계약 금지선).
 import { useState } from "react";
-import { Card, Table, Th, Td, Badge, Pager, Loading, EmptyState, LayerNav, PeriodTabs } from "../components/ui";
-import { usePeriod } from "../lib/usePeriod";
+import { Card, Table, Th, Td, Badge, Pager, Loading, EmptyState, LayerNav } from "../components/ui";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
+import { presetWindowKeepingToday } from "../lib/periodRange";
+import { usePeriodRange } from "../lib/usePeriod";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
 import { fetchNaverCreatives, type NaverCreativeRow } from "../lib/api";
 
 const PAGE = 50;
 
+/** 종전 `PeriodTabs`의 프리셋 넷(당일·어제·7일·30일)을 그대로 옮긴다 — 버튼이 조용히
+ *  사라지면 그건 기능 회귀다. 90일은 이 화면 상한(365일) 안이라 덤으로 붙인다. */
+const CREATIVE_PERIOD_PRESETS: PeriodPreset[] = ["today", "yesterday", "7d", "30d", "90d"];
+
 export default function NaverAdCreatives() {
-  const p = usePeriod();
+  // ★기본 창은 종전 `usePeriod()`의 기본값(당일)과 같다 — 열자마자 보던 것이 안 바뀐다.
+  const p = usePeriodRange();
+  const { from, to, setFrom, setTo } = p;
   // ★기본은 "적자만"이 아니라 전체다. 필터를 기본으로 걸면 안 보이는 광고비가 생기고,
   //   그건 이 화면이 없애려는 문제(가려진 소재)를 형태만 바꿔 되살린다.
   const [belowOnly, setBelowOnly] = useState(false);
@@ -41,7 +49,16 @@ export default function NaverAdCreatives() {
           </button>
         }
       >
-        <PeriodTabs p={p} />
+        {/* 기간 바 — PAO 화면 공통(Jino 2026-09-03 *"새로 만든 캘린더를 Pao내의 모든
+            캘린더에 똑같이 만들어줘"*). ★「당일」은 당일 그대로다 — 이 화면은 오늘 돌고
+            있는 소재를 보는 자리라 `presetWindowKeepingToday`를 쓴다. */}
+        <PeriodRangeBar
+          label="성과 발생일"
+          from={from} to={to} onFrom={setFrom} onTo={setTo}
+          presets={CREATIVE_PERIOD_PRESETS}
+          windowFor={presetWindowKeepingToday}
+          note="소재별 광고비·전환이 일어난 날입니다. 당일은 전환이 아직 정착 전이라 나중에 값이 올라갈 수 있습니다."
+        />
         {p.error ? (
           <EmptyState reason={p.error} hint="기간을 다시 선택하세요." />
         ) : (

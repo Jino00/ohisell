@@ -12,6 +12,33 @@ import {
 
 export type Period = ReturnType<typeof usePeriod>;
 
+/** 날짜 두 칸(`PeriodRangeBar`)용 기간 상태 — `usePeriod`의 프리셋 키 모델 대신
+ *  **from/to 원시 문자열 두 개**만 든다.
+ *
+ *  왜 만들었나 (2026-09-03, PAO 캘린더 통일 — Jino *"새로 만든 캘린더를 Pao내의 모든
+ *  캘린더에 똑같이 만들어줘"*): `PeriodRangeBar`는 키가 아니라 from/to를 받는다. 그 어댑터
+ *  6줄(상태 2개 + label + error)을 옮겨가는 화면마다 인라인으로 두면 **네 벌이 되고**,
+ *  이 저장소는 정확히 그렇게 갈라진 캘린더를 오늘 통일하는 중이다. 한 곳에 둔다.
+ *
+ *  ★`maxSpanDays`는 **호출부가 정한다** — API마다 상한이 다르다(변경 이력 365 / 매출·손익 90).
+ *    하나로 뭉치면 한쪽이 반드시 틀린다(`customRangeError` 머리말과 같은 이유).
+ *  ★반환 모양을 `usePeriod`와 같은 이름(`range`·`label`·`error`)으로 맞췄다 — 옮겨가는
+ *    화면의 하위 컴포넌트가 그 이름을 이미 받고 있어서, 이름을 바꾸면 캘린더만 바꾸는
+ *    이번 변경이 표 렌더까지 번진다. */
+export function usePeriodRange(
+  initial: DateRange = { from: kstDate(0), to: kstDate(0) },
+  maxSpanDays?: number,
+) {
+  const [from, setFrom] = useState(initial.from);
+  const [to, setTo] = useState(initial.to);
+  const range: DateRange = { from, to };
+  return {
+    from, to, setFrom, setTo, range,
+    label: rangeLabel(null, range),
+    error: customRangeError(range, undefined, maxSpanDays),
+  };
+}
+
 /** 기간 상태. range는 원시 문자열 2개라 useAsyncData deps에 그대로 넣어도 안정적이다. */
 export function usePeriod(initialKey: PeriodKey = "today") {
   const [key, setKey] = useState<PeriodKey>(initialKey);

@@ -10,6 +10,7 @@
 //   문구 정본이 두 벌이 되면 갈라진다(백엔드 SA docstring 참조).
 import { Fragment, useEffect, useState } from "react";
 import { Card, Table, Th, Td, Badge, Button, LayerNav, Loading, EmptyState } from "../components/ui";
+import { PeriodRangeBar, type PeriodPreset } from "../components/PeriodRangeBar";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num, won, roasX, NO_DATA } from "../lib/format";
 import { sweepLabel, termTitle } from "../lib/exclusionSlots";
@@ -47,7 +48,11 @@ export function detectResultText(r: NaverSearchTermDetectResult): string {
 }
 
 
-const DAYS_OPTIONS = [14, 30, 60];
+/** 종전 `<select>` 셋(14·30·60일)을 **하나도 안 빼고** 프리셋으로 옮긴다. */
+const EXCLUSION_PERIOD_PRESETS: PeriodPreset[] = ["14d", "30d", "60d"];
+const EXCLUSION_PRESET_DAYS: Record<string, number> = { "14d": 14, "30d": 30, "60d": 60 };
+/** 역방향 — 지금 걸린 창 길이에 해당하는 프리셋(눌린 것으로 보일 버튼). */
+const PRESET_FOR_DAYS: Record<number, PeriodPreset> = { 14: "14d", 30: "30d", 60: "60d" };
 const ROUND_CAP_OPTIONS = [20, 50, 100];
 
 const LIVE_STATE_LABEL: Record<string, string> = {
@@ -136,19 +141,34 @@ export default function NaverAdExclusionList() {
     <div className="space-y-4">
       <LayerNav />
 
+      {/* 기간 바 — PAO 화면 공통(Jino 2026-09-03 *"새로 만든 캘린더를 Pao내의 모든 캘린더에
+          똑같이 만들어줘"* + ⓐ 선택). 종전엔 이 화면만 `<select> 14·30·60`이었다.
+          ★★날짜 두 칸은 **잠겨 있다**. 이 화면의 기간은 「무엇을 보여줄까」가 아니라
+            **「무엇을 잘라도 되나」를 판정하는 입력**이고, 서버가 끝점을 스스로 정한다 —
+            `window_to = 오늘 − 전환 성숙 지연`(전환이 아직 덜 잡힌 최근 며칠을 일부러 뺀다.
+            안 빼면 「전환 0」으로 보이는 검색어를 성급하게 제외한다).
+            자유 날짜를 열어 사용자가 「오늘까지」를 고를 수 있게 하면 그 성숙 규칙이
+            우회된다 — 화면이 예뻐지는 대신 엔진이 잘못 자른다.
+          ⇒ 칸은 같은 자리에 같은 모양으로 두되 **서버가 실제로 쓴 창**을 보여주고 잠근다.
+            서버 창 판정 자체를 고치는 것은 광고 최적화 트랙 소관이다. */}
+      <PeriodRangeBar
+        label="판정에 쓴 성과 발생일"
+        from={data?.window.from ?? ""} to={data?.window.to ?? ""}
+        onFrom={() => {}} onTo={() => {}}
+        datesReadOnly
+        presets={EXCLUSION_PERIOD_PRESETS}
+        activePreset={PRESET_FOR_DAYS[days]}
+        onPreset={(k) => setDays(EXCLUSION_PRESET_DAYS[k] ?? days)}
+        note={
+          data
+            ? `창의 길이만 고를 수 있습니다 — 끝점은 서버가 정합니다. 최근 ${data.maturity.lag_days}일(${data.maturity.excluded_from}~${data.maturity.excluded_to})은 전환이 아직 덜 잡혀 판정에서 뺐습니다.`
+            : "창의 길이만 고를 수 있습니다 — 끝점은 서버가 정합니다(전환이 아직 덜 잡힌 최근 며칠은 판정에서 빠집니다)."
+        }
+      />
+
       {/* 상단 컨트롤 */}
       <Card>
         <div className="flex flex-wrap items-center gap-4 p-4">
-          <label className="text-xs text-gray-500 flex items-center gap-2">
-            창(일)
-            <select
-              className="text-sm border border-gray-300 rounded px-2 py-1"
-              value={days}
-              onChange={(e) => setDays(Number(e.target.value))}
-            >
-              {DAYS_OPTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </label>
           <label className="text-xs text-gray-500 flex items-center gap-2">
             라운드 상한
             <select
