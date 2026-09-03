@@ -22,10 +22,10 @@ import { Button, Card } from "./ui";
 //   그 화면을 이 공용 바로 옮기면서 프리셋 하나가 조용히 사라지면 그건 기능 회귀다 —
 //   "15d"를 더한 것과 **같은 이유**로 여기에 더해 공유한다.
 export type PeriodPreset =
-  | "today" | "yesterday" | "7d" | "15d" | "21d" | "30d" | "90d" | "180d" | "1y";
+  | "today" | "yesterday" | "7d" | "14d" | "15d" | "21d" | "30d" | "90d" | "180d" | "1y";
 
 const PRESET_LABEL: Record<PeriodPreset, string> = {
-  today: "오늘", yesterday: "어제", "7d": "7일", "15d": "15일", "21d": "21일",
+  today: "오늘", yesterday: "어제", "7d": "7일", "14d": "14일", "15d": "15일", "21d": "21일",
   "30d": "30일", "90d": "90일", "180d": "180일", "1y": "1년",
 };
 
@@ -47,6 +47,7 @@ export function presetWindow(k: PeriodPreset, today: string = kstDate(0)): { f: 
     case "today":     return { f: today, t: today };
     case "yesterday": return { f: shift(-1), t: shift(-1) };
     case "7d":        return { f: shift(-6), t: today };
+    case "14d":       return { f: shift(-13), t: today };
     case "15d":       return { f: shift(-14), t: today };
     case "21d":       return { f: shift(-20), t: today };
     case "30d":       return { f: shift(-29), t: today };
