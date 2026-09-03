@@ -42,6 +42,47 @@ ref 26 §2 채택 TOP5(①~⑤) + ref 33 findings [0]~[10]. 두 목록은 겹치
 | [8] | n-gram 집계 검색어 마이닝 | 미구현(개별 쿼리 grain뿐) | **신호 두께** |
 | [10] | 168슬롯 계층 풀링(4~8그룹) + 소폭·저빈도 | 구현·미배선(+ 남의 `bidWeight` 실설정을 읽지도 않음) | **신호 두께** |
 
+### ★1-1-b. 재측정 — 2026-09-03 (원문 §1-1은 **2026-08-17판**이고 지우지 않는다)
+
+> 발주: Jino 2026-09-03 15:39 「재측정해줘」. 발단 = 「PAO가 구현하려는 기능을 점검해보자」.
+> 세션 `14873038`(체인 pao-논의 n=82) · 3축 팬아웃(발견은 넓히고 판정은 1기) · **읽기 전용**(코드 0줄·prod 쓰기 0).
+> ★왜 필요했나: 북극성 §3의 L2 행(「논문 기법 실배선」)이 **이 문서를 인용하는데 그 값이 17일 낡아** 오늘 감사(ref 121 §1)가 「재측정 안 됨 — 미상」으로 처리했다.
+
+| # | 기법 | §1-1(08-17) | **재측정(09-03)** | 판정 근거 |
+|---|---|---|---|---|
+| ②/[9] | DHEB 계층 EB 축소추정 | 부분구현(`pool_all` 죽은 코드) | ✅ **가동중** | `pool_all_with_priors()`가 `pooled_estimate_writer.py:119`에서 호출되고 크론 `("write_naver_pooled_estimates","30 9 * * *")` 배선(D-NAO-214). prod `naver_pooled_estimate_daily` **86,577행** · `target_date` **2026-08-21~09-03** · distinct scope_key **6,943**(grain=keyword). ★`pool_all()` **함수명 자체는 여전히 호출부 0건**(테스트만) — **이름으로 찾으면 「죽은 코드」로 오판한다** |
+| ⑤ | GAVE 점수 `S=min{(ROAS/BEP)^γ,1}×매출` | 배선·정지중(실행만 차단) | ✅ **가동중** | prod `GET /api/naver/ad/proposals`(포트 8011) 응답의 `rationale`에 실측 **15건**: 예 `[GAVE사전: 기대점수 21409.3500·유형실적 51200.4(n=3423)]`. 라우터엔 `gave_score` 직접 참조 **0건**이지만 서비스(`proposal_pipeline.py:617`)가 적재한 값을 라우터가 통과시킨다 ⇒ **「실행 차단」은 현재 사실이 아니다.** 서비스 호출부는 08-17판 그대로 정확히 **6곳** |
+| [10] | 168슬롯 시간대 계층 풀링 | 구현·**미배선** | ⚠️ **부분구현**(배선 해소) | `hourly_pattern.run_daily`가 `learning_loops.py:40` 경유로 크론 `"10 8 * * *"` 배선. prod `naver_hourly_pattern_history` **168행 전 칸**(`last_folded_date` 2026-09-02) · `naver_learning_state(metric='hour_weight')` 168행. `expected_cost_fraction`이 `trigger_watch`·`response_curve_builder`에 **실소비**. ★**08-17의 핵심 지적은 그대로**: `hourly_pattern.py` 자체에 `bidWeight` 참조 **0건** — 남이 켜 둔 실설정을 여전히 안 읽는다(다른 모듈 `effective_bid.py`·`adgroup_criterion_ingest.py`는 읽게 됐다) |
+| [3] | 증액 트리거 | 가동중 | ⚠️ **가동중 — 단 실집행은 07-30이 마지막** | 크론 `run_naver_auto_operator_hourly`(`20 * * * *`) 오늘 **15:20:31 ok**. ★그러나 prod 90일 실집행(dry_run=0): `budget_up_pacing` **2건**·`budget_down_pacing` **2건**이 전부이고 **전건 07-28~07-30**, 이후 **35일간 0건**. 그 4건도 «07-28 21:20 증액 → 07-29 00:05 원복 / 07-29 20:20 증액 → 07-30 00:05 원복» = **날짜 기준 무조건 되돌림** |
+| [7] | UCB 점수 + 최소노출 강제 | 부분구현(스코어식 부재) | **부분구현(그대로)** | `ucb\|upper confidence` grep **0건**. ★「최소노출 강제」 해당 코드 **없음** — 코드의 「최소노출가」는 네이버 API의 *노출 최소입찰가*이지 논문의 *테일에 노출 강제 배정*이 아니다(위양성 분리). prod `approval_source='explore_op'` 90일 제안 **326건**(approved 189·failed 137)·실행 연결 **159건**, 생성 분포는 07-21~07-30 매일 → **07-30 이후 공백** → 08-30 하루 30건 → 다시 4일째 0건 |
+| [1][6] | soft ROAS + **데이터 하한 게이트** | 부분구현(하한은 자체 상수) | ⚠️ **부분구현(그대로) — 하한 게이트 여전히 없음** | `_settlement_window` = `(today-8, today-2)` 7일 롤링 그대로(`auto_operator.py:366`). ★`min_weekly`·`data_floor`·`하한 게이트` grep **0건**, `guardrail_params` SPECS **9키에도 없음**. 있는 것은 `agg["cost"] <= 0 → "unknown"`이라는 **「존재 여부」 게이트**이지 「주 N건 이상」 크기 하한이 아니다. (`_INTRADAY_UP_MIN_CONV = 2`는 장중 상향 레인의 별도 표본 하한이고 정착창 게이트가 아니다) |
+| [4] | 증액 롤백(한계ROAS) | 부분구현(한계ROAS 계산 0건) | **부분구현(그대로)** | `marginal_roas` grep **17건이 전부 「안 한다」는 자백형 주석**(`expansion_allocator`·`budget_allocator`·`proposal_writer`·`exploration`·`proposal_pipeline`·`auto_operator`). 실제 계산 **0건**. `restore_candidates()`(`budget_pacing.py:624`)의 원복 조건 5개는 **전부 시각·상태 대조**, 성과 조건 없음 |
+| [0][2] | 두 승수 min + SGD 슬랙 | 부분구현(슬랙 상태변수 없음) | **부분구현(그대로)** | `pacing_controller.py:90` `alpha = min(alpha_b, alpha_r)` 실재(αB=`find_alpha_budget` 예산 제약 · αC=`find_alpha_roas` ROAS 제약). `slack\|dual_var\|lagrang` grep **0건** |
+| ① | GRM 응답곡선 컨트롤러 | 배선·정지중(관측기 강등) | **배선·정지중(그대로)** | `flight_loop.py`에 `naver_execution_harness`·`naver_sa_writer` **import 0건·호출 0건**(파일 내 2건 매치는 그 사실을 적은 주석). 크론 `15 */2 * * *` 오늘 **14:15:01 ok**. ★**예측 정확도 재료는 실제로 축적 중**: `naver_forecast_model` 32,307행 중 `recent_mape` non-null **183행**, `MAX(trained_at)` **2026-09-03 07:50:19**(gate_status active 25·demoted 66·fallback 32,216) — §6 S4 ③의 진입 재료가 쌓이고 있다 |
+| [8] | n-gram 집계 검색어 마이닝 | 미구현 | **미구현(그대로)** | `n_?gram` grep **0건**. 검색어 grain은 `search_term_ingest.py:191`의 `(ad_date, campaign_id, adgroup_id, search_term)` = **개별 검색어 단위** 그대로 |
+| ③ | EBaReT LP 쌍대 닫힌형 | 미구현 | **미구현(그대로)** | `lp_dual\|쌍대\|ebaret\|linprog` grep **0건**. `PLAN_naver-ad-execution-loop.md:132`의 §8 승계 큐 문구 그대로이고 진입 조건인 「X2 성적 보고」 발생 기록은 **못 찾음** |
+| ④ | Bayesian AdComB 분포예측+정수계획 | 미구현 | **미구현(그대로)** | ★`scipy`·`ortools`·`pulp`가 **의존성에 아예 없다**(`requirements.txt` = FastAPI·SQLAlchemy·APScheduler 수준, `pyproject.toml` 없음). `adcomb\|정수계획\|milp` grep 0건 |
+| [5] | 한계ROI 균등화 + TS | 미구현(의도적 보류) | **미구현(그대로)** | `budget_allocator.py` 머리주석의 보류 자백 **문구 그대로**: *"marginal ROAS 인과추정(예산을 늘리면 실제로 얼마나 더 벌지 예측하는 것)은 여전히 하지 않는다(추정 금지 원칙)"*. `thompson\|한계 ?ROI\|균등화` grep 0건 |
+
+**영구 제외 재확인** — 생성형 계열(AIGB·GAS) grep **0건**. `advoost`·`gfa` 문자열은 매치되나 `routers/ad_costs.py:127 _GFA_AUTO_SOURCES = ("gfa:advoost","gfa:da")` = **광고비 원장 수집 소스 라벨**이지 레버 구현이 아니다(위양성 분리). §5 매트릭스의 `✗ⓐ`·`✗ⓔ` 판정 그대로.
+
+### ★재측정이 드러낸 것 셋
+
+1. **이름으로 찾으면 오판한다** — ②/[9]는 `pool_all()`로 grep하면 「호출부 0건 = 죽은 코드」인데, 실제로는 형제 함수가 크론에 붙어 매일 6,943 키워드를 돌린다. 같은 함정을 2026-09-03 하루에 **네 번** 밟았다(계약 P2 재개방 dispatch·M2 S2 2건·여기).
+2. **「가동중」은 크론이 돈다는 뜻이지 일이 일어난다는 뜻이 아니다** — [3]·[7] 둘 다 크론은 오늘도 정상 발화하는데 실집행은 **07-30**에서 끊겼다. 그날은 D-NAO-132 정지 시점이다. 상태 어휘가 «코드 존재»와 «실제 발화»를 **구분하지 못한다**.
+3. **데이터 하한 게이트는 17일 뒤에도 없다** — 그리고 그 부재가 라이브에서 실제로 값을 치르고 있다(2026-09-03 관측: 하루 전환 0~2건인 그룹에서 입찰이 `1,320→1,980→1,440원`으로 ±50% 요동, `ref 129` §1).
+
+### ⚠️ 이 재측정이 «확인 못 한» 것
+
+- prod DB·`curl` 관측이 **이 워크트리 브랜치와 같은 커밋에서 나온 것인지** 배포 커밋 대조를 안 했다(코드 grep은 워크트리 기준, 라이브는 배포본 기준).
+- `compute_bid_weight_recommendations`의 산출(`NaverLearningState metric='hour_weight'`)을 소비하는 **하류가 있는지** — grep 0건까지만 봤고 프론트는 안 봤다.
+- `naver_forecast_model.recent_mape`가 ③ 채택 판단에 **실제로 소비되는지** — 축적 사실만 확인, 소비 배선 미확인.
+- [3]이 07-30 이후 35일간 실집행 0건인 **원인**(트리거 미충족 / 대상 축소 / 스코프) — 사실만 확인, 인과는 범위 밖.
+- `naver_change_log.flight_pacing`의 `verify_date`·`outcome`·`actual_json`이 **전량 NULL**인 이유.
+- GAVE가 실린 15건이 실제로 승인·집행됐는지(status 미조회).
+
+---
+
 ### 1-2. ★우리 전환 규모 실측 — 데이터 하한의 분모 (창: 90일 2026-05-19~08-16, prod 읽기 전용, `conv_direct_cnt+conv_indirect_cnt`)
 
 ref 33 [6]의 벤더 하한 = **최근 30일 15전환**(≈주 3.5건, tROAS 활성화 최소) + 실전 규칙은 **주 15건+ 상위권/주 10건대 미달**. [10]의 intraday 하한 = **주 20전환**. 인벤토리엔 전환액만 있어 건수를 이번에 실측했다 `[실측]`:
