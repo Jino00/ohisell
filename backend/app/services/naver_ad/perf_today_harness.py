@@ -273,6 +273,37 @@ def _day_metrics(
     return source, out
 
 
+def _gross_profit_today(revenue: int | None, spend: int, bep_roas: float | None) -> tuple[int | None, str | None]:
+    """★설계서 122 §4-1 — 이 카드의 총이익(절대액). 없으면 (None, 왜 없는지).
+
+    산식은 이 저장소의 다른 총이익 산출과 **같다**: `매출 ÷ BEP − 광고비`
+    (`pao_scope_roster._profit` · `proposal_scoreboard._gross_profit` ·
+    `profit_scorecard._window_profit`). 그 private 헬퍼들을 직접 재사용하지 않는 것은
+    `profit_scorecard` 모듈 헤더가 밝힌 것과 같은 이유다(다른 모듈 내부구현 변경에 결합되지
+    않게) — 다만 **분자가 다르다**는 것이 여기서 결정적이다.
+
+    ★★이 화면의 매출은 «그날 카드가 이미 쓰는 자» 그대로다(Jino 2026-09-04 선택). 오늘치는
+      `revenue_today_proxy` = **상한 프록시**(그 상품의 전체 판매액)라 총이익이 낙관 쪽으로
+      분다 — 그래서 화면이 `source_label`로 무엇을 보고 있는지 말하고, 이 함수는 **보정계수를
+      쓰지 않는다**(그 자는 conv_amt용이다. 프록시 매출에 곱하면 두 번 부풀린다).
+
+    ★BEP를 모르면 **숫자를 지어내지 않는다** — 0으로 대체하면 그 0이 합계에 그대로 들어가
+      「이익이 없다」로 읽힌다(원칙22).
+    """
+    # ★적대 리뷰 P1-1 — **광고비 0이면 이 광고의 총이익은 정의되지 않는다.**
+    #   오늘치 매출은 「그 상품의 그날 전체 판매액」이라 **광고를 안 돌린 캠페인에도 붙는다**.
+    #   그걸 더하면 헤드라인의 대부분이 «멈춰 있던 광고»에서 나온다(리뷰 재현: 308,341원 중
+    #   85%). 같은 카드의 ROAS가 이미 `spend<=0`에서 계산을 거부하는데 총이익만 값을 내면
+    #   **한 카드 안에서 자가 갈린다** — 그래서 같은 문턱을 쓴다.
+    if spend <= 0:
+        return None, "오늘 집행된 광고비가 없어 이 광고의 총이익은 계산하지 않습니다."
+    if bep_roas is None or bep_roas <= 0:
+        return None, "이 광고의 BEP를 몰라 총이익을 계산할 수 없습니다."
+    if revenue is None:
+        return None, "매출을 몰라 총이익을 계산할 수 없습니다."
+    return round(revenue / bep_roas) - spend, None
+
+
 def _metrics_row(
     *, spend: int, imp: int, clk: int, revenue: int | None,
     daily_budget: int | None, shared_product_count: int, unknown_reason: str | None,
@@ -394,6 +425,10 @@ def build(
             "roas_unknown_reason": m["unknown_reason"] if m["roas"] is None else None,
             "target_roas": line.get("target_roas"),
             "bep_roas": line.get("bep_roas"),
+            **dict(zip(
+                ("gross_profit_today", "gross_profit_unknown_reason"),
+                _gross_profit_today(m["revenue"], m["spend"], line.get("bep_roas")),
+            )),
             "shared_product_count": m["shared_product_count"],
             "active_today": m["spend"] > 0,
             # ★출처 라벨(D-NAO-105): 같은 칸에 프록시와 확정치가 번갈아 들어오므로 화면이
@@ -439,6 +474,30 @@ def build(
         ),
         "campaigns": cards,
         "totals": {
+            # ★§4-1 — **총이익이 첫 칸**이다. ROAS가 첫 칸이면 화면이 ROAS 방어로의 표류를
+            #   다시 유도한다(D-NAO-85 실측: ROAS +7% · 매출 −52%).
+            #   ⚠️모르는 캠페인은 **합계에서 뺀다** — 0으로 세면 그 0이 「이익이 없다」로 읽힌다.
+            #   그래서 아는 수/모르는 수를 함께 낸다(몇 개 위에서 잰 합인지 화면이 말한다).
+            "gross_profit_today": (
+                sum(c["gross_profit_today"] for c in cards if c["gross_profit_today"] is not None)
+                if any(c["gross_profit_today"] is not None for c in cards) else None
+            ),
+            "gross_profit_known_campaigns": sum(
+                1 for c in cards if c["gross_profit_today"] is not None
+            ),
+            "gross_profit_unknown_campaigns": sum(
+                1 for c in cards if c["gross_profit_today"] is None
+            ),
+            # 이 총이익이 **어느 매출 위에서** 잰 값인지 — 카드의 출처 라벨을 그대로 물려받는다.
+            "gross_profit_basis": meta["source_label"],
+            # ★적대 리뷰 P1-2 — **이 값은 보정 전이다.** 오늘치는 프록시 매출이라 보정계수를
+            #   곱하면 두 번 부풀지만, 과거 날짜의 입력은 `conv_amt`라 **보정계수의 정의역**이다.
+            #   같은 저장소의 다른 총이익(Slack·다이어리·스코프 화면)은 그 계수를 적용하므로
+            #   값이 갈린다 — 실측 전례로 그 자는 **부호까지 바꾼다**(ref 93 §1 행 9: 계정
+            #   30일 총이익 보정 +5,963,568원 ↔ 미적용 −234,545원). 조용히 다르면 안 된다.
+            "gross_profit_lens_note": (
+                "보정 전 값입니다 — 다른 화면의 총이익은 보정계수를 적용해 값이 다를 수 있습니다."
+            ),
             "spend_today": sum(c["spend_today"] for c in cards),
             "campaigns_active_today": sum(1 for c in cards if c["active_today"]),
             "campaigns_total": len(cards),
