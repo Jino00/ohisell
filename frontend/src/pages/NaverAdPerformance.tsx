@@ -1220,6 +1220,27 @@ export default function NaverAdPerformance() {
       >
         <div className="p-4 space-y-4">
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            {/* ★§4-1 — **총이익이 첫 칸**이다. 첫 칸이 ROAS면 화면이 ROAS 방어로의 표류를
+                다시 유도한다(D-NAO-85 실측: ROAS +7% · 매출 −52%). */}
+            <Stat
+              label={`${dayWord} 총이익`}
+              value={
+                data.totals.gross_profit_today === null
+                  ? "모름"
+                  : won(data.totals.gross_profit_today)
+              }
+              isEmpty={data.totals.gross_profit_today === null}
+              reason={`${num(data.totals.gross_profit_unknown_campaigns)}개 광고 전부 BEP나 매출을 몰라 총이익을 계산할 수 없습니다.`}
+              tone={data.totals.gross_profit_today === null ? "idle" : "neutral"}
+              sub={
+                // ★몇 개 위에서 잰 합인지, 그리고 **어느 매출** 위에서 잰 값인지 같이 말한다.
+                //   모르는 캠페인은 합계에서 뺐다 — 0으로 셌으면 이 줄이 필요 없었을 것이다.
+                `${data.totals.gross_profit_basis} 매출 기준 · 광고 ${num(data.totals.gross_profit_known_campaigns)}개` +
+                (data.totals.gross_profit_unknown_campaigns > 0
+                  ? ` · 모름 ${num(data.totals.gross_profit_unknown_campaigns)}개는 뺐습니다`
+                  : "")
+              }
+            />
             <Stat label={`${dayWord} 쓴 광고비`} value={won(data.totals.spend_today)}
               isEmpty={data.totals.spend_today === 0}
               reason="집행된 광고비가 없습니다."

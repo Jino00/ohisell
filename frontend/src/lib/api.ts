@@ -5267,6 +5267,10 @@ export interface NaverPerformanceCampaignCard {
   roas_unknown_reason: string | null;
   target_roas: number | null;
   bep_roas: number | null;
+  /** ★§4-1 — 이 광고의 그날 총이익(절대액) = 매출 ÷ BEP − 광고비. **모르면 null**이다
+   *  (0이 아니다 — 0으로 두면 「이익이 없다」로 읽힌다). 왜 없는지는 아래 칸이 말한다. */
+  gross_profit_today: number | null;
+  gross_profit_unknown_reason: string | null;
   shared_product_count: number; // 여러 캠페인이 공유해 매출을 나눠 계상한 상품 수
   active_today: boolean;
   verdict_sentence: string;
@@ -5294,7 +5298,19 @@ export interface NaverPerformanceToday {
   date: string;
   data_note: string;
   campaigns: NaverPerformanceCampaignCard[];
-  totals: { spend_today: number; campaigns_active_today: number; campaigns_total: number };
+  totals: {
+    /** ★§4-1 — **첫 칸**. 아는 캠페인만 더한 합이다(모르는 것을 0으로 세지 않는다).
+     *  하나도 모르면 null. 몇 개 위에서 잰 합인지는 아래 두 수가 말한다. */
+    gross_profit_today: number | null;
+    gross_profit_known_campaigns: number;
+    gross_profit_unknown_campaigns: number;
+    /** 이 총이익이 **어느 매출 위에서** 잰 값인가 — 「오늘 추정」/「확정 중」/「확정」.
+     *  오늘치 매출은 상한 프록시라 총이익이 낙관 쪽으로 분다. */
+    gross_profit_basis: string;
+    spend_today: number;
+    campaigns_active_today: number;
+    campaigns_total: number;
+  };
   today_actions: {
     executed_count: number;
     blocked_count: number;
