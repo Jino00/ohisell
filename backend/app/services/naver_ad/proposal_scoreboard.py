@@ -405,3 +405,107 @@ def _rollup_accuracy(db: Session) -> dict:
         action: {"n": s["n"], "improved_ratio": (Decimal(s["improved"]) / Decimal(s["n"])).quantize(_Q4)}
         for action, s in by_action.items()
     }
+
+
+# ── 읽기 경로 — 화면의 「결과 칸」이 쓸 값 (설계서 122 §4-3·§4-4) ────────────────────
+#   ★여기 두는 이유: 산식(`_gross_profit`)과 얼린 렌즈(`_frozen_lens`)가 이 모듈에 산다.
+#     화면 쪽에서 다시 계산하면 **산식이 두 벌**이 되고, 렌즈를 안 쓰면 채점 «당시»와
+#     다른 숫자가 나온다(그게 `_frozen_lens`가 존재하는 이유 그대로다).
+#   ★**재채점하지 않는다** — 이 함수는 DB를 안 보고 행에 이미 적힌 것만 되살린다.
+_PROFIT_STATE_NOTE = {
+    "dry_run": "채점 대상 아님 — 연습(dry_run)이라 계정에 안 나갔다",
+    "no_lens": "판정 못 함 — 이 행엔 BEP 렌즈가 없다(총이익을 잴 자가 없다)",
+    "thin": "판정 보류 — 모수 미달(전·후 창의 클릭이 문턱 미만)",
+}
+
+
+def read_profit_delta(change: NaverChangeLog) -> dict:
+    """채점된 행에서 **총이익 델타를 금액으로 되살린다**(읽기 전용).
+
+    ★자 자백을 함께 낸다(D-NAO-230 — *"자의 가정·창을 성적과 반드시 병기한다"*).
+      이 금액은 보정계수 **점추정**(북극성 §3 구간 [하한, 점추정]의 위쪽 끝)으로 잰 값이다.
+      `actual_json.lens`엔 점추정만 얼려져 있어 **「하한으로도 흑자인가」는 이 행에서 못 묻는다**
+      — 그래서 `lens.interval_low_available=False`로 «못 한다»고 말한다(지어내지 않는다).
+    """
+    legacy = {
+        "outcome": change.outcome,
+        "label": "교정 전 자 — 증거용",
+        "note": "전/후 RPC(매출/클릭) 배율. 분모가 클릭이라 클릭·매출이 함께 줄어도 「개선」이 될 수 있다",
+    }
+    base = {
+        "delta": None, "before": None, "after": None,
+        "verdict": None, "lens": None, "window": None, "legacy": legacy,
+    }
+
+    if change.dry_run:
+        return {**base, "state": "dry_run", "note": _PROFIT_STATE_NOTE["dry_run"]}
+
+    raw = getattr(change, "actual_json", None)
+    if not raw:
+        # 아직 채점기가 안 다녀갔다 — 0도 「—」도 아니고 «언제 채워지는가»를 말한다(§4-4).
+        when = change.verify_date.isoformat() if change.verify_date else None
+        return {
+            **base, "state": "pending",
+            "note": (f"채점 전 · D+14 · {when}부터" if when else "채점 전 · 검증 예정일 미정"),
+            "scored_from": when,
+        }
+    try:
+        actual = json.loads(raw) or {}
+    except (ValueError, TypeError):
+        return {**base, "state": "no_lens", "note": _PROFIT_STATE_NOTE["no_lens"]}
+
+    lens = _frozen_lens(change)
+    if lens is None:
+        return {**base, "state": "no_lens", "note": _PROFIT_STATE_NOTE["no_lens"]}
+    bep, bep_source, _gamma, cf = lens
+
+    before, after = actual.get("before") or {}, actual.get("after") or {}
+    lens_out = {
+        "cf": float(cf), "bep": float(bep), "bep_source": bep_source,
+        # ★자가 무엇인지 화면이 말한다 — 「총이익」이라는 낱말만으로는 어느 끝인지 모른다.
+        "kind": "보정계수 점추정(구간의 위쪽 끝)",
+        "interval_low_available": False,
+    }
+    window = _read_window(change)
+
+    if change.outcome_profit is None:
+        # 채점기가 **일부러** 판정을 보류한 자리다. 여기에 금액을 그리면 화면이 판정을 지어낸다.
+        return {**base, "state": "thin", "note": _PROFIT_STATE_NOTE["thin"],
+                "lens": lens_out, "window": window}
+
+    try:
+        p_before = _gross_profit(int(before["conv_amt"]), int(before["cost"]), bep=bep, cf=cf)
+        p_after = _gross_profit(int(after["conv_amt"]), int(after["cost"]), bep=bep, cf=cf)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return {**base, "state": "no_lens", "note": _PROFIT_STATE_NOTE["no_lens"],
+                "lens": lens_out, "window": window}
+
+    return {
+        "state": "scored",
+        "delta": int((p_after - p_before).to_integral_value()),
+        "before": int(p_before.to_integral_value()),
+        "after": int(p_after.to_integral_value()),
+        "verdict": change.outcome_profit,
+        "note": None,
+        "lens": lens_out,
+        "window": window,
+        "legacy": legacy,
+    }
+
+
+def _read_window(change: NaverChangeLog) -> dict | None:
+    """행에 적힌 날짜로 전·후 창을 되살린다 — `evaluate_change`가 쓴 그 산식 그대로.
+
+    ★창을 화면이 따로 지어내면 「화면이 말하는 창」과 「채점이 쓴 창」이 두 벌이 된다.
+    """
+    if change.executed_at is None or change.verify_date is None:
+        return None
+    executed = change.executed_at.date() if isinstance(change.executed_at, datetime) else change.executed_at
+    days = max((change.verify_date - executed).days, 1)
+    return {
+        "days": days,
+        "before_from": (executed - timedelta(days=days)).isoformat(),
+        "before_to": (executed - timedelta(days=1)).isoformat(),
+        "after_from": executed.isoformat(),
+        "after_to": (executed + timedelta(days=days - 1)).isoformat(),
+    }

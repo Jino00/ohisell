@@ -28,7 +28,13 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models import NaverAgencyOp, NaverChangeLog
-from app.services.naver_ad import alert_humanizer, change_actor, change_log_narrator, feed_reapply
+from app.services.naver_ad import (
+    alert_humanizer,
+    change_actor,
+    change_log_narrator,
+    feed_reapply,
+    proposal_scoreboard,
+)
 
 FEED_VERDICT_FEED = feed_reapply.VERDICT_FEED
 
@@ -147,6 +153,9 @@ class _Candidate:
     axis: str | None = None
     # 규칙 ⑤(change_actor) — 우리 실집행과 대조돼 되찾은 행의 근거 문장. 그 외엔 None.
     actor_evidence: str | None = None
+    # ★설계서 122 §4-4 — 연습(dry_run)과 실집행을 **따로 세려면** 1패스가 이 값을 알아야 한다.
+    #   boolean 한 컬럼이라 2패스 원칙(큰 JSON은 안 읽는다)을 안 깬다. agency_op은 항상 False.
+    dry_run: bool = False
 
 
 def _effective_dt(occurred_at: datetime | None, op_date: date | None) -> tuple[datetime, str]:
@@ -206,6 +215,7 @@ def _change_log_candidates(
         NaverChangeLog.action,
         NaverChangeLog.occurred_at,
         NaverChangeLog.entity_id,
+        NaverChangeLog.dry_run,
     )
     # ★D-NAO-147: 날짜 조건을 occurred_at 있음/없음으로 **갈라서** 건다 — agency_op 쪽과 같은
     #   이유이자 같은 함정이다. 외부 변경은 10:49에 일어나고 우리는 다음날 07:35에 알아채므로,
@@ -225,7 +235,7 @@ def _change_log_candidates(
         q = q.filter(NaverChangeLog.after_value.isnot(None))
 
     out: list[_Candidate] = []
-    for cid, changed_at, action, occurred_at, entity_id in q.all():
+    for cid, changed_at, action, occurred_at, entity_id, dry_run in q.all():
         actor = change_actor.classify_change_log(action)
         # 우리 실집행은 changed_at이 곧 "우리가 바꾼 순간"이다. external_* 감지 행은
         # entity_sync가 **알아챈** 시각이라 실제 발생 시각이 아니다 — 섞으면 "언제"에 거짓말한다.
@@ -246,6 +256,7 @@ def _change_log_candidates(
                 auto_actor=actor,
                 entity_id=entity_id or "",
                 axis=_CHANGE_LOG_AXIS.get(action),
+                dry_run=bool(dry_run),
             )
         )
     return out
@@ -471,6 +482,15 @@ def _chunked_overrides(db: Session, keys: list[tuple[str, int]]) -> dict:
     return merged
 
 
+# ★결과 칸의 «모양»은 두 원천이 같아야 한다 — 키가 없으면 화면이 「없음」을 「0」으로 읽는다.
+_NOT_OURS_OUTCOME: dict = {
+    "state": "not_ours",
+    "delta": None, "before": None, "after": None, "verdict": None,
+    "note": "채점 대상 아님 — 우리가 한 조치가 아니다",
+    "lens": None, "window": None, "legacy": None,
+}
+
+
 def _change_log_row(
     row: NaverChangeLog,
     labels: dict[tuple[str, str], str],
@@ -495,6 +515,9 @@ def _change_log_row(
         "summary": sentence,
         "backfilled": b_backfill or a_backfill,
         "dry_run": row.dry_run,
+        # ★설계서 122 §4-3·§4-4 — 결과 칸. **재채점하지 않는다**(행에 이미 적힌 것만 되살린다)
+        #   고, 자 자백(보정계수·BEP·전후 창)을 함께 낸다(D-NAO-230).
+        "outcome_profit": proposal_scoreboard.read_profit_delta(row),
     }
 
 
@@ -532,6 +555,8 @@ def _agency_op_row(
         "summary": sentence,
         "backfilled": b_backfill or a_backfill,
         "dry_run": False,
+        # 대행사 조치엔 우리 채점기가 안 돈다 — 모양만 같게 두고 값은 「대상 아님」이다.
+        "outcome_profit": dict(_NOT_OURS_OUTCOME),
     }
 
 
@@ -612,11 +637,18 @@ def build(
 
     resolved: list[tuple[_Candidate, str, bool, str | None]] = []
     by_actor: dict[str, int] = {a: 0 for a in change_actor.ACTORS}
+    # ★설계서 122 §4-4 — 실집행과 연습(dry_run)을 **따로** 센다. 하나로 세면 화면이
+    #   「엔진이 N건 했다」고 말하는데 그중 상당수가 계정에 안 나간 연습이라 거짓이 된다.
+    executed_n = dry_run_n = 0
     for c in candidates:
         final, corrected, note = change_actor.resolve(
             c.auto_actor, overrides.get((c.source, c.source_id))
         )
         by_actor[final] = by_actor.get(final, 0) + 1
+        if c.dry_run:
+            dry_run_n += 1
+        else:
+            executed_n += 1
         resolved.append((c, final, corrected, note))
 
     if actor:
@@ -693,6 +725,13 @@ def build(
 
     return {
         "total": total, "by_actor": by_actor, "feed_reapply": feed_stats,
+        # ★§4-4. `include_dry_run`이 꺼져 있으면 연습 행은 후보에 **들어오지도 않았다** —
+        #   그때 0을 내면 「연습이 0건이었다」는 거짓이 된다. 세지 못한 것은 None으로 말한다.
+        "by_execution": {
+            "executed": executed_n,
+            "dry_run": (dry_run_n if include_dry_run else None),
+            "includes_dry_run": include_dry_run,
+        },
         # D-NAO-147: 두 원천에 중복으로 들어와 한 줄로 접힌 건수(조용한 truncation 금지).
         "dedup": {"merged_agency_op": merged_dup},
         # 규칙 ⑤로 대행사→우리로 되찾은 건수(조용히 바꾸지 않는다 — 몇 건인지 화면이 말한다).

@@ -4754,6 +4754,43 @@ export async function fetchNaverChangeLog(params: {
  *  `optimizer='mop'`은 "제3자 소유"라는 뜻이라 Jino가 말하는 "MOP=우리 시스템"과 정반대다. */
 export type NaverModificationActor = "ours" | "agency" | "jino";
 
+/** 결과 칸이 말할 수 있는 것 — **금액은 `scored`일 때만 있다**(설계서 122 §4-3·§4-4).
+ *  · `pending`  채점기가 아직 안 다녀갔다 → 0도 「—」도 아니고 «언제 채워지는가»를 말한다
+ *  · `thin`     모수 미달로 채점기가 **일부러** 판정을 보류했다(금액을 그리면 화면이 지어낸다)
+ *  · `no_lens`  BEP 렌즈가 없어 총이익을 잴 자가 없다
+ *  · `dry_run`  연습이라 계정에 안 나갔다 → 채점 대상 아님
+ *  · `not_ours` 대행사 조치 → 우리 채점기가 안 돈다 */
+export type NaverOutcomeProfitState =
+  | "scored" | "pending" | "thin" | "no_lens" | "dry_run" | "not_ours";
+
+/** ★서버가 **재채점하지 않고** 행에 얼려진 렌즈로 되살린 값이다. 자 자백(`lens`·`window`)이
+ *  함께 오는 이유는 D-NAO-230 — *"자의 가정·창을 성적과 반드시 병기한다"*. */
+export interface NaverOutcomeProfit {
+  state: NaverOutcomeProfitState;
+  /** 총이익 델타(원). 부호가 방향이다 — 「개선/악화」 낱말을 쓰지 않는다(§4-3). */
+  delta: number | null;
+  before: number | null;
+  after: number | null;
+  verdict: "improved" | "declined" | "neutral" | null;
+  /** 값이 없을 때 «왜 없는가»를 말하는 한 줄. `scored`면 null. */
+  note: string | null;
+  /** `pending`일 때 채워지는 검증 예정일(D+14). */
+  scored_from?: string | null;
+  lens: {
+    cf: number; bep: number; bep_source: string;
+    /** 이 금액을 어느 자로 쟀는가 — 「총이익」이라는 낱말만으론 어느 끝인지 모른다. */
+    kind: string;
+    /** 북극성 §3의 구간 자에서 **하한을 못 쓴다**는 자백(렌즈에 점추정만 얼려져 있다). */
+    interval_low_available: boolean;
+  } | null;
+  window: {
+    days: number;
+    before_from: string; before_to: string; after_from: string; after_to: string;
+  } | null;
+  /** 교정 전 RPC 자 — 갈아치우지 않고 **접어서** 남긴다(증거, 교훈 #274). */
+  legacy: { outcome: string | null; label: string; note: string } | null;
+}
+
 export interface NaverModificationRow {
   /** `"change_log:1122"` — 두 원천의 id가 겹치므로 원천을 접두한 합성 키다(React key·정정 대상). */
   key: string;
@@ -4810,6 +4847,9 @@ export interface NaverModificationRow {
   feed_group_size: number;
   /** 접힌 형제들의 source_id(감사·펼치기용 — 접었다고 버리지 않는다). */
   feed_group_ids: number[];
+  /** 결과 칸(§4-3·§4-4). 두 원천 모두 **같은 모양**으로 온다 — 키가 없으면 화면이
+   *  「없음」을 「0」으로 읽는다. */
+  outcome_profit: NaverOutcomeProfit;
 }
 
 /** D-NAO-139 — 피드 재적용을 얼마나 접었고 숨겼는지. **항상 온다**(조용한 truncation 금지). */
@@ -4834,6 +4874,9 @@ export interface NaverModificationResponse {
   feed_reapply: NaverModificationFeedReapply;
   /** 규칙 ⑤로 「대행사」에서 「우리 자동화」로 되찾은 건수. 조용히 바꾸지 않는다. */
   reclaimed_ours: number;
+  /** §4-4 — 실집행과 연습을 **따로** 센다. `include_dry_run`이 꺼져 있으면 연습 행은
+   *  후보에 들어오지도 않았으므로 `dry_run`은 0이 아니라 **null**(못 셌다)이다. */
+  by_execution: { executed: number; dry_run: number | null; includes_dry_run: boolean };
   rows: NaverModificationRow[];
 }
 
