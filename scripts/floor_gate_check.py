@@ -29,6 +29,12 @@ TODAY = KST_NOW.date()
 def main() -> None:
     db = SessionLocal()
     print(f"== D-NAO-286 표본 하한 게이트 — 관측 {KST_NOW:%Y-%m-%d %H:%M:%S} KST ==")
+    # ★배포 «전»에도 돌아야 한다 — 안 그러면 「돌리면 결과가 보이는 명령」이 못 된다(계약 §5).
+    #   배포 전 prod엔 새 함수가 없어 AttributeError로 죽으므로, 있으면 쓰고 없으면 그 사실을
+    #   결과로 낸다. 「미배포」도 관측이다.
+    deployed = hasattr(guardrail_gate, "_check_data_floor") and hasattr(
+        auto_operator, "settlement_conv_counts")
+    print(f"     배포 상태: {'★배포됨(새 판정기 실재)' if deployed else '⛔미배포 — prod 모듈에 새 함수 없음'}")
 
     # ── ⓐ SPECS 2키가 화면 재료에 실리는가 ──────────────────────────────────
     print("\n[ⓐ] SPECS 노출")
@@ -57,17 +63,37 @@ def main() -> None:
     if not ad_ids:
         print("     (최근 30일 소재 실집행 0건 — 대상 없음)")
     for ad_id in ad_ids:
-        agg = auto_operator._settlement_agg(db, "ad", ad_id, window_from, window_to)
+        if deployed:
+            agg = auto_operator._settlement_agg(db, "ad", ad_id, window_from, window_to)
+        else:
+            # 미배포 — 같은 질의를 여기서 직접 던져 «자료는 있는가»만 관측한다(읽기 전용).
+            row = db.execute(text(
+                "select coalesce(sum(clk),0), coalesce(sum(cost),0), "
+                "coalesce(sum(conv_direct_cnt),0)+coalesce(sum(conv_indirect_cnt),0) "
+                "from naver_ad_creative_daily where ad_id=:a and ad_date between :f and :t"
+            ), {"a": ad_id, "f": window_from.isoformat(), "t": window_to.isoformat()}).one()
+            agg = {"clk": int(row[0]), "cost": int(row[1]), "conv_cnt": int(row[2])}
         camp_id = db.execute(text(
             "select campaign_id from naver_ad_creative_daily where ad_id=:a limit 1"
         ), {"a": ad_id}).scalar()
-        camp, tgt = auto_operator.settlement_conv_counts(
-            db, target_type="ad", target_id=ad_id, campaign_id=camp_id, today=TODAY)
-        verdict = guardrail_gate._check_data_floor({
-            "auto_exec": True, "floor_exempt": False,
-            "guardrail_params": guardrail_params.get_params(db),
-            "campaign_weekly_conv": camp, "target_weekly_conv": tgt,
-        })
+        camp = db.execute(text(
+            "select coalesce(sum(conv_direct_cnt),0)+coalesce(sum(conv_indirect_cnt),0) "
+            "from naver_ad_daily where campaign_id=:c and adgroup_id<>'__backfill__' "
+            "and ad_date between :f and :t"
+        ), {"c": camp_id, "f": window_from.isoformat(), "t": window_to.isoformat()}).scalar()
+        tgt = agg["conv_cnt"]
+        if deployed:
+            camp, tgt = auto_operator.settlement_conv_counts(
+                db, target_type="ad", target_id=ad_id, campaign_id=camp_id, today=TODAY)
+            verdict = guardrail_gate._check_data_floor({
+                "auto_exec": True, "floor_exempt": False,
+                "guardrail_params": guardrail_params.get_params(db),
+                "campaign_weekly_conv": camp, "target_weekly_conv": tgt,
+            }, "bid_up")
+        else:
+            floor = 15
+            verdict = (f"[미배포 모의] 표본 하한 — 대상 정착창 전환 {tgt}건 < 하한 {floor}건"
+                       if tgt < floor else None)
         mark = "★차단" if verdict else "통과"
         print(f"     {ad_id[-12:]}  clk={agg['clk']:>4} cost={agg['cost']:>8,} "
               f"conv={agg['conv_cnt']:>3}  캠페인conv={camp}  → {mark}")
