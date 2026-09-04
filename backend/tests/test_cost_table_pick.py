@@ -1016,3 +1016,209 @@ def test_absent_confirmation_clears_the_dead_cost_table_traces(db_session):
     assert payload["match"]["excel_total_inc_vat"] is None
     assert payload["match"]["cost_table_item"] is None
     assert payload["match"]["cost_table_section"] is None
+
+
+# ── `anomaly_flag` 40자 잘림 (2026-09-04) ────────────────────────────────────
+#
+# 여기 있는 이유: 이 컬럼을 채우는 세 자리가 전부 원천을 `[:40]`으로 잘라 넣고 있었고,
+# 그중 하나가 **픽**(`pick_cost_table_item`)이라 이 파일이 그 자리를 이미 덮고 있다.
+#
+# ★잘림은 표시를 흐리는 게 아니라 **판정을 바꾼다.** 인박스 묶음은 프론트
+# `costHome.ts`의 `anomalyKinds()`가 문자열을 `,`로 갈라 `:` 앞을 토큰으로 읽어 정한다.
+# 꼬리 토큰이 반토막 나면 그 줄은 **어느 묶음에도 안 선다** — 화면에서 사라진다.
+# prod 실측(2026-09-04 12:0x KST): r81이 정확히 그 상태였다
+# (`landed_only_vat_unknown,needs_manual_lin` ← 원본 `…,needs_manual_lines`).
+#
+# 그래서 아래 단언은 「문자열이 길다」가 아니라 **「그 줄이 묶음에 서는가」**다.
+
+
+def _anomaly_kinds(flag):
+    """`frontend/src/lib/costHome.ts`의 `anomalyKinds()`를 그대로 옮긴 것.
+
+    ★왜 옮겨 적나: 이 결함의 «결과»는 프론트 규칙에서만 보인다. 백엔드 단언을
+    「문자열이 온전한가」로만 두면, 폭을 다시 좁혀도 **길이만 줄고 테스트는 통과**한다.
+    """
+
+    out = []
+    for chunk in (flag or "").split(","):
+        kind = chunk.split(":")[0].strip()
+        if kind and kind not in out:
+            out.append(kind)
+    return out
+
+
+def test_pick_keeps_the_whole_anomaly_string_so_the_tail_token_still_buckets(
+    client, db_session
+):
+    """★픽 경로 — 꼬리 토큰이 살아 「구성 없음」 묶음에 선다.
+
+    ★변이 시험 ①`pick_cost_table_item`에 `[:40]`을 되돌리면 꼬리가 `needs_manual_lin`으로
+    끊겨 `no_recipe_match`도 `needs_manual_lines`도 아니게 되고 마지막 단언이 죽는다.
+    ②`recipe_payload`에서 `"anomaly_flag"` 직렬화를 지우면 **HTTP 단언**이 죽는다
+    (1R 적대 리뷰 M6/2R M12 — 값이 아무리 온전해도 응답에 안 실리면 화면엔 없다.
+    서비스층 dict만 보면 이 자리를 원리적으로 못 잡는다).
+    """
+
+    anomalies = "landed_only_vat_unknown,needs_manual_lines"
+    assert len(anomalies) > 40, "40자를 넘어야 이 테스트가 잘림을 잰다"
+
+    item = _item(db_session, anomalies=anomalies)
+    recipe = _recipe(db_session, form_factor="flip")
+    db_session.commit()
+
+    R.pick_cost_table_item(db_session, recipe.id, item.id)
+    db_session.commit()
+    db_session.expire_all()
+
+    flag = R.get_recipe(db_session, recipe.id).anomaly_flag
+    assert flag == anomalies
+
+    # ★값이 온전한 것만으로는 부족하다 — **응답에 실려야** 화면이 볼 수 있다.
+    body = client.get(f"/api/cost/recipes/{recipe.id}").json()
+    assert body["anomaly_flag"] == anomalies
+    # ★결과를 잰다 — 화면이 받은 그 문자열로 이 줄이 「구성 없음」 묶음에 서는가.
+    assert "needs_manual_lines" in _anomaly_kinds(body["anomaly_flag"])
+
+
+def test_no_code_path_slices_an_anomalies_string(db_session):
+    """★업로드 경로 두 자리(`import_drafts`·`_reimport_composition_only`)를 구조로 덮는다.
+
+    ★왜 시나리오가 아니라 AST인가 — **못 해서가 아니라 그 시나리오가 이 결함을 못 재서**다.
+    저 두 자리는 `_match_draft`가 짝을 지어 줘야 도달하는데, 그러려면 채널코드 → SKU →
+    `cost_price`까지 픽스처를 세워야 한다. 그렇게 세워도 단언은 결국 「문자열이 온전한가」
+    하나이고, 그 사이 픽스처 층이 셋 늘어 **테스트가 무엇 때문에 죽었는지 못 가르게** 된다.
+
+    여기서 재는 것은 시나리오가 아니라 **규칙**이다: 「`anomalies` 문자열을 자르지 않는다」.
+    세 자리 중 하나만 되돌려도, 그리고 **새로 생기는 네 번째 자리도** 여기서 죽는다.
+
+    ★변이 시험: 세 자리 중 아무 곳에나 `[:40]`을 되돌리면 이 테스트가 그 줄 번호를 짚는다.
+    """
+
+    import ast
+    import pathlib
+
+    src_path = (
+        pathlib.Path(R.__file__).resolve().parent / "recipes.py"
+    )
+    source = src_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    # ★규칙은 「좁게 자르지 마라」가 아니라 **「자르는 자리는 하나뿐이다」**다.
+    #   1R 적대 리뷰가 잡은 것이 정확히 이 차이다: `[:40]`만 지우면 두 업로드 경로는 상한이
+    #   200으로 «올라간» 게 아니라 **아예 사라진다**(그 둘은 200에서 잘린
+    #   `cost_table_item.anomalies`가 아니라 잘리기 전 파스 결과를 읽는다). 실측 220자가
+    #   `String(200)` 칸에 조용히 들어갔다 — SQLite가 길이를 안 재기 때문이다.
+    #   그래서 폭을 아는 자리를 `fit_anomalies` **하나**로 두고, 여기선 그 밖에서
+    #   자르는 자리가 없다는 것을 잰다.
+    GATE = "fit_anomalies"
+    TARGETS = {"anomaly_flag", "anomalies", "anomaly"}
+
+    def _targets_an_anomaly(node):
+        for tgt in getattr(node, "targets", []) or ([node.target] if getattr(node, "target", None) else []):
+            if isinstance(tgt, ast.Attribute) and tgt.attr in TARGETS:
+                return True
+            if isinstance(tgt, ast.Name) and tgt.id in TARGETS:
+                return True
+        return False
+
+    def _is_gate_call(value):
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == GATE
+        )
+
+    offenders = []
+    for node in ast.walk(tree):
+        # ── ① 게이트 밖에서 이상 문자열을 자르는 자리
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
+            segment = ast.get_source_segment(source, node) or ""
+            if "anomal" in segment:
+                offenders.append(
+                    f"{src_path.name}:{node.lineno} → 게이트 밖 절단: {segment}"
+                )
+            continue
+
+        # ── ② 이상 필드에 «파생값»을 넣으면서 게이트를 안 거치는 자리
+        #     (상수·None·다른 이상 필드 복사는 파생이 아니다.)
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not _targets_an_anomaly(node):
+            continue
+        value = node.value
+        if value is None or _is_gate_call(value):
+            continue
+        seg = ast.get_source_segment(source, value) or ""
+        # ★변이 M5 대비: 값 안 어디에든 슬라이스가 있으면 이름과 무관하게 잡는다.
+        if any(
+            isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Slice)
+            for n in ast.walk(value)
+        ):
+            offenders.append(f"{src_path.name}:{node.lineno} → 대입값이 잘려 있다: {seg}")
+        elif ".anomalies" in seg and "item.anomalies" not in seg:
+            # 파서 결과(`draft.anomalies` 등)에서 만든 값은 반드시 게이트를 거쳐야 한다.
+            # `item.anomalies`는 이미 게이트를 거쳐 저장된 값이라 그대로 옮겨도 된다.
+            offenders.append(f"{src_path.name}:{node.lineno} → 게이트 미경유: {seg}")
+
+    assert not offenders, (
+        f"이상 문자열을 `{GATE}()` 밖에서 만들거나 자르는 자리가 있다. 문자 단위로 자르면 "
+        "꼬리 토큰이 반토막 나고, 반토막은 `costHome.ts`의 어느 묶음 규칙과도 안 맞아 "
+        "그 줄이 인박스에서 사라진다(prod r81 실측):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_overflowing_anomalies_drop_whole_tokens_never_half_of_one():
+    """★1R 적대 리뷰 P1 — 넘칠 때 **반토막을 만들지 않는다.**
+
+    리뷰어 실측: 한 품목이 이상 7건·220자를 낼 수 있고, `[:40]`만 지운 판에서는 그 220자가
+    `String(200)` 칸에 **에러 없이** 들어갔다(SQLite는 길이를 안 잰다 — Postgres였다면
+    업로드 트랜잭션이 통째로 죽는다).
+
+    그런데 「폭에 맞춰 자른다」로 고치면 40에서 나던 병이 200에서 그대로 난다.
+    그래서 자르는 단위를 **문자가 아니라 토큰**으로 둔다.
+
+    ★변이 시험: `fit_anomalies`를 `",".join(parts)[:width]`로 바꾸면 마지막 토큰이 반토막 나
+    아래 「모든 토큰이 원본에 있다」가 죽는다.
+    """
+
+    parts = [f"price_conflict:부자재{i:02d}:{i}00.0≠{i}50.0" for i in range(12)]
+    joined = ",".join(parts)
+    assert len(joined) > 200, "이 테스트가 재려면 원본이 폭을 넘겨야 한다"
+
+    out = R.fit_anomalies(parts, width=200)
+
+    assert out is not None
+    assert len(out) <= 200
+    # ★핵심 — 실린 토큰은 **전부 온전하다**. 하나라도 반토막이면 여기서 죽는다.
+    assert all(chunk in parts for chunk in out.split(","))
+    # 빠진 것은 그냥 없다(반쯤 맞는 말보다 적게 말하기가 낫다).
+    assert out.split(",") == parts[: len(out.split(","))]
+
+
+def test_fit_anomalies_never_exceeds_either_column(db_session):
+    """★게이트가 실제 저장 경로에서도 폭을 지킨다 — 함수 단위 성공은 필요조건일 뿐이다."""
+
+    parts = [f"price_conflict:부자재{i:02d}:{i}00.0≠{i}50.0" for i in range(12)]
+    item = _item(db_session, anomalies=R.fit_anomalies(parts, width=200))
+    recipe = _recipe(db_session, form_factor="flip")
+    db_session.commit()
+    R.pick_cost_table_item(db_session, recipe.id, item.id)
+    db_session.commit()
+    db_session.expire_all()
+
+    stored = R.get_recipe(db_session, recipe.id).anomaly_flag
+    assert len(stored) <= CostRecipe.__table__.c.anomaly_flag.type.length
+    assert all(chunk in parts for chunk in stored.split(","))
+
+
+def test_recipe_flag_is_at_least_as_wide_as_the_source_column():
+    """★구조 가드 — 폭이 다시 좁아지면 여기서 죽는다.
+
+    두 행동 테스트만 두면 「40 → 60」처럼 **여전히 좁지만 이 시나리오는 통과하는** 폭으로
+    돌아갈 수 있다. 잰 것은 시나리오가 아니라 **관계**다: 사본은 원천보다 좁을 수 없다.
+    """
+
+    src = CostTableItem.__table__.c.anomalies.type.length
+    dst = CostRecipe.__table__.c.anomaly_flag.type.length
+    assert dst >= src, (
+        f"cost_recipe.anomaly_flag({dst})가 원천 cost_table_item.anomalies({src})보다 좁다 — "
+        "좁은 쪽이 넓은 쪽을 받아 적으면 손실이 구조적으로 보장된다"
+    )

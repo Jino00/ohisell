@@ -36,7 +36,11 @@ export function hasNoUnitPrice(
 /** anomaly 문자열 → **종류** 목록.
  *
  * DB 실측 모양: `price_conflict:부착 안내문:55.0≠30.0,price_conflict:비닐(16*23+4):15.0≠10.0`
- * (`cost_recipe.anomaly_flag` 40자 · `cost_table_item.anomalies` 200자 — **잘려 있을 수 있다**).
+ * (`cost_recipe.anomaly_flag`·`cost_table_item.anomalies` **둘 다 200자** — 2026-09-04까지는
+ * 앞의 것만 40자였고 백엔드가 문자 단위로 잘라 **꼬리 토큰이 반토막** 났다. 그러면 여기서
+ * 나오는 종류가 `needs_manual_lin` 같은 것이 되어 **아래 어느 묶음에도 안 걸리고 그 줄이
+ * 인박스에서 사라진다** — prod r81이 실제로 그 상태였다. 지금은 백엔드가 넘칠 때 **토큰을
+ * 통째로 빼므로**(`recipes.fit_anomalies`) 여기 오는 조각은 전부 온전하다.)
  * 그래서 콤마로 가르고 첫 콜론 앞만 취한다. 빈 조각·중복은 버린다.
  *
  * ★이 함수가 인박스의 「중복 접기」를 가능하게 한다 — 레시피 45·97의 `price_conflict`는

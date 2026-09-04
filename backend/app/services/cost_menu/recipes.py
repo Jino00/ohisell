@@ -111,6 +111,53 @@ PIN_LOST = "pin_lost"
 PIN_AMBIGUOUS = "pin_ambiguous"
 
 
+def fit_anomalies(parts, *, width: int) -> Optional[str]:
+    """이상 토큰들을 컬럼에 넣을 한 문자열로 만든다 — **폭을 아는 유일한 자리**.
+
+    ★불변식은 「폭에 맞춘다」가 아니라 **「반토막 토큰을 만들지 않는다」**다.
+
+    왜 그 차이가 중요한가: 이 문자열의 소비처는 사람이 아니라 **규칙**이다.
+    `frontend/src/lib/costHome.ts`의 `anomalyKinds()`가 `,`로 갈라 `:` 앞을 토큰으로 읽어
+    인박스 묶음을 정한다. 문자 단위로 자르면 꼬리가 `needs_manual_lin` 같은 반토막이 되고,
+    반토막은 **어느 묶음 규칙과도 안 맞아 그 줄이 화면에서 사라진다**
+    (prod 실측 2026-09-04: r81이 정확히 그 상태였다 — 40자에서 끊겨 「구성 없음」에도
+    「모순」에도 안 섰다).
+
+    그래서 넘치면 **토큰을 통째로 뺀다.** 남은 토큰은 전부 온전하고, 빠진 것은 그냥 없다 —
+    「반쯤 맞는 말」보다 「적게 말하기」가 낫다.
+
+    ⚠️이 함수는 **자르는 유일한 자리**다. 호출부에서 `[:N]`을 다시 쓰지 마라
+    (`tests/test_cost_table_pick.py`의 AST 가드가 그 자리를 짚는다).
+    """
+
+    parts = [p for p in (parts or ()) if p]
+    if not parts:
+        return None
+    out: list[str] = []
+    used = 0
+    for part in parts:
+        need = len(part) + (1 if out else 0)   # 앞 토큰과의 구분자 `,` 한 글자
+        if used + need > width:
+            continue        # 이 토큰은 통째로 뺀다 — 반만 싣지 않는다
+        out.append(part)
+        used += need
+    return ",".join(out) or None
+
+
+#: `cost_recipe.anomaly_flag`·`cost_table_item.anomalies` 둘 다 `String(200)`이다.
+#: 폭을 여기서 «모델로부터» 읽어 상수 중복을 만들지 않는다.
+def _anomaly_flag_width() -> int:
+    from app.models import CostRecipe
+
+    return CostRecipe.__table__.c.anomaly_flag.type.length
+
+
+def _anomalies_width() -> int:
+    from app.models import CostTableItem
+
+    return CostTableItem.__table__.c.anomalies.type.length
+
+
 def pin_key(section: str, item_name: str, form_factor: Optional[str]) -> str:
     """`section\\x1Fitem_name\\x1Fform_factor` — `CostTableItem.natural_key`와 같은 규칙.
 
@@ -498,7 +545,7 @@ def import_drafts(
 
         anomaly = None if match.draft else "no_recipe_match"
         if match.draft and match.draft.anomalies:
-            anomaly = ",".join(match.draft.anomalies)[:40]
+            anomaly = fit_anomalies(match.draft.anomalies, width=_anomaly_flag_width())
 
         is_new = recipe is None
         if recipe is None:
@@ -716,7 +763,9 @@ def _reimport_composition_only(
 
         recipe.anomaly_flag = None if match.draft else "no_recipe_match"
         if match.draft and match.draft.anomalies:
-            recipe.anomaly_flag = ",".join(match.draft.anomalies)[:40]
+            recipe.anomaly_flag = fit_anomalies(
+                match.draft.anomalies, width=_anomaly_flag_width()
+            )
         recipe.note = json.dumps(note, ensure_ascii=False)
         db.flush()
 
@@ -947,7 +996,7 @@ def _replace_cost_table_items(db: Session, cost: ParseResult) -> int:
             recipe_kind=draft.recipe_kind,
             total_inc_vat=draft.excel_total_inc_vat,
             row_number=draft.row_number,
-            anomalies=",".join(draft.anomalies)[:200] if draft.anomalies else None,
+            anomalies=fit_anomalies(draft.anomalies, width=_anomalies_width()),
         )
         for line in draft.lines:
             item.lines.append(
@@ -1209,7 +1258,8 @@ def pick_cost_table_item(db: Session, recipe_id: int, item_id: int) -> CostRecip
     # 픽은 「없음 확인」과 상호배타다 — 고른 순간 부재 판정은 사실이 아니게 된다.
     recipe.absent_confirmed_at = None
     recipe.absent_note = None
-    recipe.anomaly_flag = item.anomalies[:40] if item.anomalies else None
+    # 항목의 `anomalies`는 이미 폭에 맞춰 저장돼 있으므로 그대로 옮긴다 — 여기서 다시 자르지 않는다.
+    recipe.anomaly_flag = item.anomalies or None
 
     note = _note_dict(recipe)
     note.update(

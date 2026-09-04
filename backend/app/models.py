@@ -5016,7 +5016,12 @@ class CostRecipe(Base):
         String(20), nullable=False, default="assembly", server_default="assembly"
     )
     # 파싱 이상(계약 §9-4·§9-9)을 초안에 실어 승인 단계에서 사람이 처분한다 — 자동 판정 금지.
-    anomaly_flag: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # ★폭은 원천인 `CostTableItem.anomalies`와 **같아야 한다**(둘 다 String(200)).
+    #   2026-09-04까지 여기만 String(40)이었고 세 소비처가 `[:40]`으로 잘라 넣었다. 그 결과는
+    #   표시 흐림이 아니라 **판정 변화**다 — 잘린 꼬리가 토큰을 반으로 끊으면
+    #   `costHome.ts`의 `anomalyKinds()`가 「needs_manual_lin」을 내고, 그 줄은
+    #   「구성 없음」에도 「모순」에도 **안 선다**(prod 실측: r81이 정확히 그 상태였다).
+    anomaly_flag: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
