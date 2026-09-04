@@ -18,11 +18,15 @@ import { usePeriodRange } from "../lib/usePeriod";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
 import {
-  ACTOR_OPTIONS, actorLabel, actorTone, correctionNote, timeSuffix, valueText,
+  ACTOR_OPTIONS, actorLabel, actorNote, actorTone, correctionNote,
+  legacyOutcomeText, NO_API_WRITE_BADGE, NO_API_WRITE_TITLE, outcomeHighText,
+  outcomeLensNote, outcomeLensTitle, outcomeText, outcomeTone, signFlipNote,
+  timeSuffix, valueText,
 } from "../lib/modificationActor";
 import {
   fetchNaverModifications, putNaverModificationActor,
-  type NaverModificationActor, type NaverModificationFeedReapply, type NaverModificationRow,
+  type NaverModificationActor, type NaverModificationFeedReapply,
+  type NaverModificationResponse, type NaverModificationRow,
 } from "../lib/api";
 
 const PAGE = 50;
@@ -133,6 +137,9 @@ function ModificationTable({
     () => fetchNaverModifications({
       date_from: from, date_to: to, actor: actor || undefined, limit: PAGE, offset,
       include_feed_reapply: !hideFeed,
+      // ★§4-4 — 연습(dry_run) 행을 **뺴지 않는다**. 여태 이 화면은 기본값(제외)으로 돌아
+      //   PAO 자기 행동의 대부분이 목록에 아예 없었다. 빼는 대신 배지를 달고 따로 센다.
+      include_dry_run: true,
     }),
     [from, to, actor, hideFeed, offset, version],
   );
@@ -157,13 +164,14 @@ function ModificationTable({
 
   return (
     <>
-      <ActorSummary byActor={data.by_actor} label={label} />
+      <ActorSummary byActor={data.by_actor} byExecution={data.by_execution} label={label} />
       <ReclaimedOursNote count={data.reclaimed_ours} />
       <FeedReapplyNote info={data.feed_reapply} />
       <Table
         head={
           <>
-            <Th>시각</Th><Th>주체</Th><Th>대상</Th><Th>무엇을</Th><Th>이전 → 이후</Th><Th>출처</Th>
+            <Th>시각</Th><Th>주체</Th><Th>대상</Th><Th>무엇을</Th><Th>이전 → 이후</Th>
+            <Th>결과</Th><Th>출처</Th>
           </>
         }
       >
@@ -174,9 +182,15 @@ function ModificationTable({
             <Td><TargetCell row={r} /></Td>
             <Td>
               <span className="text-xs">{r.op_label}</span>
+              {r.dry_run && (
+                <div className="mt-0.5" title={NO_API_WRITE_TITLE}>
+                  <Badge tone="alert">{NO_API_WRITE_BADGE}</Badge>
+                </div>
+              )}
               <FeedVerdictBadge row={r} />
             </Td>
             <Td><ValueCell row={r} /></Td>
+            <Td><OutcomeCell row={r} /></Td>
             <Td><SourceCell row={r} /></Td>
           </tr>
         ))}
@@ -187,16 +201,30 @@ function ModificationTable({
 }
 
 /** 주체 분포 — 필터를 걸어도 **구간 전체**를 보여준다(필터 때문에 그림이 반쪽이 되지 않게). */
-function ActorSummary({ byActor, label }: { byActor: Record<string, number>; label: string }) {
+function ActorSummary({ byActor, byExecution, label }: {
+  byActor: Record<string, number>;
+  byExecution: NaverModificationResponse["by_execution"];
+  label: string;
+}) {
   return (
     <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
       {label} ·{" "}
       {ACTOR_OPTIONS.map((a, i) => (
         <span key={a}>
           {i > 0 && " · "}
-          <span className="text-gray-700">{actorLabel(a)}</span> {num(byActor[a] ?? 0)}건
+          <span className="text-gray-700">{actorLabel(a)}</span>
+          {actorNote(a) && <span className="text-amber-600">{actorNote(a)}</span>} {num(byActor[a] ?? 0)}건
         </span>
       ))}
+      {/* ★§4-4 — **PAO 자기 행동만** 네이버 쓰기 유무로 갈라 센다. 「연습」이라 쓰지 않는
+          이유는 `dry_run`이 세 뜻을 겸하기 때문이다(NO_API_WRITE_TITLE 참조).
+          목록에서 빠져 있으면 0이 아니라 «못 셌다»고 말한다 — 0은 사실 주장이다. */}
+      <span className="block mt-0.5" title={NO_API_WRITE_TITLE}>
+        우리 자동화가 한 것 · 네이버 쓰기 {num(byExecution.api_write)}건 ·{" "}
+        {byExecution.no_api_write === null
+          ? "쓰기 없는 기록은 목록에서 빠져 있어 세지 못했습니다"
+          : `쓰기 없음 ${num(byExecution.no_api_write)}건`}
+      </span>
     </p>
   );
 }
@@ -233,6 +261,50 @@ function FeedReapplyNote({ info }: { info: NaverModificationFeedReapply }) {
           ? ` — 같은 상품이 같은 초에 움직인 ${num(info.collapsed_into)}줄을 접었습니다(한 사건 = 한 줄).`
           : " — 접힌 줄 없음."}
     </p>
+  );
+}
+
+/** ★결과 칸(설계서 122 §4-3·§4-4). **빈 칸은 0도 「—」도 아니다** — «언제 채워지는가»를
+ *  말한다. 그리고 총이익 델타 하나만 보이고, 교정 전 RPC 자는 **펼쳐야** 보인다(둘을
+ *  나란히 두면 같은 조치가 한 자로는 개선·다른 자로는 악화로 읽혀 화면이 모순돼 보인다). */
+function OutcomeCell({ row }: { row: NaverModificationRow }) {
+  const op = row.outcome_profit;
+  const lens = outcomeLensNote(op);
+  const legacy = legacyOutcomeText(op);
+  const scored = op.state === "scored";
+  return (
+    <div className="text-xs leading-tight space-y-0.5">
+      <div
+        className={
+          scored
+            ? outcomeTone(op) === "good"
+              ? "font-medium text-emerald-700 tabular-nums"
+              : outcomeTone(op) === "bad"
+                ? "font-medium text-red-700 tabular-nums"
+                : "font-medium text-gray-700 tabular-nums"
+            : "text-gray-500"
+        }
+      >
+        {outcomeText(op)}
+      </div>
+      {/* ★자를 하나만 실으면 그 하나가 사실처럼 읽힌다 — 실측에서 이 자는 끝값에 따라
+          **부호가 갈렸다**(계정 30일 총이익 보정 +5,963,568원 ↔ 미적용 −234,545원). */}
+      {outcomeHighText(op) && (
+        <div className="text-[11px] text-gray-500 tabular-nums">{outcomeHighText(op)}</div>
+      )}
+      {signFlipNote(op) && (
+        <div className="text-[11px] text-amber-600">{signFlipNote(op)}</div>
+      )}
+      {lens && (
+        <div className="text-[11px] text-gray-400" title={outcomeLensTitle(op)}>{lens}</div>
+      )}
+      {legacy && (
+        <details>
+          <summary className="text-[11px] text-gray-400 cursor-pointer">교정 전 자 보기</summary>
+          <div className="text-[11px] text-gray-500">{legacy}</div>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -291,7 +363,14 @@ function ActorCell({ row, onCorrected }: { row: NaverModificationRow; onCorrecte
 
   return (
     <div className="space-y-0.5">
-      <Badge tone={actorTone(row.actor)}>{row.actor_label}</Badge>
+      <div className="flex items-center gap-1">
+        {/* ★라벨 경로를 하나로 모았다 — 여기만 서버 `actor_label`을 쓰고 요약·필터는 프론트
+            `actorLabel()`을 써서, 같은 주체가 화면 두 자리에서 다른 말이 될 수 있었다. */}
+        <Badge tone={actorTone(row.actor)}>{actorLabel(row.actor)}</Badge>
+        {actorNote(row.actor) && (
+          <span className="text-[11px] text-amber-600">{actorNote(row.actor)}</span>
+        )}
+      </div>
       <select
         className="block text-xs border border-gray-200 rounded px-1 py-0.5 text-gray-600"
         value={row.corrected ? row.actor : "auto"}
