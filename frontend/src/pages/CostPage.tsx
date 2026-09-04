@@ -2612,7 +2612,15 @@ export function RecipeList({
               {r.anomaly_flag &&
               r.anomaly_flag !== "pin_lost" &&
               r.anomaly_flag !== "pin_ambiguous" ? (
-                <span className="text-xs text-amber-700">⚠ {r.anomaly_flag}</span>
+                /* ★한 줄로 가둔다 — 2026-09-04에 백엔드 폭이 40 → 200자가 되면서 r45·r97이
+                   곧바로 40 → 100자가 된다(마이그레이션 복원분). 안 가두면 목록 한 줄이
+                   세 줄로 벌어진다. 전문은 `title`로 남긴다(자르되 숨기지 않는다). */
+                <span
+                  className="block truncate text-xs text-amber-700"
+                  title={r.anomaly_flag}
+                >
+                  ⚠ {r.anomaly_flag}
+                </span>
               ) : null}
             </div>
           </button>
