@@ -38,10 +38,12 @@
 
 ## 2-3. 착지
 
-- **완료 단계**: (Step 6에서 채움)
-- **멈춘 단계**: (Step 6에서 채움)
-- **좌표**: (Step 6에서 채움)
-- **리뷰 판정**: 기록물만(HANDOFF 1파일) — 적대 리뷰 생략 대상
+- **완료 단계**: 커밋 → push → PR 생성까지 완주. 머지는 CI 통과 후 상위 세션이 `scripts/safe_merge.sh`로 실행한다.
+- **멈춘 단계**: 없음
+- **재개 명령**: `gh pr view 704 --json state,mergedAt --jq '.state, .mergedAt'` (기대 MERGED / 머지 시각)
+- **좌표**: 커밋 `ac12839` (+ 이 착지 절 커밋 1개) · PR **#704** · 브랜치 `docs/abc-verify-20260904` · 머지 해시는 세션 종료 블록에 기록
+- **리뷰 판정**: ⚠️ 리뷰 생략: 기록물만 — `.claude/memory/HANDOFF_the-abc-was-never-written-down_20260904.md` 1파일(신규). 코드 0파일이라 전역 하네스의 기록물 예외에 해당한다.
+- **특기**: 이 세션은 공유 메인 폴더(iCloud)에서 워크트리를 만들지 못했다 — `git worktree add`가 두 번 다 `fatal: mmap failed: Operation canceled`로 죽었다(팩파일은 전부 materialized 상태였다). 우회로 GitHub에서 로컬 디스크로 `--depth 1` 클론해 작업했다. 같은 증상을 만나면 이 우회를 쓸 것.
 
 ---
 
