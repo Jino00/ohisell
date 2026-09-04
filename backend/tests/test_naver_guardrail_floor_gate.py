@@ -236,6 +236,27 @@ def test_conv_counts는_미지원_grain에_None을_준다(db):
     assert tgt is None      # 대상은 못 잰다
 
 
+def test_conv_counts의_미지원_grain_판정은_자백_플래그_하나로만_한다(db):
+    """★자기 변이 M9 생존이 만든 테스트 — 「grain_fallback을 무시해도 초록」이었다.
+
+    원인: 호출부가 `target_type in ("ad","adgroup","keyword")`로 미리 걸러서 그 셋은
+    fallback이 원리적으로 False였다 ⇒ **뒤 가드가 도달 불가한 죽은 코드**. 어휘를 두 곳에
+    적으면 갈라진다. 이 테스트는 «미지원 grain이 남의 그룹 숫자를 들고 오지 않는다»를
+    자백 플래그 «하나»로만 지킨다 — 플래그를 무시하면 여기가 빨개진다.
+    """
+    # 'search_term'은 adgroup 필터로 폴백해 «남의» 그룹 행을 긁는다 — 그걸 대상 표본으로
+    # 쓰면 안 된다. 같은 문자열의 adgroup 행을 일부러 심어 그 위험을 재현한다.
+    db.add(NaverAdDaily(
+        ad_date=WINDOW_FROM, campaign_id=CAMPAIGN, campaign_type="SHOPPING",
+        adgroup_id="검색어", keyword_id=None, imp=1, clk=1, cost=1,
+        conv_direct_cnt=99, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+    _, tgt = auto_operator.settlement_conv_counts(
+        db, target_type="search_term", target_id="검색어", campaign_id=CAMPAIGN, today=TODAY)
+    assert tgt is None, "미지원 grain은 «측정 불가»여야 한다 — 99건을 대상 표본으로 읽으면 안 된다"
+
+
 def test_conv_counts는_캠페인_id가_없으면_None을_준다(db):
     camp, _ = auto_operator.settlement_conv_counts(
         db, target_type="ad", target_id=AD, campaign_id=None, today=TODAY)

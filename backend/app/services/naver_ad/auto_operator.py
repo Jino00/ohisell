@@ -628,11 +628,14 @@ def settlement_conv_counts(
     """
     window_from, window_to = _settlement_window(today)
 
-    target_cnt: int | None = None
-    if target_type in ("ad", "adgroup", "keyword"):
-        agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
-        if not agg.get("grain_fallback"):
-            target_cnt = int(agg["conv_cnt"])
+    # ★판정 지점은 «하나»다 — 「어느 grain을 잴 수 있나」의 어휘를 여기 한 번 더 적지 않는다.
+    #   초판은 `target_type in ("ad","adgroup","keyword")`로 미리 거르고 그 «뒤에»
+    #   `grain_fallback`도 봤는데, 그 셋은 fallback이 원리적으로 False라 **뒤 가드가 도달
+    #   불가한 죽은 코드**였다(자기 변이 M9 생존으로 드러났다 — 가드라 부른 것이 가드가
+    #   아니었다). 어휘가 두 곳에 있으면 반드시 갈라진다(D-NAO-125 「두 상수는 항상 같이
+    #   움직여야 한다」와 같은 결) ⇒ `_settlement_agg`의 자백 플래그 하나만 믿는다.
+    agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
+    target_cnt: int | None = None if agg["grain_fallback"] else int(agg["conv_cnt"])
 
     campaign_cnt: int | None = None
     if campaign_id:
