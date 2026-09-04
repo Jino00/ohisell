@@ -23,6 +23,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import (
     NaverAgencyOp,
+    NaverAdCreativeDaily,
     NaverAdDaily,
     NaverAdgroupProduct,
     NaverCampaignSettings,
@@ -483,6 +484,25 @@ def _ad(db, adgroup_id, mall_product_id, *, ad_id, ad_bid_amt, use_group, user_l
         product_name=mall_product_id, ad_id=ad_id, ad_bid_amt=ad_bid_amt,
         use_group_bid_amt=use_group, ad_user_lock=user_lock,
     ))
+
+
+def _seed_sample_floor(db, *, ad_id, adgroup_id="grp-hot", campaign_id=CAMP):
+    """D-NAO-286 표본 하한을 넘기는 최소 시드 — **이 파일의 주제는 클레임(동시성)이지 표본이 아니다.**
+
+    하한 게이트가 생기면서 표본 없는 소재는 클레임에 닿기 «전에» 막힌다. 그건 게이트가
+    의도대로 도는 것이고, 클레임 회귀를 계속 재려면 그 앞 관문을 통과시켜 줘야 한다.
+    (전환 20건 = 하한 15 초과. 캠페인·소재 두 층 다 채운다 — 게이트가 둘 다 본다.)
+    """
+    window_from, _ = auto_operator._settlement_window(TODAY)
+    db.add(NaverAdDaily(ad_date=window_from, campaign_id=campaign_id, campaign_type="SHOPPING",
+                        adgroup_id=adgroup_id, keyword_id="", imp=500, clk=50, cost=5000,
+                        conv_direct_cnt=20, conv_indirect_cnt=0))
+    db.add(NaverAdCreativeDaily(ad_date=window_from, ad_id=ad_id, campaign_id=campaign_id,
+                                campaign_type="SHOPPING", adgroup_id=adgroup_id,
+                                imp=500, clk=50, cost=5000, rank_sum=0,
+                                conv_direct_cnt=20, conv_indirect_cnt=0,
+                                conv_direct_amt=50000, conv_indirect_amt=0))
+    db.commit()
 
 
 def _seed_hourly_shopping(db, *, adgroup_id="grp-hot"):
@@ -1296,6 +1316,7 @@ def test_target_level_claim_blocks_second_proposal_on_same_ad(db):
     """
     db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
+    _seed_sample_floor(db, ad_id="nad-1")
     first = NaverProposal(  # 다른 실행자가 이미 클레임한 상태
         proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
         adgroup_id="grp-hot", status="executing", target_bid=680,
@@ -1386,6 +1407,7 @@ def test_claim_race_across_separate_connections(tmp_path):
     setup.add(NaverAdgroupProduct(adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1",
                                   product_name="p1", ad_id="nad-1", ad_bid_amt=800,
                                   use_group_bid_amt=False))
+    _seed_sample_floor(setup, ad_id="nad-1")  # D-NAO-286 표본 하한 통과(주제는 클레임이다)
     ids = []
     for _ in range(2):
         pr = NaverProposal(

@@ -17,6 +17,7 @@ from app.services.naver_ad.bid_step_types import (
     BID_DOWN_TYPES as _BID_DOWN_TYPES,
     BID_UP_TYPES as _BID_UP_TYPES,
     CHANGE_PCT_EXEMPT_TYPES as _EXEMPT_FROM_CHANGE_PCT,
+    COLD_START_STEP_TYPES as _COLD_START_STEP_TYPES,
     EXPLORATION_STEP_TYPES as _EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES as _RANK_STEP_TYPES,
 )
@@ -93,6 +94,32 @@ _MAX_AUTO_UP_MULTIPLE = Decimal("2.0")
 # 같은 값이어야 한다(그 모듈은 이 모듈을 import 하므로 역방향 import를 피해 값으로 고정 —
 # 정합은 테스트로 지킨다: test_cumulative_cap_types_match_ad_up_open_types).
 _CUMULATIVE_CAP_TYPES: frozenset[str] = frozenset({"bid_up"})
+# ★D-NAO-286 — 표본 하한 게이트(북극성 M2 S2-ⓑ · `ref 65` §6 S2 목표 ⓑ의 집행).
+# 값 15는 **`ref 33` [6] 원문(최근 30일 15전환 ≈ 주 15건, tROAS 활성화 최소)**이고 `ref 65` §4
+# 판정표가 이미 게이트 상수로 지목한 수다 — 이 세션이 발명한 숫자가 아니다.
+#
+# ★왜 두 개인가: `ref 65` 원문은 **캠페인** grain만 적었는데, 2026-09-04 실측으로 그것만으론
+#   막히지 않는 것이 확인됐다 — PAO가 실제로 도는 두 캠페인이 주 174.1·47.4전환으로 **둘 다
+#   통과**한다. 정작 사고(2026-09-01, Jino가 `auto_operate`를 끈 사건)는 **소재 grain**에서
+#   났다: 이틀·14클릭 표본으로 입찰을 +49% 올렸다. ⇒ Jino 결정(2026-09-04) 「캠페인 + 대상그룹
+#   둘 다, 양방향 차단」. 계약 `docs/contracts/CONTRACT_sample_floor_gate.md`.
+#
+# ★왜 «양방향»인가: 증액만 막으면 하향은 계속 돌아 브레이크만 남는다 — 그게 D-NAO-85 실측
+#   (ROAS +7% · 매출 −52%)이 나온 바로 그 모양이고 북극성 §7이 매번 검사하라고 못 박은 축이다.
+#   이 게이트의 문장은 「표본이 없으면 **아무 판단도 하지 않는다**」이지 「올리지 마라」가 아니다.
+_MIN_WEEKLY_CONV_CAMPAIGN = 15
+_MIN_WEEKLY_CONV_TARGET = 15
+# ★게이트 대상 = **성과를 «판단»하는 레인만**(Jino 결정 2026-09-04 「탐색·콜드는 면제」).
+#   탐색(bid_up_explore)·콜드스타트(bid_up_cold)는 «표본이 없는 유닛에 표본을 만들러 가는»
+#   레인이라 전환 하한을 걸면 **입찰→노출→클릭→전환 길이 막혀 하한을 영원히 못 넘는다**
+#   (닫힌 고리). ★이 면제는 이 저장소의 선례와 같다 — 이익하한 게이트 자리에 이미
+#   *「표본 없는 그룹에 표본-기반 이익하한 강제 = 탐색 원천 봉쇄」*(PLAN §1 가드6)라 적혀 있다.
+#   그 둘은 자체 상한이 따로 있다: 경제성 ceiling(exploration_ceiling·cold_ceiling) · 한 스텝
+#   30% · 쿨다운 2h. 그리고 2026-09-01 사고는 explore가 아니라 `auto_op_hr`의 `bid_up`이었다.
+_FLOOR_GATED_TYPES: frozenset[str] = (
+    _BID_TYPES - _EXPLORATION_STEP_TYPES - _COLD_START_STEP_TYPES
+)
+
 # 외부변경 확인 판정값(harness._EXT_* 와 같은 값 — 역방향 import 회피, 정합은 테스트로 고정).
 _EXT_CHECK_OURS = "ours"
 _EXT_CHECK_EXTERNAL = "external"
@@ -118,6 +145,61 @@ def _param(context: dict, key: str, code_default):
         return code_default
     val = params.get(key)
     return code_default if val is None else val
+
+
+def _check_data_floor(context: dict, proposal_type: str) -> str | None:
+    """D-NAO-286 표본 하한 — 정착창 주간 전환이 하한 미달이면 자동 입찰 변경을 **양방향 모두**
+    차단(사유 문자열), 통과면 None.
+
+    적용 경계 넷(계약 §3 금지선 그대로):
+      ⓪ `_FLOOR_GATED_TYPES`(성과 판단 레인 5종)가 아니면 적용 안 함 — 탐색·콜드는 면제다
+         (위 집합 주석의 «닫힌 고리» 근거).
+      ① `auto_exec`가 아니면 적용 안 함 — **사람 승인(console) 경로는 종전 그대로**다.
+         사람은 표본이 얇은 것을 알고도 누를 수 있고, 이 게이트가 막으려는 것은 무인 판정이다.
+      ② `floor_exempt`면 적용 안 함 — **되돌리기·출혈 정지 레인**이다(손실 고삐 하향·탐침
+         되돌림). 표본 하한이 막으려는 것은 「표본 없이 «새로» 판단해서 값을 움직이는 것」이지
+         「이전 판단을 취소하는 것」이 아니다. 막으면 «올려놓고 못 내리는» 상태가 된다.
+      ③ 두 원료 키가 **하나도 없으면** 통과 — 컨텍스트를 안 채우는 기존 호출부·테스트의 행위를
+         바꾸지 않는다(`_param` fail-to-current 관례와 같은 결).
+
+    ★그러나 «키가 있는데 값이 None»이면 **차단**한다. 「측정 안 함」과 「측정했는데 모름」은
+      다르다 — 후자를 통과로 읽는 것이 이 저장소가 반복해 밟은 「모름=괜찮음」이다(교훈 #123).
+    """
+    if proposal_type not in _FLOOR_GATED_TYPES:
+        return None
+    if not context.get("auto_exec"):
+        return None
+    if context.get("floor_exempt"):
+        return None
+    if "campaign_weekly_conv" not in context and "target_weekly_conv" not in context:
+        return None
+
+    campaign_floor = _param(context, "min_weekly_conv_campaign", _MIN_WEEKLY_CONV_CAMPAIGN)
+    target_floor = _param(context, "min_weekly_conv_target", _MIN_WEEKLY_CONV_TARGET)
+    campaign_conv = context.get("campaign_weekly_conv")
+    target_conv = context.get("target_weekly_conv")
+
+    if campaign_conv is None:
+        return (
+            "표본 하한 — 캠페인 정착창 전환 «측정 불가»(D-NAO-286). "
+            "모름은 통과가 아니다 — 올리지도 내리지도 않는다"
+        )
+    if target_conv is None:
+        return (
+            "표본 하한 — 대상 정착창 전환 «측정 불가»(D-NAO-286). "
+            "모름은 통과가 아니다 — 올리지도 내리지도 않는다"
+        )
+    if campaign_conv < campaign_floor:
+        return (
+            f"표본 하한 — 캠페인 정착창 전환 {campaign_conv}건 < 하한 {campaign_floor}건"
+            f"(D-NAO-286, ref 33 [6] 주 15전환). 표본이 없으면 올리지도 내리지도 않는다"
+        )
+    if target_conv < target_floor:
+        return (
+            f"표본 하한 — 대상 정착창 전환 {target_conv}건 < 하한 {target_floor}건"
+            f"(D-NAO-286, ref 33 [6] 주 15전환). 표본이 없으면 올리지도 내리지도 않는다"
+        )
+    return None
 
 
 def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
@@ -153,6 +235,11 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
         return reason
 
     if proposal_type in _BID_TYPES:
+        # D-NAO-286: 표본 하한을 **입찰 검사보다 먼저** 본다 — 「표본이 없다」는 「값이 나쁘다」의
+        # 앞선 사유이고, 뒤에 두면 클램프·방향 사유가 먼저 떠서 진짜 이유가 로그에서 가려진다.
+        reason = _check_data_floor(context, proposal_type)
+        if reason:
+            return reason
         return _check_bid(proposal, context, proposal_type)
     if proposal_type in _BUDGET_TYPES:
         return _check_budget(proposal, context, proposal_type)
