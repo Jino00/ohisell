@@ -490,7 +490,9 @@ _NOT_OURS_OUTCOME: dict = {
     #   화면이 undefined를 falsy로 삼켜 조용히 다르게 그린다(적대 리뷰 1R P2-2).
     "delta_high": None, "scored_by": None, "sign_flips": False,
     "scored_from": None, "overdue": False,
-    "note": "채점 대상 아님 — 우리가 한 조치가 아닙니다",
+    # ★문구는 한 벌만 둔다 — 두 벌이면 한쪽만 고쳐져 같은 행이 원천에 따라 다른 말을 한다
+    #   (이 슬라이스의 P1-1이 정확히 그 병이었다).
+    "note": proposal_scoreboard._PROFIT_STATE_NOTE["not_ours"],
     "lens": None, "window": None, "legacy": None,
 }
 
