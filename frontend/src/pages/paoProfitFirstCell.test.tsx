@@ -43,6 +43,8 @@ const DAY: NaverPerformanceDay = {
     gross_profit_known_campaigns: 1,
     gross_profit_unknown_campaigns: 1,
     gross_profit_basis: "오늘 추정",
+    gross_profit_lens_note:
+      "보정 전 값입니다 — 다른 화면의 총이익은 보정계수를 적용해 값이 다를 수 있습니다.",
     spend_today: 46300,
     campaigns_active_today: 2,
     campaigns_total: 2,
@@ -86,7 +88,10 @@ describe("총이익이 첫 칸이다", () => {
     const sub = screen.getByText(/오늘 추정 매출 기준/);
     expect(sub.textContent).toContain("광고 1개");
     // ★뺀 것을 숨기지 않는다 — 모르는 캠페인을 0으로 셌으면 이 문장이 필요 없었다.
-    expect(sub.textContent).toContain("모름 1개는 뺐습니다");
+    expect(sub.textContent).toContain("뺀 광고 1개(집행 없음·BEP 모름)");
+    // ★이 값이 **보정 전**이라는 자백이 같은 줄에 있다 — 없으면 다른 화면의 총이익과
+    //   값이 다른데 「같은 값」으로 읽힌다(적대 리뷰 P1-2).
+    expect(sub.textContent).toContain("보정 전 값입니다");
   });
 
   it("③ 하나도 모르면 0이 아니라 「모름」이라 말한다", async () => {
@@ -100,6 +105,22 @@ describe("총이익이 첫 칸이다", () => {
     } finally {
       DAY.totals.gross_profit_today = -41300;
       DAY.totals.gross_profit_known_campaigns = 1;
+    }
+  });
+
+  it("④ 셀 광고가 아예 없으면 「0개 광고 전부…」라 하지 않는다", async () => {
+    // ★적대 리뷰 P2-1 — unknown=0인데 값이 없으면 «모르는» 게 아니라 «셀 게 없는» 것이다.
+    DAY.totals.gross_profit_today = null;
+    DAY.totals.gross_profit_known_campaigns = 0;
+    DAY.totals.gross_profit_unknown_campaigns = 0;
+    try {
+      await renderScreen();
+      expect(await screen.findByText("집계할 광고가 없습니다.")).toBeTruthy();
+      expect(screen.queryByText(/0개 광고 전부/)).toBeNull();
+    } finally {
+      DAY.totals.gross_profit_today = -41300;
+      DAY.totals.gross_profit_known_campaigns = 1;
+      DAY.totals.gross_profit_unknown_campaigns = 1;
     }
   });
 });

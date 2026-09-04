@@ -1230,15 +1230,24 @@ export default function NaverAdPerformance() {
                   : won(data.totals.gross_profit_today)
               }
               isEmpty={data.totals.gross_profit_today === null}
-              reason={`${num(data.totals.gross_profit_unknown_campaigns)}개 광고 전부 BEP나 매출을 몰라 총이익을 계산할 수 없습니다.`}
+              reason={
+                // ★모르는 광고가 0개인데 값이 없으면 셀 광고 자체가 없는 것이다 —
+                //   「0개 광고 전부…」는 말이 안 된다(적대 리뷰 P2-1).
+                data.totals.gross_profit_unknown_campaigns === 0
+                  ? "집계할 광고가 없습니다."
+                  : `${num(data.totals.gross_profit_unknown_campaigns)}개 광고 전부 오늘 집행이 없거나 BEP·매출을 몰라 총이익을 계산할 수 없습니다.`
+              }
               tone={data.totals.gross_profit_today === null ? "idle" : "neutral"}
               sub={
                 // ★몇 개 위에서 잰 합인지, 그리고 **어느 매출** 위에서 잰 값인지 같이 말한다.
                 //   모르는 캠페인은 합계에서 뺐다 — 0으로 셌으면 이 줄이 필요 없었을 것이다.
                 `${data.totals.gross_profit_basis} 매출 기준 · 광고 ${num(data.totals.gross_profit_known_campaigns)}개` +
                 (data.totals.gross_profit_unknown_campaigns > 0
-                  ? ` · 모름 ${num(data.totals.gross_profit_unknown_campaigns)}개는 뺐습니다`
-                  : "")
+                  ? ` · 뺀 광고 ${num(data.totals.gross_profit_unknown_campaigns)}개(집행 없음·BEP 모름)`
+                  : "") +
+                // ★자 자백 — 이 값이 보정 전이라는 사실을 화면이 말한다. 안 말하면 다른
+                //   화면의 총이익과 다른데 «같은 값»으로 읽힌다(적대 리뷰 P1-2).
+                ` · ${data.totals.gross_profit_lens_note}`
               }
             />
             <Stat label={`${dayWord} 쓴 광고비`} value={won(data.totals.spend_today)}

@@ -5307,6 +5307,9 @@ export interface NaverPerformanceToday {
     /** 이 총이익이 **어느 매출 위에서** 잰 값인가 — 「오늘 추정」/「확정 중」/「확정」.
      *  오늘치 매출은 상한 프록시라 총이익이 낙관 쪽으로 분다. */
     gross_profit_basis: string;
+    /** ★이 값이 **보정 전**이라는 자백. 같은 저장소의 다른 총이익은 보정계수를 적용하므로
+     *  값이 갈리고, 그 자는 **부호까지 바꾼 전례**가 있다(ref 93 §1 행 9). */
+    gross_profit_lens_note: string;
     spend_today: number;
     campaigns_active_today: number;
     campaigns_total: number;
