@@ -67,6 +67,13 @@ from app.services.naver_ad.bid_step_types import (
     is_loss_defense,
 )
 
+# ★D-NAO-286 적대 리뷰 P2-7 — `[[loss_defense=1]]` 마커가 «유효한» 승인원.
+# 사람 발의(`POST /proposals`)는 `expected_effect`를 그대로 받고 콘솔 표시가 마커를 지우므로,
+# 마커를 아무 승인원에서나 믿으면 위임 자동승인(`delegation`)을 타고 하한을 우회할 수 있다.
+# 엔진 레인이 스스로 심은 것만 믿는다. 문자열은 auto_operator 상수와 같아야 하고 정합은
+# 테스트로 고정한다(역방향 import 회피 — 이 모듈이 auto_operator를 지연 import 하는 관례).
+_FLOOR_EXEMPT_MARKER_SOURCES: frozenset[str] = frozenset({"auto_op", "auto_op_hr"})
+
 # D-NAO-129: 소재(ad) 실쓰기 경계에서 **승인원 무관으로 개방**되는 UP 타입(= DOWN 대칭).
 # ★불변식: 이 집합은 변경폭 상한을 면제받는 타입을 절대 포함하지 않는다. 쌍방향 (승인원⟺타입)
 #   잠금의 존재 이유가 "면제 타입이 아무 승인원으로 발사되는 것"을 막는 것이기 때문이다
@@ -912,21 +919,43 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         #   값 None = «측정 불가»(게이트가 차단으로 읽는다) / 0 = «측정했고 0건».
         "campaign_weekly_conv": None, "target_weekly_conv": None,
         # ★D-NAO-286 표본 하한 «면제» 레인 — 표본 하한이 막으려는 것은 「표본 없이 **새로**
-        #   판단해서 값을 움직이는 것」이다. 아래 둘은 새 판단이 아니라서 면제한다:
-        #     ⓐ 손실 고삐(DL RL3) — 출혈 정지. 막으면 표본 없는 유닛이 새는 걸 못 멈춘다.
-        #     ⓑ 탐침 되돌림(revert_op) — 이전 판단의 **취소**(원래 입찰가로 복귀).
+        #   판단해서 값을 움직이는 것」이지 「이전 판단의 취소」나 「출혈 정지」가 아니다.
+        #   계약 §3이 **이름으로** 못 박은 셋과 그 좌표(적대 리뷰 1R P1-1이 잡은 자리):
+        #     ⓐ **DL 일일 손실 고삐** — 일 레인(`auto_op`)의 `bid_down`. `run_daily_lane`이
+        #        「bid_down: 조건 없음(무조건 승인, 안전 방향)」으로 통과시키는 그 하향이다.
+        #        ★초판은 이걸 **빠뜨렸다.** 마커를 붙인 곳은 RL3(시간당 «순위» 고삐, `is_leash`)
+        #        이었고, 주석이 「손실 고삐(DL RL3)」로 **두 이름을 뭉개** 놔서 누락이 안 보였다.
+        #        북극성 L55·L210이 `RL1~5 순위 고삐`와 `DL 일일 손실 고삐`를 **따로** 센다.
+        #     ⓑ **CD 출혈밸브·탐침 되돌림** — `revert_op`(`probe_revert`가 둘 다 이 승인원을 쓴다).
+        #     ⓒ **킬스위치** — 이 게이트를 아예 안 탄다(harness가 `guardrail_gate.check` «밖»에서
+        #        `_auto_operate_now`로 따로 막는다). 그래서 여기 목록에 없는 것이 맞다.
+        #   그리고 RL3 순위 고삐도 마커로 면제한다(출혈 정지 방향은 같다).
+        #
+        # ★★승인원 화이트리스트로 판정한다 — 마커«만» 믿으면 새는 경로가 있다(적대 리뷰 P2-7):
+        #   `POST /proposals`가 `expected_effect`를 그대로 받고 콘솔 표시는 마커를 지워 버리므로,
+        #   사람이 `[[loss_defense=1]]`을 심은 제안이 나중에 위임 자동승인(`delegation`)을 타면
+        #   무인 경로에서 하한을 우회한다. 마커는 **엔진 레인이 발의한 제안에서만** 유효하다.
         #   ★이 계산은 DB를 타지 않으므로 아래 조회 try «밖»에 둔다 — 조회가 실패해도 안전
-        #     경로는 계속 열려 있어야 한다(조회 실패로 되돌림이 막히면 그게 더 나쁘다).
+        #     경로는 계속 열려 있어야 한다(조회 실패로 되돌림·손실 하향이 막히면 그게 더 나쁘다).
         "floor_exempt": False,
     }
     try:
         from app.services.naver_ad import auto_operator as _auto_operator_floor
 
-        context["floor_exempt"] = bool(
-            is_loss_defense(getattr(proposal, "expected_effect", None))
-            or getattr(proposal, "approval_source", None)
-            == _auto_operator_floor.APPROVAL_SOURCE_REVERT
+        _src = getattr(proposal, "approval_source", None)
+        _ptype = getattr(proposal, "proposal_type", None)
+        # ⓐ DL 일일 손실 고삐 — 일 레인의 무조건 승인 하향
+        _is_daily_loss_down = (
+            _src == _auto_operator_floor.APPROVAL_SOURCE_DAILY and _ptype in BID_DOWN_TYPES
         )
+        # ⓑ CD 출혈밸브 · 탐침 되돌림
+        _is_revert = _src == _auto_operator_floor.APPROVAL_SOURCE_REVERT
+        # RL3 순위 고삐 — 마커는 «엔진 레인이 발의한 제안»에서만 유효(P2-7 누수 차단)
+        _is_engine_lane = _src in _FLOOR_EXEMPT_MARKER_SOURCES
+        _has_marker = _is_engine_lane and is_loss_defense(
+            getattr(proposal, "expected_effect", None)
+        )
+        context["floor_exempt"] = bool(_is_daily_loss_down or _is_revert or _has_marker)
     except Exception as e:  # noqa: BLE001 — 면제 판별 실패는 False 유지(게이트 적용 = 보수)
         log.warning(
             "naver_execution_harness: 표본 하한 면제 판별 실패(게이트 적용 유지) "
@@ -934,23 +963,27 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         )
     # ★D-NAO-286 원료 채우기 — 지연 import(순환 회피, 위 킬스위치 가드와 같은 관용구).
     #   조회 실패는 None 유지 = 차단(fail-closed) — 「모름」을 「괜찮음」으로 읽지 않는다.
-    try:
-        from app.services.naver_ad import auto_operator as _auto_operator_floor
+    #   ★게이트 대상 유형에만 던진다(적대 리뷰 P2-6): 예산·lock·`negative_keyword`(search_term
+    #     grain)는 게이트가 ⓪에서 이미 통과시키는데, 조회는 돌아서 미지원 grain 경고 로그를
+    #     상시로 흘렸다. 값을 안 쓰는 조회는 하지 않는다.
+    if proposal.proposal_type in guardrail_gate._FLOOR_GATED_TYPES:
+        try:
+            from app.services.naver_ad import auto_operator as _auto_operator_floor
 
-        campaign_conv, target_conv = _auto_operator_floor.settlement_conv_counts(
-            db,
-            target_type=proposal.target_type,
-            target_id=proposal.target_id,
-            campaign_id=proposal.campaign_id,
-            today=now.date(),
-        )
-        context["campaign_weekly_conv"] = campaign_conv
-        context["target_weekly_conv"] = target_conv
-    except Exception as e:  # noqa: BLE001 — 실패는 None 유지(표본 하한이 차단으로 읽는다)
-        log.warning(
-            "naver_execution_harness: 표본 하한 원료 조회 실패(fail-closed 차단 유지) "
-            "proposal_id=%s: %s", getattr(proposal, "id", None), e,
-        )
+            campaign_conv, target_conv = _auto_operator_floor.settlement_conv_counts(
+                db,
+                target_type=proposal.target_type,
+                target_id=proposal.target_id,
+                campaign_id=proposal.campaign_id,
+                today=now.date(),
+            )
+            context["campaign_weekly_conv"] = campaign_conv
+            context["target_weekly_conv"] = target_conv
+        except Exception as e:  # noqa: BLE001 — 실패는 None 유지(하한이 차단으로 읽는다)
+            log.warning(
+                "naver_execution_harness: 표본 하한 원료 조회 실패(fail-closed 차단 유지) "
+                "proposal_id=%s: %s", getattr(proposal, "id", None), e,
+            )
     # VT4 codex 1R P1-1: guardrail_gate가 campaign_type 인지형 입찰 하한(SHOPPING 50·그 외 70)을
     # 적용하려면 context에 campaign_type이 실려야 한다 — proposal.campaign_id의 campaign 엔티티
     # 행에서 조회(부재/조회 실패 시 None → guardrail_gate가 보수 70 하한 유지, fail-closed). 세

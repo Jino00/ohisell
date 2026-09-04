@@ -306,3 +306,167 @@ def test_성과_판단_레인은_전부_막힌다(proposal_type):
     """면제가 «면제 아닌 것»까지 새지 않는지 — 대상 5종 전수."""
     reason = gate._check_data_floor(_ctx(target_weekly_conv=0), proposal_type)
     assert reason is not None and reason.startswith("표본 하한")
+
+
+# ══════════════ H. 적대 리뷰 1R 상환 — 면제 레인과 «행위» 표면 ══════════════
+# P1-1: 계약 §3이 이름으로 못 박은 셋 중 **DL 일일 손실 고삐**가 안 면제돼 있었다.
+#       마커를 붙인 곳은 RL3(시간당 «순위» 고삐)였고, 주석이 「손실 고삐(DL RL3)」로 두 이름을
+#       뭉개 놔서 누락이 안 보였다. 아래 테스트들이 그 자리를 잠근다.
+
+from unittest.mock import patch  # noqa: E402
+
+from app.models import NaverProposal  # noqa: E402
+from app.services.naver_ad import naver_execution_harness as harness  # noqa: E402
+
+
+def _thin_sample(db, *, ad_id=AD):
+    """정착창 표본이 하한 미만인 상태(캠페인 2건·대상 2건)."""
+    db.add(NaverAdDaily(
+        ad_date=WINDOW_FROM, campaign_id=CAMPAIGN, campaign_type="SHOPPING",
+        adgroup_id=ADGROUP, keyword_id=None, imp=50, clk=5, cost=5000,
+        conv_direct_cnt=2, conv_indirect_cnt=0, conv_direct_amt=1000, conv_indirect_amt=0,
+    ))
+    db.add(NaverAdCreativeDaily(
+        ad_date=WINDOW_FROM, ad_id=ad_id, campaign_id=CAMPAIGN, campaign_type="SHOPPING",
+        adgroup_id=ADGROUP, imp=50, clk=5, cost=5000, rank_sum=0,
+        conv_direct_cnt=2, conv_indirect_cnt=0, conv_direct_amt=1000, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+
+def _proposal(db, *, proposal_type, approval_source, expected_effect=None, target_bid=1000):
+    p = NaverProposal(
+        proposal_type=proposal_type, target_type="ad", target_id=AD, campaign_id=CAMPAIGN,
+        adgroup_id=ADGROUP, status="approved", target_bid=target_bid,
+        approval_source=approval_source, expected_effect=expected_effect,
+    )
+    db.add(p)
+    db.commit()
+    return p
+
+
+def _ctx_via_harness(db, p):
+    with patch.object(harness.naver_sa_writer, "get_ad_bid", return_value=1200), \
+         patch.object(harness.naver_sa_writer, "_get_adgroup", side_effect=RuntimeError("no net")):
+        return harness._build_guardrail_context(db, p, NOW)
+
+
+def test_P2_1_표면은_행위로_잠근다__얇은_표본_자동증액이_실제로_차단된다(db):
+    """★적대 리뷰 M16 생존이 만든 테스트.
+
+    종전엔 배선을 지워도 죽는 것이 **컨텍스트 dict 동일성 단언 2개**뿐이었다. 그 기대치는
+    「키가 늘면 갱신한다」가 이 저장소의 관례라(이 PR 자신이 그렇게 했다) 미래 유지보수자가
+    배선을 지우고 기대치를 «관례대로» 고치면 전건 초록이 된다.
+    ⇒ 여기서는 **판정 자체**를 잰다: harness가 만든 컨텍스트로 `gate.check`를 태워
+      「얇은 표본 자동 증액이 차단된다」를 확인한다. 배선이 없으면 이 줄이 빨개진다.
+    """
+    _thin_sample(db)
+    p = _proposal(db, proposal_type="bid_up", approval_source="auto_op_hr")
+    ctx = _ctx_via_harness(db, p)
+    reason = gate.check(_bid("bid_up", 1300), ctx, now=NOW)
+    assert reason is not None and reason.startswith("표본 하한"), reason
+
+
+def test_P1_DL_일일손실고삐_하향은_면제된다(db):
+    """★적대 리뷰 1R P1-1 — 계약 §3이 **이름으로** 못 박은 면제 대상.
+
+    일 레인(`auto_op`)의 `bid_down`은 「조건 없음(무조건 승인, 안전 방향)」으로 나가는
+    **출혈 정지** 하향이다. 막으면 표본 없는 유닛이 새는 걸 자동으로 못 멈춘다.
+    초판은 RL3 마커만 면제해 이 자리가 비어 있었다.
+    """
+    _thin_sample(db)
+    p = _proposal(db, proposal_type="bid_down", approval_source="auto_op", target_bid=1050)
+    ctx = _ctx_via_harness(db, p)
+    assert ctx["floor_exempt"] is True
+    # ±15% 클램프 안(1200 → 1050 = −12.5%)이라 표본 하한만 남는데, 그게 면제된다.
+    assert gate.check(_bid("bid_down", 1050), ctx, now=NOW) is None
+
+
+def test_시간당_밴드_하향은_면제가_아니다(db):
+    """면제가 «면제 아닌 것»으로 새지 않는다 — 시간당 레인의 성과 하향은 새 판단이라 게이트를 탄다."""
+    _thin_sample(db)
+    p = _proposal(db, proposal_type="bid_down", approval_source="auto_op_hr", target_bid=1050)
+    ctx = _ctx_via_harness(db, p)
+    assert ctx["floor_exempt"] is False
+    assert (gate.check(_bid("bid_down", 1050), ctx, now=NOW) or "").startswith("표본 하한")
+
+
+def test_RL3_순위고삐_마커는_엔진_레인에서만_믿는다(db):
+    """★적대 리뷰 P2-7 — 마커 누수 차단.
+
+    `POST /proposals`가 `expected_effect`를 그대로 받고 콘솔 표시는 마커를 지운다. 사람이
+    심은 마커를 아무 승인원에서나 믿으면, 그 제안이 위임 자동승인(`delegation`)을 타는 순간
+    무인 경로에서 하한을 우회한다. 마커는 엔진 레인이 스스로 심은 것만 유효하다.
+    """
+    marked = bid_step_types.encode_loss_defense("순위 고삐 본문")
+    _thin_sample(db)
+    engine = _proposal(db, proposal_type="bid_down", approval_source="auto_op_hr",
+                       expected_effect=marked, target_bid=800)
+    assert _ctx_via_harness(db, engine)["floor_exempt"] is True
+
+    leaked = _proposal(db, proposal_type="bid_down", approval_source="delegation",
+                       expected_effect=marked, target_bid=1050)
+    ctx = _ctx_via_harness(db, leaked)
+    assert ctx["floor_exempt"] is False, "사람이 심은 마커가 위임 자동승인으로 새면 안 된다"
+    assert (gate.check(_bid("bid_down", 1050), ctx, now=NOW) or "").startswith("표본 하한")
+
+
+def test_탐침_되돌림은_면제된다(db):
+    """CD 출혈밸브·탐침 되돌림은 `revert_op` 하나로 덮인다(계약 §3 ⓑ)."""
+    _thin_sample(db)
+    p = _proposal(db, proposal_type="bid_down", approval_source="revert_op", target_bid=800)
+    assert _ctx_via_harness(db, p)["floor_exempt"] is True
+
+
+def test_마커_유효_승인원_집합이_auto_operator_상수와_같다():
+    """역방향 import를 피하려고 문자열로 고정한 값 — 갈라지면 여기가 빨개진다."""
+    assert harness._FLOOR_EXEMPT_MARKER_SOURCES == frozenset({
+        auto_operator.APPROVAL_SOURCE_DAILY, auto_operator.APPROVAL_SOURCE_HOURLY,
+    })
+
+
+def test_P2_6_게이트_대상이_아닌_유형엔_조회를_안_던진다(db):
+    """예산·lock·검색어 제안은 게이트가 ⓪에서 통과시키는데 조회는 돌아 경고 로그를 흘렸다."""
+    _thin_sample(db)
+    p = NaverProposal(
+        proposal_type="pause", target_type="adgroup", target_id=ADGROUP, campaign_id=CAMPAIGN,
+        status="approved", target_lock=True, approval_source="auto_op",
+    )
+    db.add(p); db.commit()
+    ctx = _ctx_via_harness(db, p)
+    assert ctx["campaign_weekly_conv"] is None and ctx["target_weekly_conv"] is None
+
+
+# ── P2-2·P2-3·P2-4: 순수 판정기의 생존 변이 3종을 잠근다 ──
+
+def test_P2_2_한_키만_있어도_검사한다(db):
+    """키 부재 검사는 «둘 다 없을 때»만 통과다 — `and`를 `or`로 바꾸면 한 키만 있을 때 샌다."""
+    ctx = _ctx(target_weekly_conv=2)
+    del ctx["campaign_weekly_conv"]
+    assert (gate._check_data_floor(ctx, "bid_up") or "").startswith("표본 하한")
+    ctx2 = _ctx(campaign_weekly_conv=2)
+    del ctx2["target_weekly_conv"]
+    assert (gate._check_data_floor(ctx2, "bid_up") or "").startswith("표본 하한")
+
+
+def test_P2_3_두_SPECS_키는_따로_작동한다():
+    """★키 스왑 변이가 생존했다 — 기존 테스트가 두 값을 «같이» 놓아 구분 불능이었다.
+
+    Jino가 화면에서 한 키만 내리면 그 키만 움직여야 한다. 안 그러면 승인 카드가 거짓말한다.
+    """
+    only_campaign_low = {"min_weekly_conv_campaign": 5, "min_weekly_conv_target": 15}
+    ctx = _ctx(campaign_weekly_conv=9, target_weekly_conv=99, guardrail_params=only_campaign_low)
+    assert gate._check_data_floor(ctx, "bid_up") is None      # 캠페인 하한만 5로 내려 9 통과
+
+    ctx2 = _ctx(campaign_weekly_conv=9, target_weekly_conv=99,
+                guardrail_params={"min_weekly_conv_campaign": 15, "min_weekly_conv_target": 5})
+    r = gate._check_data_floor(ctx2, "bid_up")
+    assert r is not None and "캠페인" in r                     # 대상 하한만 내리면 캠페인이 막는다
+
+
+def test_P2_4_표본_하한은_입찰_검사보다_먼저다():
+    """순서가 계약이다 — 뒤로 밀면 클램프·방향 사유가 먼저 떠서 진짜 이유가 로그에서 가려진다
+    (합격기준 ⓓ가 「사유에 실수가 박힌다」를 요구하는 근거)."""
+    ctx = _ctx(target_weekly_conv=2, current_bid=190)
+    reason = gate.check(_bid("bid_up", 99999), ctx, now=NOW)  # 입찰도 «범위 밖»으로 틀렸다
+    assert reason is not None and reason.startswith("표본 하한"), reason
