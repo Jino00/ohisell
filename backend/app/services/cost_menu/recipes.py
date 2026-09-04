@@ -283,6 +283,29 @@ def _note_dict(recipe: CostRecipe) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _excel_total_inc_vat(recipe: CostRecipe, saved: dict):
+    """레시피의 **엑셀 대조값** — 픽된 원가표 항목이 있으면 «그 항목의 지금 값»이 정본이다.
+
+    ★왜 저장된 note를 못 쓰나 (2026-09-03 실측): `pick_cost_table_item`이 픽 «시점»의
+    `item.total_inc_vat`를 note에 얼려 넣는다. 그런데 원가표 파서는 2026-09-01에 고쳐졌다 —
+    수입 섹션에서 D열 「제품원가(CNY)」가 아니라 I열 「상품원가」를 읽도록(`recipe_parser`
+    §총액 열 지도). 08-27에 픽된 레시피는 그 «외화 단가»를 note에 든 채로 남았고, 화면 한
+    자리에서 같은 항목이 두 값으로 섰다: 매칭 근거 줄 **12.2원** vs 고른 항목 줄 **3,102.7원**.
+    보드의 `excel_gap_pct`도 그 얼린 값으로 나눠 「격차 5,000원대」를 만들었다.
+
+    ★얼린 값을 고쳐 «쓰지» 않고 읽을 때 «파생»한다 — 정본은 엑셀이고(원가표 재업로드가
+    항목 값을 바꾼다) 얼린 사본은 재업로드를 못 따라간다. 파생이면 저절로 따라간다.
+
+    ★픽된 항목의 값이 `None`이면 `None`을 돌려준다 — 엑셀이 그 행의 상품원가를 아직 안
+    채운 것이고(예: 「오타오_갤럭시 투명 강화유리」), 그건 「엑셀 총액 없음」이 참이다.
+    옛 외화값으로 메우면 그 자리가 다시 거짓말한다(§2-7: 모르는 것을 지어내지 않는다).
+    """
+
+    if recipe.picked_item is not None:
+        return _d(recipe.picked_item.total_inc_vat)
+    return saved.get("excel_total_inc_vat")
+
+
 def import_drafts(
     db: Session,
     cost_rows: Optional[Iterable[Sequence[Any]]] = None,
@@ -1349,8 +1372,22 @@ def confirm_cost_table_absent(
     recipe.absent_note = (note_text or "").strip() or None
 
     note = _note_dict(recipe)
-    note["match_reason"] = "원가표에 없음 — 사람이 확인함" + (
-        f" ({recipe.absent_note})" if recipe.absent_note else ""
+    note.update(
+        {
+            "match_reason": "원가표에 없음 — 사람이 확인함"
+            + (f" ({recipe.absent_note})" if recipe.absent_note else ""),
+            # ★「없음」을 확인했으면 **항목의 흔적을 함께 거둔다** — `unpick_cost_table_item`이
+            #   이미 하는 것과 같은 처분이고, 여기만 짝이 없었다(적대 리뷰 1R P1).
+            #
+            #   안 거두면 `state=absent`인데 화면은 「원가표 «오타오_투명 강화유리» ·
+            #   제품원가(+VAT) 12.2원」을 계속 말한다 — 방금 「원가표에 없다」고 판정한
+            #   그 자리에서 항목 이름과 얼린 값을 동시에 말하는, 서로 모순인 화면이다.
+            #   그리고 `_excel_total_inc_vat`의 폴백이 그 죽은 값을 되살려 보드의
+            #   `excel_gap_pct`까지 옛 값으로 나누게 된다.
+            "cost_table_item": None,
+            "cost_table_section": None,
+            "excel_total_inc_vat": None,
+        }
     )
     recipe.note = json.dumps(note, ensure_ascii=False)
     # ★커밋은 **라우터가 한다** (적대 리뷰 1R P2-2 채택) — `approve_recipe`·`adopt_excel_prices`와
@@ -1792,7 +1829,14 @@ def recipe_payload(db: Session, recipe: CostRecipe, *, with_links: bool = False)
         or form_source_for(recipe.form_factor),
         "anomaly_flag": recipe.anomaly_flag,
         "approved_at": recipe.approved_at.isoformat() if recipe.approved_at else None,
-        "match": note,
+        # ★대조값은 저장된 사본이 아니라 픽된 항목의 «지금 값»에서 파생한다
+        #   (`_excel_total_inc_vat`). 저장된 note는 그대로 두고 **읽을 때만** 덮는다 —
+        #   note는 픽 시점의 기록이고, 이 칸은 지금 엑셀이 뭐라 하는지를 말해야 한다.
+        "match": (
+            {**note, "excel_total_inc_vat": _excel_total_inc_vat(recipe, note)}
+            if isinstance(note, dict)
+            else note
+        ),
         "line_count": len(recipe.lines),
         # ── 개정 4 (D-CPP-59) — 픽·부재확인 상태 ────────────────────────────
         #   ★셋은 서로 다른 상태다: 픽됨 / 「없음」을 사람이 확인함 / **아직 아무도 안 봄**.
@@ -1927,7 +1971,7 @@ def board(db: Session) -> dict:
         # ★엑셀 표준 — «대조값»이다(계약 A′ §3: 엑셀에서 단가가 계산에 유입되는 경로는 없다).
         #   합격 6이 요구하는 「세 값 나란히」의 가운데 값이고, 여기 말고는 화면 어디에도
         #   이 값이 서 있는 자리가 없었다(현 격차 열은 표준원가 vs `cost_price`다).
-        excel_total = saved.get("excel_total_inc_vat")
+        excel_total = _excel_total_inc_vat(recipe, saved)
         excel_dec: Optional[Decimal] = None
         if excel_total is not None:
             try:

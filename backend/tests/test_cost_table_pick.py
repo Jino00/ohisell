@@ -34,6 +34,7 @@ from app.models import (
     CostMaterialPrice,
     CostRecipe,
     CostRecipeLine,
+    CostRecipeLink,
     CostTableItem,
     CostTableItemLine,
 )
@@ -882,3 +883,136 @@ def test_swap_moves_the_standard_cost_by_the_price_difference(client, db_session
     # 응답만 맞고 DB가 안 바뀌는 경우를 막는다 — 다시 조회해 대조한다.
     fresh = client.get(f"/api/cost/recipes/{recipe.id}").json()["standard"]
     assert fresh["std_cost_ex_vat"] == "171.00"
+
+
+# ──────────────────────────────────────────────
+# 2026-09-03 — 얼린 대조값이 재업로드를 못 따라간 자리
+# ──────────────────────────────────────────────
+def test_excel_total_follows_the_picked_item_after_reupload(client, db_session):
+    """픽 «시점»의 값이 아니라 **픽된 항목의 지금 값**이 화면에 선다.
+
+    실사고(prod 실측 2026-09-03): 파서가 2026-09-01에 고쳐져 수입 섹션에서 D열
+    「제품원가(CNY)」 대신 I열 「상품원가」를 읽게 됐는데, 08-27에 픽된 레시피 2개는
+    note에 **외화 단가**(12.20·19.20)를 얼린 채 남았다. 그래서 상세 한 화면에서
+    같은 항목이 「매칭 근거 12.2원」·「고른 항목 3,102.7원」 두 값으로 섰다.
+    """
+
+    recipe = _recipe(db_session)
+    item = _item(db_session, total="12.20")  # 옛 파서가 넣은 외화값
+    db_session.commit()
+
+    res = client.post(
+        f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": item.id}
+    )
+    assert res.status_code == 200
+
+    # 원가표를 다시 올려 항목 값이 «원화 상품원가»로 고쳐졌다.
+    item.total_inc_vat = Decimal("3102.70")
+    db_session.commit()
+
+    body = next(
+        r for r in client.get("/api/cost/recipes").json()["items"] if r["id"] == recipe.id
+    )
+    # ★두 자리가 «같은 값»을 말해야 한다 — 이게 깨진 것이 실사고였다.
+    assert body["picked"]["item_total_inc_vat"] == "3102.70"
+    assert body["match"]["excel_total_inc_vat"] == "3102.70"
+
+
+def test_excel_total_is_none_when_the_picked_item_has_no_total(client, db_session):
+    """픽된 항목에 상품원가가 **없으면** 「없음」이 참이다 — 옛 외화값으로 메우지 않는다.
+
+    실물(2026-09-03): 「오타오_갤럭시 투명 강화유리」는 엑셀이 아직 환산·부대비를 안 채워
+    상품원가가 비어 있다. 그 자리에 옛 CNY 19.30을 그리면 화면이 다시 거짓말한다.
+    """
+
+    recipe = _recipe(db_session)
+    item = _item(db_session, total="19.30")
+    db_session.commit()
+
+    client.post(
+        f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": item.id}
+    )
+    item.total_inc_vat = None
+    db_session.commit()
+
+    body = next(
+        r for r in client.get("/api/cost/recipes").json()["items"] if r["id"] == recipe.id
+    )
+    assert body["match"]["excel_total_inc_vat"] is None
+
+
+def test_excel_total_falls_back_to_the_note_without_a_pick(client, db_session):
+    """픽이 없으면 저장된 note가 그대로 대조값이다 — 자동 매칭 초안의 자리를 안 뺏는다."""
+
+    recipe = _recipe(db_session, note='{"excel_total_inc_vat": "889.90"}')
+    db_session.commit()
+
+    body = next(
+        r for r in client.get("/api/cost/recipes").json()["items"] if r["id"] == recipe.id
+    )
+    assert body["picked"]["state"] == "none"
+    assert body["match"]["excel_total_inc_vat"] == "889.90"
+
+
+def test_board_excel_gap_uses_the_picked_items_current_total(client, db_session):
+    """★보드의 「엑셀 대비」도 같은 값에서 나온다 — 상세만 고치면 두 화면이 갈린다.
+
+    이 단언이 없으면 보드 쪽 배선을 끊는 변이가 **살아남는다**(2026-09-03 변이 M3에서
+    실제로 살아남았다). 저장소가 반복해서 밟은 자리다: 값이 도는 층과 사람이 읽는 층
+    중 한쪽만 고치면, 고친 화면은 초록인데 옆 화면이 옛 숫자를 계속 말한다.
+    """
+
+    recipe = _recipe(db_session)
+    item = _item(db_session, total="12.20")  # 옛 파서가 넣은 외화값
+    db_session.add(CostRecipeLink(recipe_id=recipe.id, internal_sku="OHI-EZ1"))
+    db_session.commit()
+
+    res = client.post(
+        f"/api/cost/recipes/{recipe.id}/pick-cost-table-item", json={"item_id": item.id}
+    )
+    assert res.status_code == 200, res.text
+    item.total_inc_vat = Decimal("3102.70")
+    db_session.commit()
+
+    row = next(
+        r
+        for r in client.get("/api/cost/board").json()["items"]
+        if r["internal_sku"] == "OHI-EZ1"
+    )
+    assert row["excel_total_inc_vat"] == "3102.70"
+    # 얼린 12.20으로 나누면 격차가 «수천 %»로 뜬다 — 그게 「진짜 이상」으로 오해된 값이다.
+    assert row["excel_gap_pct"] is None or abs(row["excel_gap_pct"]) < 1000
+
+
+def test_absent_confirmation_clears_the_dead_cost_table_traces(db_session):
+    """「원가표에 없음」을 확인하면 **항목의 흔적이 함께 거둬진다** (적대 리뷰 1R P1).
+
+    핀이 끊긴 뒤(`pin_lost`) 화면이 시키는 대로 「없음」을 확인하면, `picked`는 정직하게
+    `absent`를 말하는데 `match`는 **얼린 항목 이름과 값을 그대로** 들고 있었다 — 이 PR이
+    없애려던 증상(「한 자리가 두 말을 한다」)이 다른 상태 전이로 재발한다.
+    `unpick_cost_table_item`은 이미 셋을 거두는데 이 경로만 짝이 없었다.
+    """
+
+    _reimport(db_session, _cost_rows())
+    item = db_session.query(CostTableItem).one()
+    recipe = _recipe(db_session, form_factor="flip")
+    db_session.commit()
+    R.pick_cost_table_item(db_session, recipe.id, item.id)
+    db_session.commit()
+    # 픽이 항목의 흔적을 note에 실었다 — 여기서 출발한다.
+    assert R._note_dict(R.get_recipe(db_session, recipe.id))["cost_table_item"]
+
+    # 재업로드가 그 항목을 없애 핀이 끊긴다.
+    _reimport(db_session, _cost_rows(item_name="완전히 다른 품목"))
+    db_session.expire_all()
+    assert R.get_recipe(db_session, recipe.id).anomaly_flag == R.PIN_LOST
+
+    after = R.confirm_cost_table_absent(db_session, recipe.id, "원가표에서 빠졌다")
+    db_session.commit()
+
+    payload = R.recipe_payload(db_session, after)
+    assert payload["picked"]["state"] == "absent"
+    # ★셋 다 거둬져야 한다 — 하나라도 남으면 화면이 「없다」면서 그 항목을 말한다.
+    assert payload["match"]["excel_total_inc_vat"] is None
+    assert payload["match"]["cost_table_item"] is None
+    assert payload["match"]["cost_table_section"] is None
