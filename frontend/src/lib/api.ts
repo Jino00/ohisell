@@ -4767,10 +4767,17 @@ export type NaverOutcomeProfitState =
  *  함께 오는 이유는 D-NAO-230 — *"자의 가정·창을 성적과 반드시 병기한다"*. */
 export interface NaverOutcomeProfit {
   state: NaverOutcomeProfitState;
-  /** 총이익 델타(원). 부호가 방향이다 — 「개선/악화」 낱말을 쓰지 않는다(§4-3). */
+  /** 총이익 델타(원) — **있는 그대로**(보정 없음). 화면의 첫 숫자가 이것이다.
+   *  부호가 방향이다 — 「개선/악화」 낱말을 쓰지 않는다(§4-3). */
   delta: number | null;
   before: number | null;
   after: number | null;
+  /** 같은 양을 **상한 가정**(보정계수 점추정)으로 잰 값 — 채점기가 판정에 쓴 자다. */
+  delta_high: number | null;
+  scored_by: "high" | null;
+  /** 두 자의 **부호가 갈리는** 행. 자 선택이 결론을 바꾼다는 뜻이라 화면이 말해야 한다.
+   *  실측 전례: 계정 30일 총이익 보정 +5,963,568원 ↔ 미적용 −234,545원(ref 93 §1 행 9). */
+  sign_flips: boolean;
   verdict: "improved" | "declined" | "neutral" | null;
   /** 값이 없을 때 «왜 없는가»를 말하는 한 줄. `scored`면 null. */
   note: string | null;
@@ -4778,8 +4785,10 @@ export interface NaverOutcomeProfit {
   scored_from?: string | null;
   lens: {
     cf: number; bep: number; bep_source: string;
-    /** 이 금액을 어느 자로 쟀는가 — 「총이익」이라는 낱말만으론 어느 끝인지 모른다. */
-    kind: string;
+    /** `delta`를 어느 자로 쟀는가 — 「총이익」이라는 낱말만으론 어느 끝인지 모른다. */
+    basis: string;
+    /** `delta_high`를 어느 자로 쟀는가(그 자가 무엇을 «가정»하는지 포함). */
+    high_basis: string;
     /** 북극성 §3의 구간 자에서 **하한을 못 쓴다**는 자백(렌즈에 점추정만 얼려져 있다). */
     interval_low_available: boolean;
   } | null;

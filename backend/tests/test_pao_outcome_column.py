@@ -42,8 +42,16 @@ VERIFY = date(2026, 8, 13)  # D+14
 LENS = {"bep": 2.0, "bep_source": "product", "gamma": 1.0, "cf": 1.25}
 BEFORE = {"clk": 900, "conv_amt": 200000, "cost": 50000}
 AFTER = {"clk": 950, "conv_amt": 300000, "cost": 60000}
-# (200000×1.25)/2 − 50000 = 75,000 · (300000×1.25)/2 − 60000 = 127,500 ⇒ 델타 +52,500
-EXPECT_BEFORE, EXPECT_AFTER, EXPECT_DELTA = 75000, 127500, 52500
+# 있는 그대로(보정 없음): 200000/2 − 50000 = 50,000 · 300000/2 − 60000 = 90,000 ⇒ 델타 +40,000
+# 상한 가정(cf 1.25): 75,000 · 127,500 ⇒ 델타 +52,500
+EXPECT_BEFORE, EXPECT_AFTER, EXPECT_DELTA = 50000, 90000, 40000
+EXPECT_DELTA_HIGH = 52500
+
+# ★자 선택이 **부호를 뒤집는** 행. 이게 §7이 경계하는 「부푼 자 위의 판정」 그 자체다.
+#   있는 그대로: 50,000 → 40,000 (델타 −10,000) / 상한(cf 1.5): 100,000 → 115,000 (델타 +15,000)
+FLIP_LENS = {"bep": 2.0, "bep_source": "product", "gamma": 1.0, "cf": 1.5}
+FLIP_BEFORE = {"clk": 900, "conv_amt": 200000, "cost": 50000}
+FLIP_AFTER = {"clk": 950, "conv_amt": 300000, "cost": 110000}
 
 
 @pytest.fixture
@@ -71,13 +79,14 @@ def _bid(amount: int) -> str:
 
 
 def _seed(db, *, entity_id="nad-1", dry_run=False, actual=True, outcome_profit="improved",
-          outcome="improved", verify_date=VERIFY):
+          outcome="improved", verify_date=VERIFY, lens=None, before=None, after=None):
+    lens, before, after = lens or LENS, before or BEFORE, after or AFTER
     row = NaverChangeLog(
         entity_type="ad", entity_id=entity_id, campaign_id="cmp-1", action="update_bid",
         before_value=_bid(2730), after_value=_bid(2330), dry_run=dry_run,
         changed_at=EXECUTED, executed_at=EXECUTED, verify_date=verify_date,
         outcome=outcome, outcome_profit=outcome_profit,
-        actual_json=(json.dumps({"before": BEFORE, "after": AFTER, "lens": LENS}) if actual else None),
+        actual_json=(json.dumps({"before": before, "after": after, "lens": lens}) if actual else None),
     )
     db.add(row)
     db.commit()
@@ -99,13 +108,18 @@ def test_scored_row_carries_the_amount_from_the_frozen_lens(client_and_session):
     op = body["rows"][0]["outcome_profit"]
 
     assert op["state"] == "scored"
-    # ★렌즈(cf=1.25)를 실제로 쓴 숫자다. 무보정으로 재계산하면 40,000이 나온다.
+    # ★기본값은 **있는 그대로**(보정 없음) — 표시 전용 소비처의 관례(ref 93 §1 행 9).
     assert (op["before"], op["after"], op["delta"]) == (EXPECT_BEFORE, EXPECT_AFTER, EXPECT_DELTA)
+    # ★상한 가정은 **얼려진 렌즈(cf=1.25)**로 잰 값이다 — 지금 값으로 재계산한 게 아니다.
+    assert op["delta_high"] == EXPECT_DELTA_HIGH
+    assert op["scored_by"] == "high"  # 채점 판정은 상한 자로 했다(그 사실을 화면이 안다)
+    assert op["sign_flips"] is False
     assert op["verdict"] == "improved"
 
     # 자 자백(D-NAO-230) — 가정과 창이 성적과 **함께** 온다.
     assert op["lens"]["cf"] == 1.25
     assert op["lens"]["bep"] == 2.0
+    assert op["lens"]["basis"] == "있는 그대로(보정 없음)"
     # ★「하한으로도 흑자인가」는 이 행에서 못 묻는다 — 그 사실 자체가 응답에 있어야 한다.
     assert op["lens"]["interval_low_available"] is False
     assert op["window"] == {
@@ -184,3 +198,19 @@ def test_agency_row_has_the_same_shape_but_no_score(client_and_session):
     assert op["state"] == "not_ours"
     assert op["delta"] is None
     assert set(op) >= {"state", "delta", "before", "after", "verdict", "note", "lens", "window", "legacy"}
+
+
+def test_sign_flip_is_surfaced_not_hidden(client_and_session):
+    """★자 선택이 **부호를 뒤집는** 행은 화면이 그렇게 말해야 한다.
+
+    이 자는 끝값에 따라 결론이 갈린다 — 실측 전례로 계정 30일 총이익이 보정 적용
+    +5,963,568원 ↔ 미적용 −234,545원이었다(ref 93 §1 행 9). 상한 하나만 실으면 그 행은
+    화면에서 **그냥 개선**으로 보이고, 자가 결론을 만들었다는 사실이 사라진다.
+    """
+    client, db = client_and_session
+    _seed(db, lens=FLIP_LENS, before=FLIP_BEFORE, after=FLIP_AFTER)
+    op = _rows(client)["rows"][0]["outcome_profit"]
+
+    assert op["delta"] == -10000        # 있는 그대로는 **악화**
+    assert op["delta_high"] == 15000    # 상한 가정으로는 **개선**
+    assert op["sign_flips"] is True

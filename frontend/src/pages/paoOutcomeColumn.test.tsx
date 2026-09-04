@@ -47,7 +47,9 @@ const BASE: Omit<NaverModificationRow, "key" | "entity_id" | "dry_run" | "outcom
 
 const LENS = {
   cf: 1.25, bep: 2, bep_source: "product",
-  kind: "보정계수 점추정(구간의 위쪽 끝)", interval_low_available: false,
+  basis: "있는 그대로(보정 없음)",
+  high_basis: "보정계수 점추정(구간의 위쪽 끝) — 채널 매출 전액을 광고 공으로 돌리는 가정",
+  interval_low_available: false,
 };
 const WINDOW = {
   days: 14, before_from: "2026-07-16", before_to: "2026-07-29",
@@ -67,7 +69,8 @@ const RESPONSE: NaverModificationResponse = {
     {
       ...BASE, key: "change_log:1", entity_id: "nad-1", dry_run: false,
       outcome_profit: {
-        state: "scored", delta: 52500, before: 75000, after: 127500, verdict: "improved",
+        state: "scored", delta: 40000, before: 50000, after: 90000, verdict: "improved",
+        delta_high: 52500, scored_by: "high", sign_flips: false,
         note: null, lens: LENS, window: WINDOW,
         legacy: { outcome: "improved", label: "교정 전 자 — 증거용", note: "전/후 RPC 배율" },
       },
@@ -76,6 +79,7 @@ const RESPONSE: NaverModificationResponse = {
       ...BASE, key: "change_log:2", entity_id: "nad-2", source_id: 2, dry_run: false,
       outcome_profit: {
         state: "pending", delta: null, before: null, after: null, verdict: null,
+        delta_high: null, scored_by: null, sign_flips: false,
         note: "채점 전 · D+14 · 2026-09-15부터", scored_from: "2026-09-15",
         lens: null, window: null,
         legacy: { outcome: null, label: "교정 전 자 — 증거용", note: "전/후 RPC 배율" },
@@ -85,8 +89,19 @@ const RESPONSE: NaverModificationResponse = {
       ...BASE, key: "change_log:3", entity_id: "nad-3", source_id: 3, dry_run: true,
       outcome_profit: {
         state: "dry_run", delta: null, before: null, after: null, verdict: null,
+        delta_high: null, scored_by: null, sign_flips: false,
         note: "채점 대상 아님 — 연습(dry_run)이라 계정에 안 나갔다",
         lens: null, window: null, legacy: null,
+      },
+    },
+    {
+      ...BASE, key: "change_log:4", entity_id: "nad-4", source_id: 4, dry_run: false,
+      outcome_profit: {
+        // 있는 그대로는 악화(−10,000)인데 상한 가정으로는 개선(+15,000)인 행.
+        state: "scored", delta: -10000, before: 50000, after: 40000, verdict: "improved",
+        delta_high: 15000, scored_by: "high", sign_flips: true,
+        note: null, lens: LENS, window: WINDOW,
+        legacy: { outcome: "improved", label: "교정 전 자 — 증거용", note: "전/후 RPC 배율" },
       },
     },
   ],
@@ -103,16 +118,27 @@ async function renderScreen() {
 describe("결과 칸이 사용자에게 닿는다", () => {
   it("① 채점된 행은 금액을 찍고, 그 금액을 «무슨 자로» 쟀는지 함께 말한다", async () => {
     await renderScreen();
-    // 부호 + 금액. 「개선」이라는 낱말이 아니다(§4-3 — 매출 −48.3%가 「개선」이던 그 얼굴).
-    expect(await screen.findByText("+52,500원")).toBeTruthy();
+    // 첫 숫자는 **있는 그대로**(보정 없음)다 — 상한만 실으면 가장 낙관적으로 보인다.
+    expect(await screen.findByText("+40,000원")).toBeTruthy();
+    // 상한 가정은 나란히, 그리고 「채점은 이 자로 했다」까지 말한다(ref 93 §1 행 9).
+    expect(screen.getByText(/상한 가정 \+52,500원/).textContent).toContain("채점 판정은 이 자로");
+    // 「개선」이라는 낱말이 아니다(§4-3 — 매출 −48.3%가 「개선」이던 그 얼굴).
     expect(screen.queryByText("개선")).toBeNull();
-    // 자 자백(D-NAO-230) — 보정계수·BEP·전후 창이 성적과 **함께** 뜬다.
-    const lens = screen.getByText(/보정계수 1.25/);
+    // 자 자백(D-NAO-230) — 자의 정체·BEP·전후 창이 성적과 **함께** 뜬다.
+    const lens = screen.getAllByText(/있는 그대로\(보정 없음\)/)[0];
     expect(lens.textContent).toContain("BEP 2");
     expect(lens.textContent).toContain("2026-07-16~2026-07-29");
     expect(lens.textContent).toContain("2026-07-30~2026-08-12");
     // 「하한으로도 흑자인가」는 못 잰다 — 그 자백은 툴팁에 있다.
     expect(lens.getAttribute("title")).toContain("하한");
+  });
+
+  it("①-b 자에 따라 부호가 갈리는 행은 화면이 그렇게 말한다", async () => {
+    await renderScreen();
+    // ★상한만 실었으면 이 행은 그냥 「개선」으로 보인다 — 자가 결론을 만들었다는 사실이 사라진다.
+    expect(await screen.findByText("−10,000원")).toBeTruthy();
+    expect(screen.getByText(/상한 가정 \+15,000원/)).toBeTruthy();
+    expect(screen.getByText("자에 따라 부호가 뒤집힙니다 — 자 선택이 결론을 바꿉니다")).toBeTruthy();
   });
 
   it("② 아직 안 채워진 칸은 0도 「—」도 아니라 «언제 채워지는가»를 말한다", async () => {

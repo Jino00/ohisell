@@ -19,8 +19,8 @@ import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
 import {
   ACTOR_OPTIONS, actorLabel, actorNote, actorTone, correctionNote, DRY_RUN_BADGE,
-  legacyOutcomeText, outcomeLensNote, outcomeLensTitle, outcomeText, outcomeTone,
-  timeSuffix, valueText,
+  legacyOutcomeText, outcomeHighText, outcomeLensNote, outcomeLensTitle, outcomeText,
+  outcomeTone, signFlipNote, timeSuffix, valueText,
 } from "../lib/modificationActor";
 import {
   fetchNaverModifications, putNaverModificationActor,
@@ -283,6 +283,14 @@ function OutcomeCell({ row }: { row: NaverModificationRow }) {
       >
         {outcomeText(op)}
       </div>
+      {/* ★자를 하나만 실으면 그 하나가 사실처럼 읽힌다 — 실측에서 이 자는 끝값에 따라
+          **부호가 갈렸다**(계정 30일 총이익 보정 +5,963,568원 ↔ 미적용 −234,545원). */}
+      {outcomeHighText(op) && (
+        <div className="text-[11px] text-gray-500 tabular-nums">{outcomeHighText(op)}</div>
+      )}
+      {signFlipNote(op) && (
+        <div className="text-[11px] text-amber-600">{signFlipNote(op)}</div>
+      )}
       {lens && (
         <div className="text-[11px] text-gray-400" title={outcomeLensTitle(op)}>{lens}</div>
       )}

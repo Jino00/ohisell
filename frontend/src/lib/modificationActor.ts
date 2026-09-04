@@ -99,7 +99,22 @@ export function outcomeLensNote(op: NaverOutcomeProfit): string | null {
   const w = op.window
     ? ` · 전 ${op.window.before_from}~${op.window.before_to} → 후 ${op.window.after_from}~${op.window.after_to}`
     : "";
-  return `자: 보정계수 ${op.lens.cf} ${op.lens.kind} · BEP ${op.lens.bep}${w}`;
+  return `자: ${op.lens.basis} · BEP ${op.lens.bep}${w}`;
+}
+
+/** 같은 양을 **상한 가정**으로 잰 값. 하나만 실으면 그 하나가 사실처럼 읽히므로 나란히 둔다
+ *  (ref 93 §1 행 9 — 표시 전용 소비처는 「구간 양끝 병기」가 1순위). 채점 판정은 이 자로 했다. */
+export function outcomeHighText(op: NaverOutcomeProfit): string | null {
+  if (op.state !== "scored" || op.delta_high === null) return null;
+  const amount = op.delta_high === 0
+    ? "±0원"
+    : op.delta_high > 0 ? `+${won(op.delta_high)}` : `−${won(-op.delta_high)}`;
+  return `상한 가정 ${amount} — 채점 판정은 이 자로 했습니다`;
+}
+
+/** ★자 선택이 결론을 바꾸는 행. 이게 「부푼 자 위의 판정」이 사람 눈에 처음 닿는 자리다. */
+export function signFlipNote(op: NaverOutcomeProfit): string | null {
+  return op.sign_flips ? "자에 따라 부호가 뒤집힙니다 — 자 선택이 결론을 바꿉니다" : null;
 }
 
 /** 툴팁용 — 위 자백에 «못 재는 것»을 덧붙인다. 북극성 §3의 자는 구간 [하한, 점추정]인데
@@ -107,9 +122,11 @@ export function outcomeLensNote(op: NaverOutcomeProfit): string | null {
 export function outcomeLensTitle(op: NaverOutcomeProfit): string | undefined {
   const note = outcomeLensNote(op);
   if (!note) return undefined;
-  return op.lens && !op.lens.interval_low_available
-    ? `${note} · 하한으로도 흑자인지는 이 행에서 못 잽니다(렌즈에 점추정만 얼려져 있습니다)`
-    : note;
+  if (!op.lens) return note;
+  const high = `상한 가정 = ${op.lens.high_basis}(보정계수 ${op.lens.cf})`;
+  return op.lens.interval_low_available
+    ? `${note} · ${high}`
+    : `${note} · ${high} · 하한으로도 흑자인지는 이 행에서 못 잽니다(렌즈에 점추정만 얼려져 있습니다)`;
 }
 
 /** 교정 전 RPC 자 — **접어서** 보여줄 한 줄. 갈아치우지 않는 이유는 「교정 전 채점기가

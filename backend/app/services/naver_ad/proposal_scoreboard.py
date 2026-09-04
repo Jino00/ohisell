@@ -434,6 +434,7 @@ def read_profit_delta(change: NaverChangeLog) -> dict:
     }
     base = {
         "delta": None, "before": None, "after": None,
+        "delta_high": None, "scored_by": None, "sign_flips": False,
         "verdict": None, "lens": None, "window": None, "legacy": legacy,
     }
 
@@ -462,8 +463,10 @@ def read_profit_delta(change: NaverChangeLog) -> dict:
     before, after = actual.get("before") or {}, actual.get("after") or {}
     lens_out = {
         "cf": float(cf), "bep": float(bep), "bep_source": bep_source,
-        # ★자가 무엇인지 화면이 말한다 — 「총이익」이라는 낱말만으로는 어느 끝인지 모른다.
-        "kind": "보정계수 점추정(구간의 위쪽 끝)",
+        # ★기본값은 «있는 그대로»다 — 표시 전용 소비처의 관례가 그것이다(`pao_scope_roster.
+        #   _profit_band`, Jino 2026-08-24 *"있는 그대로를 보여줘야 하는거 아니야?"*).
+        "basis": "있는 그대로(보정 없음)",
+        "high_basis": "보정계수 점추정(구간의 위쪽 끝) — 채널 매출 전액을 광고 공으로 돌리는 가정",
         "interval_low_available": False,
     }
     window = _read_window(change)
@@ -473,18 +476,34 @@ def read_profit_delta(change: NaverChangeLog) -> dict:
         return {**base, "state": "thin", "note": _PROFIT_STATE_NOTE["thin"],
                 "lens": lens_out, "window": window}
 
+    # ★자를 **두 개** 낸다(ref 93 §1 행 9 · D-NAO-230). 하나만 실으면 그 하나가 사실처럼
+    #   읽히는데, 이 자는 끝값에 따라 **부호가 갈린다** — 실측: 계정 30일 총이익이
+    #   보정 적용 +5,963,568원 ↔ 미적용 −234,545원. 상한만 쓰면 화면이 가장 낙관적으로 보인다.
+    #   하한은 렌즈에 `factor_low`가 안 얼려져 있어 **못 낸다**(지어내지 않는다).
+    one = Decimal(1)
     try:
-        p_before = _gross_profit(int(before["conv_amt"]), int(before["cost"]), bep=bep, cf=cf)
-        p_after = _gross_profit(int(after["conv_amt"]), int(after["cost"]), bep=bep, cf=cf)
+        raw_before = _gross_profit(int(before["conv_amt"]), int(before["cost"]), bep=bep, cf=one)
+        raw_after = _gross_profit(int(after["conv_amt"]), int(after["cost"]), bep=bep, cf=one)
+        hi_before = _gross_profit(int(before["conv_amt"]), int(before["cost"]), bep=bep, cf=cf)
+        hi_after = _gross_profit(int(after["conv_amt"]), int(after["cost"]), bep=bep, cf=cf)
     except (KeyError, TypeError, ValueError, ArithmeticError):
         return {**base, "state": "no_lens", "note": _PROFIT_STATE_NOTE["no_lens"],
                 "lens": lens_out, "window": window}
 
+    raw_delta = int((raw_after - raw_before).to_integral_value())
+    high_delta = int((hi_after - hi_before).to_integral_value())
     return {
         "state": "scored",
-        "delta": int((p_after - p_before).to_integral_value()),
-        "before": int(p_before.to_integral_value()),
-        "after": int(p_after.to_integral_value()),
+        # 기본값 = 있는 그대로. 화면의 첫 숫자가 이것이다.
+        "delta": raw_delta,
+        "before": int(raw_before.to_integral_value()),
+        "after": int(raw_after.to_integral_value()),
+        # 상한 가정으로 잰 같은 양 — 채점기가 **판정에 쓴** 자다.
+        "delta_high": high_delta,
+        "scored_by": "high",
+        # ★자 선택이 결론을 바꾸는 행. 이게 §7이 경계하는 「부푼 자 위의 판정」이
+        #   사람 눈에 처음 닿는 자리다.
+        "sign_flips": (raw_delta > 0) != (high_delta > 0) and 0 not in (raw_delta, high_delta),
         "verdict": change.outcome_profit,
         "note": None,
         "lens": lens_out,
