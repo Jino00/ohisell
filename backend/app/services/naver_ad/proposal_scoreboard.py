@@ -413,19 +413,35 @@ def _rollup_accuracy(db: Session) -> dict:
 #     다른 숫자가 나온다(그게 `_frozen_lens`가 존재하는 이유 그대로다).
 #   ★**재채점하지 않는다** — 이 함수는 DB를 안 보고 행에 이미 적힌 것만 되살린다.
 _PROFIT_STATE_NOTE = {
-    "dry_run": "채점 대상 아님 — 연습(dry_run)이라 계정에 안 나갔다",
-    "no_lens": "판정 못 함 — 이 행엔 BEP 렌즈가 없다(총이익을 잴 자가 없다)",
-    "thin": "판정 보류 — 모수 미달(전·후 창의 클릭이 문턱 미만)",
+    "not_ours": "채점 대상 아님 — 우리가 한 조치가 아닙니다",
+    # ★`dry_run`은 이 저장소에서 **세 뜻**으로 쓰인다(적대 리뷰 1R P1-2): PAO 연습 집행 ·
+    #   관찰 기록(`entity_sync`·`flight_loop`) · **실제 로컬 설정 변경**(`optimizer_change` —
+    #   `improvement_events` 모듈 헤더가 「라이브 실측 함정」이라고 못 박아 둔 그 자리).
+    #   셋 모두에 참인 문장은 「네이버 광고 API 쓰기가 없었다」 하나뿐이다. 「연습」이라고
+    #   부르면 자동운영 재가동 같은 **실제로 한 일**을 안 했다고 말하게 된다.
+    "no_api_write": "채점 대상 아님 — 네이버 광고 API 쓰기가 없었습니다",
+    "not_scored": "채점 대상 아님 — 채점기가 보는 행이 아닙니다(검증 예정일 없음)",
+    "no_lens": "판정 못 함 — 이 행엔 BEP 렌즈가 없습니다(총이익을 잴 자가 없습니다)",
+    "broken": "판정 못 함 — 관측 기록이 불완전합니다",
+    "thin": "판정 보류 — 채점기가 판정을 매기지 않았습니다",
 }
 
 
-def read_profit_delta(change: NaverChangeLog) -> dict:
+def _sgn(n: int) -> int:
+    return (n > 0) - (n < 0)
+
+
+def read_profit_delta(change: NaverChangeLog, *, actor: str | None = None,
+                      today: date | None = None) -> dict:
     """채점된 행에서 **총이익 델타를 금액으로 되살린다**(읽기 전용).
 
     ★자 자백을 함께 낸다(D-NAO-230 — *"자의 가정·창을 성적과 반드시 병기한다"*).
-      이 금액은 보정계수 **점추정**(북극성 §3 구간 [하한, 점추정]의 위쪽 끝)으로 잰 값이다.
-      `actual_json.lens`엔 점추정만 얼려져 있어 **「하한으로도 흑자인가」는 이 행에서 못 묻는다**
-      — 그래서 `lens.interval_low_available=False`로 «못 한다»고 말한다(지어내지 않는다).
+      기본값은 **있는 그대로**(보정 없음)이고 상한 가정을 나란히 둔다 — 이 저장소의 표시
+      관례가 그것이다(`pao_scope_roster._profit_band`, ref 93 §1 행 9). 하한은
+      `actual_json.lens`에 `factor_low`가 안 얼려져 있어 **못 낸다**(지어내지 않는다).
+
+    ★`actor`는 호출부가 이미 **정정까지 반영해 정한** 최종 주체다. 여기서 다시 분류하지
+      않는다 — 두 벌이 되면 같은 행이 화면과 채점에서 다른 주체가 된다.
     """
     legacy = {
         "outcome": change.outcome,
@@ -435,25 +451,35 @@ def read_profit_delta(change: NaverChangeLog) -> dict:
     base = {
         "delta": None, "before": None, "after": None,
         "delta_high": None, "scored_by": None, "sign_flips": False,
+        "scored_from": None, "overdue": False,
         "verdict": None, "lens": None, "window": None, "legacy": legacy,
     }
 
+    # ★순서가 곧 「왜 안 채워지나」의 정확도다 — 채점기가 **보지도 않는 행**에
+    #   「채점 전」이라고 쓰면 영영 안 채워질 칸을 «곧 채워진다»고 말하게 된다(1R P1-1).
+    if actor is not None and actor != "ours":
+        return {**base, "state": "not_ours", "note": _PROFIT_STATE_NOTE["not_ours"]}
     if change.dry_run:
-        return {**base, "state": "dry_run", "note": _PROFIT_STATE_NOTE["dry_run"]}
+        return {**base, "state": "no_api_write", "note": _PROFIT_STATE_NOTE["no_api_write"]}
+    if change.verify_date is None:
+        # `run_daily`의 대상 조건이 `verify_date IS NOT NULL`이다 — 그 조건을 그대로 쓴다.
+        return {**base, "state": "not_scored", "note": _PROFIT_STATE_NOTE["not_scored"]}
 
     raw = getattr(change, "actual_json", None)
     if not raw:
-        # 아직 채점기가 안 다녀갔다 — 0도 「—」도 아니고 «언제 채워지는가»를 말한다(§4-4).
-        when = change.verify_date.isoformat() if change.verify_date else None
+        when = change.verify_date.isoformat()
+        overdue = change.verify_date < (today or kst_today())
         return {
-            **base, "state": "pending",
-            "note": (f"채점 전 · D+14 · {when}부터" if when else "채점 전 · 검증 예정일 미정"),
-            "scored_from": when,
+            **base, "state": "pending", "scored_from": when, "overdue": overdue,
+            # 「…부터」는 미래를 가리키는 말이라, 예정일이 지났는데 그대로 쓰면
+            # **크론 침묵이 예정으로 읽힌다**(1R P2-8).
+            "note": (f"채점 예정일 {when}이 지났는데 아직 안 채워졌습니다"
+                     if overdue else f"채점 전 · D+14 · {when}부터"),
         }
     try:
         actual = json.loads(raw) or {}
     except (ValueError, TypeError):
-        return {**base, "state": "no_lens", "note": _PROFIT_STATE_NOTE["no_lens"]}
+        return {**base, "state": "broken", "note": _PROFIT_STATE_NOTE["broken"]}
 
     lens = _frozen_lens(change)
     if lens is None:
@@ -461,25 +487,26 @@ def read_profit_delta(change: NaverChangeLog) -> dict:
     bep, bep_source, _gamma, cf = lens
 
     before, after = actual.get("before") or {}, actual.get("after") or {}
+    # cf가 1이면 그건 「보정 없음」이 아니라 **보정계수를 못 구해 폴백한 것**이다
+    # (`_cf_for`의 계약). 그때 상한 줄을 그리면 두 자가 «일치했다»는 거짓 인상을 준다(1R P2-9).
+    high_available = cf != 1
     lens_out = {
         "cf": float(cf), "bep": float(bep), "bep_source": bep_source,
-        # ★기본값은 «있는 그대로»다 — 표시 전용 소비처의 관례가 그것이다(`pao_scope_roster.
-        #   _profit_band`, Jino 2026-08-24 *"있는 그대로를 보여줘야 하는거 아니야?"*).
         "basis": "있는 그대로(보정 없음)",
-        "high_basis": "보정계수 점추정(구간의 위쪽 끝) — 채널 매출 전액을 광고 공으로 돌리는 가정",
+        "high_basis": (
+            "보정계수 점추정(구간의 위쪽 끝) — 채널 매출 전액을 광고 공으로 돌리는 가정"
+            if high_available else "상한 자를 못 구해 보정 없이 채점됐습니다(cf=1 폴백)"
+        ),
+        "high_available": high_available,
         "interval_low_available": False,
     }
     window = _read_window(change)
 
     if change.outcome_profit is None:
-        # 채점기가 **일부러** 판정을 보류한 자리다. 여기에 금액을 그리면 화면이 판정을 지어낸다.
+        # 채점기가 **일부러** 판정을 안 매긴 자리다. 여기에 금액을 그리면 화면이 판정을 지어낸다.
         return {**base, "state": "thin", "note": _PROFIT_STATE_NOTE["thin"],
                 "lens": lens_out, "window": window}
 
-    # ★자를 **두 개** 낸다(ref 93 §1 행 9 · D-NAO-230). 하나만 실으면 그 하나가 사실처럼
-    #   읽히는데, 이 자는 끝값에 따라 **부호가 갈린다** — 실측: 계정 30일 총이익이
-    #   보정 적용 +5,963,568원 ↔ 미적용 −234,545원. 상한만 쓰면 화면이 가장 낙관적으로 보인다.
-    #   하한은 렌즈에 `factor_low`가 안 얼려져 있어 **못 낸다**(지어내지 않는다).
     one = Decimal(1)
     try:
         raw_before = _gross_profit(int(before["conv_amt"]), int(before["cost"]), bep=bep, cf=one)
@@ -487,11 +514,12 @@ def read_profit_delta(change: NaverChangeLog) -> dict:
         hi_before = _gross_profit(int(before["conv_amt"]), int(before["cost"]), bep=bep, cf=cf)
         hi_after = _gross_profit(int(after["conv_amt"]), int(after["cost"]), bep=bep, cf=cf)
     except (KeyError, TypeError, ValueError, ArithmeticError):
-        return {**base, "state": "no_lens", "note": _PROFIT_STATE_NOTE["no_lens"],
+        # 렌즈는 멀쩡한데 관측 기록이 빈 경우다 — 렌즈 탓을 하면 엉뚱한 곳을 고치게 된다(1R P2-7).
+        return {**base, "state": "broken", "note": _PROFIT_STATE_NOTE["broken"],
                 "lens": lens_out, "window": window}
 
     raw_delta = int((raw_after - raw_before).to_integral_value())
-    high_delta = int((hi_after - hi_before).to_integral_value())
+    high_delta = int((hi_after - hi_before).to_integral_value()) if high_available else None
     return {
         "state": "scored",
         # 기본값 = 있는 그대로. 화면의 첫 숫자가 이것이다.
@@ -500,10 +528,12 @@ def read_profit_delta(change: NaverChangeLog) -> dict:
         "after": int(raw_after.to_integral_value()),
         # 상한 가정으로 잰 같은 양 — 채점기가 **판정에 쓴** 자다.
         "delta_high": high_delta,
-        "scored_by": "high",
-        # ★자 선택이 결론을 바꾸는 행. 이게 §7이 경계하는 「부푼 자 위의 판정」이
-        #   사람 눈에 처음 닿는 자리다.
-        "sign_flips": (raw_delta > 0) != (high_delta > 0) and 0 not in (raw_delta, high_delta),
+        "scored_by": ("high" if high_available else None),
+        # ★자 선택이 결론을 바꾸는 행. ±0과 「개선」이 갈리는 것도 결론이 갈리는 것이다 —
+        #   0을 예외로 두면 그 경계가 조용히 안 보인다(1R P2-4).
+        "sign_flips": (high_delta is not None and _sgn(raw_delta) != _sgn(high_delta)),
+        "scored_from": change.verify_date.isoformat(),
+        "overdue": False,
         "verdict": change.outcome_profit,
         "note": None,
         "lens": lens_out,

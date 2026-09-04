@@ -18,9 +18,10 @@ import { usePeriodRange } from "../lib/usePeriod";
 import { useAsyncData } from "../lib/useAsyncData";
 import { num } from "../lib/format";
 import {
-  ACTOR_OPTIONS, actorLabel, actorNote, actorTone, correctionNote, DRY_RUN_BADGE,
-  legacyOutcomeText, outcomeHighText, outcomeLensNote, outcomeLensTitle, outcomeText,
-  outcomeTone, signFlipNote, timeSuffix, valueText,
+  ACTOR_OPTIONS, actorLabel, actorNote, actorTone, correctionNote,
+  legacyOutcomeText, NO_API_WRITE_BADGE, NO_API_WRITE_TITLE, outcomeHighText,
+  outcomeLensNote, outcomeLensTitle, outcomeText, outcomeTone, signFlipNote,
+  timeSuffix, valueText,
 } from "../lib/modificationActor";
 import {
   fetchNaverModifications, putNaverModificationActor,
@@ -182,7 +183,9 @@ function ModificationTable({
             <Td>
               <span className="text-xs">{r.op_label}</span>
               {r.dry_run && (
-                <div className="mt-0.5"><Badge tone="alert">{DRY_RUN_BADGE}</Badge></div>
+                <div className="mt-0.5" title={NO_API_WRITE_TITLE}>
+                  <Badge tone="alert">{NO_API_WRITE_BADGE}</Badge>
+                </div>
               )}
               <FeedVerdictBadge row={r} />
             </Td>
@@ -213,13 +216,14 @@ function ActorSummary({ byActor, byExecution, label }: {
           {actorNote(a) && <span className="text-amber-600">{actorNote(a)}</span>} {num(byActor[a] ?? 0)}건
         </span>
       ))}
-      {/* ★§4-4 — 실집행과 연습을 **따로** 센다. 하나로 세면 「엔진이 N건 했다」가 거짓이 된다.
-          연습이 목록에서 빠져 있으면 0이 아니라 «못 셌다»고 말한다(0은 사실 주장이다). */}
-      <span className="block mt-0.5">
-        실집행 {num(byExecution.executed)}건 ·{" "}
-        {byExecution.dry_run === null
-          ? "연습(dry_run)은 목록에서 빠져 있어 세지 못했습니다"
-          : `연습(dry_run) ${num(byExecution.dry_run)}건 — 계정에 안 나갔습니다`}
+      {/* ★§4-4 — **PAO 자기 행동만** 네이버 쓰기 유무로 갈라 센다. 「연습」이라 쓰지 않는
+          이유는 `dry_run`이 세 뜻을 겸하기 때문이다(NO_API_WRITE_TITLE 참조).
+          목록에서 빠져 있으면 0이 아니라 «못 셌다»고 말한다 — 0은 사실 주장이다. */}
+      <span className="block mt-0.5" title={NO_API_WRITE_TITLE}>
+        우리 자동화가 한 것 · 네이버 쓰기 {num(byExecution.api_write)}건 ·{" "}
+        {byExecution.no_api_write === null
+          ? "쓰기 없는 기록은 목록에서 빠져 있어 세지 못했습니다"
+          : `쓰기 없음 ${num(byExecution.no_api_write)}건`}
       </span>
     </p>
   );

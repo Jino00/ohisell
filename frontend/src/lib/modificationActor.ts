@@ -74,8 +74,15 @@ export function actorNote(actor: string): string | null {
   return actor === "ours" ? "(Ava 미분리)" : null;
 }
 
-/** §4-4 — 연습 행에 붙는 배지. 이 말이 없으면 화면이 「엔진이 N건 했다」고 거짓말한다. */
-export const DRY_RUN_BADGE = "연습(dry_run) — 계정에 안 나감";
+/** §4-4 — 네이버 쓰기가 없던 행에 붙는 배지.
+ *  ★설계서 §4-4는 이 자리에 「연습(dry_run) — 계정에 안 나감」을 적으라고 했지만, 실측이
+ *    그 전제를 반증했다: `dry_run` 컬럼은 **세 뜻**을 겸한다(PAO 연습 집행 · 관찰 기록 ·
+ *    **실제 로컬 설정 변경**). `optimizer_change`(자동운영 켜기/끄기)가 세 번째라
+ *    「연습」이라 쓰면 이 트랙에서 가장 중요한 사건을 **안 했다고** 말하게 된다.
+ *    셋 모두에 참인 문장 하나만 쓴다. */
+export const NO_API_WRITE_BADGE = "네이버 광고 API 쓰기 없음";
+export const NO_API_WRITE_TITLE =
+  "이 기록은 네이버 광고 API를 부르지 않았습니다 — 연습 집행 · 관찰 기록 · 로컬 설정 변경이 이 표시를 함께 씁니다";
 
 /** 결과 칸 본문. **금액은 `scored`일 때만** 나온다 — 그 밖의 상태는 «왜 없는가»를 말한다.
  *  ★「개선/악화」 낱말을 쓰지 않는다(§4-3): 실측에서 매출 −48.3%인 건이 「개선」이었다. */
@@ -105,6 +112,8 @@ export function outcomeLensNote(op: NaverOutcomeProfit): string | null {
 /** 같은 양을 **상한 가정**으로 잰 값. 하나만 실으면 그 하나가 사실처럼 읽히므로 나란히 둔다
  *  (ref 93 §1 행 9 — 표시 전용 소비처는 「구간 양끝 병기」가 1순위). 채점 판정은 이 자로 했다. */
 export function outcomeHighText(op: NaverOutcomeProfit): string | null {
+  // 보정계수를 못 구해 cf=1로 폴백한 행은 상한 줄을 그리지 않는다 — 그리면 두 자가
+  // 「일치했다」는 거짓 인상을 준다.
   if (op.state !== "scored" || op.delta_high === null) return null;
   const amount = op.delta_high === 0
     ? "±0원"
@@ -123,7 +132,9 @@ export function outcomeLensTitle(op: NaverOutcomeProfit): string | undefined {
   const note = outcomeLensNote(op);
   if (!note) return undefined;
   if (!op.lens) return note;
-  const high = `상한 가정 = ${op.lens.high_basis}(보정계수 ${op.lens.cf})`;
+  const high = op.lens.high_available
+    ? `상한 가정 = ${op.lens.high_basis}(보정계수 ${op.lens.cf})`
+    : op.lens.high_basis;
   return op.lens.interval_low_available
     ? `${note} · ${high}`
     : `${note} · ${high} · 하한으로도 흑자인지는 이 행에서 못 잽니다(렌즈에 점추정만 얼려져 있습니다)`;

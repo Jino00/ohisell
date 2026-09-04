@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,11 +32,15 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import NaverAgencyOp, NaverChangeLog
+from app.utils.kst import kst_today
 
 _URL = "/api/naver/ad/modifications"
 DAY = date(2026, 7, 30)
 EXECUTED = datetime(2026, 7, 30, 10, 12, 9)
 VERIFY = date(2026, 8, 13)  # D+14
+# ★「…부터」 문구는 **아직 안 지난** 예정일에만 유효하다. 고정 날짜를 쓰면 시간이 흐르며
+#   테스트가 조용히 다른 분기를 재게 되므로(그게 이 파일을 한 번 깨뜨렸다) 오늘 기준으로 잡는다.
+FUTURE = kst_today() + timedelta(days=10)
 
 # ★렌즈는 «점추정»(구간의 위쪽 끝)이다 — 1.0이 아니어야 재계산 변이가 잡힌다.
 LENS = {"bep": 2.0, "bep_source": "product", "gamma": 1.0, "cf": 1.25}
@@ -79,10 +83,11 @@ def _bid(amount: int) -> str:
 
 
 def _seed(db, *, entity_id="nad-1", dry_run=False, actual=True, outcome_profit="improved",
-          outcome="improved", verify_date=VERIFY, lens=None, before=None, after=None):
+          outcome="improved", verify_date=VERIFY, lens=None, before=None, after=None,
+          action="update_bid"):
     lens, before, after = lens or LENS, before or BEFORE, after or AFTER
     row = NaverChangeLog(
-        entity_type="ad", entity_id=entity_id, campaign_id="cmp-1", action="update_bid",
+        entity_type="ad", entity_id=entity_id, campaign_id="cmp-1", action=action,
         before_value=_bid(2730), after_value=_bid(2330), dry_run=dry_run,
         changed_at=EXECUTED, executed_at=EXECUTED, verify_date=verify_date,
         outcome=outcome, outcome_profit=outcome_profit,
@@ -146,14 +151,15 @@ def test_thin_row_refuses_to_invent_an_amount(client_and_session):
 def test_pending_row_says_when_not_zero(client_and_session):
     """§4-4 — 아직 안 채워진 결과 칸은 0도 「—」도 아니라 «언제 채워지는가»를 말한다."""
     client, db = client_and_session
-    _seed(db, actual=False, outcome_profit=None, outcome=None)
+    _seed(db, actual=False, verify_date=FUTURE, outcome_profit=None, outcome=None)
     op = _rows(client)["rows"][0]["outcome_profit"]
 
     assert op["state"] == "pending"
     assert op["delta"] is None
+    assert op["overdue"] is False
     assert "채점 전" in op["note"] and "D+14" in op["note"]
-    assert VERIFY.isoformat() in op["note"]  # «그 행의» 검증 예정일이지 하드코딩한 날짜가 아니다
-    assert op["scored_from"] == VERIFY.isoformat()
+    assert FUTURE.isoformat() in op["note"]  # «그 행의» 검증 예정일이지 하드코딩한 날짜가 아니다
+    assert op["scored_from"] == FUTURE.isoformat()
 
 
 def test_dry_run_row_is_listed_and_marked_not_scorable(client_and_session):
@@ -163,7 +169,7 @@ def test_dry_run_row_is_listed_and_marked_not_scorable(client_and_session):
     row = _rows(client)["rows"][0]
 
     assert row["dry_run"] is True
-    assert row["outcome_profit"]["state"] == "dry_run"
+    assert row["outcome_profit"]["state"] == "no_api_write"
     assert row["outcome_profit"]["delta"] is None
 
 
@@ -175,13 +181,15 @@ def test_execution_counts_split_and_confess_when_not_counted(client_and_session)
     _seed(db, entity_id="nad-3", dry_run=True)
 
     counted = _rows(client)["by_execution"]
-    assert counted == {"executed": 1, "dry_run": 2, "includes_dry_run": True}
+    assert counted == {
+        "scope": "ours", "api_write": 1, "no_api_write": 2, "includes_no_api_write": True,
+    }
 
-    # 연습을 빼고 조회하면 그 행들은 후보에 **들어오지도 않았다** — 0이라 답하면 거짓이다.
+    # 쓰기 없는 행을 빼고 조회하면 그것들은 후보에 **들어오지도 않았다** — 0이라 답하면 거짓이다.
     hidden = _rows(client, include_dry_run="false")["by_execution"]
-    assert hidden["executed"] == 1
-    assert hidden["dry_run"] is None
-    assert hidden["includes_dry_run"] is False
+    assert hidden["api_write"] == 1
+    assert hidden["no_api_write"] is None
+    assert hidden["includes_no_api_write"] is False
 
 
 def test_agency_row_has_the_same_shape_but_no_score(client_and_session):
@@ -214,3 +222,114 @@ def test_sign_flip_is_surfaced_not_hidden(client_and_session):
     assert op["delta"] == -10000        # 있는 그대로는 **악화**
     assert op["delta_high"] == 15000    # 상한 가정으로는 **개선**
     assert op["sign_flips"] is True
+
+
+# ── 적대 리뷰 1R 수리분 ────────────────────────────────────────────────────────
+
+def test_agency_row_in_change_log_is_not_called_pending(client_and_session):
+    """★P1-1 — 같은 「대행사 입찰 변경」이 grain에 따라 두 테이블 중 하나에 들어간다.
+
+    `agency_op`으로 잡히면 「채점 대상 아님」인데 `change_log`의 `external_*`로 잡히면
+    **「채점 전」**이 됐다. 그 행엔 `verify_date`가 없어 채점기(`run_daily`의 대상 조건이
+    `verify_date IS NOT NULL`)가 **보지도 않는다** — 즉 영영 안 채워지는 칸에 화면이
+    «곧 채워진다»고 말하고 있었다. 같은 사건이 원천에 따라 두 말을 하기도 했다.
+    """
+    client, db = client_and_session
+    _seed(db, action="external_bid_change", actual=False, verify_date=None,
+          outcome_profit=None, outcome=None)
+    row = _rows(client)["rows"][0]
+
+    assert row["actor"] == "agency"
+    assert row["outcome_profit"]["state"] == "not_ours"
+    assert "채점 전" not in (row["outcome_profit"]["note"] or "")
+
+
+def test_local_setting_change_is_not_called_practice(client_and_session):
+    """★P1-2 — `dry_run=True`는 이 저장소에서 「연습」만 뜻하지 않는다.
+
+    `optimizer_change`(자동운영 켜기/끄기)는 **광고 API 쓰기가 없는 로컬 설정 변경**이라
+    `dry_run=True`로 기록된다 — `improvement_events` 모듈 헤더가 「라이브 실측 함정」이라고
+    못 박아 둔 자리다. 여기에 「연습 — 계정에 안 나감」을 붙이면 이 트랙에서 가장 중요한
+    사건을 **안 했다고** 말하게 된다.
+    """
+    client, db = client_and_session
+    _seed(db, action="optimizer_change", dry_run=True, actual=False, verify_date=None,
+          outcome_profit=None, outcome=None)
+    op = _rows(client)["rows"][0]["outcome_profit"]
+
+    assert op["state"] == "no_api_write"
+    assert "네이버 광고 API 쓰기가 없었습니다" in op["note"]
+    # ★「연습」이라는 낱말을 쓰지 않는다 — 그게 이 P1의 내용이다.
+    assert "연습" not in op["note"]
+
+
+def test_by_execution_counts_only_our_own_actions(client_and_session):
+    """§4-4의 주어는 «우리»다 — 대행사 조치를 같이 세면 「우리가 몇 건 했나」가 틀린다."""
+    client, db = client_and_session
+    _seed(db, entity_id="nad-1")                       # 우리 · 네이버 쓰기 있음
+    _seed(db, entity_id="nad-2", action="external_bid_change",
+          actual=False, verify_date=None, outcome_profit=None, outcome=None)  # 대행사
+    db.add(NaverAgencyOp(
+        op_date=DAY, detected_at=datetime(2026, 8, 3, 12, 53, 57), occurred_at=EXECUTED,
+        entity_type="ad", entity_id="nad-9", campaign_id="cmp-1", optimizer="none",
+        op_type="bid_change", before_value="2330", after_value="1890", is_exception=True,
+    ))
+    db.commit()
+
+    counted = _rows(client)["by_execution"]
+    assert counted["scope"] == "ours"
+    assert counted["api_write"] == 1        # 대행사 2건은 안 센다
+    assert counted["no_api_write"] == 0
+
+
+def test_window_follows_the_row_not_a_constant(client_and_session):
+    """★생존 변이 M5 — 창 산식을 상수 14로 바꿔도 전 테스트가 초록이었다.
+
+    픽스처가 D+14 하나뿐이라 «산식»과 «상수»가 구분되지 않았다. 오프셋을 5일로 둬서
+    산식이 실제로 행을 읽는지 잰다.
+    """
+    client, db = client_and_session
+    _seed(db, verify_date=date(2026, 8, 4))  # executed 07-30 → 창 5일
+    op = _rows(client)["rows"][0]["outcome_profit"]
+
+    assert op["window"] == {
+        "days": 5,
+        "before_from": "2026-07-25", "before_to": "2026-07-29",
+        "after_from": "2026-07-30", "after_to": "2026-08-03",
+    }
+
+
+def test_overdue_pending_does_not_call_silence_a_schedule(client_and_session):
+    """★P2-8 — 예정일이 지났는데 「…부터」라고 쓰면 크론 침묵이 «예정»으로 읽힌다."""
+    client, db = client_and_session
+    _seed(db, actual=False, verify_date=date(2026, 8, 13), outcome_profit=None, outcome=None)
+    op = _rows(client)["rows"][0]["outcome_profit"]
+
+    assert op["state"] == "pending"
+    assert op["overdue"] is True
+    assert "지났는데" in op["note"]
+
+
+def test_sign_flip_includes_the_zero_boundary(client_and_session):
+    """★생존 변이 M11 — 있는 그대로가 ±0인데 상한으로는 개선인 행도 «결론이 갈린» 행이다."""
+    client, db = client_and_session
+    _seed(db, before={"clk": 900, "conv_amt": 200000, "cost": 50000},
+          after={"clk": 950, "conv_amt": 300000, "cost": 100000})
+    op = _rows(client)["rows"][0]["outcome_profit"]
+
+    assert op["delta"] == 0
+    assert op["delta_high"] == 12500
+    assert op["sign_flips"] is True
+
+
+def test_cf_fallback_does_not_pretend_two_yardsticks_agreed(client_and_session):
+    """★P2-9 — 보정계수를 **못 구하면** cf=1로 폴백한다. 그때 상한 줄을 그리면
+    두 자가 «일치했다»는 거짓 인상을 준다."""
+    client, db = client_and_session
+    _seed(db, lens={"bep": 2.0, "bep_source": "product", "gamma": 1.0, "cf": 1.0})
+    op = _rows(client)["rows"][0]["outcome_profit"]
+
+    assert op["lens"]["high_available"] is False
+    assert op["delta_high"] is None
+    assert op["scored_by"] is None
+    assert op["sign_flips"] is False

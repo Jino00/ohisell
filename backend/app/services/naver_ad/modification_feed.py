@@ -486,7 +486,11 @@ def _chunked_overrides(db: Session, keys: list[tuple[str, int]]) -> dict:
 _NOT_OURS_OUTCOME: dict = {
     "state": "not_ours",
     "delta": None, "before": None, "after": None, "verdict": None,
-    "note": "채점 대상 아님 — 우리가 한 조치가 아니다",
+    # ★키 집합이 change_log 쪽과 **같아야** 한다 — 타입은 필수라고 선언했는데 값이 없으면
+    #   화면이 undefined를 falsy로 삼켜 조용히 다르게 그린다(적대 리뷰 1R P2-2).
+    "delta_high": None, "scored_by": None, "sign_flips": False,
+    "scored_from": None, "overdue": False,
+    "note": "채점 대상 아님 — 우리가 한 조치가 아닙니다",
     "lens": None, "window": None, "legacy": None,
 }
 
@@ -496,6 +500,7 @@ def _change_log_row(
     labels: dict[tuple[str, str], str],
     camp_names: dict[str, str],
     sentence: str | None,
+    actor: str,
 ) -> dict:
     before, after = change_log_narrator.changed_values(row)
     b_val, b_backfill = _split_backfill(before)
@@ -517,7 +522,9 @@ def _change_log_row(
         "dry_run": row.dry_run,
         # ★설계서 122 §4-3·§4-4 — 결과 칸. **재채점하지 않는다**(행에 이미 적힌 것만 되살린다)
         #   고, 자 자백(보정계수·BEP·전후 창)을 함께 낸다(D-NAO-230).
-        "outcome_profit": proposal_scoreboard.read_profit_delta(row),
+        # ★주체는 **호출부가 정정까지 반영해 정한 최종값**을 넘긴다 — 여기서 다시 분류하면
+        #   같은 행이 화면과 채점에서 다른 주체가 된다.
+        "outcome_profit": proposal_scoreboard.read_profit_delta(row, actor=actor),
     }
 
 
@@ -637,18 +644,22 @@ def build(
 
     resolved: list[tuple[_Candidate, str, bool, str | None]] = []
     by_actor: dict[str, int] = {a: 0 for a in change_actor.ACTORS}
-    # ★설계서 122 §4-4 — 실집행과 연습(dry_run)을 **따로** 센다. 하나로 세면 화면이
-    #   「엔진이 N건 했다」고 말하는데 그중 상당수가 계정에 안 나간 연습이라 거짓이 된다.
-    executed_n = dry_run_n = 0
+    # ★설계서 122 §4-4 — PAO **자기 행동**을 네이버 쓰기 유무로 갈라 센다.
+    #   ⚠️`dry_run`은 세 뜻(연습 집행·관찰 기록·로컬 설정 변경)을 겸하므로 「연습」이라
+    #     부르지 않는다 — 셋 모두에 참인 건 「네이버 광고 API 쓰기가 없었다」뿐이다.
+    #   ⚠️대행사·Jino 행은 이 계수에 안 넣는다. 「우리가 몇 건 했나」를 재는 줄인데 남의
+    #     조치를 같이 세면 그 답이 틀린다(적대 리뷰 1R P2-1).
+    api_write_n = no_write_n = 0
     for c in candidates:
         final, corrected, note = change_actor.resolve(
             c.auto_actor, overrides.get((c.source, c.source_id))
         )
         by_actor[final] = by_actor.get(final, 0) + 1
-        if c.dry_run:
-            dry_run_n += 1
-        else:
-            executed_n += 1
+        if final == change_actor.ACTOR_OURS:
+            if c.dry_run:
+                no_write_n += 1
+            else:
+                api_write_n += 1
         resolved.append((c, final, corrected, note))
 
     if actor:
@@ -690,7 +701,7 @@ def build(
             src_row = cl_by_id.get(c.source_id)
             if src_row is None:
                 continue  # 1패스와 2패스 사이에 사라진 행(리플레이) — 지어내지 않는다
-            body = _change_log_row(src_row, labels, camp_names, sentences.get(src_row.id))
+            body = _change_log_row(src_row, labels, camp_names, sentences.get(src_row.id), final)
         else:
             ao_row = ao_by_id.get(c.source_id)
             if ao_row is None:
@@ -728,9 +739,11 @@ def build(
         # ★§4-4. `include_dry_run`이 꺼져 있으면 연습 행은 후보에 **들어오지도 않았다** —
         #   그때 0을 내면 「연습이 0건이었다」는 거짓이 된다. 세지 못한 것은 None으로 말한다.
         "by_execution": {
-            "executed": executed_n,
-            "dry_run": (dry_run_n if include_dry_run else None),
-            "includes_dry_run": include_dry_run,
+            # 이 계수가 «누구»를 세는지 응답이 스스로 말한다.
+            "scope": change_actor.ACTOR_OURS,
+            "api_write": api_write_n,
+            "no_api_write": (no_write_n if include_dry_run else None),
+            "includes_no_api_write": include_dry_run,
         },
         # D-NAO-147: 두 원천에 중복으로 들어와 한 줄로 접힌 건수(조용한 truncation 금지).
         "dedup": {"merged_agency_op": merged_dup},

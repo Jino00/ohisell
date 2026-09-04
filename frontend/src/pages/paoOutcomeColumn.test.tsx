@@ -49,6 +49,7 @@ const LENS = {
   cf: 1.25, bep: 2, bep_source: "product",
   basis: "있는 그대로(보정 없음)",
   high_basis: "보정계수 점추정(구간의 위쪽 끝) — 채널 매출 전액을 광고 공으로 돌리는 가정",
+  high_available: true,
   interval_low_available: false,
 };
 const WINDOW = {
@@ -64,14 +65,14 @@ const RESPONSE: NaverModificationResponse = {
     included: true, collapsed: true,
   },
   reclaimed_ours: 0,
-  by_execution: { executed: 1, dry_run: 1, includes_dry_run: true },
+  by_execution: { scope: "ours", api_write: 1, no_api_write: 1, includes_no_api_write: true },
   rows: [
     {
       ...BASE, key: "change_log:1", entity_id: "nad-1", dry_run: false,
       outcome_profit: {
         state: "scored", delta: 40000, before: 50000, after: 90000, verdict: "improved",
         delta_high: 52500, scored_by: "high", sign_flips: false,
-        note: null, lens: LENS, window: WINDOW,
+        scored_from: "2026-08-13", overdue: false, note: null, lens: LENS, window: WINDOW,
         legacy: { outcome: "improved", label: "교정 전 자 — 증거용", note: "전/후 RPC 배율" },
       },
     },
@@ -79,7 +80,7 @@ const RESPONSE: NaverModificationResponse = {
       ...BASE, key: "change_log:2", entity_id: "nad-2", source_id: 2, dry_run: false,
       outcome_profit: {
         state: "pending", delta: null, before: null, after: null, verdict: null,
-        delta_high: null, scored_by: null, sign_flips: false,
+        delta_high: null, scored_by: null, sign_flips: false, overdue: false,
         note: "채점 전 · D+14 · 2026-09-15부터", scored_from: "2026-09-15",
         lens: null, window: null,
         legacy: { outcome: null, label: "교정 전 자 — 증거용", note: "전/후 RPC 배율" },
@@ -88,9 +89,10 @@ const RESPONSE: NaverModificationResponse = {
     {
       ...BASE, key: "change_log:3", entity_id: "nad-3", source_id: 3, dry_run: true,
       outcome_profit: {
-        state: "dry_run", delta: null, before: null, after: null, verdict: null,
+        state: "no_api_write", delta: null, before: null, after: null, verdict: null,
         delta_high: null, scored_by: null, sign_flips: false,
-        note: "채점 대상 아님 — 연습(dry_run)이라 계정에 안 나갔다",
+        scored_from: null, overdue: false,
+        note: "채점 대상 아님 — 네이버 광고 API 쓰기가 없었습니다",
         lens: null, window: null, legacy: null,
       },
     },
@@ -100,7 +102,7 @@ const RESPONSE: NaverModificationResponse = {
         // 있는 그대로는 악화(−10,000)인데 상한 가정으로는 개선(+15,000)인 행.
         state: "scored", delta: -10000, before: 50000, after: 40000, verdict: "improved",
         delta_high: 15000, scored_by: "high", sign_flips: true,
-        note: null, lens: LENS, window: WINDOW,
+        scored_from: "2026-08-13", overdue: false, note: null, lens: LENS, window: WINDOW,
         legacy: { outcome: "improved", label: "교정 전 자 — 증거용", note: "전/후 RPC 배율" },
       },
     },
@@ -150,16 +152,32 @@ describe("결과 칸이 사용자에게 닿는다", () => {
     await renderScreen();
     // 조회가 연습을 **일부러 포함**한다 — 빼면 PAO 자기 행동 대부분이 화면에서 사라진다.
     expect(h.calls[0].include_dry_run).toBe(true);
-    expect(await screen.findByText("연습(dry_run) — 계정에 안 나감")).toBeTruthy();
-    const summary = screen.getByText(/실집행 1건/);
-    expect(summary.textContent).toContain("연습(dry_run) 1건");
+    // ★「연습」이라 쓰지 않는다 — dry_run 컬럼이 세 뜻(연습·관찰·로컬 설정 변경)을 겸해서
+    //   그렇게 쓰면 `optimizer_change` 같은 **실제로 한 일**을 안 했다고 말하게 된다.
+    expect(await screen.findByText("네이버 광고 API 쓰기 없음")).toBeTruthy();
+    expect(screen.queryByText(/계정에 안 나감/)).toBeNull();
+    const summary = screen.getByText(/네이버 쓰기 1건/);
+    expect(summary.textContent).toContain("우리 자동화가 한 것");
+    expect(summary.textContent).toContain("쓰기 없음 1건");
   });
 
-  it("③-b 연습을 못 셌으면 0이 아니라 그렇게 말한다", async () => {
-    RESPONSE.by_execution = { executed: 1, dry_run: null, includes_dry_run: false };
+  it("③-b 못 셌으면 0이 아니라 그렇게 말한다", async () => {
+    RESPONSE.by_execution = {
+      scope: "ours", api_write: 1, no_api_write: null, includes_no_api_write: false,
+    };
     await renderScreen();
     expect(await screen.findByText(/세지 못했습니다/)).toBeTruthy();
-    RESPONSE.by_execution = { executed: 1, dry_run: 1, includes_dry_run: true };
+    RESPONSE.by_execution = {
+      scope: "ours", api_write: 1, no_api_write: 1, includes_no_api_write: true,
+    };
+  });
+
+  it("⑤ 방향이 색으로도 갈린다 — 초록/빨강 신호에 테스트가 0건이었다(1R P2-5)", async () => {
+    await renderScreen();
+    // 같은 「금액」이라도 +와 −는 훑을 때 색으로 먼저 갈린다. 톤을 전부 회색으로 바꾸면
+    // 화면은 멀쩡해 보이는데 그 신호가 조용히 사라진다.
+    expect((await screen.findByText("+40,000원")).className).toContain("text-emerald-700");
+    expect(screen.getByText("−10,000원").className).toContain("text-red-700");
   });
 
   it("④ 「우리 자동화」 옆에 (Ava 미분리)가 붙는다 — 없는 정확도를 있는 척하지 않는다", async () => {
