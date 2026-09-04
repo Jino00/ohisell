@@ -64,6 +64,7 @@ from app.services.naver_ad.bid_step_types import (
     decode_base_bid,
     decode_cold_ceiling,
     decode_exploration_ceiling,
+    is_loss_defense,
 )
 
 # D-NAO-129: 소재(ad) 실쓰기 경계에서 **승인원 무관으로 개방**되는 UP 타입(= DOWN 대칭).
@@ -904,7 +905,52 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         # D-NAO-121: 출시창 순위 하한 — 소재(target_type='ad')와 그룹(target_type='adgroup',
         # 그룹 입찰을 쓰는 출시창 소재가 있을 때) 제안에서 채운다. 캠페인 단위는 항상 None.
         "launch_floor_bid": None, "launch_target_rank": None,
+        # ★★D-NAO-286 표본 하한 게이트의 원료 — 정착창(D-8~D-2) 주간 전환 «건수».
+        #   **이 두 키가 컨텍스트에 없으면 게이트는 영원히 통과한다**(guardrail_gate가 미배선
+        #   호출부의 행위를 안 바꾸도록 그렇게 설계됐다). 즉 여기가 게이트의 «마지막 표면»이고,
+        #   이 줄을 지우면 게이트 전체가 조용히 무력해진다 — 적대 리뷰의 절단 변이 대상.
+        #   값 None = «측정 불가»(게이트가 차단으로 읽는다) / 0 = «측정했고 0건».
+        "campaign_weekly_conv": None, "target_weekly_conv": None,
+        # ★D-NAO-286 표본 하한 «면제» 레인 — 표본 하한이 막으려는 것은 「표본 없이 **새로**
+        #   판단해서 값을 움직이는 것」이다. 아래 둘은 새 판단이 아니라서 면제한다:
+        #     ⓐ 손실 고삐(DL RL3) — 출혈 정지. 막으면 표본 없는 유닛이 새는 걸 못 멈춘다.
+        #     ⓑ 탐침 되돌림(revert_op) — 이전 판단의 **취소**(원래 입찰가로 복귀).
+        #   ★이 계산은 DB를 타지 않으므로 아래 조회 try «밖»에 둔다 — 조회가 실패해도 안전
+        #     경로는 계속 열려 있어야 한다(조회 실패로 되돌림이 막히면 그게 더 나쁘다).
+        "floor_exempt": False,
     }
+    try:
+        from app.services.naver_ad import auto_operator as _auto_operator_floor
+
+        context["floor_exempt"] = bool(
+            is_loss_defense(getattr(proposal, "expected_effect", None))
+            or getattr(proposal, "approval_source", None)
+            == _auto_operator_floor.APPROVAL_SOURCE_REVERT
+        )
+    except Exception as e:  # noqa: BLE001 — 면제 판별 실패는 False 유지(게이트 적용 = 보수)
+        log.warning(
+            "naver_execution_harness: 표본 하한 면제 판별 실패(게이트 적용 유지) "
+            "proposal_id=%s: %s", getattr(proposal, "id", None), e,
+        )
+    # ★D-NAO-286 원료 채우기 — 지연 import(순환 회피, 위 킬스위치 가드와 같은 관용구).
+    #   조회 실패는 None 유지 = 차단(fail-closed) — 「모름」을 「괜찮음」으로 읽지 않는다.
+    try:
+        from app.services.naver_ad import auto_operator as _auto_operator_floor
+
+        campaign_conv, target_conv = _auto_operator_floor.settlement_conv_counts(
+            db,
+            target_type=proposal.target_type,
+            target_id=proposal.target_id,
+            campaign_id=proposal.campaign_id,
+            today=now.date(),
+        )
+        context["campaign_weekly_conv"] = campaign_conv
+        context["target_weekly_conv"] = target_conv
+    except Exception as e:  # noqa: BLE001 — 실패는 None 유지(표본 하한이 차단으로 읽는다)
+        log.warning(
+            "naver_execution_harness: 표본 하한 원료 조회 실패(fail-closed 차단 유지) "
+            "proposal_id=%s: %s", getattr(proposal, "id", None), e,
+        )
     # VT4 codex 1R P1-1: guardrail_gate가 campaign_type 인지형 입찰 하한(SHOPPING 50·그 외 70)을
     # 적용하려면 context에 campaign_type이 실려야 한다 — proposal.campaign_id의 campaign 엔티티
     # 행에서 조회(부재/조회 실패 시 None → guardrail_gate가 보수 70 하한 유지, fail-closed). 세

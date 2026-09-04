@@ -140,12 +140,40 @@ def decode_base_bid(expected_effect: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# ── D-NAO-286: 손실 방어(DL 일일 손실 고삐) 표식 ──────────────────────────────────
+# 표본 하한 게이트(guardrail_gate._check_data_floor)는 «표본이 없으면 아무 판단도 하지 않는다»가
+# 문장이라 양방향을 막는다. 그런데 손실 고삐가 쏘는 하향까지 막으면 **표본 없는 유닛이 출혈
+# 중인데 못 내리는** 상태가 되어 게이트가 손해를 만든다(계약 §3 금지선).
+# ★그래서 레인이 «이건 손실 방어다»를 제안에 실어 보내고 harness가 그걸 컨텍스트로 옮긴다.
+#   rationale 프로즈를 파싱하지 않는다 — 이 파일의 base_bid·ceiling 마커와 같은 기계판독 관용구를
+#   쓴다(마이그레이션 0, 기존 Text 컬럼 재사용). 값이 없는 불리언이라 `=1` 고정 태그다.
+_LOSS_DEFENSE_TAG = "loss_defense"
+_LOSS_DEFENSE_RE = re.compile(r"\[\[loss_defense=1\]\]")
+
+
+def encode_loss_defense(expected_effect: str | None) -> str:
+    """expected_effect에 손실 방어 표식을 붙여 반환(멱등 — 이미 있으면 그대로)."""
+    body = expected_effect or ""
+    if _LOSS_DEFENSE_RE.search(body):
+        return body
+    return f"{body}\n[[{_LOSS_DEFENSE_TAG}=1]]"
+
+
+def is_loss_defense(expected_effect: str | None) -> bool:
+    """손실 방어 표식이 **정확히 1개** 있는가 — base_bid 디코드와 같은 엄격 모드.
+    부재·중복은 전부 False(표식을 못 믿으면 게이트를 그냥 적용한다 = 보수 방향)."""
+    if not expected_effect:
+        return False
+    return len(_LOSS_DEFENSE_RE.findall(expected_effect)) == 1
+
+
 def strip_base_bid_marker(expected_effect: str | None) -> str | None:
-    """표시용 — expected_effect에서 기계판독 마커(base_bid·explore_ceiling) 제거(콘솔/브리핑 사람
+    """표시용 — expected_effect에서 기계판독 마커(base_bid·explore_ceiling·loss_defense) 제거(콘솔/브리핑 사람
     노출 방지, GATE R2 P2-1). 저장값은 건드리지 않는다(TOCTOU·상한 원료 보존) — 표시 직전 레이어만."""
     if not expected_effect:
         return expected_effect
-    return _CEILING_RE.sub("", _BASE_BID_RE.sub("", expected_effect)).rstrip()
+    stripped = _CEILING_RE.sub("", _BASE_BID_RE.sub("", expected_effect))
+    return _LOSS_DEFENSE_RE.sub("", stripped).rstrip()
 
 
 # ── B-X BX3(D-NAO-70·71): 탐색 스텝 경제성 상한(ceiling) 마커(PLAN §3 BX2 GATE 이월 P2①) ──

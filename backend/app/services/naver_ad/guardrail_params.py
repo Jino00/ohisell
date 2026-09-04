@@ -146,6 +146,31 @@ SPECS: dict[str, ParamSpec] = {
         "못 막으므로 **대체 브레이크가 없다.**",
         "tighten_down",
     ),
+    # ══ D-NAO-286 — 표본 하한 게이트 2키(북극성 M2 S2-ⓑ) ══
+    # 계약 `docs/contracts/CONTRACT_sample_floor_gate.md`. 이 둘은 **게이트 전용**이라 위 주석이
+    # 경고한 「생성기 7곳이 값을 재현하는」 문제가 없다 — `guardrail_gate._check_data_floor`
+    # 한 곳만 읽는다. 값을 내려도 죽는 생성기가 없다.
+    "min_weekly_conv_campaign": ParamSpec(
+        "min_weekly_conv_campaign", guardrail_gate._MIN_WEEKLY_CONV_CAMPAIGN, "int", 5, 20,
+        "캠페인 표본 하한(정착창 주간 전환)",
+        "15건(`ref 33` [6] 원문 — 최근 30일 15전환 ≈ 주 15건, tROAS 활성화 최소. `ref 65` §4 "
+        "판정표가 이미 이 값을 게이트 상수로 지목했다). 하한 5는 ss/pl 클릭 게이트의 「표본 "
+        "미달이라 판정 근거가 없다」 컷 재사용, 상한 20은 `ref 33` [10] intraday 하한(주 20전환) "
+        "재사용 — 양끝 다 기존 문서의 수이고 새로 만든 숫자가 아니다. "
+        "★**커지면 조인다** — 하한이 높을수록 더 많은 캠페인에서 자동 입찰이 멈춘다.",
+        "tighten_up",
+    ),
+    "min_weekly_conv_target": ParamSpec(
+        "min_weekly_conv_target", guardrail_gate._MIN_WEEKLY_CONV_TARGET, "int", 5, 20,
+        "대상 표본 하한(정착창 주간 전환)",
+        "15건 — 캠페인 키와 같은 출처(`ref 33` [6]). ★이 키가 «따로» 있는 이유: 2026-09-04 실측 "
+        "결과 PAO가 도는 두 캠페인은 주 174.1·47.4전환으로 **캠페인 게이트를 둘 다 통과**하는데, "
+        "정작 2026-09-01 사고(Jino가 auto_operate를 끈 사건)는 **소재 grain**에서 났다 — "
+        "이틀·14클릭 표본으로 +49% 증액. 캠페인 하한만으론 그 자리를 못 막는다. "
+        "★**커지면 조인다** — 하한이 높을수록 더 많은 소재·그룹에서 자동 입찰이 멈춘다. "
+        "★양방향이다 — 증액만 막으면 브레이크만 남아 D-NAO-85형 표류가 된다(북극성 §7).",
+        "tighten_up",
+    ),
     # ══ D-NAO-262 (S4) — 파워링크 제외 게이트 2종 승격 ══
     # 계약 `CONTRACT_ignition_readiness.md` §4-B⑤ 봉투 표 그대로. 끝값은 전부 기존 숫자의
     # 재사용이고 이 세션이 발명한 수는 없다.

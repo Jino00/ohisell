@@ -1220,6 +1220,11 @@ def test_build_guardrail_context_non_keyword_target_all_none(db):
         "auto_exec": False,
         # 자동 하향 상한 원료는 소재(ad) grain에서만 채운다 — 그 외 target_type은 None(미적용).
         "auto_bid_down_today": None,
+        # ★D-NAO-286 표본 하한 게이트 원료. campaign_id가 있으면 «측정했고 0건»(0)이고,
+        #   대상은 입찰 grain(ad/adgroup/keyword)일 때만 잰다 — 그 외는 «측정 불가»(None)라
+        #   게이트가 차단으로 읽는다. `floor_exempt`는 되돌림·손실고삐 레인에서만 True.
+        "campaign_weekly_conv": 0, "target_weekly_conv": None,
+        "floor_exempt": False,
     }
 
 
@@ -1246,6 +1251,11 @@ def test_build_guardrail_context_adgroup_target_bid_budget_fields_none_no_prior_
         "auto_exec": False,
         # 자동 하향 상한 원료는 소재(ad) grain에서만 채운다 — 그 외 target_type은 None(미적용).
         "auto_bid_down_today": None,
+        # ★D-NAO-286 표본 하한 게이트 원료. campaign_id가 있으면 «측정했고 0건»(0)이고,
+        #   대상은 입찰 grain(ad/adgroup/keyword)일 때만 잰다 — 그 외는 «측정 불가»(None)라
+        #   게이트가 차단으로 읽는다. `floor_exempt`는 되돌림·손실고삐 레인에서만 True.
+        "campaign_weekly_conv": 0, "target_weekly_conv": 0,
+        "floor_exempt": False,
     }
 
 

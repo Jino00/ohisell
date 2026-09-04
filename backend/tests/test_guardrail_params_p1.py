@@ -310,11 +310,15 @@ def test_every_param_actually_wins_over_code_constant(db):
     이번에 는 둘은 봉투가 아니라 **킬스위치**(bool)다 — True/False라 「DB가 이긴다」의 반례가
     더 조용하다(1과 True가 화면에서 같아 보인다). 그래서 코드 기본값과 **반대 값**을 넣어
     이긴다는 것을 못박는다.
+
+    ★2026-09-04(D-NAO-286): SPECS가 9 -> 11로 늘며 **네 번째로** 먼저 빨개졌다. 는 둘은
+    표본 하한(`min_weekly_conv_campaign` [5,20] · `min_weekly_conv_target` [5,20])이다.
     """
     _kv(db, '{"cooldown_hours": 5, "max_daily_auto_bid_downs": 6, "max_auto_up_multiple": "2.5",'
             ' "pl_min_click": 7, "pl_window_days": 21,'
             ' "ss_min_click": 15, "ss_window_days": 9,'
-            ' "ad_bid_routing_enabled": 0, "naver_cs_dry_run": 0}')
+            ' "ad_bid_routing_enabled": 0, "naver_cs_dry_run": 0,'
+            ' "min_weekly_conv_campaign": 8, "min_weekly_conv_target": 12}')
     p = guardrail_params.get_params(db)
     assert p["cooldown_hours"] == 5
     assert p["max_daily_auto_bid_downs"] == 6
@@ -323,6 +327,8 @@ def test_every_param_actually_wins_over_code_constant(db):
     assert p["pl_window_days"] == 21
     assert p["ss_min_click"] == 15
     assert p["ss_window_days"] == 9
+    assert p["min_weekly_conv_campaign"] == 8
+    assert p["min_weekly_conv_target"] == 12
     # 코드 기본값은 둘 다 True다 — 반대 값이 실제로 이겨야 한다.
     assert guardrail_params.SPECS["ad_bid_routing_enabled"].default is True
     assert guardrail_params.SPECS["naver_cs_dry_run"].default is True

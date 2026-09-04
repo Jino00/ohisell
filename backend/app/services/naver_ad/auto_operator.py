@@ -25,6 +25,7 @@ from sqlalchemy import and_, exists, func as sqlfunc, select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
+    NaverAdCreativeDaily,
     NaverAdDaily,
     NaverCampaignSettings,
     NaverChangeLog,
@@ -35,7 +36,7 @@ from app.models import (
     NaverRetroSignal,
 )
 from app.services.naver_ad import adgroup_scope, bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, hierarchical_pooling, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
-from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
+from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling, encode_loss_defense
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
@@ -542,25 +543,115 @@ def _resolve_target_roas(db: Session, campaign_id: str) -> float | None:
 
 
 def _settlement_agg(db: Session, target_type: str, target_id: str, date_from: date, date_to: date) -> dict:
-    """정착창 내 (clk, cost, conv_amt) 집계 — account_diagnosis.keyword_window_agg/
+    """정착창 내 (clk, cost, conv_amt, conv_cnt) 집계 — account_diagnosis.keyword_window_agg/
     adgroup_window_agg는 clk을 반환하지 않아(cost/conv_amt만, D-NAO-48 조건③·시간당 CPC/
     페이싱 판정엔 clk도 필요) 이 모듈 전용 로컬 집계를 둔다. 기존 SA(account_diagnosis)
-    수정 금지 원칙에 따라 새 함수를 거기 추가하지 않고 이 파일 안에 격리한다."""
+    수정 금지 원칙에 따라 새 함수를 거기 추가하지 않고 이 파일 안에 격리한다.
+
+    ★D-NAO-286: **소재(ad) grain 분기 신설.** 종전엔 `keyword`/`else` 두 갈래뿐이라
+    target_type='ad'가 else로 떨어져 `NaverAdDaily.adgroup_id == <소재id>`를 조회했고, 그
+    조합은 **원리적으로 0행**이다(소재 id는 adgroup_id 컬럼에 들어가지 않는다). 그래서 소재
+    grain에선 cost가 항상 0이 되어 `_settlement_roas_status`가 항상 "unknown",
+    `baseline_cpc`가 항상 None, `_intraday_loss_leash`의 avg_daily_cost가 항상 0 —
+    **정착창 실측 검증·CPC 급등 DOWN·손실 고삐 셋이 전부 죽어 있었다.** 그런데 최근 30일
+    실집행 15건이 **전부 ad grain**이다(2026-09-04 실측). 소재 성과 원장은 따로 있다:
+    `naver_ad_creative_daily`(2026-08-01~, 소재 1,246개).
+
+    ★`conv_cnt`(전환 «건수») 추가 — 표본 하한 게이트의 원료. 종전 반환은 금액(conv_amt)만이라
+    「얼마 벌었나」는 알아도 「몇 번 팔렸나」를 몰랐다.
+
+    ★`else`는 종전과 **같은 adgroup 필터를 유지**하되(회귀 0) 미지원 grain이면
+    `grain_fallback=True`로 자백한다 — 다음 grain이 또 «조용히» 흡수되지 않게.
+    """
+    if target_type == "ad":
+        clk, cost, direct, indirect, cnt_d, cnt_i = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdCreativeDaily.clk), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdCreativeDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdCreativeDaily.conv_direct_amt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdCreativeDaily.conv_indirect_amt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdCreativeDaily.conv_direct_cnt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdCreativeDaily.conv_indirect_cnt), 0),
+        ).filter(
+            NaverAdCreativeDaily.ad_date >= date_from,
+            NaverAdCreativeDaily.ad_date <= date_to,
+            NaverAdCreativeDaily.ad_id == target_id,
+        ).one()
+        return {
+            "clk": int(clk), "cost": int(cost),
+            "conv_amt": int(direct) + int(indirect),
+            "conv_cnt": int(cnt_d) + int(cnt_i),
+            "grain_fallback": False,
+        }
+
     q = db.query(
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_cnt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_cnt), 0),
     ).filter(
         NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
         NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
     )
+    grain_fallback = False
     if target_type == "keyword":
         q = q.filter(NaverAdDaily.keyword_id == target_id, NaverAdDaily.campaign_type == "WEB_SITE")
-    else:  # adgroup
+    else:
+        if target_type != "adgroup":
+            grain_fallback = True
+            log.warning(
+                "auto_operator._settlement_agg: 미지원 grain target_type=%r — adgroup 필터로 "
+                "폴백(D-NAO-286 자백 플래그, 판정 소비처가 fail-closed 처리)", target_type,
+            )
         q = q.filter(NaverAdDaily.adgroup_id == target_id)
-    clk, cost, direct, indirect = q.one()
-    return {"clk": int(clk), "cost": int(cost), "conv_amt": int(direct) + int(indirect)}
+    clk, cost, direct, indirect, cnt_d, cnt_i = q.one()
+    return {
+        "clk": int(clk), "cost": int(cost),
+        "conv_amt": int(direct) + int(indirect),
+        "conv_cnt": int(cnt_d) + int(cnt_i),
+        "grain_fallback": grain_fallback,
+    }
+
+
+def settlement_conv_counts(
+    db: Session, *, target_type: str, target_id: str, campaign_id: str | None, today: date,
+) -> tuple[int | None, int | None]:
+    """(캠페인 정착창 전환건수, 대상 정착창 전환건수) — D-NAO-286 표본 하한 게이트의 원료.
+
+    창은 **정착창 D-8~D-2(7일)** 그대로다(`_settlement_window`) — 「주 15전환」의 자로 새 창을
+    신설하지 않고 이 모듈이 이미 쓰는 창을 쓴다(계약 §3 「창 길이 변경 0」).
+
+    ★반환의 `None`은 «측정 불가»이고 `0`은 «측정했고 0건»이다 — 둘을 뭉개면 이 저장소가
+    반복해 밟은 「모름=괜찮음」이 된다(교훈 #123). 게이트는 None을 차단으로 읽는다.
+    미지원 grain(`grain_fallback=True`)은 «남의 그룹 숫자»를 보고 있는 것이므로 None이다.
+    """
+    window_from, window_to = _settlement_window(today)
+
+    target_cnt: int | None = None
+    if target_type in ("ad", "adgroup", "keyword"):
+        agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
+        if not agg.get("grain_fallback"):
+            target_cnt = int(agg["conv_cnt"])
+
+    campaign_cnt: int | None = None
+    if campaign_id:
+        direct, indirect = (
+            db.query(
+                sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_cnt), 0),
+                sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_cnt), 0),
+            )
+            .filter(
+                NaverAdDaily.ad_date >= window_from,
+                NaverAdDaily.ad_date <= window_to,
+                NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+                NaverAdDaily.campaign_id == campaign_id,
+            )
+            .one()
+        )
+        campaign_cnt = int(direct) + int(indirect)
+
+    return campaign_cnt, target_cnt
 
 
 def _settlement_roas_status(
@@ -3851,7 +3942,9 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 proposal_approval_source = APPROVAL_SOURCE_HOURLY
             elif is_leash:
                 rationale = f"[순위고삐] {verdict['reason']}"
-                expected_effect = (
+                # D-NAO-286: 손실 방어 표식 — 표본 하한 게이트가 이 하향만은 통과시킨다
+                # (표본 없는 유닛이 출혈 중인데 못 내리면 게이트가 손해를 만든다, 계약 §3).
+                expected_effect = encode_loss_defense(
                     "순위 고삐 — 장중 추정 총이익 loss(추정ROAS<BEP·하루치 소진)에서 한 등 "
                     "하향, 자정 리셋(D-NAO-60 RL3)."
                 )
