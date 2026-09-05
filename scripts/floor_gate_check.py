@@ -26,6 +26,16 @@ KST_NOW = datetime.utcnow() + timedelta(hours=9)
 TODAY = KST_NOW.date()
 
 
+def _campaign_auto_operate_off(db, ad_id: str) -> bool:
+    """이 소재의 캠페인 마스터 스위치가 꺼져 있나 — 「0건」의 사유를 가르는 데 쓴다."""
+    row = db.execute(text(
+        "select s.auto_operate from naver_campaign_settings s "
+        "where s.campaign_id = (select campaign_id from naver_ad_creative_daily "
+        "                       where ad_id=:a limit 1)"
+    ), {"a": ad_id}).scalar()
+    return row == 0
+
+
 def main() -> None:
     db = SessionLocal()
     print(f"== D-NAO-286 표본 하한 게이트 — 관측 {KST_NOW:%Y-%m-%d %H:%M:%S} KST ==")
@@ -113,7 +123,17 @@ def main() -> None:
         "group by 1 order by 2 desc limit 8"
     )).fetchall()
     if not diary_rows:
-        print("     하한 차단 일기: 0건 (아직 레인이 안 돌았거나 미배포)")
+        # ★「0건」의 사유가 셋이라 가려서 말한다(적대 리뷰 P2-12): 미배포 / 레인 미실행 /
+        #   **막힐 대상이 애초에 안 돎**. 셋을 뭉개면 «미가동»을 «차단»으로 오독한다.
+        blocked_ads = [a for a in ad_ids if _campaign_auto_operate_off(db, a)]
+        if not deployed:
+            why = "미배포 — 게이트가 아직 prod에 없다"
+        elif blocked_ads:
+            why = (f"★막힐 대상이 안 돈다 — 하한에 걸리는 소재의 캠페인이 auto_operate=0"
+                   f"({len(blocked_ads)}개). 이건 «게이트가 막은 것»이 아니라 «애초에 미가동»이다")
+        else:
+            why = "레인이 아직 안 돌았거나, 이번 회차에 그 소재의 제안이 안 나왔다"
+        print(f"     하한 차단 일기: 0건 — {why}")
     for r, n, newest in diary_rows:
         print(f"     {n:>3}건  {newest}  {r}")
 
