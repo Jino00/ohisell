@@ -8239,3 +8239,28 @@ return None
 **집행 지점**: `backend/tests/test_naver_oscillation_damping.py::test_ordinary_hold_still_gets_the_click_probe`(①) · `::test_b_veto_marker_does_not_hijack_a_hold_it_did_not_cause`(②) · `backend/tests/test_naver_aveto_counterfactual.py::test_summarize_excludes_rows_after_the_deploy_boundary`(③). 셋 다 해당 변이 재주입으로 사망 확인.
 
 **관련**: 교훈 #395(거부권이 이름만 남는다) · #396(보존기한이 곧 판정 가능 창) · #123(0건과 실행 안 됨) · `ref 135` §5-3·§10-1 · PR #742
+
+---
+
+## 교훈 #398 — 인계의 「X가 없다」는 관측이 아니라 «그 세션이 X를 안 찾았다»일 수 있다 (2026-09-06, 체인 `pao-진동차단` n=4 · D-NAO-291)
+
+**사건.** n=3이 `ref 135` §7에 이월했다: *"hh24 곡선을 적재하지 않으면 이 축은 09-09에 닫힌다. 곡선 적재가 선행이다."* 그 문장은 **작업 지시의 모양**을 하고 있었고, 그대로 믿었으면 n=4는 새 표·마이그레이션·크론을 만들었을 것이다.
+
+**실측(착수 30분, prod 읽기 전용).** 적재는 **이미 1년치가 돌고 있었다.**
+- `naver_keyword_hourly`(`entity_type='adgroup'`) — D-1 스윕 09:10 KST · 보존 **365일** · 24시간 완전
+- `naver_adgroup_hourly_today` — 매시 :57 · 보존 **14일** · hour 23 결손
+- API 곡선과 대조: **시간 슬롯 574/574 전필드 일치**(광고그룹×날짜 24건)
+
+없던 것은 적재가 아니라 **배선**이었다. 실제로 든 것은 **함수 하나(`stored_curve`)와 플래그 하나(`--curve-source`)**다.
+
+**★일반형.** 「없다」는 단정어다(전역 §6 — 단정어를 쓰기 «전에» 반례를 한 번 센다). 인계문의 단정어는 **그 세션의 탐색 범위**를 말하는 것이지 세계를 말하는 게 아니다. 세는 비용은 쿼리 한 줄(`sqlite_master`에 그 표가 있나)이고, 안 세는 비용은 이번 경우 **없어도 될 파이프라인 하나**였다.
+
+**★가장 아픈 부분 — 같은 실수의 짝이 그 문서 «세 줄 위»에 이미 있었다.** `ref 135` §2는 *"곡선이 없는 게 아니라 우리가 안 받아 왔다"*고 적었다. **그 문장을 쓴 세션이 바로 다음 절에서 「적재가 없다」를 새로 만들었다.** 교훈 #397의 *"적어 두는 것과 지키는 것은 다른 일이다"*가 문서 층에서 재현된 것이다.
+
+**부수 — 자기검증의 표는 그 자체로 증거가 아니다.** 2R에서 내가 「1R 생존 변이 전건 사망」이라 낸 표를 리뷰어가 재측정해 **두 칸을 갈랐다**: ①`M9`는 변이 «형태»에 따라 갈린다(같은 라벨 재계수는 사망 / 별도 버킷 «추가»는 생존 — 단언이 부분일치라서) ②`M11b`는 `mode=rw`로 바꾸면서 가드가 찾는 리터럴을 **주석에 심으면** 통과한다(이 저장소의 소스 텍스트 드리프트 가드 관례 전체가 공유하는 성질 — 현실적 드리프트 방향으로는 시끄럽게 실패하므로 안전 쪽으로 깨진다).
+
+**그리고 교훈 #397의 네 번째 재현이 이 세션에도 났다.** 내가 쓴 「읽기 전용」 테스트가 **자기 픽스처가 연 접속**을 검사했다(`_mk_curve_db`가 스스로 `mode=ro`로 열었다) — 스크립트를 `mode=rw`로 바꿔도 초록이었다. 교훈 #397을 **읽고 나서** 쓴 파일에서 났다.
+
+**집행 지점**: `scripts/measurements/aveto_counterfactual.py::stored_curve`(적재 우선 배선) · `backend/tests/test_naver_aveto_counterfactual.py::test_auto_prefers_the_store_over_the_api_without_any_flag`(적재 우선을 «플래그 없이» 고정) · `::test_missing_curve_is_unresolvable_not_a_silent_non_fire`(곡선 부재 = 판정불가) · `::test_curve_connection_literal_is_read_only`(쓰기 0건 드리프트 가드).
+
+**관련**: 교훈 #396(보존기한이 곧 판정 가능 창 — 이번 것은 그 짝: **적재가 곧 판정 가능 창**) · #397(픽스처가 조건을 안 세우면 테스트가 거짓말한다) · #123(0건과 실행 안 됨) · `ref 136` · PR #745
