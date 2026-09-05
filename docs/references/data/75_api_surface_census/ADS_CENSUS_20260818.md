@@ -366,3 +366,51 @@ for target in resp.json():
 ---
 
 *작성: Sonnet(전수성 검증 담당, 읽기 전용). 1차 출처: `https://naver.github.io/searchad-apidoc/assets/json/{ncc-heroes-ncc,ncc-heroes-tool,ncc-heroes-billing,atower,ncc-report,master-report,ncc-keywordstool,estimate,ncc-inspect-history}.json`(2026-08-18 curl 취득, 전부 200 OK). 로컬 사본은 세션 스크래치패드(`swagger/*.json`), repo에는 반영 안 함. 네이버 API 실호출 0건·prod 접속 0건·git 커밋 0건·파일 수정 0건(신규 산출물 1개만 작성).*
+
+---
+
+## 7. ★2026-09-05 재측정 (18일 경과, C2조사 세션) — 순수 추가, 위 §1~6 원문 불변
+
+> 이 절은 08-18판을 고치지 않고 그 아래에 덧붙인다. 목적: 북극성(`ref 82`) §3 「L0 수집 — 층1 표면 실사용」 행이 08-18 값(광고 19/110)을 아직 인용 중이라 갱신한다. 읽기 전용 — **네이버 API 실호출 0건 · prod 접속 0건 · 코드 0줄 · 새 endpoint 개봉 0건**(이번 세션은 기존 코드가 이미 무엇을 부르는지만 재확인했다).
+
+### 7-1. 분모(110) 재확인 — 변하지 않았다
+
+09-05 10:3x KST, 08-18과 동일한 1차 출처(`https://naver.github.io/searchad-apidoc/assets/json/*.json`, 9개 파일)를 다시 `curl`로 취득해(전부 200 OK) `paths`를 재파싱했다. **raw 행 126 → canonical(method+templated path, 쿼리 템플릿 `{?...}` 제거 후 dedup) 110 — 08-18과 정확히 같은 집합**(`{?ids}` 등 쿼리 파라미터 표기 차이 1건을 빼면 100% 일치, 신규·삭제 endpoint 0건). **네이버가 이 9개 Swagger 표면 자체를 18일 동안 바꾸지 않았다** — 분모는 재측정해도 그대로 **110**이다.
+
+### 7-2. 분자 재확인 — 코드 grep 재실행 (18일치 커밋 반영)
+
+`backend/app/services/naver_sa_ad_fetcher.py` + `backend/app/services/naver_ad/*.py` 전체를 08-18과 같은 방법(경로 리터럴 grep, `fetcher.BASE_URL` 유일 진입점 확인)으로 재검사했다.
+
+| endpoint | 08-18 | 09-05 | 변경 |
+|---|---|---|---|
+| `GET /ncc/criterion-dictionary/{type}` | 미사용 | **사용**(`fetch_criterion_dictionary()`, `naver_sa_ad_fetcher.py:1824`) | **신규 O** |
+| `GET /ncc/criterion/{ownerId}` | 미사용 | **사용**(`get_adgroup_criterion()`, `naver_sa_ad_fetcher.py:945`) | **신규 O** |
+| 나머지 108개 | (08-18 §3-2 표 그대로) | 재확인, 변화 없음 | 불변 |
+
+그 외 확인한 것 — **전부 08-18과 동일, 신규 endpoint 없음**:
+- StatReport `reportTp=CRITERION`/`CRITERION_CONVERSION`이 08-19 이후 실제 요청되고 있으나(§7-3), 이는 기존에 이미 O였던 `POST/GET /stat-reports`의 **파라미터** 값이 하나 더 늘어난 것이지 새 canonical endpoint가 아니다(08-18 §4-4가 이미 "미사용 8종"으로 CRITERION 계열을 지목한 그 표는 reportTp 종류 카운트이지 endpoint 카운트가 아니다 — 두 카운트를 혼동하지 않는다).
+- `/ncc/targets` GET(이미 O)의 응답에서 `MEDIA_TARGET`·`PC_MOBILE_TARGET` 필드까지 파싱하게 됐으나(§7-3), 호출 자체는 같은 GET 1개 — 새 endpoint 아님.
+- `master-reports`·`shared-budgets`·`product-groups`·`inspect-history`·`ad-extensions`·`time-contracts`·`managedKeyword`·`labels`·`label-refs` — grep 0건, **08-18과 동일하게 여전히 미사용**.
+
+**09-05 실사용 = 21/110**(08-18 대비 **+2**).
+
+### 7-3. 무엇이, 언제, 어느 결정으로 열렸나 (개별 기록)
+
+- **D-NAO-203**(2026-08-19 10:5x Jino 승인, 트랙 파일 1089행) — 「D-NAO-197 ② 연령·성별·관심사(CRITERION) 적재」. 벌크 리포트 경로(StatReport `CRITERION`/`CRITERION_CONVERSION`)를 열면서 **코드값→한글명 사전이 필요해** `GET /ncc/criterion-dictionary/{type}`도 같이 열었다(`CRITERION_DICT_TYPES` 순회, AG·GN·AD·SD 4개 type). 이건 08-18 census §3-3이 "①등급교차 가능"으로 지목했던 Criterion 그룹 미배정 4개 중 GET 1개다.
+- **D-NAO-216**(2026-08-21 11:5x, 트랙 파일 29행·443행) — M2-b 착수 실측이 매트릭스·계약의 전제(「bidWeight는 `/ncc/targets`에서 온다」)를 반증: 533그룹 전수 캡처에서 `/ncc/targets`엔 `bidWeight` 문자열 **0건**, `/ncc/criterion`엔 **1,271건**. Jino 결정 *"criterion 일일 전수 스윕 신설"* → `get_adgroup_criterion()` 신설, `GET /ncc/criterion/{ownerId}` 개통. 이건 08-18 census §2-4가 "GET 경로 미상"으로 남겼던 A4(개별입찰·잠금) 원료의 **정확한 GET 표면**이었다 — §6 "확인 못한 것" 3번째 항목("`bidWeight`의 정확한 GET 경로... 이번 조사로 특정 못함")이 **이후 세션에서 해소**됐다.
+- **D-NAO-201**(2026-08-19 08:2x) — A5·A6(매체 블랙리스트·PC/모바일 가중치) 적재. **endpoint는 늘지 않았다** — 이미 O였던 `GET /ncc/targets`의 응답 안에 `MEDIA_TARGET`·`PC_MOBILE_TARGET`이 이미 실려 오는데 코드가 버리고 있던 것(08-18 census §4-3이 이미 지목한 정확히 그 지점)을 **파싱해 저장**하게 만든 것 — 08-18 §5-3이 "①등급 교차 가능"이라 지목한 후보를 endpoint 신규 개통 없이 실현한 사례.
+- **D-NAO-212**(2026-08-21, 트랙 13행) — C10 상품메타(`naver_product_meta_current`). `POST /v1/products/search`(이미 O, 08-18 커머스 census §4에서도 "583행"으로 이미 사용 중 확인)를 **필터 없이 전건 순회**하도록 바꾼 것 — 새 endpoint가 아니라 기존 endpoint의 **호출 방식 변경**(부분 조회 → 전건 스윕).
+
+### 7-4. 남은 미배정 26개(§3-3 "①등급 교차 가능")의 현재 상태
+
+08-18 §3-3이 "①등급 교차 가능"으로 지목한 26개 endpoint 중, 이번 재측정으로 **2개(Criterion GET 1 + Criterion-dictionary GET 1)만 열렸다** — 나머지 24개(MasterReport 5·AdExtension군 9·SharedBudget 8·ProductGroup 1·InspectHistory 2 중 Criterion 이외 전부)는 **여전히 grep 0건**, 08-18 그대로다. 즉 §3-3이 "등급 교차 가능"이라 지목한 26개 중 **8%(2/26)만 이번 18일 사이 실제로 열렸다** — 나머지는 지목만 되고 착수는 안 된 채 남아 있다.
+
+### 7-5. 이번에도 확인 못한 것 (08-18 §6과 동일하게 유지)
+
+08-18 §6의 8개 항목 중 **재확인해 해소된 것은 3번째 하나뿐**(`bidWeight` GET 경로, §7-3). 나머지 7개(Guides 절 · `RL`/`RP` 의미 · AdExtension CRUD 상충 · MasterReport Qi 대안경로 · SharedBudget/ProductGroup/InspectHistory grain · "저장하나 미독" 전수감사 · 커머스 재조사)는 **이번 세션도 손대지 않았다** — 코드 0줄·새 API 호출 0건 원칙상 실측 불가능한 항목들이라 그대로 [미상] 유지.
+
+**「전수 조사 완료」라고 쓰지 않는다** — 이 절도 08-18과 마찬가지로 코드 grep + 문서 재대조까지만이고, 미배정 24개의 grain·용도는 여전히 미확정이다.
+
+---
+
+*7절 작성: Sonnet(C2조사, 읽기 전용). 재확인 1차 출처: 08-18과 동일 9개 Swagger URL(2026-09-05 curl 재취득, 전부 200 OK, 구조 100% 동일 — 신규 삭제 endpoint 0). 코드 재확인: `backend/app/services/naver_sa_ad_fetcher.py`(2,180줄대)·`backend/app/services/naver_ad/*.py`. 네이버 API 실호출 0건·prod 접속 0건·git 커밋(이 파일 외) 0건·`backend/`·`frontend/` 수정 0줄.*
