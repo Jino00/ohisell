@@ -2134,7 +2134,7 @@ def test_intraday_loss_leash_fires_when_underwater_and_spend_met(db):
     _leash_keyword(db)
     curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]  # revenue=1000·cost=2000→roas=0.5<2.5
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}  # avg_daily=1000, today_cost=2000≥1000
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
@@ -2148,7 +2148,7 @@ def test_intraday_loss_leash_not_fired_when_roas_above_bep(db):
     _leash_keyword(db)
     curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=6)]  # revenue=6000/cost=2000=3.0≥2.5
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
@@ -2162,7 +2162,7 @@ def test_intraday_loss_leash_deferred_when_spend_below_daily_average(db):
     _leash_keyword(db)
     curve = [_hour(6, imp=20, clk=2, cost=500, avg_rank=3.0, conv_cnt=0)]  # roas=0<2.5(underwater)
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}  # avg_daily=1000, today_cost=500<1000
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
@@ -2175,7 +2175,7 @@ def test_intraday_loss_leash_not_fired_when_price_bep_unavailable(db):
     _leash_keyword(db)  # 매핑 없음(NaverAdgroupProduct/NaverProductBep 미시드)
     curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=0)]
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
@@ -2189,7 +2189,7 @@ def test_intraday_loss_leash_not_fired_when_no_spend_today(db):
     _leash_keyword(db)
     curve = [_hour(6, imp=0, clk=0, cost=0, avg_rank=None, conv_cnt=0)]
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
@@ -2206,7 +2206,7 @@ def test_intraday_loss_leash_resolves_keyword_parent_adgroup(db):
     db.commit()
     curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]  # roas=0.5<2.5
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="keyword", target_id="nkw-child", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
@@ -2217,7 +2217,7 @@ def test_intraday_loss_leash_not_fired_when_keyword_entity_missing(db):
     """(f-역) NaverEntity 행 자체가 없는 키워드 → adgroup 해석 불가로 미발동(fail-closed)."""
     curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="keyword", target_id="nkw-ghost", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
@@ -2230,7 +2230,7 @@ def test_intraday_loss_leash_works_directly_on_adgroup_target_type(db):
     _seed_product_bep(db, adgroup_id="grp-shop", bep_roas=Decimal("2.5"))
     curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]  # roas=0.5<2.5
     baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
-    fired, reason = auto_operator._intraday_loss_leash(
+    fired, reason, _sub_bep = auto_operator._intraday_loss_leash(
         db, target_type="adgroup", target_id="grp-shop", campaign_id=CAMPAIGN,
         curve=curve, now=NOW, baseline_agg=baseline_agg,
     )
