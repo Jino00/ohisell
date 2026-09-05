@@ -30,6 +30,13 @@
 |---|---|---|
 | `measure_floor_blocks.py` | 자의 하한을 1.0 / 0.827로 바꿔 `compute_bid_sims`를 두 번 돌려 **방향 분포·basis 분포·뒤집힌 대상**을 낸다 | ref 95 §9-2(빈 칸 실측: 액셀 −24.0%·브레이크 0%) · §9-3 · §9 「배포 후 라이브 재측정」 |
 | `measure_magnitude.py` | 같은 두 하한에서 **방향별 금액 합**(현재 입찰 합 vs 추천 입찰 합)을 낸다 | ref 95 §9-2 금액 행(+244,730 → +169,610원 / 브레이크 불변) |
+| `oscillation_symmetry_count.py` | D-NAO-288 두 거부권이 **액셀·브레이크를 각각 몇 건 움직이는지**(북극성 §7 대칭) | ref 132 · 계약 `CONTRACT_oscillation_damping.md` §4-C ⓖ |
+| `latch_reason_census.py` | `·->·` 무쓰기 재발화가 **어느 가드레일에서 막혔나**(자유 텍스트 사유 → 키) | ref 134 · 같은 계약 §4-C ⓘ |
+
+★**위 둘은 앞의 `measure_*.py`와 성질이 다르다** — 앱 패키지를 임포트하지 않는 **stdlib 전용**이라
+`.venv` 없이 `python3 <파일> --db <경로>`로 돌고, **네이버 API를 한 번도 부르지 않는다**(위 ⚠️의
+「견적 API 호출 있음」은 `measure_*.py` 얘기다). 그 대가로 앱 상수와 갈라질 수 있어, 정합은
+저장소 쪽 테스트가 지킨다 — `test_naver_oscillation_damping.py` · `test_naver_latch_reason_census.py`.
 
 ## ⚠️ 배포 «전» 검증에 쓸 때
 새 코드를 배포하지 않고 재려면, 새 모듈을 `/tmp`에 올리고 `sys.modules`에 **인메모리로만** 얹는다
