@@ -80,6 +80,9 @@ GATE_CASES = [
     ("일예산 상한 불가침", _prop(), {"cost_today": 500_000}),
     ("변경폭 상한 (D-NAO-5·71)", _prop(target_bid=300), {}),
     ("방향 불일치 (구조 결함)", _prop(target_bid=180), {}),
+    ("current_bid 미확보 (fail-closed)", _prop(), {"current_bid": None}),
+    ("target_bid 없음 (구조 결함)", _prop(target_bid=None), {}),
+    ("target_bid 범위 밖", _prop(target_bid=7), {}),
 ]
 
 
@@ -117,13 +120,45 @@ def test_markers_match_the_harness_single_source():
     assert census.WRITE_FAILURE_MARKER == harness.WRITE_FAILURE_MARKER
 
 
-def test_non_block_rationale_is_none_not_unclassified():
-    """「차단이 아닌 행」과 「분류 실패한 차단 행」을 섞지 않는다 — 후자만 드리프트 신호다."""
+def test_reason_prefix_matches_what_the_harness_actually_writes():
+    """★적대 리뷰 P2-8 — 접두사 `가드레일 차단 — `는 이 설계에서 하중이 가장 큰 리터럴이다.
+
+    harness는 `reason = f"가드레일 차단 — {block_reason}"`으로 만든다(:2092·2197·2320).
+    상수만 맞추고 «실제로 그 모양이 나오는지»를 안 보면 상수끼리만 일치하는 동어반복이 된다.
+    """
+    assert census.GUARD_BLOCK_REASON_PREFIX == "가드레일 차단 — "
+    src = (
+        Path(harness.__file__).read_text()
+    )
+    assert 'f"가드레일 차단 — {block_reason}"' in src, (
+        "harness가 접두사를 바꿨다 — 계수기 GUARD_BLOCK_REASON_PREFIX를 함께 고칠 것"
+    )
+
+
+def test_classify_reason_is_three_way_not_two():
+    """★적대 리뷰 P1-2 (a) — 「모름」과 「막힘」을 섞지 않는다.
+
+    초판은 「`[실행 불가]`인데 게이트 사유가 아닌 행」을 None으로 떨궈 **확실히 안 바뀐 행을
+    「모름」 통에** 넣었다. 하니스 :267이 금지한 것의 역방향이다.
+    """
+    # ① 마커 없음 = 「모름」 → None
     assert census.classify_reason("[시간당밴드] ROAS-UP — 정착창 실측(…)") is None
     assert census.classify_reason("") is None
     assert census.classify_reason(
         f"[시간당밴드] CPC급등 {harness.WRITE_FAILURE_MARKER} HTTPError: 500"
     ) is None
+
+    # ② 마커 있고 게이트 사유 아님 = harness 자체 사전 가드 → 「막힘」이되 게이트 키 없음
+    assert census.classify_reason(
+        f"[시간당밴드] ROAS-UP {harness.GUARD_BLOCK_MARKER} "
+        "ad 증액 가드 컨텍스트 불완전(fail-closed) — BEP(roas_corrected=None, target_roas=None)"
+    ) == census.NON_GATE_BLOCK
+
+    # ③ 마커 있고 게이트 사유 = 키
+    assert census.classify_reason(
+        f"x {harness.GUARD_BLOCK_MARKER} 가드레일 차단 — "
+        "쿨다운 중 — 마지막 변경 1.0시간 전(최소 2시간 필요, D-NAO-19)"
+    ) == "쿨다운 2h (D-NAO-19)"
 
 
 def test_unknown_block_reason_is_unclassified():
@@ -163,33 +198,49 @@ def test_lane_classification(rationale, expected):
 #   이 트랙의 상습 실패 모드가 정확히 그것이다(「라벨은 붙고 집행 안 됨」).
 #   그래서 **사람이 읽는 마지막 줄**을 여기서 지킨다.
 
+import itertools
 import sqlite3
 
 
+_db_seq = itertools.count()
+
+
 def _mk_db(tmp_path, rows):
-    """rows = [(changed_at, rationale, before_value)] — 최소 스키마."""
-    path = tmp_path / "census.db"
+    """rows = [(changed_at, rationale, before_value)] 또는 5튜플(+entity_type, action)."""
+    path = tmp_path / f"census{next(_db_seq)}.db"
     con = sqlite3.connect(path)
     con.execute(
         "create table naver_change_log ("
         " changed_at text, entity_type text, action text,"
         " rationale text, before_value text)"
     )
+    norm = [
+        r if len(r) == 5 else (r[0], "ad", "update_bid", r[1], r[2])
+        for r in ((*x,) for x in rows)
+    ]
     con.executemany(
-        "insert into naver_change_log values (?, 'ad', 'update_bid', ?, ?)", rows
+        "insert into naver_change_log(changed_at, entity_type, action, rationale, before_value)"
+        " values (?, ?, ?, ?, ?)",
+        [(r[0], r[1], r[2], r[3], r[4]) for r in norm],
     )
     con.commit()
     con.close()
     return path
 
 
-def _run_census(tmp_path, rows, capsys, monkeypatch):
+def _run_census(tmp_path, rows, capsys, monkeypatch, argv_extra=()):
     path = _mk_db(tmp_path, rows)
-    monkeypatch.setattr(
-        "sys.argv", ["latch_reason_census.py", "--db", str(path), "--days", "7"]
-    )
+    argv = ["latch_reason_census.py", "--db", str(path), *argv_extra]
+    monkeypatch.setattr("sys.argv", argv)
     census.main()
     return capsys.readouterr().out
+
+
+def _blocked(reason):
+    return f"[시간당밴드] ROAS-UP {harness.GUARD_BLOCK_MARKER} 가드레일 차단 — {reason}"
+
+
+_COOLDOWN = "쿨다운 중 — 마지막 변경 1.0시간 전(최소 2시간 필요, D-NAO-19)"
 
 
 def test_census_confesses_when_a_block_reason_is_unclassified(tmp_path, capsys, monkeypatch):
@@ -225,3 +276,68 @@ def test_census_confesses_unknown_lane(tmp_path, capsys, monkeypatch):
          None),
     ], capsys, monkeypatch)
     assert "레인 미분류 1건" in out
+
+
+def test_lane_denominator_excludes_unknowns(tmp_path, capsys, monkeypatch):
+    """★적대 리뷰 P1-2 (b) — 레인 표는 «막힌 행»만 센다.
+
+    이 표가 곧 계약·ref 134·트랙이 인용하는 「액셀 N : 브레이크 M」 = 북극성 §7 대칭 수다.
+    쓰기 «실패»(모름)를 섞으면 분모가 거짓이 되고, 두 표의 합이 같아서 같은 모집단처럼 보인다.
+    """
+    out = _run_census(tmp_path, [
+        ("2026-09-05 11:20:00", _blocked(_COOLDOWN), None),                       # 막힘·액셀
+        ("2026-09-05 12:20:00",                                                   # 「모름」·액셀 문구
+         f"[시간당밴드] ROAS-UP {harness.WRITE_FAILURE_MARKER} HTTPError: 400 code=3830", None),
+    ], capsys, monkeypatch)
+    assert "분모 = `[실행 불가]` 1건" in out and "「모름」 1건 제외" in out
+    # 액셀은 «막힌» 1건만 세어야 한다 — 2가 되면 대칭 수가 거짓이 된다.
+    lane = out.split("막힌 판정의 레인별")[1]
+    assert "1  액셀 ROAS-UP" in lane and "2  액셀 ROAS-UP" not in lane
+    assert "「모름」이다" in out          # ℹ️ 자백 줄 (M10)
+
+
+def test_non_gate_block_is_counted_as_blocked_not_unknown(tmp_path, capsys, monkeypatch):
+    """★P1-2 (a) 표면판 — harness 자체 사전 가드는 「확실히 안 바뀐 행」이라 막힌 것으로 센다."""
+    out = _run_census(tmp_path, [
+        ("2026-09-05 11:20:00",
+         f"[시간당밴드] ROAS-UP {harness.GUARD_BLOCK_MARKER} "
+         "ad 증액 가드 컨텍스트 불완전(fail-closed) — BEP(roas_corrected=None)", None),
+    ], capsys, monkeypatch)
+    assert census.NON_GATE_BLOCK in out
+    assert "분모 = `[실행 불가]` 1건" in out
+    assert "「모름」" not in out.split("--- ★막은")[1].split("---")[0]
+    assert "guardrail_gate «밖»의 harness 사전 가드 1건" in out   # ℹ️ 두 번째 자백 줄
+
+
+def test_grain_filter_actually_filters(tmp_path, capsys, monkeypatch):
+    """★적대 리뷰 M9 생존분 — `entity_type` 필터가 무테스트였다(픽스처가 ad만 넣어서)."""
+    rows = [
+        ("2026-09-05 11:20:00", "ad", "update_bid", _blocked(_COOLDOWN), None),
+        ("2026-09-05 11:20:00", "adgroup", "update_bid", _blocked(_COOLDOWN), None),
+        ("2026-09-05 11:20:00", "ad", "set_user_lock", _blocked(_COOLDOWN), None),
+    ]
+    out = _run_census(tmp_path, rows, capsys, monkeypatch)
+    assert "전체 1건" in out, "entity_type·action 필터가 안 걸렸다"
+    out2 = _run_census(tmp_path, rows, capsys, monkeypatch,
+                       argv_extra=("--entity-type", "adgroup"))
+    assert "entity_type=adgroup" in out2 and "전체 1건" in out2
+
+
+def test_default_window_is_the_one_the_contract_quotes(tmp_path, capsys, monkeypatch):
+    """★적대 리뷰 M11 생존분 — `--days` 기본값이 무테스트라 조용히 바뀔 수 있었다."""
+    assert census.DEFAULT_DAYS == 7
+    out = _run_census(tmp_path, [
+        ("2026-09-05 11:20:00", _blocked(_COOLDOWN), None),
+    ], capsys, monkeypatch)
+    assert "최근 7일" in out
+
+
+def test_window_is_kst_not_utc(tmp_path, capsys, monkeypatch):
+    """★적대 리뷰 P2-5 — `changed_at`은 KST-naive인데 sqlite `now`는 UTC다.
+
+    보정이 없으면 창이 실제로 7일 9시간이 되고 「최근 7일」 라벨이 거짓이 된다.
+    """
+    src = (Path(census.__file__).read_text() if hasattr(census, "__file__")
+           else (Path(__file__).resolve().parents[2] / "scripts" / "measurements"
+                 / "latch_reason_census.py").read_text())
+    assert "'+9 hours'" in src, "KST 보정이 사라졌다"

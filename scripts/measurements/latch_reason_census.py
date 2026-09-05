@@ -30,11 +30,30 @@ import sqlite3
 from collections import Counter
 
 # `naver_execution_harness.GUARD_BLOCK_MARKER`와 같은 값이어야 한다(테스트가 대조).
+#
+# ★★두 마커는 «다른 사건»이다 — 하니스 :252~267이 대문자로 못 박은 것:
+#   `[실행 불가]` = 사전 가드 거부. writer를 부르지도 않았다 → 광고는 **확실히 안 바뀌었다**.
+#   `[실행 실패]` = writer 예외. PUT을 이미 보낸 뒤일 수 있다 → **바뀌었는지 모른다**.
+#   *"「모름」을 「차단됨」으로 표시하는 것은 원칙22 위반이다."*
+#   ⇒ 이 계수기는 **`[실행 불가]` 행만 「막힌 것」으로 센다.**
 GUARD_BLOCK_MARKER = "[실행 불가]"
 WRITE_FAILURE_MARKER = "[실행 실패]"
 
-# 사유 본문은 `_guard_failure`가 "{마커} 가드레일 차단 — {guardrail_gate 사유}" 꼴로 싣는다.
-_RE_BLOCK_BODY = re.compile(r"\[실행 불가\]\s*가드레일 차단 — (.*)$", re.S)
+# ★접두사도 상수다(적대 리뷰 P2-8) — 이 문자열은 `_guard_failure`가 만드는 rationale의
+#   접착부이고 하중이 가장 크다. 하드코딩을 흩뿌리면 접두사가 바뀔 때 조용히 어긋난다
+#   (하니스가 마커에 대해 같은 이유로 상수화한 그 원칙을 여기까지 끌고 온다).
+GUARD_BLOCK_REASON_PREFIX = "가드레일 차단 — "
+
+_RE_BLOCK_BODY = re.compile(
+    re.escape(GUARD_BLOCK_MARKER) + r"\s*" + re.escape(GUARD_BLOCK_REASON_PREFIX) + r"(.*)$", re.S
+)
+
+# ★`[실행 불가]`인데 `가드레일 차단 — `이 아닌 행 = **guardrail_gate «밖»의 사전 가드**
+#   (소재 실쓰기 경계·콜드 상한·탐색 상한·서보 신선도·증액 컨텍스트 불완전 등 harness 자체 거부).
+#   이것도 「확실히 안 바뀌었다」이므로 «막힌 것»이 맞다 — 다만 게이트 키로는 분류할 수 없다.
+NON_GATE_BLOCK = "가드레일 밖 사전 가드 (harness)"
+# 마커가 아예 없는 무쓰기 행 = 쓰기 실패 등. **막힌 게 아니라 「모름」이다.**
+NOT_A_BLOCK = "차단 아님 — 「모름」(쓰기 실패 등)"
 
 # ★키 사전 — 왼쪽 정규식은 **guardrail_gate가 실제로 뱉는 문자열**에 걸려야 한다.
 #   테스트가 진짜 게이트를 구동해 12종 전건이 여기서 «미분류가 아닌» 키로 떨어지는지 단언한다.
@@ -52,6 +71,11 @@ REASON_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^일예산 상한 불가침 — "), "일예산 상한 불가침"),
     (re.compile(r"^변경폭 .* 초과"), "변경폭 상한 (D-NAO-5·71)"),
     (re.compile(r"^방향 불일치 — "), "방향 불일치 (구조 결함)"),
+    # ★적대 리뷰 P2-1 채택 — 아래 셋은 «지어낸 것이 아니라 prod에 이미 있는» 사유다
+    #   (`current_bid 미확보`는 adgroup grain 90일 창에 6건 실재했고, 초판은 그걸 (미분류)로 떨궜다).
+    (re.compile(r"^current_bid 미확보 — "), "current_bid 미확보 (fail-closed)"),
+    (re.compile(r"^target_bid 없음 — "), "target_bid 없음 (구조 결함)"),
+    (re.compile(r"^target_bid=.*유효 범위 밖"), "target_bid 범위 밖"),
 ]
 
 # 어느 레인의 판정이 막혔나 — 사유문 머리의 밴드 라벨. 순서 의미 있음:
@@ -69,6 +93,10 @@ LANE_RULES: list[tuple[re.Pattern, str]] = [
 
 UNCLASSIFIED = "(미분류)"
 
+# ★계약 §4-C가 실은 수의 창(일). `changed_at`은 **KST-naive**인데 sqlite `now`는 UTC라
+#   `+9 hours` 보정 없이 자르면 창이 실제로 7일 9시간이 된다(적대 리뷰 P2-5).
+DEFAULT_DAYS = 7
+
 
 def classify(text: str, rules: list[tuple[re.Pattern, str]]) -> str:
     """rules 순서대로 첫 일치를 돌려준다. 아무것도 안 맞으면 UNCLASSIFIED."""
@@ -78,22 +106,31 @@ def classify(text: str, rules: list[tuple[re.Pattern, str]]) -> str:
     return UNCLASSIFIED
 
 
-def classify_reason(rationale: str) -> str:
-    """change_log.rationale 원문 → 막은 가드레일 키.
+def classify_reason(rationale: str) -> str | None:
+    """change_log.rationale 원문 → 「무엇이 막았나」. **3분기다**(적대 리뷰 P1-2).
 
-    ★차단 마커가 없으면 UNCLASSIFIED가 아니라 None을 돌려준다 — 「차단이 아닌 행」과
-      「분류에 실패한 차단 행」은 다른 사건이고, 후자만 드리프트 신호다.
+    · `None`             — `[실행 불가]` 마커가 없다. **막힌 게 아니라 「모름」**이다(쓰기 실패 등).
+    · `NON_GATE_BLOCK`   — 마커는 있는데 guardrail_gate 사유가 아니다 = harness 자체의 사전 가드.
+                           **확실히 안 바뀌었으므로 「막힌 것」이 맞다** — 다만 게이트 키가 없다.
+    · 게이트 키 / `UNCLASSIFIED` — guardrail_gate 사유. 후자만 **드리프트 신호**다.
+
+    ★초판은 「마커 있음 ∧ 게이트 사유 아님」을 `None`으로 떨궈, **확실히 안 바뀐 행을
+      「모름」 통에** 넣었다 — 하니스 :267이 금지한 것의 역방향이다.
     """
-    m = _RE_BLOCK_BODY.search(rationale or "")
-    if m is None:
+    text = rationale or ""
+    if GUARD_BLOCK_MARKER not in text:
         return None
+    m = _RE_BLOCK_BODY.search(text)
+    if m is None:
+        return NON_GATE_BLOCK
     return classify(m.group(1).strip(), REASON_RULES)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="래치 사유 계수기 (읽기 전용)")
     ap.add_argument("--db", required=True, help="sqlite 파일 경로")
-    ap.add_argument("--days", type=int, default=7, help="창(일). 기본 7")
+    # ★기본 7 — 계약 §4-C가 실은 수의 창이다(적대 리뷰 P2-4: 기본값이 무테스트였다).
+    ap.add_argument("--days", type=int, default=DEFAULT_DAYS, help=f"창(일). 기본 {DEFAULT_DAYS}")
     ap.add_argument("--entity-type", default="ad", help="grain. 기본 ad")
     args = ap.parse_args()
 
@@ -105,7 +142,7 @@ def main() -> int:
                case when before_value is null then 1 else 0 end
         from naver_change_log
         where action = 'update_bid' and entity_type = ?
-          and changed_at >= datetime('now', ?)
+          and changed_at >= datetime('now', '+9 hours', ?)
         """,
         (args.entity_type, f"-{args.days} days"),
     )
@@ -116,7 +153,8 @@ def main() -> int:
     nowrite_by_day: Counter = Counter()
     by_reason: Counter = Counter()
     by_lane: Counter = Counter()
-    unmarked = 0  # 무쓰기인데 차단 마커가 없는 행 = 쓰기 실패 등 다른 사건
+    unmarked = 0  # 무쓰기인데 차단 마커가 없는 행 = 「모름」(쓰기 실패 등)
+    blocked = 0   # 무쓰기이면서 `[실행 불가]` = 확실히 안 바뀐 행 = 레인 표의 분모
 
     for day, rationale, nowrite in rows:
         total_by_day[day] += 1
@@ -125,10 +163,13 @@ def main() -> int:
         nowrite_by_day[day] += 1
         key = classify_reason(rationale)
         if key is None:
+            # ★「모름」이다 — 막힌 게 아니다. 레인 표에도 넣지 않는다(적대 리뷰 P1-2 (b)):
+            #   이 표가 곧 북극성 §7 「액셀·브레이크 대칭」 수라, 쓰기 실패를 섞으면 분모가 거짓이 된다.
             unmarked += 1
-            by_reason[f"(차단 마커 없음 — {WRITE_FAILURE_MARKER} 등)"] += 1
-        else:
-            by_reason[key] += 1
+            by_reason[NOT_A_BLOCK] += 1
+            continue
+        by_reason[key] += 1
+        blocked += 1
         by_lane[classify(rationale, LANE_RULES)] += 1
 
     total = sum(total_by_day.values())
@@ -143,7 +184,7 @@ def main() -> int:
     print("\n--- ★막은 가드레일별 ---")
     for key, n in by_reason.most_common():
         print(f"  {n:>4}  {key}")
-    print("\n--- 막힌 판정의 레인별 ---")
+    print(f"\n--- 막힌 판정의 레인별 (분모 = `{GUARD_BLOCK_MARKER}` {blocked}건 — 「모름」 {unmarked}건 제외) ---")
     for key, n in by_lane.most_common():
         print(f"  {n:>4}  {key}")
 
@@ -157,7 +198,15 @@ def main() -> int:
     if by_lane.get(UNCLASSIFIED, 0):
         print(f"⚠️ 레인 미분류 {by_lane[UNCLASSIFIED]}건 — LANE_RULES 갱신 필요.")
     if unmarked:
-        print(f"ℹ️ 무쓰기인데 가드레일 차단이 아닌 행 {unmarked}건(쓰기 실패 등) — 위 표에 별도 표기됨.")
+        print(
+            f"ℹ️ 무쓰기 {nowrite}건 중 {unmarked}건은 «막힌 것»이 아니라 「모름」이다 "
+            f"({WRITE_FAILURE_MARKER} 등 — PUT을 이미 보낸 뒤일 수 있다). 레인 표 분모에서 제외했다."
+        )
+    if by_reason.get(NON_GATE_BLOCK, 0):
+        print(
+            f"ℹ️ guardrail_gate «밖»의 harness 사전 가드 {by_reason[NON_GATE_BLOCK]}건 — "
+            "확실히 안 바뀐 행이지만 게이트 키로는 안 갈린다."
+        )
     return 0
 
 
