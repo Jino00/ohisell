@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 _SETTLEMENT_WINDOW_START_DAYS = 8
 _SETTLEMENT_WINDOW_END_DAYS = 2
 
-# ══════════ D-NAO-287 S1: 시간당 레인 네 게이트가 «어떤 창을 보는지» 한 자리 선언 ══════════
+# ══════════ D-NAO-288 S1: 시간당 레인 네 게이트가 «어떤 창을 보는지» 한 자리 선언 ══════════
 # ★왜 표로 두나 (2026-09-05 실측): 진동의 원인은 게이트마다 창이 다른 것 자체가 아니라, **그
 #   사실이 코드 네 군데에 흩어져 아무도 나란히 못 보던 것**이었다. 소재 nad-…554755092는
 #   4일 동안 54회 발화·16회 실쓰기로 1,320원 → 1,330원(순변위 +0.8%)을 돌았다 —
@@ -85,7 +85,7 @@ _HOURLY_DECISION_WINDOWS: dict[str, dict] = {
     "cpc_spike": {
         "side": "brake", "baseline_window": _WINDOW_SETTLEMENT, "reads_today_curve": True,
         "self_mixed": True,
-        "note": "당일 CPC > 정착창 CPC×비율. **분자가 우리 상향으로 오른다** — D-NAO-287 B-veto 대상.",
+        "note": "당일 CPC > 정착창 CPC×비율. **분자가 우리 상향으로 오른다** — D-NAO-288 B-veto 대상.",
     },
     "loss_leash": {
         "side": "brake", "baseline_window": _WINDOW_SETTLEMENT, "reads_today_curve": True,
@@ -112,7 +112,7 @@ def _gate_baseline_window(gate: str, today: date) -> tuple[date, date] | None:
         return _settlement_window(today)
     raise ValueError(f"_HOURLY_DECISION_WINDOWS[{gate!r}].baseline_window={name!r} — 해석할 수 없는 창")
 
-# ★★D-NAO-287 미러 거부권 2개 — 둘은 **한 커밋으로만** 들어간다(계약 §2-2).
+# ★★D-NAO-288 미러 거부권 2개 — 둘은 **한 커밋으로만** 들어간다(계약 §2-2).
 #   하나만 넣으면 §7 「액셀·브레이크 대칭」이 깨진다: B만이면 안전장치 단독 완화이고,
 #   A만이면 D-NAO-85(ROAS +7% · 매출 −52%)의 재현이다.
 #   둘 다 `hold`만 만든다 — 새 액션(상향/하향)을 **만들지 않는다**. 그래서 대칭이다.
@@ -1875,7 +1875,7 @@ def _own_bid_multiple_today(
     db: Session, target_type: str, target_id: str, now: datetime,
     adgroup_id: str | None = None,
 ) -> tuple[Decimal, str]:
-    """★D-NAO-287 B-veto 원료 — **오늘 우리가 이 유닛의 입찰가를 몇 배로 올려 놨나.**
+    """★D-NAO-288 B-veto 원료 — **오늘 우리가 이 유닛의 입찰가를 몇 배로 올려 놨나.**
 
     (배수, 사유) 반환. 오늘 00시 입찰가(= 오늘 첫 실쓰기의 `before_value`) 대비 현재
     입찰가(= 오늘 마지막 실쓰기의 `after_value`)의 비.
@@ -1986,7 +1986,7 @@ def _intraday_loss_leash(
     총이익 절대액 극대화 — 볼륨 0=이익 0이므로 kill보다 leash가 우월).
     **(발동여부, 사유, 오늘_BEP하회_확인)** 반환.
 
-    ★D-NAO-287: 세 번째 값 = 「오늘 추정ROAS가 BEP 아래인가」의 **3상** 판정
+    ★D-NAO-288: 세 번째 값 = 「오늘 추정ROAS가 BEP 아래인가」의 **3상** 판정
     (`True`=하회 확인 · `False`=하회 아님 확인 · `None`=판정 불가). 발동여부와 «다른 질문»이다 —
     발동은 여기에 ④소진 문턱을 **더** 요구하기 때문이다. 그 차이가 곧 §7 비대칭의 좌표였다:
     2026-09-04 11:20 실측에서 이 값은 이미 True였는데(추정ROAS 1.47 < BEP 2.00) 당일소진이
@@ -2027,7 +2027,7 @@ def _intraday_loss_leash(
     if est_roas is None:
         return False, "당일 소진 없음", None
 
-    # ★D-NAO-287: 여기서부터 「오늘 BEP 하회인가」는 **확정**이다 — 아래 ④소진 문턱은 발동을
+    # ★D-NAO-288: 여기서부터 「오늘 BEP 하회인가」는 **확정**이다 — 아래 ④소진 문턱은 발동을
     # 가르지만 이 사실을 바꾸지 않는다. 두 질문을 분리해 내보낸다.
     sub_bep = bool(est_roas < bep_roas)
 
@@ -2285,11 +2285,11 @@ def _judge_hourly(
 
     우선순위(하나만, DOWN이 UP보다 먼저 = bleeding day UP 금지, §0 불변 가드):
       0. 표본 게이트(최근 3시간 imp<30 → hold).
-      1. CPC 급등 DOWN(trigger_watch.CPC_SPIKE_RATIO). ★D-NAO-287 **B-veto**: 문턱에서
+      1. CPC 급등 DOWN(trigger_watch.CPC_SPIKE_RATIO). ★D-NAO-288 **B-veto**: 문턱에서
          «우리 자신의 당일 상향 배수»를 벗긴다 — 자기유발 CPC 상승은 급등이 아니다.
       2. 장중 loss 고삐 DOWN(D-NAO-60 RL3 — 추정 ROAS<BEP, 안전방향 한정 완화). 상단 순위의
          무전환 고지출도 여기서 잡힌다(전환 0 → est ROAS 0 < BEP → 고삐, IU2 안전망).
-      2.5 ★D-NAO-287 **A-veto**(GATE P2-A-3): 고삐가 «오늘 BEP 하회»를 확인했는데 소진 문턱
+      2.5 ★D-NAO-288 **A-veto**(GATE P2-A-3): 고삐가 «오늘 BEP 하회»를 확인했는데 소진 문턱
          미달로 발동을 미룬 구간 — 그 구간에서 **UP만 멈춘다**(hold). 하향은 안 만든다.
       3. UP(IU1): (장중 tally 게이트 OR 정착창 실측 ROAS≥target) ∧ 예산 여력. 순위 무관.
       4. 기본 hold.
@@ -2298,7 +2298,7 @@ def _judge_hourly(
     D-8~D-2 누적(관성 — 좋은 성과는 다음날 자동 하강하지 않음)이고, 장중 tally는 당일 누적
     (뒤로 갈수록 신뢰 상승, 자정 리셋).
 
-    ★★D-NAO-287 — 그 「비대칭 기억」이 되먹임 진동을 낳았다(prod 4일 실측, 계약 §0):
+    ★★D-NAO-288 — 그 「비대칭 기억」이 되먹임 진동을 낳았다(prod 4일 실측, 계약 §0):
     액셀은 과거창만 보고 브레이크는 당일 누적만 보는데, **당일 누적은 우리 상향의 결과를 담는다.**
     소재 nad-…554755092는 54회 발화·16회 실쓰기로 1,320 → 1,330원(+0.8%)을 돌았다.
     두 거부권은 그 «비대칭 기억»을 지우지 않는다 — 창은 그대로 두고, **자기 창이 상대에게
@@ -2310,7 +2310,7 @@ def _judge_hourly(
     # (settle_status·intraday_ok·target_roas·est_roas·budget_ok)는 UP 판정 구간에서 채운다.
     # 기존 direction/reason 소비자 행위 불변 — 키를 추가만 한다.
     base = {"weighted_rank": summary["weighted_rank"], "imp_sum": summary["imp_sum"]}
-    cpc_spike_self_caused = ""  # D-NAO-287 B-veto가 CPC급등 DOWN을 눌렀을 때의 사유문
+    cpc_spike_self_caused = ""  # D-NAO-288 B-veto가 CPC급등 DOWN을 눌렀을 때의 사유문
     if summary["imp_sum"] < _MIN_HOURLY_SAMPLE_IMP:
         return {
             "direction": "hold",
@@ -2325,7 +2325,7 @@ def _judge_hourly(
 
     # DOWN 우선 ①: CPC 급등(trigger_watch.CPC_SPIKE_RATIO 재사용 — 단일소스, PLAN §4 원문의
     # "×1.5" 표기와 실제 상수(×2)가 불일치해 실코드 상수를 채택함, 최종보고에 명시)
-    # ★D-NAO-287 S1: 창 경계는 «선언표»에서 받는다(`_gate_baseline_window`) — 표가 집행되는 자리.
+    # ★D-NAO-288 S1: 창 경계는 «선언표»에서 받는다(`_gate_baseline_window`) — 표가 집행되는 자리.
     window_from, window_to = _gate_baseline_window("cpc_spike", now.date())
     baseline_agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
     baseline_cpc = (
@@ -2336,7 +2336,7 @@ def _judge_hourly(
     self_adgroup_id = _resolve_adgroup_id(db, target_type, target_id)
     today_cpc = _today_group_cpc(curve)
     if baseline_cpc is not None and baseline_cpc > 0 and today_cpc is not None:
-        # ★★D-NAO-287 B-veto — 분자(당일 CPC)에 섞인 «우리 자신의 당일 상향분»을 문턱에서 벗긴다.
+        # ★★D-NAO-288 B-veto — 분자(당일 CPC)에 섞인 «우리 자신의 당일 상향분»을 문턱에서 벗긴다.
         # 배수는 1.0 미만으로 안 내려가므로 이 한 줄은 브레이크를 **완화만 하고 강화하지 않는다**.
         own_multiple, own_reason = _own_bid_multiple_today(
             db, target_type, target_id, now, adgroup_id=self_adgroup_id,
@@ -2357,7 +2357,7 @@ def _judge_hourly(
             # 사유문으로 남긴다(표면: 운영 일기 blocked). 판정은 계속 진행 — 아래 고삐·UP 게이트는
             # 그대로 돈다(이 거부권은 CPC급등 한 갈래만 막는다).
             log.info(
-                "auto_operator: CPC급등 보류(자기유발분, D-NAO-287) target=%s 당일=%.1f원 ≤ "
+                "auto_operator: CPC급등 보류(자기유발분, D-NAO-288) target=%s 당일=%.1f원 ≤ "
                 "정착창 %.1f원×%s×자기상향 %.2f배 — %s",
                 target_id, float(today_cpc), float(baseline_cpc), CPC_SPIKE_RATIO,
                 float(own_multiple), own_reason,
@@ -2452,7 +2452,7 @@ def _judge_hourly(
             "direction": "hold", "reason": f"UP 보류(예산 여력 없음/미확보) — {budget_reason}",
             **base, **up_fields, "budget_ok": budget_ok,
         }
-    # ★★GATE P2-A-3 = **D-NAO-287 A-veto** — 위 P2-A-1의 거울. P2-A-1이 「정착창이 나쁘다고
+    # ★★GATE P2-A-3 = **D-NAO-288 A-veto** — 위 P2-A-1의 거울. P2-A-1이 「정착창이 나쁘다고
     # 말하는데 오늘 추정만 좋다」를 막는다면, 이건 「정착창이 좋다고 말하는데 **오늘 실측이
     # BEP 아래**」를 막는다. 두 방향 다 «오염된 증거로 올리지 않는다»는 같은 문장이다.
     #
@@ -2492,7 +2492,7 @@ def _judge_hourly(
         return {
             "direction": "hold",
             "reason": (
-                f"UP 보류(오늘 증거 거부권, D-NAO-287 A-veto) — 정착창({settle_reason})인데 "
+                f"UP 보류(오늘 증거 거부권, D-NAO-288 A-veto) — 정착창({settle_reason})인데 "
                 f"오늘 실측이 BEP 하회(전환 {today_conv}건, {leash_reason}). "
                 "정착창은 과거창이라 오늘을 못 본다"
             ),
@@ -3884,7 +3884,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 db, target_type=target_type, target_id=target_id, campaign_id=campaign_id,
                 curve=curve, now=now,
             )
-            # ★★D-NAO-287: 미러 거부권 2건은 **운영 일기(blocked)에 남긴다.** 아래 판정 hold가
+            # ★★D-NAO-288: 미러 거부권 2건은 **운영 일기(blocked)에 남긴다.** 아래 판정 hold가
             # 일기에 안 남는 이유는 "액션 의도 자체가 없었으므로"(`_record_blocked` 선별 규약)인데,
             # 거부권은 정반대다 — **올리려던/내리려던 것을 멈춘 것**이라 정확히 그 규약이 말하는
             # 「의도된 액션이 차단된 것」이다. 로그로만 두면 안 된다: 블루-그린 배포가 pm2 로그
