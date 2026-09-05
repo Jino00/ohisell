@@ -28,12 +28,24 @@ import re
 import sqlite3
 from collections import defaultdict
 
-# 실코드 단일 소스와 같은 값 — 어긋나면 이 계수기가 거짓말을 한다.
-# (스크립트는 앱 패키지를 임포트하지 않는다: prod에서 의존성 없이 돌리기 위해서다.
-#  값이 바뀌면 여기도 바꾼다 — 아래 --assert-ratio로 사유문과 대조해 어긋남을 잡는다.)
+# 실코드 단일 소스(`trigger_watch.CPC_SPIKE_RATIO`)와 같은 값이어야 한다 — 어긋나면 이 계수기가
+# 거짓말을 한다. 스크립트는 앱 패키지를 임포트하지 않는다(prod에서 의존성 없이 돌리려고).
+# 대신 사유문에 실린 비율과 대조해 어긋나면 «⚠️ 계수기가 낡았다»를 출력한다(아래 ratio_mismatch).
 CPC_SPIKE_RATIO = 2
 
 _RE_CPC = re.compile(r"당일=([\d.]+)원 > 정착창기준=([\d.]+)원×(\d+)")
+
+# ★UP 타입 전량 — `app.services.naver_ad.bid_step_types.BID_UP_TYPES`와 **같아야 한다**.
+#   (앱을 임포트하지 않는 이유는 위 CPC_SPIKE_RATIO와 같다. 두 집합의 동일성은
+#    `test_naver_oscillation_damping.py`가 저장소 쪽에서 대조한다 — 갈라지면 테스트가 죽는다.
+#    분류 못 한 타입이 실제로 나오면 실행 시 «⚠️ 분류 못 한 proposal_type»으로 자백한다.)
+# ★적대 리뷰 1R P1-5: 초판은 `proposal_type.endswith("bid_up")`으로 갈랐는데
+#   `"bid_up_servo".endswith("bid_up")`은 **False**다. 시간당 레인은 SHOPPING adgroup UP을
+#   `bid_up_servo`, WEB_SITE keyword UP을 `bid_up_rank`로 내므로 **액셀 발화가 통째로 DOWN 칸에
+#   들어갔다** — 그 오분류 하나로 §7 판정이 「대칭」↔「비대칭·채택 보류」로 뒤집힌다.
+BID_UP_TYPES = frozenset(
+    {"bid_up", "growth_bid_up", "bid_up_servo", "bid_up_rank", "bid_up_explore", "bid_up_cold"}
+)
 
 
 def _bid_of(raw: str | None) -> int | None:
@@ -87,6 +99,7 @@ def main() -> int:
     b_suppressed: list[str] = []
     a_proxy: list[str] = []
     ratio_mismatch: list[str] = []
+    unknown_types: set[str] = set()
 
     for (etype, eid, day), day_rows in sorted(by_unit_day.items()):
         # 그날 이 유닛에 순위고삐 DOWN이 있었나 — A-veto 대리 지표의 조건.
@@ -95,7 +108,10 @@ def main() -> int:
 
         for i, r in enumerate(day_rows):
             rationale = r["rationale"] or ""
-            is_up = (r["proposal_type"] or "").endswith("bid_up") or r["proposal_type"] == "bid_up"
+            ptype = r["proposal_type"] or ""
+            is_up = ptype in BID_UP_TYPES
+            if ptype and ptype not in BID_UP_TYPES and ptype != "bid_down":
+                unknown_types.add(ptype)   # 분류 못 한 타입은 숨기지 않고 보고한다
 
             if is_up:
                 up_old += 1
@@ -160,6 +176,11 @@ def main() -> int:
         print("\n⚠️ 사유문 비율 ≠ 코드 상수 — 계수기가 낡았다:")
         for line in ratio_mismatch:
             print(f"  · {line}")
+    if unknown_types:
+        print(
+            "\n⚠️ 분류 못 한 proposal_type — DOWN 칸에 들어갔다. BID_UP_TYPES를 갱신하라: "
+            + ", ".join(sorted(unknown_types))
+        )
     print(
         "\n★판정 규약: 두 방향이 **둘 다** 0이 아니게 줄면 대칭. 한쪽만 줄면 비대칭 —"
         "\n  채택 보류하고 이 수를 그대로 Jino에게 보고한다(계약 §4-C ⓖ)."

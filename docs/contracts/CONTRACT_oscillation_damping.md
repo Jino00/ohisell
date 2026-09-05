@@ -174,10 +174,16 @@ where action='update_bid' and dry_run=0 and entity_type='ad'
 - [x] ⓖ ★**§7 대칭 검사 — «수»로 보고**(D-NAO-234 §9-2 방식). **측정 완료 2026-09-05 12:2x KST**
       (prod 읽기 전용 · `scripts/measurements/oscillation_symmetry_count.py` · 창 7일 · 후보 53건):
 
+      **재측정 2026-09-05 13:0x KST**(적대 리뷰 P1-5 수정 후 · 창 7일 · 후보 54건):
+
       | 방향 | 종전 → 새 | 감소 | 정확도 |
       |---|---|---|---|
-      | 액셀 UP | **27 → 22건** | −5 (−18.5%) | 🧠 **대리 지표**(측정 아님 — 아래) |
+      | 액셀 UP | **28 → 23건** | −5 (−17.9%) | 🧠 **대리 지표**(측정 아님 — 아래) |
       | 브레이크 DOWN | **26 → 24건** | −2 (−7.7%) | 소급 정확 |
+
+      📄 P1-5(servo/rank 오분류) 수정은 **이 창의 수를 바꾸지 않았다** — 최근 7일 UP이 전부
+      평범한 `bid_up` 타입이라 오분류 대상이 0건이었다. 12:2x 측정의 27/53과의 차 1건은
+      그 사이 새로 발화한 행이다. 즉 이 수정은 **보고된 수치의 정정이 아니라 지뢰 제거**다.
 
       ★**둘 다 0이 아니게 줄었다 = 한쪽만 조이지 않았다.** 다만 두 수의 «자격»이 다르므로 아래를 병기한다.
       - **B-veto(−2)는 소급 정확하다.** 필요한 입력이 전부 원장에 있다(사유문의 당일 CPC·정착창 기준 +
@@ -214,15 +220,18 @@ where action='update_bid' and dry_run=0 and entity_type='ad'
 ## §5. 실행 — 돌리면 결과가 보이는 명령
 
 ```bash
-cd /private/tmp/claude-501/pao-b2/repo && \
-  python -m pytest backend/tests/test_naver_guardrail_floor_gate.py backend/tests/test_naver_auto_operator.py \
-    backend/tests/test_naver_oscillation_damping.py -q
+cd /private/tmp/claude-501/pao-b2/repo/backend && python3 -m pytest \
+  tests/test_naver_guardrail_floor_gate.py tests/test_naver_auto_operator.py \
+  tests/test_naver_oscillation_damping.py -q
 ```
 
-대칭 검사(§4-C ⓖ, prod 읽기 전용 · 쓰기 0):
+대칭 검사(§4-C ⓖ, prod 읽기 전용 · 쓰기 0) — prod에서 돌린다:
 ```bash
-python scripts/measurements/oscillation_symmetry_count.py --window 7d
+scp scripts/measurements/oscillation_symmetry_count.py sellc.ohitech.co.kr:/tmp/osc_sym.py && \
+  ssh sellc.ohitech.co.kr "python3 /tmp/osc_sym.py --db /home/ubuntu/ohisell/backend/ohisell.db --days 7"
 ```
+⚠️초판 §5는 `--window 7d`라 적었는데 **존재하지 않는 인자**였다(실제는 `--db` 필수 + `--days`).
+적대 리뷰 P2-1 채택 — 계약의 `실행:` 명령은 «돌리면 결과가 보여야» 의미가 있다.
 
 ---
 

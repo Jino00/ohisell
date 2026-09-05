@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -31,6 +32,8 @@ from app.models import (
     NaverEntity,
     NaverHourlySnapshot,
     NaverProductBep,
+    NaverProposal,
+    OpsDiaryEntry,
 )
 from app.services.naver_ad import auto_operator
 
@@ -360,3 +363,300 @@ def test_today_window_gates_read_only_the_passed_curve(db):
         _judge(db, "nkw-t", curve)
 
     assert seen_curves == [id(curve)]
+
+
+# ══════════ 적대 리뷰 1R P1 회귀 고정 — 리뷰어가 재현한 6건이 다시 안 나오게 ══════════
+
+def test_b_veto_sees_ad_grain_writes_belonging_to_the_judged_adgroup(db):
+    """★★P1-1. **판정 grain ≠ 실쓰기 grain**이 이 계약의 가장 큰 구멍이었다.
+
+    시간당 레인은 `adgroup`으로 판정하는데 카나리 그룹은 B3 라우팅으로 **소재(ad)에 쓴다**.
+    판정 grain으로만 원장을 조회하면 그 유닛에서 배수가 영원히 1.0 = **B-veto가 아무것도 안
+    하는 코드**가 되고, 그러면 살아 있는 거부권이 A-veto 하나뿐이라 계약 §3 「액셀만 조이는
+    수정 금지」·북극성 §7을 이 커밋 스스로 위반한다. 하필 최근 30일 실집행이 전부 ad grain이다.
+
+    적대 리뷰가 재현한 그대로: adgroup으로 물으면 1.0, ad로 물으면 1.5였다."""
+    _seed_unit(db, target_id="nkw-x", bep_roas=None)
+    # 이 그룹(grp-1)에 귀속된 «소재» 쓰기 — proposal.adgroup_id가 연결 고리(prod 54/54행 채워짐)
+    for i, (before, after) in enumerate([(1320, 1510), (1730, 1980)]):
+        p = NaverProposal(
+            proposal_type="bid_up", target_type="ad", target_id="nad-osc",
+            campaign_id=CAMPAIGN, adgroup_id="grp-1", rationale="-", expected_effect="-",
+            status="approved", target_bid=after,
+        )
+        db.add(p)
+        db.flush()
+        db.add(NaverChangeLog(
+            entity_type="ad", entity_id="nad-osc", campaign_id=CAMPAIGN, action="update_bid",
+            dry_run=False, proposal_id=p.id,
+            before_value=json.dumps({"adAttr": {"bidAmt": before}}),
+            after_value=json.dumps({"adAttr": {"bidAmt": after}}),
+            changed_at=datetime.combine(TODAY, datetime.min.time()) + timedelta(hours=8 + i),
+        ))
+    db.commit()
+
+    # adgroup_id를 안 주면 종전 결함 그대로 1.0 — 그래서 호출부가 반드시 넘겨야 한다
+    bare, _ = auto_operator._own_bid_multiple_today(db, "adgroup", "grp-1", NOW)
+    assert bare == Decimal(1)
+    # 그룹에 귀속된 소재 쓰기를 보면 1.5
+    with_group, reason = auto_operator._own_bid_multiple_today(
+        db, "adgroup", "grp-1", NOW, adgroup_id="grp-1")
+    assert with_group == Decimal("1.5")
+    assert "1320→1980원" in reason
+
+
+def test_b_veto_end_to_end_on_adgroup_judged_unit_with_ad_grain_writes(db):
+    """★P1-1의 «호출부» 고정 — `_judge_hourly`가 adgroup을 판정할 때 소재 쓰기를 실제로 본다.
+    함수를 직접 부르는 테스트만 있으면 호출부가 grain을 안 넘기는 결함이 원리적으로 안 잡힌다
+    (적대 리뷰 P2-6이 지적한 그 자리)."""
+    _seed_unit(db, target_id="nkw-y", bep_roas=None)
+    _seed_settlement(db, keyword_id="nkw-y", clk=10, cost=7947)  # baseline_cpc 794.7
+    # 판정 대상은 adgroup grp-1인데 쓰기는 소재로 남는다
+    db.add(NaverAdDaily(
+        ad_date=auto_operator._settlement_window(TODAY)[0], campaign_id=CAMPAIGN,
+        campaign_type="SHOPPING", adgroup_id="grp-1", keyword_id=None,
+        imp=1000, clk=10, cost=7947, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    for i, (before, after) in enumerate([(1320, 1510), (1730, 1980)]):
+        p = NaverProposal(
+            proposal_type="bid_up", target_type="ad", target_id="nad-y",
+            campaign_id=CAMPAIGN, adgroup_id="grp-1", rationale="-", expected_effect="-",
+            status="approved", target_bid=after,
+        )
+        db.add(p)
+        db.flush()
+        db.add(NaverChangeLog(
+            entity_type="ad", entity_id="nad-y", campaign_id=CAMPAIGN, action="update_bid",
+            dry_run=False, proposal_id=p.id,
+            before_value=json.dumps({"adAttr": {"bidAmt": before}}),
+            after_value=json.dumps({"adAttr": {"bidAmt": after}}),
+            changed_at=datetime.combine(TODAY, datetime.min.time()) + timedelta(hours=8 + i),
+        ))
+    db.commit()
+    curve = [_hour(h, imp=20, clk=2, cost=3367) for h in (9, 10, 11)]  # CPC 1683.5
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK):
+        verdict = auto_operator._judge_hourly(
+            db, target_type="adgroup", target_id="grp-1", campaign_id=CAMPAIGN,
+            curve=curve, now=NOW,
+        )
+    assert verdict["direction"] != "down"
+    assert "자기유발분" in (verdict.get("cpc_spike_self_caused") or "")
+
+
+def test_self_caused_note_absent_when_leash_actually_lowers_the_bid(db):
+    """★P1-3. 「내리려던 걸 멈췄다」와 「실제로 내렸다」가 **같은 verdict에 같이 실리면** 안 된다.
+    초판은 `base`에 실어서, 고삐 DOWN이 나가는 판정에도 「CPC급등 보류」가 따라붙었고
+    `run_hourly_lane`이 그걸 보고 **하향을 집행하면서 동시에 「하향 보류」 일기**를 남겼다."""
+    _seed_unit(db, target_id="nkw-z", bep_roas=Decimal("2.0"))
+    _seed_settlement(db, keyword_id="nkw-z", clk=10, cost=7947)   # 하루평균 1135 · CPC 794.7
+    _seed_own_bid_writes(db, target_id="nkw-z", steps=[(1320, 1510), (1730, 1980)])  # ×1.5
+    curve = [_hour(h, imp=20, clk=2, cost=3600) for h in (9, 10, 11)]
+    # 당일 CPC 1800 → 옛 문턱 1589.4 초과(B-veto가 누름) · 새 문턱 2384.1 미만
+    # 전환 0 → 추정ROAS 0 < BEP 2.0 · 당일소진 10800 ≥ 하루평균 1135 → 고삐 DOWN
+
+    verdict = _judge(db, "nkw-z", curve)
+    assert verdict["direction"] == "down"
+    assert verdict.get("leash") is True
+    assert verdict.get("cpc_spike_self_caused") is None, "하향이 나가는 판정에 「하향 보류」가 실렸다"
+
+
+def test_a_veto_scoped_to_settlement_ok_only(db):
+    """★P1-4. 계약 §4-A는 A-veto를 *"정착창이 ok여도"*로 정의했다. 초판 코드엔 그 조건이 없어
+    **정착창이 미달·판정불가라 애초에 UP 의도가 없던 유닛까지** 「UP 보류」 일기를 만들었고,
+    사유문도 문자 그대로 거짓이었다(*"정착창(미달)인데 … 정착창은 오늘을 못 본다"*)."""
+    _seed_unit(db, target_id="nkw-below", bep_roas=Decimal("2.0"))
+    # 정착창 ROAS 0.5 < 목표 2.0 = below
+    _seed_settlement(db, keyword_id="nkw-below", clk=20, cost=21000, conv_amt=10500)
+    curve = [
+        _hour(9, imp=20, clk=1, cost=800),
+        _hour(10, imp=20, clk=1, cost=800, conv_cnt=1),
+        _hour(11, imp=20, clk=1, cost=800, conv_cnt=1),
+    ]  # 오늘도 BEP 하회지만 정착창이 below라 A-veto 범위 밖
+
+    verdict = _judge(db, "nkw-below", curve)
+    assert verdict.get("veto") is None
+    assert "재시작 대기" in verdict["reason"]   # 종전 사유 체계 그대로
+
+
+def test_declaration_table_is_load_bearing_not_decorative(db):
+    """★P1-6. 초판은 표를 선언만 하고 코드는 `_settlement_window`를 직접 불렀다 — 표의 값을
+    **거짓으로 바꿔도 전건 초록**이었다. 계약 §2-3이 「선언만 있는 표는 조용히 거짓이 된다」며
+    세운 방어가 그 자신에게 없었다. 이제 CPC급등·고삐의 창 경계는 표를 거친다."""
+    # ① 표가 실제 경계를 만든다
+    assert auto_operator._gate_baseline_window("cpc_spike", TODAY) == \
+        auto_operator._settlement_window(TODAY)
+    assert auto_operator._gate_baseline_window("intraday_up", TODAY) is None
+    # ② 표를 거짓으로 고치면 «조용히» 통과하지 않고 죽는다
+    with patch.dict(auto_operator._HOURLY_DECISION_WINDOWS["cpc_spike"],
+                    {"baseline_window": "settlement_d30_d1"}):
+        with pytest.raises(ValueError):
+            auto_operator._gate_baseline_window("cpc_spike", TODAY)
+
+
+def test_declared_accel_window_matches_what_the_settlement_gate_reads(db):
+    """★P1-6(액셀 쪽). `roas_up`은 창 경계를 인자로 받지 않으므로(함수가 스스로 계산한다)
+    **관측된 소비와 선언을 대조**해 표의 거짓을 잡는다 — 표에 「당일창을 본다」고 적어 두면
+    실제 소비(정착창)와 어긋나 이 테스트가 죽는다."""
+    _seed_unit(db, target_id="nkw-decl", bep_roas=None)
+    _seed_settlement(db, keyword_id="nkw-decl", clk=10, cost=1000)
+    curve = [_hour(h, imp=20, clk=2, cost=100) for h in (9, 10, 11)]
+
+    real_agg = auto_operator._settlement_agg
+    seen: list[tuple] = []
+
+    def _spy(db_, tt, tid, date_from, date_to):
+        seen.append((date_from, date_to))
+        return real_agg(db_, tt, tid, date_from, date_to)
+
+    with patch.object(auto_operator, "_settlement_agg", side_effect=_spy):
+        _judge(db, "nkw-decl", curve)
+
+    declared = auto_operator._HOURLY_DECISION_WINDOWS["roas_up"]["baseline_window"]
+    assert declared == auto_operator._WINDOW_SETTLEMENT, "선언과 실제 소비가 갈라졌다"
+    assert set(seen) == {auto_operator._settlement_window(TODAY)}
+
+
+def test_counter_up_types_match_the_apps_single_source():
+    """★P1-5. 계수기가 `bid_up_servo`/`bid_up_rank`를 DOWN으로 세면 §7 판정이 뒤집힌다
+    (`"bid_up_servo".endswith("bid_up")`은 False다). 두 집합이 갈라지면 여기서 죽는다."""
+    import importlib.util
+    from app.services.naver_ad.bid_step_types import BID_UP_TYPES as APP_TYPES
+
+    path = Path(__file__).resolve().parents[2] / "scripts" / "measurements" / "oscillation_symmetry_count.py"
+    spec = importlib.util.spec_from_file_location("osc_counter", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert set(mod.BID_UP_TYPES) == set(APP_TYPES)
+    assert mod.CPC_SPIKE_RATIO == auto_operator.CPC_SPIKE_RATIO
+
+
+# ══════ ★P1-2 표면 절단 방어 — 두 거부권이 «운영 일기»에 실제로 남는지 (레인 통과) ══════
+# 적대 리뷰의 생존 변이 M13: `run_hourly_lane`의 `_record_blocked` 두 호출을 통째로 지워도
+# 235개 전건 초록이었다. 계약 §4-D가 지목한 이번 슬라이스의 **유일한 사람 표면**이 무보호였다.
+# 아래 둘은 레인을 실제로 통과시켜 일기 행을 확인한다 — 배선을 지우면 죽는다.
+
+def _blocked_rows(db, action):
+    return (
+        db.query(OpsDiaryEntry)
+        .filter(OpsDiaryEntry.event_type == "blocked", OpsDiaryEntry.action == action)
+        .all()
+    )
+
+
+def test_lane_writes_diary_row_when_a_veto_holds_an_up(db):
+    """★A-veto가 상향을 멈추면 운영 일기(blocked, action='bid_up')에 사유가 원문으로 남는다.
+    이 행이 §4-C ⓙ가 「A-veto의 유일한 정확한 계수」라고 선언한 그 행이다 — 배선이 없으면
+    배포 후 판정 자체가 불가능하다."""
+    _seed_unit(db, target_id="nkw-lane-a", bep_roas=Decimal("2.0"))
+    _seed_settlement(db, keyword_id="nkw-lane-a", clk=20, cost=21000, conv_amt=63000)
+    curve = [
+        _hour(9, imp=20, clk=1, cost=800),
+        _hour(10, imp=20, clk=1, cost=800, conv_cnt=1),
+        _hour(11, imp=20, clk=1, cost=800, conv_cnt=1),
+    ]
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    mock_exec.assert_not_called()          # 상향이 나가지 않았다
+    rows = _blocked_rows(db, "bid_up")
+    assert len(rows) == 1, "A-veto 일기 배선이 없다(표면 절단)"
+    assert "오늘 증거 거부권" in rows[0].rationale
+    assert rows[0].target_id == "nkw-lane-a"
+
+
+def test_lane_writes_diary_row_when_b_veto_suppresses_a_down(db):
+    """★B-veto가 CPC급등 하향을 멈추면 운영 일기(blocked, action='bid_down')에 남는다.
+    ★그리고 그 행은 «하향이 실제로 안 나간» 판정에서만 나와야 한다(P1-3) — 여기선 고삐도
+    안 걸리므로 하향 0건이다."""
+    _seed_unit(db, target_id="nkw-lane-b", bep_roas=None)   # 원가 없음 → 고삐 판정 불가
+    _seed_settlement(db, keyword_id="nkw-lane-b", clk=10, cost=7947)
+    _seed_own_bid_writes(db, target_id="nkw-lane-b", steps=[(1320, 1510), (1730, 1980)])
+    curve = [_hour(h, imp=20, clk=2, cost=3367) for h in (9, 10, 11)]  # CPC 1683.5
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    mock_exec.assert_not_called()          # 하향이 나가지 않았다
+    rows = _blocked_rows(db, "bid_down")
+    assert len(rows) == 1, "B-veto 일기 배선이 없다(표면 절단)"
+    assert "자기유발분" in rows[0].rationale
+
+
+def test_lane_does_not_write_a_false_down_hold_when_the_leash_actually_lowers(db):
+    """★P1-3의 레인 판본 — 하향이 **집행되는** 회차엔 「하향 보류」 일기가 없어야 한다.
+    초판은 같은 분에 「내리려던 걸 멈췄다」 일기 1행 + 진짜 bid_down 제안을 같이 냈다."""
+    _seed_unit(db, target_id="nkw-lane-c", bep_roas=Decimal("2.0"))
+    _seed_settlement(db, keyword_id="nkw-lane-c", clk=10, cost=7947)   # 하루평균 1135
+    _seed_own_bid_writes(db, target_id="nkw-lane-c", steps=[(1320, 1510), (1730, 1980)])
+    curve = [_hour(h, imp=20, clk=2, cost=3600) for h in (9, 10, 11)]  # CPC 1800 · 전환 0
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    mock_exec.assert_called_once()                       # 고삐 하향이 실제로 나갔다
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_down"
+    assert _blocked_rows(db, "bid_down") == [], "하향을 집행하면서 「하향 보류」 일기를 남겼다"
+
+
+def test_multiple_across_several_ads_takes_the_conservative_minimum(db):
+    """★자기 변이 M20이 살아남아 추가한 고정 — `min`을 `max`로 바꿔도 아무도 안 죽었다.
+
+    그룹 CPC는 소재들의 혼합이라 한 소재만 1.5배 올렸다고 그룹 CPC가 1.5배 오르지 않는다.
+    최댓값을 쓰면 «자기 몫»을 과대 계상해 브레이크를 필요 이상으로 끈다 — 이 거부권이 지켜야
+    할 경계(「완화만 하고 강화하지 않는다」)의 반대편이다. 그래서 최솟값이 정답이고, 그 선택은
+    취향이 아니라 계약 §2-6이라 테스트로 못박는다."""
+    _seed_unit(db, target_id="nkw-multi", bep_roas=None)
+    for idx, (ad_id, before, after) in enumerate(
+        [("nad-hot", 1320, 1980), ("nad-flat", 1000, 1000)]
+    ):
+        p = NaverProposal(
+            proposal_type="bid_up", target_type="ad", target_id=ad_id, campaign_id=CAMPAIGN,
+            adgroup_id="grp-1", rationale="-", expected_effect="-", status="approved",
+            target_bid=after,
+        )
+        db.add(p)
+        db.flush()
+        db.add(NaverChangeLog(
+            entity_type="ad", entity_id=ad_id, campaign_id=CAMPAIGN, action="update_bid",
+            dry_run=False, proposal_id=p.id,
+            before_value=json.dumps({"adAttr": {"bidAmt": before}}),
+            after_value=json.dumps({"adAttr": {"bidAmt": after}}),
+            changed_at=datetime.combine(TODAY, datetime.min.time()) + timedelta(hours=8 + idx),
+        ))
+    db.commit()
+
+    multiple, reason = auto_operator._own_bid_multiple_today(
+        db, "adgroup", "grp-1", NOW, adgroup_id="grp-1")
+    assert multiple == Decimal(1), "최댓값을 쓰면 자기 몫을 과대 계상해 브레이크를 과하게 끈다"
+    assert "순상향 없음" in reason
+
+
+def test_a_veto_yields_to_the_budget_gate_so_its_count_means_prevented_ups(db):
+    """★적대 리뷰 P2-5 채택분 고정 — A-veto는 **예산 여력 게이트 뒤**에 선다.
+
+    앞에 두면 「예산이 없어 어차피 안 올라갔을 유닛」까지 가로채, §4-C ⓙ가 「A-veto의 유일한
+    정확한 계수」라고 선언한 일기 수가 «막은 상향»이 아니라 «지나간 유닛»을 세게 된다.
+    (그리고 종전 사유 `예산 여력 없음`의 시계열이 끊긴다.)"""
+    _seed_unit(db, target_id="nkw-budget", bep_roas=Decimal("2.0"))
+    _seed_settlement(db, keyword_id="nkw-budget", clk=20, cost=21000, conv_amt=63000)
+    # 일예산을 이미 소진 — UP은 예산 게이트에서 멈춰야 한다
+    snap = db.query(NaverHourlySnapshot).filter(
+        NaverHourlySnapshot.campaign_id == CAMPAIGN).one()
+    snap.cost = 100000
+    db.commit()
+    curve = [
+        _hour(9, imp=20, clk=1, cost=800),
+        _hour(10, imp=20, clk=1, cost=800, conv_cnt=1),
+        _hour(11, imp=20, clk=1, cost=800, conv_cnt=1),
+    ]  # A-veto 조건도 동시에 충족(오늘 BEP 하회 · 전환 2)
+
+    verdict = _judge(db, "nkw-budget", curve)
+    assert verdict["direction"] == "hold"
+    assert verdict.get("veto") is None, "예산 게이트가 먼저 잡아야 ⓙ의 계수가 「막은 상향」이 된다"
+    assert "예산 여력 없음" in verdict["reason"]
