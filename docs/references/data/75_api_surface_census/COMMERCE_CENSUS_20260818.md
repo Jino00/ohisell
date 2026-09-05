@@ -176,3 +176,33 @@ TS 필드는 존재하나(회차·신청일 등) 상품/주문 연결 키가 전
 - **매트릭스가 자체 언급한 "ref 71 내부 계수 1건 불일치(상품 64 vs 정적 그룹 63)"** — 이번 조사로 부분 해소: 상품 64 = products/search(1) + change-status(1) + **정적 62**(매트릭스 원문의 "61"은 오프바이원). 단 이 62건 자체를 전부 열어 재확인한 것은 아니므로(§6 첫 항목과 동일 공백) "62"도 목록 카운트일 뿐 개별 grain 재확인은 아니다.
 - **API데이터솔루션 도메인**(llms.txt 인덱스에 섹션 자체가 없음, ref71이 이미 기록) — 이번 조사도 재확인 못 함, 그대로 [미상] 유지.
 - **prod 실측**(이 census는 코드·문서 정적 분석만 — 읽기 전용 경계상 prod DB 조회·API 호출 0건. N배송 조인 후보의 실제 매치율은 prod 없이는 확인 불가).
+
+---
+
+## 7. ★2026-09-05 재측정 (18일 경과, C2조사 세션) — 순수 추가, 위 §1~6 원문 불변
+
+> 목적·경계는 ADS_CENSUS §7과 동일 — 북극성(`ref 82`) §3 L0 「커머스 25/116」 행 갱신. **네이버 API 실호출 0건 · prod 접속 0건 · 코드 0줄.**
+
+### 7-1. 분모(116) 재확인 — 변하지 않았다
+
+09-05 10:3x KST `https://apicenter.commerce.naver.com/llms/llms.txt`를 재`curl`(200 OK, 149줄). 도메인 섹션의 endpoint 링크 수를 재파싱: 공통소개 6·위키 4(합 10, endpoint 아님) + **N배송 4·문의 6·상품 64·인증 1·정산 5·주문 20·커머스솔루션 8·판매자정보 8 = 116** — 08-18과 **정확히 동일**(도메인별 세부 개수까지 일치, 신규·삭제 0건). **API데이터솔루션 섹션은 이번에도 인덱스에 없다**(08-18 §6과 동일 — [미상] 유지, ref71 이래 3번째 확인).
+
+### 7-2. 분자 재확인 — `backend/app/clients/naver.py` 재검사
+
+파일은 여전히 `backend/app/clients/naver.py`(1,232줄, 08-18 대비 +178줄 — 다른 기능 추가로 늘었을 뿐 이 census 대상 endpoint 호출부는 아래처럼 불변). 경로 리터럴을 전수 재grep(`"/v1\|f"/v1"` 패턴)했다.
+
+**결과: 08-18과 완전히 동일한 25개 endpoint, 신규 0건, 감소 0건.** `oauth2/token`·`product-orders`(query·last-changed-statuses·confirm·dispatch·delay)·`claim/*`(11종)·`settle/daily`·`settle/case`·`pay-user/inquiries`·`products/search`·`seller/account`·`seller/channels`·`origin-products/{id}/change-status` — 08-18 §4 표의 좌표(행 번호는 파일이 늘어 이동했으나 endpoint 자체는 불변)와 1:1 대응.
+
+**09-05 실사용 = 25/116(21.6%) — 08-18과 변화 없음.**
+
+이번 세션이 확인한 것 — **D-NAO-212(C10 상품메타, 08-21)가 새 endpoint를 열지 않았다**: `naver_product_meta_ingest.py`가 쓰는 `POST /v1/products/search`는 08-18에 이미 O였던 바로 그 endpoint이고(§4 "products/search 583"), D-NAO-212가 바꾼 것은 **호출 파라미터**(카테고리 필터 있음 → 전건 무필터 순회)뿐이다 — endpoint 신규 개통이 아니다. N배송 SKU 4종(§5-1이 "등급 교차 가능 후보"로 지목)·`shared-budgets`류에 대응하는 커머스 쪽 후보(SharedBudget은 광고 계열, 커머스엔 해당 없음)도 grep 0건 그대로다.
+
+### 7-3. §5-1 N배송 SKU 후보 — 여전히 미착수
+
+08-18 §5-1이 "①등급 교차 가능(조건부)"로 지목한 N배송 SKU 4종(`GET SKU 조회 v1/v2`·`GET SKU 연결상품 조회`·`POST SKU 목록조회`)은 이번 재확인에서도 코드 호출 **0건**(`nsId`·`logistics/products/sellers` 문자열 grep 0건) — `channelProductId` = `naver_adgroup_product.mall_product_id` 동일 ID 공간 가설(§6 세 번째 항목)은 18일 전과 마찬가지로 **[미상]** 그대로, 실제 조인은 시도되지 않았다.
+
+**「전수 조사 완료」라고 쓰지 않는다** — 상품 도메인 54/64건 미확인 등 08-18 §6의 공백은 이번 세션도 그대로 남아 있다.
+
+---
+
+*7절 작성: Sonnet(C2조사, 읽기 전용). 재확인 1차 출처: `https://apicenter.commerce.naver.com/llms/llms.txt`(2026-09-05 curl 재취득, 200 OK, 116개 endpoint 구성 100% 동일). 코드 재확인: `backend/app/clients/naver.py`(1,232줄). 네이버 API 실호출 0건·prod 접속 0건·git 커밋(이 파일 외) 0건·`backend/`·`frontend/` 수정 0줄.*
