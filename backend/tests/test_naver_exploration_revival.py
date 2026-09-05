@@ -89,7 +89,7 @@ def test_a_bleeding_sample_scarce_allows_exploration(db):
     assert eff["source"] == "ad"
 
     reason = auto_operator._exploration_daily_loss_reason(
-        db, ADGROUP_A, TODAY, NOW, effective_bid_value=eff["effective_bid"])
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=lambda: eff["effective_bid"])
     assert reason is None
 
 
@@ -103,7 +103,7 @@ def test_b_bleeding_confirmed_loss_stays_excluded(db):
     assert eff["effective_bid"] == 460
 
     reason = auto_operator._exploration_daily_loss_reason(
-        db, ADGROUP_B, TODAY, NOW, effective_bid_value=eff["effective_bid"])
+        db, ADGROUP_B, TODAY, NOW, effective_bid_getter=lambda: eff["effective_bid"])
     assert reason is not None
     assert "17617" in reason
     assert "4600" in reason
@@ -114,17 +114,17 @@ def test_c1_missing_retro_data_fail_closed(db):
     """§4-B ⓒ(부재): 소급채점 데이터 전무 → 종전 사유 그대로 제외(fail-closed 불변,
     표본 부족 예외 미적용)."""
     reason = auto_operator._exploration_daily_loss_reason(
-        db, ADGROUP_A, TODAY, NOW, effective_bid_value=999_999)
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=lambda: 999_999)
     assert reason is not None
     assert "데이터 없음" in reason
 
 
 def test_c2_stale_retro_fail_closed(db):
     """§4-B ⓒ(stale): 최신 asof가 기대보다 낡음 → 종전 사유 그대로 제외(fail-closed 불변),
-    effective_bid_value가 있어도(=예외 조건이 아니므로) 열리지 않는다."""
+    effective_bid_getter가 있어도(=예외 조건이 아니므로) 열리지 않는다."""
     _seed_retro(db, target_id=ADGROUP_A, cost_asof=0, asof=date(2026, 7, 18))  # stale
     reason = auto_operator._exploration_daily_loss_reason(
-        db, ADGROUP_A, TODAY, NOW, effective_bid_value=999_999)
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=lambda: 999_999)
     assert reason is not None
     assert "stale" in reason
 
@@ -139,7 +139,7 @@ def test_d_sample_scarce_but_on_stoploss_board_stays_excluded(db):
 
     eff = effective_bid.adgroup_effective_bid(db, ADGROUP_A, 50)
     reason = auto_operator._exploration_daily_loss_reason(
-        db, ADGROUP_A, TODAY, NOW, effective_bid_value=eff["effective_bid"])
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=lambda: eff["effective_bid"])
     assert reason is not None
     assert "스톱로스" in reason
 
@@ -155,13 +155,66 @@ def test_e_threshold_is_same_object_as_account_diagnosis_constant(db, monkeypatc
     assert eff["effective_bid"] == 150
 
     before = auto_operator._exploration_daily_loss_reason(
-        db, ADGROUP_A, TODAY, NOW, effective_bid_value=eff["effective_bid"])
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=lambda: eff["effective_bid"])
     assert before is not None  # 10배 경계 — 1500 >= 1500 → 제외
 
     monkeypatch.setattr(account_diagnosis, "LOW_CLICK_THRESHOLD", 11)
     after = auto_operator._exploration_daily_loss_reason(
-        db, ADGROUP_A, TODAY, NOW, effective_bid_value=eff["effective_bid"])
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=lambda: eff["effective_bid"])
     assert after is None  # 같은 객체 참조라면 11배(1650) 기준 1500 < 1650 → 통과
+
+
+# ══════════════ ⓖ: 계약 §1 안전 경계 ②③ — 파생 실패·cost_asof 부재는 fail-closed ══════════
+# 적대리뷰(2026-09-05)가 214개 테스트 전건 초록인 채로 살린 변이 둘: (f) 실효입찰 파생 실패를
+# fail-open으로 바꿔도 초록 (h) cost_asof 부재를 fail-open으로 바꿔도 초록. 계약 §1이 선언한
+# 안전 경계인데 §4-B에 대응 체크박스가 없었다 — 「테스트 범위 확대」가 아니라 계약이 스스로
+# 선언한 안전 경계를 처음으로 지키는 것이다.
+
+def test_g1_effective_bid_getter_failure_stays_excluded(db):
+    """(f) bleeding ∧ 실효입찰 파생 실패(getter가 None을 돌려줌 — 라이브 재조회 실패의 흉내)
+    → fail-open(탐색 허용)이 아니라 종전대로 제외 유지. cost_asof(1,117)만 보면 표본 부족
+    조건(<1,500)이지만, 실효입찰을 못 구했으니 비교 자체가 불가능하다 — 「모름=괜찮음」 금지."""
+    _seed_retro(db, target_id=ADGROUP_A, cost_asof=1117)
+    reason = auto_operator._exploration_daily_loss_reason(
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=lambda: None)
+    assert reason == "④최신 소급채점에서 bleeding으로 판정됨"
+
+
+def test_g1b_effective_bid_getter_raises_stays_excluded(db):
+    """(f)의 변형 — getter가 값 대신 예외를 던지는 경우(네이버 API 예외가 그대로 전파되는
+    경로)도 같은 fail-closed. `_exploration_daily_loss_reason`이 직접 try/except로 잡는다."""
+    _seed_retro(db, target_id=ADGROUP_A, cost_asof=1117)
+
+    def _boom():
+        raise RuntimeError("live GET 실패(흉내)")
+
+    reason = auto_operator._exploration_daily_loss_reason(
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=_boom)
+    assert reason == "④최신 소급채점에서 bleeding으로 판정됨"
+
+
+def test_g2_cost_asof_missing_row_stays_excluded(db, monkeypatch):
+    """(h) bleeding ∧ cost_asof 행 부재 → fail-open이 아니라 종전대로 제외 유지. 실 조건에서는
+    `_bleeding_hold_reason`의 exists-쿼리와 여기 cost_asof-쿼리가 같은 board/target_id/asof
+    필터를 쓰므로 자연 발생하지 않는다(방어 심층 테스트) — `_bleeding_hold_reason`을 정확한
+    bleeding 사유로 고정해 그 경로에 진입시키되, ADGROUP_A의 shopping_group_bep 행은 두지
+    않아(다른 target_id로만 최신 asof가 존재) cost_asof 조회가 부재가 되게 한다. cost_asof가
+    없으면 getter 자체가 호출되면 안 된다(불필요 라이브 GET 방지, P2-2와 동일 원칙)."""
+    _seed_retro(db, target_id="adgroup-other-n89", cost_asof=500)  # 최신 asof는 존재, 대상 행은 없음
+    monkeypatch.setattr(
+        auto_operator, "_bleeding_hold_reason",
+        lambda *a, **kw: "④최신 소급채점에서 bleeding으로 판정됨",
+    )
+    called = {"n": 0}
+
+    def _getter():
+        called["n"] += 1
+        return 150
+
+    reason = auto_operator._exploration_daily_loss_reason(
+        db, ADGROUP_A, TODAY, NOW, effective_bid_getter=_getter)
+    assert reason == "④최신 소급채점에서 bleeding으로 판정됨"
+    assert called["n"] == 0
 
 
 # ══════════════════════ ⓕ: 스코프 밖 행위 변화 0(전체 레인) ══════════════════════
