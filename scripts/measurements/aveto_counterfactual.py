@@ -29,8 +29,10 @@ A-veto가 이미 있었다면 몇 건이 막혔을까"**를 소급 재현한다.
   이월했다. **적재는 이미 있었다** — `naver_keyword_hourly`(entity_type='adgroup', 보존 365일)와
   `naver_adgroup_hourly_today`가 같은 곡선을 담고 있고, prod 실측에서 API와 **574/574 슬롯 전필드
   일치**했다(2026-09-06 07:2x KST · 광고그룹×날짜 24건 · imp·clk·cost·conv_cnt·avg_rank).
-  ⇒ 네이버 7일 보존 창 «밖»의 날짜도 `--curve-source db`로 재현할 수 있다. 자세한 규약과
-  hour 23 결손 주의는 `stored_curve()` docstring에 있다.
+  ⇒ 네이버 7일 보존 창 «밖»의 날짜도 `--curve-source db`로 재현할 수 있다 — **단 adgroup grain
+  유닛에 한해서다**(WEB_SITE 키워드 grain은 적재가 원리적으로 없다). 곡선을 못 얻은 행은
+  **판정불가**로 접혀 분모·분자 모두에서 빠진다. 자세한 규약·grain 한정·hour 23 결손 주의는
+  `stored_curve()` docstring에 있다.
 
 ★순서 규약 — 이 파일의 다른 모든 `app.*` import보다 먼저 **①cwd를 sys.path에 얹고 ②dotenv를
   읽는다.** 반드시 `backend/`를 cwd로 두고 실행할 것(`cd .../backend && ./.venv/bin/python
@@ -281,11 +283,20 @@ def stored_curve(con: sqlite3.Connection, adgroup_id: str, d: date) -> tuple[lis
     출처는 둘이고 **완전한 쪽을 먼저 본다**:
       ① `naver_keyword_hourly`(entity_type='adgroup') — D-1 스윕(09:10 KST)이 넣는다.
          보존 365일(`keyword_hourly_sweep._RETAIN_DAYS`) ⇒ 네이버 7일 창과 무관하다. 24시간 완전.
-      ② `naver_adgroup_hourly_today` — 매시 :57 스윕. ①이 아직 안 채운 날(오늘·오늘 09:10 이전의
-         어제)을 메운다. ★**hour 23이 원리적으로 없다**(실측 2026-09-05: 상위 10개 그룹 전건 h23
-         결손, 최근 8일 전건 maxh=22). 이 계수기에는 무해하다 — 가시 지연 L=2라 판정 시각 H에
-         보이는 건 `hour <= H-2`뿐이고 h23은 H=25에서만 보일 값이라 **애초에 판정에 안 들어간다.**
-         다른 용도로 이 함수를 재사용한다면 그 결손을 먼저 확인할 것.
+      ② `naver_adgroup_hourly_today` — 매시 :57 스윕, 보존 **14일**(`today_hourly_sweep._RETAIN_DAYS`).
+         ①이 아직 안 채운 날(오늘·오늘 09:10 이전의 어제)을 메운다. ★**hour 23이 원리적으로
+         없다**(실측 2026-09-05: 상위 10개 그룹 전건 h23 결손, 최근 8일 전건 maxh=22).
+         **기본 `--lag 2`에서는 무해하다** — 판정 시각 H에 보이는 건 `hour <= H-2`뿐이라
+         H∈[0,23] 전체를 훑어도 가시 hour 최대가 **21**이다(h22조차 안 들어간다).
+         ⚠️**`--lag`를 1 이하로 낮추면 그 무해성이 깨진다**(lag=1→h22, lag=0→h23이 판정에
+         들어가는데 이 표엔 그 시간이 없다 ⇒ **조용한 과소계상**). 적대 리뷰 2R P2-3.
+
+    ⚠️**grain 한정 — 이 배선이 커버하는 것은 «adgroup grain 유닛»뿐이다**(적대 리뷰 2R P2-1).
+    `keyword_hourly_sweep.build_sweep_targets`는 `keyword_id`가 빈 유닛만 `entity_type='adgroup'`
+    행으로 만들고(SHOPPING/BRAND_SEARCH 규약), `today_hourly_sweep.build_today_targets`도
+    `entity_type != "adgroup"`을 거른다. ⇒ **WEB_SITE(키워드 grain) 광고그룹은 적재가
+    원리적으로 없다.** 「네이버 7일 창 밖에서도 재현된다」는 그 한정 아래에서 참이다 —
+    그런 행은 이제 「곡선 없음」으로 **판정불가 처리**되지 미발동으로 세어지지 않는다.
 
     Returns: ([{"hour","imp","clk","cost","conv_cnt","avg_rank"}, ...], 출처 테이블명 | None)
              행이 없으면 ([], None) — 「적재가 없다」와 「적재가 0이다」를 호출측이 가를 수 있게
@@ -399,7 +410,7 @@ def main() -> int:
     curve_con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
 
     price_cache: dict[str, dict] = {}
-    curve_cache: dict[tuple[str, str], list[dict]] = {}
+    curve_cache: dict[tuple[str, str], tuple[list[dict], str | None]] = {}
     api_calls = 0
     source_counts: dict[str, int] = {}
 
@@ -408,8 +419,12 @@ def main() -> int:
             price_cache[adgroup_id] = intraday_roas.adgroup_unit_price(db, adgroup_id)
         return price_cache[adgroup_id]
 
-    def get_curve(adgroup_id: str, d: date) -> list[dict]:
-        """적재 → API 순서(기본 auto). 출처는 «곡선 하나당 한 번» 센다(캐시 적중은 안 센다)."""
+    def get_curve(adgroup_id: str, d: date) -> tuple[list[dict], str | None]:
+        """적재 → API 순서(기본 auto). 출처는 «곡선 하나당 한 번» 센다(캐시 적중은 안 센다).
+
+        ★출처를 **곡선과 함께** 돌려준다(적대 리뷰 2R P1-1) — 여기서 버리면 호출측이
+        「곡선을 못 얻었다」와 「곡선이 비었다」를 못 가르고, 전자가 조용히 「A-veto 미발동」이
+        된다. `stored_curve`가 애써 만든 구분을 한 함수 만에 버리던 자리다."""
         nonlocal api_calls
         key = (adgroup_id, d.isoformat())
         if key in curve_cache:
@@ -425,8 +440,8 @@ def main() -> int:
             source = "네이버 /stats" if curve else None
         label = source or "곡선 없음"
         source_counts[label] = source_counts.get(label, 0) + 1
-        curve_cache[key] = curve
-        return curve
+        curve_cache[key] = (curve, source)
+        return curve_cache[key]
 
     results = []
     for row in rows:
@@ -448,7 +463,19 @@ def main() -> int:
             continue
 
         info = get_price_bep(adgroup_id)
-        curve = get_curve(adgroup_id, changed_at.date())
+        curve, curve_source = get_curve(adgroup_id, changed_at.date())
+
+        # ★★적대 리뷰 2R P1-1 — **곡선을 «못 얻은» 행은 판정불가다.** 종전엔 빈 곡선을
+        # 그대로 judge_row에 넘겨 `a_veto_fired=False`가 나왔고, 그 False가 헤드라인 숫자의
+        # **분모엔 남고 분자에서만 빠졌다** — 바로 아래 줄이 「모른다를 미발동으로 세지
+        # 않는다」고 자백하는 그 자리에서 곡선 축만 그 문장을 배신하고 있었다.
+        # adgroup 미해석 행과 «같은 관례»로 접는다(분모·분자 모두에서 제외).
+        if curve_source is None:
+            entry["judge"] = None
+            entry["skip_reason"] = f"곡선 없음(--curve-source={args.curve_source}에서 적재·API 모두 부재)"
+            results.append(entry)
+            continue
+
         verdict = judge_row(
             curve=curve, rationale=rationale, hour=changed_at.hour,
             price=info["price"], bep=info["bep_roas"], lag=args.lag,
@@ -528,9 +555,21 @@ def main() -> int:
         f"(«ⓙ 일기가 남았을 회차» — 이쪽이 §4-C ⓙ의 인구다)"
     )
     print(
-        f"   (adgroup 판정불가 ①{summary['unresolvable_written']}건 ②{summary['unresolvable_all']}건은 "
+        f"   (판정불가 ①{summary['unresolvable_written']}건 ②{summary['unresolvable_all']}건은 "
         "분모·분자 모두에서 제외 — 「모른다」를 「미발동」으로 세지 않는다)"
     )
+    # ★사유별 내역(적대 리뷰 2R P1-1) — 위 괄호가 「모른다를 안 센다」고 «보증»하는 줄이므로
+    #   그 보증이 무엇을 덮고 있는지 같은 자리에서 보여야 한다. 곡선 결손이 조용히 섞이면
+    #   그게 곧 P1-1이 만든 사고다. 0건이면 그 사실도 적는다(침묵이 아니라 0을 낸다).
+    reason_counts: dict[str, int] = {}
+    for r in results:
+        if r["judge"] is None:
+            reason_counts[r["skip_reason"]] = reason_counts.get(r["skip_reason"], 0) + 1
+    if reason_counts:
+        for reason, cnt in sorted(reason_counts.items()):
+            print(f"     · 판정불가 사유 — {reason}: {cnt}건")
+    else:
+        print("     · 판정불가 사유 — 없음(전건 판정됨)")
     if deploy_ts is not None:
         print(
             f"배포 경계 {deploy_ts.strftime('%Y-%m-%d %H:%M KST')} — 배포 «전» {summary['pre_deploy']}행 / "

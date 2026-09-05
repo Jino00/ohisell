@@ -576,3 +576,162 @@ def test_main_with_curve_source_db_reproduces_without_touching_the_naver_api(tmp
     assert "[곡선 출처] --curve-source=db → naver_keyword_hourly 2건" in out
     # API판(위 e2e)과 같은 판정 — 전환 하한을 넘는 ncg-fire만 발동한다.
     assert "★A-veto가 발동했을 행 수: ①1/2건" in out
+
+
+# ══════════ 적대 리뷰 2R — P1-1 수리 + 생존 변이가 드러낸 커버리지 구멍 ══════════
+
+def test_missing_curve_is_unresolvable_not_a_silent_non_fire(tmp_path, capsys, monkeypatch):
+    """★★2R P1-1 — **곡선을 «못 얻은» 행은 판정불가다.**
+
+    종전엔 빈 곡선이 그대로 judge_row로 가 `a_veto_fired=False`가 됐고, 그 False가
+    헤드라인 ★줄의 **분모엔 남고 분자에서만 빠졌다** — 바로 다음 줄이 「모른다를 미발동으로
+    세지 않는다」고 보증하는 자리에서. 리뷰어 재현: 적재 전무 → `①0/2건`(발동 조건을 갖춘
+    2행인데도). 여기서는 **같은 픽스처로 적재 유무만 갈라** 그 둘이 다르게 나오는지 고정한다."""
+    rows = [
+        (1, "2026-09-04 12:20:00", "ad", "nad-a", "update_bid", 0,
+         _up_rationale(True), '{"adAttr":{"bidAmt":1330}}', 100),
+        (2, "2026-09-04 12:20:00", "ad", "nad-b", "update_bid", 0,
+         _up_rationale(True), '{"adAttr":{"bidAmt":1330}}', 200),
+    ]
+    props = [(100, "ncg-a"), (200, "ncg-b")]
+    # est_roas = conv*price/cost = 3*1000/5000 = 0.6 < bep 2.0 · conv 3 >= min_conv 2 → 발동
+    laden = [(g, "ncg-a", "2026-09-04", 10, 100, 5, 5000, 3, None) for g in ("adgroup",)]
+    laden += [("adgroup", "ncg-b", "2026-09-04", 10, 100, 5, 5000, 3, None)]
+
+    def fake_price(db, adgroup_id):
+        return {"price": Decimal("1000"), "margin": None, "bep_roas": Decimal("2.0"),
+                "source": "product_bep"}
+
+    def run(keyword_hourly_rows, sub):
+        d = tmp_path / sub          # _mk_db는 파일명이 고정이라 «다른 폴더»로 갈라야 한다
+        d.mkdir()
+        db_path = _mk_db(d, rows, props, keyword_hourly_rows=keyword_hourly_rows)
+        monkeypatch.setattr(mod, "fetch_entity_hh24", lambda *a, **k: [])
+        monkeypatch.setattr(mod.intraday_roas, "adgroup_unit_price", fake_price)
+        monkeypatch.setattr("sys.argv", [
+            "aveto_counterfactual.py", "--db", str(db_path),
+            "--since", "2026-09-01", "--until", "2026-09-05", "--curve-source", "db",
+        ])
+        assert mod.main() == 0
+        return capsys.readouterr().out
+
+    # ① 적재가 있으면 2행 다 판정되고 둘 다 발동한다 — 조건이 실제로 섰다는 증거.
+    out_laden = run(laden, "laden")
+    assert "★A-veto가 발동했을 행 수: ①2/2건" in out_laden
+    assert "판정불가 사유 — 없음(전건 판정됨)" in out_laden
+
+    # ② 적재가 없으면 «0/0»이지 «0/2»가 아니다 — 분모에서도 빠져야 한다.
+    out_bare = run((), "bare")
+    assert "★A-veto가 발동했을 행 수: ①0/0건" in out_bare, "곡선 결손이 「미발동」으로 세어졌다"
+    assert "판정불가 ①2건 ②2건" in out_bare
+    assert "판정불가 사유 — 곡선 없음" in out_bare
+    # 행별 표에도 사유가 보여야 한다(요약만 고치고 표를 두면 읽는 사람이 못 가른다).
+    assert "(판정불가: 곡선 없음" in out_bare
+
+
+def test_auto_prefers_the_store_over_the_api_without_any_flag(tmp_path, capsys, monkeypatch):
+    """★★2R 커버리지 구멍 #1 — 기본 모드가 «적재 우선»임을 고정한다.
+
+    종전 테스트는 auto를 «적재가 빈» 상태로만 돌려서 **폴백만** 증명했다. 그래서 auto의
+    DB 분기를 통째로 지워도(=이 PR의 목적 자체가 사라져도) 전건 초록이었다(리뷰어 변이 M16).
+    여기서는 적재를 «넣고» 플래그 없이 돌려 API를 한 번도 안 부르는지 본다."""
+    db_path = _mk_db(
+        tmp_path,
+        [(1, "2026-09-04 12:20:00", "ad", "nad-a", "update_bid", 0,
+          _up_rationale(True), '{"adAttr":{"bidAmt":1330}}', 100)],
+        [(100, "ncg-a")],
+        keyword_hourly_rows=[("adgroup", "ncg-a", "2026-09-04", 10, 100, 5, 5000, 3, None)],
+    )
+
+    def boom(adgroup_id, d):  # pragma: no cover - 불리면 실패다
+        raise AssertionError(f"auto인데 적재를 두고 API를 불렀다: {adgroup_id} {d}")
+
+    monkeypatch.setattr(mod, "fetch_entity_hh24", boom)
+    monkeypatch.setattr(mod.intraday_roas, "adgroup_unit_price", lambda db, ag: {
+        "price": Decimal("1000"), "margin": None, "bep_roas": Decimal("2.0"), "source": "product_bep"})
+    monkeypatch.setattr("sys.argv", [  # ★--curve-source를 «안» 준다 — 기본값이 이 테스트의 대상이다
+        "aveto_counterfactual.py", "--db", str(db_path), "--since", "2026-09-01", "--until", "2026-09-05",
+    ])
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert "네이버 /stats 읽기 콜 0건" in out
+    assert "[곡선 출처] --curve-source=auto → naver_keyword_hourly 1건" in out
+
+
+def test_curve_source_counter_counts_each_curve_once_not_per_row(tmp_path, capsys, monkeypatch):
+    """2R 커버리지 구멍 #3 — `get_curve` docstring의 「캐시 적중은 안 센다」 계약.
+    같은 (그룹, 날짜)를 쓰는 행을 셋 두고 출처 카운트가 1인지 본다(이중 계수 변이 M9)."""
+    db_path = _mk_db(
+        tmp_path,
+        [(i, "2026-09-04 12:20:00", "ad", f"nad-{i}", "update_bid", 0,
+          _up_rationale(True), '{"adAttr":{"bidAmt":1330}}', 100) for i in (1, 2, 3)],
+        [(100, "ncg-a")],
+        keyword_hourly_rows=[("adgroup", "ncg-a", "2026-09-04", 10, 100, 5, 5000, 3, None)],
+    )
+    monkeypatch.setattr(mod, "fetch_entity_hh24", lambda *a, **k: [])
+    monkeypatch.setattr(mod.intraday_roas, "adgroup_unit_price", lambda db, ag: {
+        "price": Decimal("1000"), "margin": None, "bep_roas": Decimal("2.0"), "source": "product_bep"})
+    monkeypatch.setattr("sys.argv", [
+        "aveto_counterfactual.py", "--db", str(db_path), "--since", "2026-09-01", "--until", "2026-09-05",
+    ])
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert "naver_keyword_hourly 1건" in out, "곡선 단위로 세야 하는데 행 단위로 셌다"
+    assert "★A-veto가 발동했을 행 수: ①3/3건" in out  # 행은 3건 다 판정된다
+
+
+def test_curve_connection_literal_is_read_only(tmp_path):
+    """2R P2-6 — 「쓰기 0건」은 이 파일에 ★로 세 번 적힌 불변인데 리터럴 하나(`mode=ro`)에
+    걸려 있었고 어떤 테스트도 안 지켰다(리뷰어 변이 M11이 `mode=rw`로 바꿔도 전건 초록).
+
+    ★★초판의 이 테스트는 **자기 픽스처가 연 접속**을 검사했다 — `_mk_curve_db`가 스스로
+    `mode=ro`로 열어 두고 그 접속이 읽기 전용인지 물었으니, 스크립트를 `mode=rw`로 바꿔도
+    당연히 초록이었다. 「고정하려 한 것」과 「실제로 고정하던 것」이 갈린 자리(교훈 #397).
+    스크립트가 **자기 접속을 어떻게 여는지**를 소스 리터럴로 때린다 — 이 파일이 auto_operator
+    마커에 쓰는 것과 같은 드리프트 가드 관례다."""
+    src = Path(mod.__file__).read_text()
+    assert 'sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)' in src, (
+        "곡선용 접속이 읽기 전용이 아니다 — 이 스크립트의 「쓰기 0건」 불변이 깨졌다"
+    )
+    # 픽스처 쪽 접속도 같은 규약인지는 별도로 본다(둘을 한 단언에 섞지 않는다).
+    con = _mk_curve_db(tmp_path, keyword_rows=[("adgroup", "ncg-1", "2026-09-02", 5, 1, 1, 1, 0, None)])
+    with pytest.raises(sqlite3.OperationalError):
+        con.execute("insert into naver_keyword_hourly values "
+                    "('adgroup','ncg-x','2026-09-02',1,1,1,1,0,null)")
+
+
+def test_auto_with_empty_store_and_empty_api_is_unresolvable_not_non_fire(tmp_path, capsys, monkeypatch):
+    """★2R 생존 변이 M8·M15 — **빈 API 응답에 출처를 붙이면 P1-1이 그대로 부활한다.**
+
+    `--curve-source db`만 고정하면 API 분기를 한 번도 안 밟아 이 자리가 비어 있다.
+    여기서는 auto에서 적재·API가 «둘 다» 빈 경우를 밟아 ①판정불가로 접히는지 ②출처 줄이
+    「곡선 없음」이라고 **정직하게** 말하는지 둘 다 본다(라벨을 API로 위장하면 M15가 산다)."""
+    db_path = _mk_db(
+        tmp_path,
+        [(1, "2026-09-04 12:20:00", "ad", "nad-a", "update_bid", 0,
+          _up_rationale(True), '{"adAttr":{"bidAmt":1330}}', 100)],
+        [(100, "ncg-a")],
+    )
+    monkeypatch.setattr(mod, "fetch_entity_hh24", lambda *a, **k: [])   # 네이버가 빈 응답
+    monkeypatch.setattr(mod.intraday_roas, "adgroup_unit_price", lambda db, ag: {
+        "price": Decimal("1000"), "margin": None, "bep_roas": Decimal("2.0"), "source": "product_bep"})
+    monkeypatch.setattr("sys.argv", [
+        "aveto_counterfactual.py", "--db", str(db_path), "--since", "2026-09-01", "--until", "2026-09-05",
+    ])
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert "★A-veto가 발동했을 행 수: ①0/0건" in out, "빈 응답이 「미발동」으로 세어졌다"
+    assert "판정불가 ①1건 ②1건" in out
+    assert "[곡선 출처] --curve-source=auto → 곡선 없음 1건" in out, "빈 응답에 API 출처를 붙였다"
+
+
+def test_stored_curve_casts_null_columns_not_just_passes_them_through(tmp_path):
+    """2R 커버리지 구멍 #4 — 종전 타입 단언은 스텁 sqlite가 이미 int를 주므로 캐스팅을
+    벗겨도 초록이었다(변이 M4 생존). NULL 행을 섞으면 캐스팅이 «실제로» 일하는 자리가 생긴다."""
+    from datetime import date
+    con = _mk_curve_db(tmp_path, keyword_rows=[
+        ("adgroup", "ncg-1", "2026-09-02", 5, None, None, None, None, None),
+    ])
+    curve, _ = mod.stored_curve(con, "ncg-1", date(2026, 9, 2))
+    assert curve == [{"hour": 5, "imp": 0, "clk": 0, "cost": 0, "conv_cnt": 0, "avg_rank": None}]
+    assert all(isinstance(curve[0][f], int) for f in ("imp", "clk", "cost", "conv_cnt"))
