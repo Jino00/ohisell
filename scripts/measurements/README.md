@@ -32,6 +32,7 @@
 | `measure_magnitude.py` | 같은 두 하한에서 **방향별 금액 합**(현재 입찰 합 vs 추천 입찰 합)을 낸다 | ref 95 §9-2 금액 행(+244,730 → +169,610원 / 브레이크 불변) |
 | `oscillation_symmetry_count.py` | D-NAO-288 두 거부권이 **액셀·브레이크를 각각 몇 건 움직이는지**(북극성 §7 대칭) | ref 132 · 계약 `CONTRACT_oscillation_damping.md` §4-C ⓖ |
 | `latch_reason_census.py` | `·->·` 무쓰기 재발화가 **어느 가드레일에서 막혔나**(자유 텍스트 사유 → 키) | ref 134 · 같은 계약 §4-C ⓘ |
+| `aveto_counterfactual.py` | D-NAO-288 **A-veto**(2026-09-05 14:08 KST 배포)를 배포 «전» 기간에 소급 적용 — 실제 UP 실쓰기 중 몇 건이 막혔을지 재현(그룹grain·L=2 가시지연·순위고삐 원장 대조 검산 포함) | D-NAO-288 §4-D — 앱 임포트 + 네이버 `/stats`(hh24, **읽기**·견적 아님) 콜 있음, (adgroup,날짜) 조합당 1회 캐시 |
 
 ★**위 둘은 앞의 `measure_*.py`와 성질이 다르다** — 앱 패키지를 임포트하지 않는 **stdlib 전용**이라
 `.venv` 없이 `python3 <파일> --db <경로>`로 돌고, **네이버 API를 한 번도 부르지 않는다**(위 ⚠️의

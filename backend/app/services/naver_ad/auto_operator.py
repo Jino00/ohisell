@@ -815,6 +815,14 @@ def _entity_status_hold_reason(db: Session, target_type: str, target_id: str) ->
 # 위, 넓은 규칙이 아래다(예: "소급채점 stale"이 "소급채점"보다 위). 못 맞추면 "other"이고,
 # other가 커지는 것 자체가 「분류가 낡았다」는 신호라 그 값을 일부러 남긴다(0으로 감추지 않는다).
 _HOLD_REASON_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ── D-NAO-288 미러 거부권 2개 (규칙 신설 D-NAO-290) ──
+    # ★맨 위에 둔다: 거부권 사유문은 정착창·BEP 문구를 함께 싣기 때문에 아래 넓은 규칙
+    #   (`roas_below` 등)에 먼저 걸리면 «거부권이 걸렸다»는 사실이 집계에서 사라진다.
+    # ★왜 필요한가: 계약 §4-C ⓖ가 ⓙ(운영 일기)를 A-veto의 정확한 계수로 지정했는데,
+    #   매시 도는 이 로그 집계에는 두 거부권을 가리키는 키가 **없어서 `other`로 들어갔다**.
+    #   최근 3회차의 `other`는 8·14·13건이라 거부권 1건은 그 안에서 보이지 않는다.
+    ("veto_accel", ("오늘 증거 거부권",)),
+    ("veto_brake", ("CPC급등 보류(자기유발분)",)),
     # ── 조건④ 소급채점(retro) 계열 — 탐색 차단의 최대 지분 ──
     ("retro_stale", ("소급채점 stale",)),
     ("retro_missing", ("소급채점 데이터 없음",)),
@@ -3974,13 +3982,42 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     reason=verdict["reason"], now=now, target_type=target_type,
                     target_id=target_id, action="bid_up",
                 )
-            if verdict.get("cpc_spike_self_caused"):
+            # ★D-NAO-290: 표식을 **판정 직후에** 잡아 둔다. 아래 CD2 탐침이 `verdict`를 통째로
+            #   새 dict로 갈아치우므로, 그 뒤에 `verdict.get(...)`을 보면 탐침 경로에선 사라진다.
+            cpc_spike_self_caused = verdict.get("cpc_spike_self_caused")
+            if cpc_spike_self_caused:
                 _record_blocked(
                     db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
-                    reason=verdict["cpc_spike_self_caused"], now=now, target_type=target_type,
+                    reason=cpc_spike_self_caused, now=now, target_type=target_type,
                     target_id=target_id, action="bid_down",
                 )
             if verdict["direction"] == "hold":
+                # ★★D-NAO-290: **거부권이 만든 hold는 탐침으로 되돌리지 않는다.**
+                # 아래 CD2 탐침은 「hold = 액션 없음 = 사각지대일 수 있다」를 전제로 모든 hold를
+                # up-의도 탐침 후보로 다시 집어 올린다. 그런데 `_probe_trigger`는 순수 SA라
+                # 거부권을 **모른다**(clk·imp·rank만 본다) — 그래서 D-NAO-288 배포분이 둘 다 깨졌다
+                # (2026-09-05 17:4x 레인 실행으로 재현, 교훈 #395):
+                #   ① A-veto: 「UP 보류」 일기를 쓴 **같은 회차에** 탐침이 bid_up 1000→1150을 집행했다.
+                #      계약 §4-A는 이 거부권을 *"UP을 금지하고 hold한다"*로 정의했는데 hold가 안 남았다.
+                #      더 나쁜 건 일기다 — `_record_blocked`가 여기 **위**에서 이미 돌아, §4-C ⓖ가
+                #      *"A-veto의 유일한 정확한 계수"*라 선언한 그 행이 **막지 못한 것을 막았다고 센다.**
+                #   ② B-veto: CPC급등 DOWN을 억제하니 판정이 hold로 떨어졌고 탐침이 그 자리에
+                #      **새 UP**을 만들었다. 배포 전이라면 그 회차는 DOWN이었다. 계약 §4-A S2의
+                #      *"둘 다 hold만 만들고 **새 액션을 만들지 않는다**"*와 정반대이고,
+                #      북극성 §7 대칭이 액셀 쪽으로 기운다(브레이크 자리에 액셀이 들어섰다).
+                # ⇒ 거부권 표식이 있으면 여기서 끝낸다. 거부권은 「올릴 근거가 오염됐다」는 판정이고
+                #   탐침은 「올려 볼 자리다」라는 **다른 질문의 답**이다 — 후자가 전자를 이기면
+                #   거부권은 이름만 남는다. hold는 종전과 같은 자리(`result["held"]`)에 그대로 쌓인다.
+                # ★A-veto만 여기서 끝낸다 — **이 거부권이 이 hold를 «만들었기»** 때문이다.
+                #   B-veto는 hold를 만들지 않는다(CPC급등 갈래만 막고 판정은 계속 진행된다,
+                #   `_judge_hourly` :2385). 그래서 「표식이 있으면 hold를 가로챈다」로 쓰면
+                #   **거부권이 만들지도 않은 hold의 탐침까지 죽이고**(D-NAO-58 축소) 그 hold를
+                #   `veto_brake`로 오분류해 종전 사유(`roas_below` 등) 시계열을 끊는다 —
+                #   계약이 A-veto에 대해 :2495에서 경계한 그 병을 브레이크 쪽에 새로 만드는 것이다.
+                #   (적대 리뷰 1R P1-2. B-veto 몫은 아래 «상향 금지» 게이트가 진다.)
+                if verdict.get("veto") == "accel":
+                    result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
+                    continue
                 # D-NAO-58 CD2 클릭 탐침: 밴드 판정이 hold(액션 없음)일 때만 사각지대 평가
                 # (up/down이면 이미 액션 — 이중 발동 금지). 트리거 참이면 up-의도 탐침으로 치환.
                 # _probe_trigger는 clk/imp/rank를 모두 자기 2시간 창에서 산출(R1 P3-1 자기완결).
@@ -4029,6 +4066,27 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # 결과). 밴드=탐침 프라이어, ROAS-UP 캡 아님(D-NAO-66). _learned_optimal_skip은 위
             # 탐침(probe) 분기 전용으로 남는다(과열 상단으로의 무근거 탐침 상향만 억제). 오버슛
             # 비용은 스텝 1개 분량 + 쿨다운 2h로 자연 캡되고, BEP 하한·loss 고삐가 최종 방어선.
+
+            # ★★D-NAO-290 B-veto 몫 — **자기유발분을 벗겨 브레이크를 접은 회차엔 상향을 안 낸다.**
+            # 계약 §4-A S2: *"둘 다 `hold`만 만들고 **새 액션을 만들지 않는다**"*.
+            # B-veto가 섰다는 것은 **종전 코드였으면 그 회차가 `CPC급등` DOWN이었다**는 뜻이다.
+            # 그 자리에 상향이 나가면 「브레이크를 접었다」가 아니라 **「브레이크 자리에 액셀을 넣었다」**가
+            # 되고, 북극성 §7 대칭이 액셀 쪽으로 기운다(이 트랙 상습 실패 모드와 «반대 방향»이라
+            # §7 검사표에 안 걸린다 — 그래서 여기 명시적으로 둔다).
+            # ★여기 두는 이유: 상향은 **두 경로**로 온다 — 평범한 ROAS-UP/순위직행(위 `_judge_hourly`)과
+            #   CD2 탐침(바로 위 분기). 초판은 hold 분기 «안»에만 가드를 둬서 탐침 경로만 막고
+            #   평범한 상향은 그대로 나갔다(적대 리뷰 1R P1-1이 `bid_up_rank 1150`으로 재현).
+            #   두 경로가 합류하는 **여기**가 유일하게 둘 다 덮는 자리다.
+            # ★하향은 막지 않는다 — 고삐(`순위고삐`)는 다른 근거로 서는 별개 브레이크다.
+            #   그래서 이 게이트는 **브레이크를 늘리지도 줄이지도 않고 액셀만 되돌린다.**
+            if verdict["direction"] == "up" and cpc_spike_self_caused:
+                # 탐침이 verdict를 통째로 갈아치우므로(`{"direction":"up", ...}`) 표식은 판정
+                # 직후에 따로 잡아 뒀다 — 여기서 `verdict.get(...)`을 보면 탐침 경로에선 비어 있다.
+                result["held"].append({
+                    "target_id": target_id,
+                    "reason": f"{cpc_spike_self_caused} · 상향 보류(자기유발 억제 회차 — 새 액션 금지)",
+                })
+                continue
 
             # 여기부터는 verdict가 up/down = 액션 의도 확정 — 이후의 hold는 "의도된 액션이
             # 차단된 것"이므로 일기(blocked) 기록 대상(위의 판정 hold·imp 없음은 관찰 소음이라 제외).
