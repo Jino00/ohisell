@@ -113,3 +113,4 @@ Jino가 성과 화면을 보고 *"어제 PAO가 돌리긴 한거잖아"* 라고 
   · 「PAO가 돌린다」는 세 축의 ∧ · 관할 이력이 `naver_change_log`에 존재(2026-07-11~, 7,705행 중
   optimizer_change 18 · auto_operate_change 3 · adgroup_scope_change 1) · 현재 관할은 오늘
   만들어졌다(스코프 행 08-29 00:25, optimizer none→ours 08-29 12:53).
+확인: 2026-09-05 12:0x KST [ced45cb7] — ↗️ **이월 1줄(다른 체인의 기록만 — 이 트랙 작업 아님)**: `pao-상한리셋` n=1이 D-NAO-287로 네이버 광고 최적화 콘솔(`NaverAdOptimizationConsole.tsx`)에 「자동 상향 여력」 판 + 「기준점 리셋」 버튼을 **최소 표면**으로 넣었다(표 1개·`window.prompt` 사유 입력·`window.confirm` 없이 prompt 취소로 갈음 — 이 저장소의 기존 패턴). 화면 소관은 이 트랙이므로 **디자인·배치·문구의 정본 판단은 여기로 넘긴다.** 이 트랙 진행률·합격기준은 **건드리지 않았다**(체인 `pao-uiux` n=9 닫힘 09-04 15:04 확인 — 가로채기 아님).

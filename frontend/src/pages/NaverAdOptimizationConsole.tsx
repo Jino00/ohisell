@@ -25,6 +25,10 @@ import {
   getNaverDashboardOverview,
   getNaverGuardrailParams,
   putNaverGuardrailParams,
+  getNaverAutoUpCeiling,
+  resetNaverAutoUpBase,
+  type NaverAutoUpCeilingResponse,
+  type NaverAutoUpCeilingRow,
   type NaverAdProposal,
   type NaverAdCampaignSettings,
   type NaverAdOptimizer,
@@ -410,6 +414,14 @@ export default function NaverAdOptimizationConsole() {
   const [guardrailSaving, setGuardrailSaving] = useState(false);
   const [guardrailSaveError, setGuardrailSaveError] = useState<string | null>(null);
 
+  // 자동 상향 여력 현황판(D-NAO-287) — 상한이 「사람 개입으로만 리셋」인데 개입할 입구가
+  // 없었다(ref 131 L3-신1). ★0건이면 0건이라고 말하는 것이 이 판의 첫째 임무다 —
+  // 빈 표는 「닿은 게 없다」와 「안 재고 있다」를 같은 그림으로 만든다.
+  const [autoUp, setAutoUp] = useState<NaverAutoUpCeilingResponse | null>(null);
+  const [autoUpError, setAutoUpError] = useState<string | null>(null);
+  const [autoUpBusy, setAutoUpBusy] = useState<string | null>(null);
+  const [autoUpNotice, setAutoUpNotice] = useState<string | null>(null);
+
   // D-NAO-249 F1 — param_change 승인 카드의 값 입력(제안 id별). 프리필은 봉투 현황판의
   // «현재값»이지 제안이 권하는 값이 아니다(판사는 키·방향만 정한다 — 순수 함수
   // naverParamChangeApproval.ts 헤더 참조). 사람이 손대지 않았으면 undefined로 두고
@@ -431,6 +443,49 @@ export default function NaverAdOptimizationConsole() {
       setGuardrailError(e.message);
     } finally {
       setGuardrailLoading(false);
+    }
+  }
+
+  async function loadAutoUp() {
+    setAutoUpError(null);
+    try {
+      setAutoUp(await getNaverAutoUpCeiling());
+    } catch (e) {
+      setAutoUpError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // 기준점 리셋 — 사유 필수(서버도 400으로 막는다). 확인 문안은 «무엇이 어떻게 바뀌는지»와
+  // «회피할 수 없는 부작용»을 숫자로 말한다: 이 행은 change_log의 확정 쓰기라 쿨다운 시계와
+  // 일일 변경 건수에 그대로 잡힌다(계약 §2-부록). 말하지 않으면 사람은 「리셋했는데 왜 안
+  // 올라가지」를 다시 상한 탓으로 오독한다.
+  async function handleAutoUpReset(row: NaverAutoUpCeilingRow) {
+    const reason = window.prompt(
+      `자동 상향 기준점을 지금 입찰가로 재설정합니다.\n` +
+      `소재 ${row.entity_id}\n현재 기준점 ${row.base_bid ?? "없음"}원 · 천장 ${row.ceiling ?? "없음"}원\n\n` +
+      `★리셋 직후 쿨다운이 새로 걸리고 오늘 변경 건수도 1건 늘어납니다(즉시 오르지 않습니다).\n\n` +
+      `사유를 적어 주세요(필수 — 감사 기록에 원문으로 남습니다).`,
+      "",
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setAutoUpNotice("사유가 비어 있어 리셋하지 않았습니다.");
+      return;
+    }
+    setAutoUpBusy(row.entity_id);
+    setAutoUpNotice(null);
+    try {
+      const res = await resetNaverAutoUpBase({ entityId: row.entity_id, reason: reason.trim() });
+      setAutoUpNotice(
+        `기준점 ${res.base_before ?? "없음"}원 → ${res.base_after ?? "없음"}원 ` +
+        `(천장 ${res.ceiling_before ?? "없음"} → ${res.ceiling_after ?? "없음"}원). ` +
+        `쿨다운 ${res.side_effect.cooldown_hours ?? "?"}시간이 새로 걸렸고 오늘 변경 ${res.side_effect.changes_today}건입니다.`,
+      );
+      await loadAutoUp();
+    } catch (e) {
+      setAutoUpError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutoUpBusy(null);
     }
   }
 
@@ -587,6 +642,7 @@ export default function NaverAdOptimizationConsole() {
   useEffect(() => { loadAva(); }, []);
   useEffect(() => { loadDelegation(); }, []);
   useEffect(() => { loadGuardrail(); }, []);
+  useEffect(() => { loadAutoUp(); }, []);
 
   function updateEdit(campaignId: string, patch: Partial<EditState>) {
     setEdits((prev) => ({ ...prev, [campaignId]: { ...prev[campaignId], ...patch } }));
@@ -1248,6 +1304,96 @@ export default function NaverAdOptimizationConsole() {
             </p>
           </div>
         )}
+      </div>
+
+      {/* 자동 상향 여력 (D-NAO-287) — 상한 기준점을 사람이 리셋하는 유일한 입구.
+          ★접지 않는다: 「상한에 닿아 굳은 소재가 있나」는 감춰 두면 아무도 안 본다. */}
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div className="p-3 border-b border-gray-100 flex items-center justify-between gap-2">
+          <span className="text-sm font-medium text-gray-700">자동 상향 여력</span>
+          {autoUp && (
+            <span className="text-[11px] text-gray-500">
+              누적 상한 {autoUp.multiple}배 · 대상 {autoUp.cap_applies_count}개 중 상한 도달{" "}
+              <span className={autoUp.capped_count > 0 ? "text-red-600 font-medium" : "text-gray-500"}>
+                {autoUp.capped_count}개
+              </span>
+            </span>
+          )}
+        </div>
+        <div className="px-4 pb-4">
+          {autoUpError && <div className="text-sm text-red-600 mt-3">{autoUpError}</div>}
+          {autoUpNotice && <div className="text-sm text-blue-700 mt-3">{autoUpNotice}</div>}
+          {!autoUp ? (
+            <div className="text-sm text-gray-400 py-3">불러오는 중...</div>
+          ) : autoUp.cap_applies_count === 0 ? (
+            /* ★「대상 없음」과 「닿은 것 없음」을 가른다 — 둘 다 빈 표로 그리면 같은 그림이 된다. */
+            <div className="text-sm text-gray-500 py-3">
+              누적 상한이 적용되는 소재가 없습니다(기준점 없음 {autoUp.counted}개). 재계산 {autoUp.as_of}
+            </div>
+          ) : (
+            <>
+              {autoUp.capped_count === 0 && (
+                <div className="text-sm text-gray-500 mt-3">
+                  지금 상한에 닿은 소재는 0개입니다 — 아래는 여력 현황입니다. 재계산 {autoUp.as_of}
+                </div>
+              )}
+              <table className="w-full text-sm mt-3">
+                <thead>
+                  <tr className="text-left text-xs text-gray-500 border-b border-gray-100">
+                    <th className="py-2 pr-3">소재</th>
+                    <th className="py-2 pr-3">기준점</th>
+                    <th className="py-2 pr-3">천장</th>
+                    <th className="py-2 pr-3">마지막으로 아는 입찰</th>
+                    <th className="py-2 pr-3">여력</th>
+                    <th className="py-2 pr-3"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {autoUp.rows.filter((r) => r.cap_applies).map((r) => (
+                    <tr key={r.entity_id} className="border-b border-gray-50">
+                      <td className="py-2 pr-3 text-xs text-gray-600 max-w-[220px] truncate" title={r.entity_id}>
+                        {r.entity_id}
+                      </td>
+                      <td className="py-2 pr-3">{r.base_bid ?? "-"}원</td>
+                      <td className="py-2 pr-3">{r.ceiling ?? "-"}원</td>
+                      <td className="py-2 pr-3">
+                        {r.current_bid ?? "-"}원
+                        {/* ★라이브 재조회가 아니다 — 이름표를 단다(목록에서 대상 수만큼
+                            네이버를 때리지 않는다). 리셋 시점에만 라이브를 읽는다. */}
+                        <span className="text-[11px] text-gray-400 ml-1">최종 관측</span>
+                      </td>
+                      <td className={`py-2 pr-3 ${r.capped ? "text-red-600 font-medium" : ""}`}>
+                        {r.capped ? "상한 도달" : r.headroom_pct == null ? "-" : `+${r.headroom_pct}%`}
+                      </td>
+                      <td className="py-2 pr-3">
+                        <button
+                          type="button"
+                          disabled={autoUpBusy === r.entity_id}
+                          onClick={() => handleAutoUpReset(r)}
+                          className="px-2 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          {autoUpBusy === r.entity_id ? "리셋 중..." : "기준점 리셋"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {/* ★적대 리뷰 1R P2 채택: `truncated`가 계산만 되고 화면에 없었다 —
+                  절단된 목록으로 「상한 도달 0개」를 말하면 이 판이 막으려던 함정을
+                  이 판이 재현한다(D-NAO-264 「게이트 판정에 절단된 컬렉션 금지」). */}
+              {autoUp.truncated && (
+                <div className="text-xs text-amber-700 mt-2">
+                  대상이 많아 목록을 잘랐습니다 — 위 「상한 도달」 수는 전체가 아닙니다.
+                </div>
+              )}
+              <p className="text-[11px] text-gray-400 mt-2">
+                리셋은 네이버에 쓰지 않습니다 — 지금 입찰가를 새 기준점으로 받아들이고 그 사실을
+                변경 이력에 남깁니다. 리셋 직후에는 쿨다운이 새로 걸립니다.
+              </p>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Ava 위임 자동승인 설정 (X1a T5, D-NAO-25) — 기본 접힘 */}

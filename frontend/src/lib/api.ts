@@ -4651,6 +4651,60 @@ export function putNaverGuardrailParams(
   });
 }
 
+// D-NAO-287 — 자동 상향 누적 상한의 «기준점 리셋» (계약 CONTRACT_auto_up_base_reset.md)
+// 상한은 「사람 개입으로만 리셋」인데 개입할 입구가 없었다(ref 131 L3-신1).
+export interface NaverAutoUpCeilingRow {
+  entity_id: string;
+  campaign_id: string;
+  base_bid: number | null;
+  ceiling: number | null;
+  current_bid: number | null;
+  current_bid_as_of: string | null;
+  current_bid_source: string;
+  headroom_pct: number | null;
+  capped: boolean;
+  // 기준점이 없으면 상한이 «적용되지 않는다» — 「여력 무한」이 아니라 게이트 밖이다.
+  cap_applies: boolean;
+}
+export interface NaverAutoUpCeilingResponse {
+  as_of: string;
+  multiple: number;
+  counted: number;
+  cap_applies_count: number;
+  capped_count: number;
+  truncated: boolean;
+  rows: NaverAutoUpCeilingRow[];
+}
+export interface NaverAutoUpBaseResetResponse {
+  entity_id: string;
+  actor: string;
+  reason: string;
+  changed_at: string;
+  multiple: number;
+  base_before: number | null;
+  base_after: number | null;
+  ceiling_before: number | null;
+  ceiling_after: number | null;
+  live_bid: number;
+  // 회피 불가한 부작용(계약 §2-부록) — 화면이 이걸 말해야 「리셋했는데 왜 안 올라가지」를
+  // 다시 상한 탓으로 오독하지 않는다.
+  side_effect: { cooldown_hours: number | null; changes_today: number };
+}
+
+export function getNaverAutoUpCeiling(): Promise<NaverAutoUpCeilingResponse> {
+  return fetchApi<NaverAutoUpCeilingResponse>("/api/naver/ad/auto-up-ceiling");
+}
+
+// 사유는 필수다(빈 문자열이면 서버가 400) — 이 입구의 존재 이유가 감사 기록이다.
+export function resetNaverAutoUpBase(body: {
+  entityId: string; reason: string; actor?: string;
+}): Promise<NaverAutoUpBaseResetResponse> {
+  return fetchApi<NaverAutoUpBaseResetResponse>("/api/naver/ad/auto-up-base/reset", {
+    method: "POST",
+    body: JSON.stringify({ entity_id: body.entityId, reason: body.reason, actor: body.actor }),
+  });
+}
+
 // 대시보드 미니 스프린트 T1/T2 — 엔진 파이프라인 5단계 라이브 증거 상태 + optimizer 커버리지
 // (dashboard_overview.py 응답과 1:1 대응, PLAN_naver-ad-dashboard-mini.md §1 T1).
 export interface NaverDashboardEngineStage {

@@ -1702,6 +1702,231 @@ def retro_scorecard(
 
 
 # ══════════════════════════════════════════════════════════════════
+# D-NAO-287 — 자동 상향 누적 상한의 «기준점 리셋 입구»
+#   계약: docs/contracts/CONTRACT_auto_up_base_reset.md (Jino 승인 2026-09-05)
+#
+# ★왜 필요한가: 자동 상향 누적 상한(2.0배)의 기준점은 설계상 **「사람 개입으로만 리셋」**인데
+#   (북극성 §7 원문) 개입할 입구가 코드에 **0건**이었다(ref 131 L3-신1). 상한이 처음 걸리는
+#   날, 그 대상은 사람이 손댈 방법 없이 굳는다 — 아직 안 터진 덫이지 없는 문제가 아니다.
+#   ★2026-09-05 prod 실측: 이 게이트는 **전 기간 발화 0건**이다(change_log에 「누적 상한」
+#     0행). 그래서 이 판은 **「0건이면 0건이라고 말하는」 것이 첫째 임무**다 — 빈 표는
+#     「닿은 게 없다」와 「안 재고 있다」를 같은 그림으로 만든다(교훈 #123).
+#
+# ★리셋을 «별도 action»으로 남기는 이유(계약 §2-1, 2026-09-05 실측으로 근거 정정):
+#   초판 근거는 「별도 action이면 쿨다운에 안 잡힌다」였는데 **테스트가 그걸 반증했다**.
+#   `compute_change_cadence`(harness:838)는 `dry_run=False ∧ after_value IS NOT NULL`만 보고
+#   **action은 보지 않는다**(그 docstring 원문: "액션 유형 무관"). 기준점은 `after_value`에
+#   담아야 `auto_up_base_bid`가 읽으므로, **행을 남기는 한 쿨다운은 반드시 걸린다.**
+#   ⇒ 회피하지 않고 **응답에 실어 표면화**한다(아래 side_effect). 남는 실익은 그대로다:
+#     ①`count_auto_bid_down_today`는 제안 조인이라 이 행을 안 센다(자동 하향 상한 불변)
+#     ②원장이 「입찰을 바꿨다」고 거짓말하지 않는다 — 네이버 값은 그대로다
+#     ③`auto_up_base_bid`가 «사람이 기준점을 정한 사건»을 이름으로 구분해 읽는다
+#
+# ★판정 공식을 여기서 재구현하지 않는다(계약 §2-5): 기준점은 naver_execution_harness.
+#   auto_up_base_bid(), 배수는 guardrail_params를 **호출**해 얻는다. 이 리포의 상습 결함이
+#   «값이 도는 층»과 «사람이 읽는 층»의 분기다(D-NAO-265).
+# ══════════════════════════════════════════════════════════════════
+_AUTO_UP_RESET_ACTION = "reset_auto_up_base"
+_AUTO_UP_CAP_ACTIONS = ("update_bid", _AUTO_UP_RESET_ACTION)
+_AUTO_UP_CEILING_MAX_ROWS = 200  # 화면 상한(현재 prod 대상 수십 건 — 절단되면 아래에서 자백한다)
+
+
+def _auto_up_multiple(db: Session) -> Decimal:
+    """지금 실효 중인 누적 상한 배수. 화면과 실행 경로가 **같은 출처**를 읽는다."""
+    raw = guardrail_params.get_params(db).get("max_auto_up_multiple")
+    try:
+        return Decimal(str(raw))
+    except Exception:  # noqa: BLE001 — 값이 깨졌으면 코드 상수로(get_params 자체가 이미 폴백한다)
+        return Decimal("2.0")
+
+
+def _auto_up_last_known_bid(db: Session, entity_id: str) -> tuple[int | None, datetime | None]:
+    """그 소재에 대해 **우리가 마지막으로 아는** 입찰가와 그 시각.
+
+    라이브 재조회(get_ad_bid)는 목록 API에서 대상 수만큼 네이버를 때리므로 쓰지 않는다 —
+    목록은 «마지막으로 아는 값»이라고 이름표를 달고 말하고, 리셋 POST만 라이브를 읽는다.
+    """
+    rows = (
+        db.query(NaverChangeLog.after_value, NaverChangeLog.changed_at)
+        .filter(
+            NaverChangeLog.entity_type == "ad",
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.action.in_(_AUTO_UP_CAP_ACTIONS),
+            NaverChangeLog.dry_run.is_(False),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .limit(20)
+        .all()
+    )
+    for after_value, changed_at in rows:
+        # 하네스의 파서를 그대로 쓴다 — payload 모양(adAttr 중첩 / 평면 bidAmt)을 두 곳에
+        # 적으면 갈라진다. 갈라진 쪽은 사고가 나야 드러난다.
+        bid = naver_execution_harness._ad_bid_from_payload(after_value)
+        if bid is not None:
+            return bid, changed_at
+    return None, None
+
+
+@router.get("/auto-up-ceiling")
+def auto_up_ceiling(db: Session = Depends(get_db)):
+    """자동 상향 여력 현황판 — 소재별 기준점 · 천장 · 마지막으로 아는 입찰 · 여력.
+
+    읽기 전용. 대상은 「상한이 걸릴 수 있는 소재」 = 우리 실집행 쓰기 이력이 있는 ad grain
+    (기준점이 None이면 상한 자체가 적용되지 않는다 — auto_up_base_bid ③).
+    """
+    now = kst_now()
+    multiple = _auto_up_multiple(db)
+    targets = (
+        db.query(NaverChangeLog.entity_id, NaverChangeLog.campaign_id)
+        .filter(
+            NaverChangeLog.entity_type == "ad",
+            NaverChangeLog.action.in_(_AUTO_UP_CAP_ACTIONS),
+            NaverChangeLog.dry_run.is_(False),
+        )
+        .distinct()
+        .order_by(NaverChangeLog.entity_id)
+        .limit(_AUTO_UP_CEILING_MAX_ROWS + 1)
+        .all()
+    )
+    truncated = len(targets) > _AUTO_UP_CEILING_MAX_ROWS
+    targets = targets[:_AUTO_UP_CEILING_MAX_ROWS]
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for entity_id, campaign_id in targets:
+        if not entity_id or entity_id in seen:
+            continue
+        seen.add(entity_id)
+        base = naver_execution_harness.auto_up_base_bid(db, "ad", entity_id, now)
+        current, current_at = _auto_up_last_known_bid(db, entity_id)
+        ceiling = int(Decimal(base) * multiple) if base else None
+        capped = bool(ceiling is not None and current is not None and current >= ceiling)
+        headroom_pct = (
+            round((ceiling / current - 1) * 100, 1)
+            if ceiling is not None and current else None
+        )
+        rows.append({
+            "entity_id": entity_id,
+            "campaign_id": campaign_id or "",
+            "base_bid": base,
+            "ceiling": ceiling,
+            "current_bid": current,
+            "current_bid_as_of": current_at.isoformat() if current_at else None,
+            "current_bid_source": "last_known",  # 라이브 재조회가 아니다 — 이름표를 단다
+            "headroom_pct": headroom_pct,
+            "capped": capped,
+            # 기준점이 없으면 상한이 «적용되지 않는다» — 「여력 무한」이 아니라 「게이트 밖」이다
+            "cap_applies": base is not None,
+        })
+
+    capped_rows = [r for r in rows if r["capped"]]
+    return {
+        "as_of": now.isoformat(),
+        "multiple": float(multiple),
+        "counted": len(rows),
+        "cap_applies_count": sum(1 for r in rows if r["cap_applies"]),
+        "capped_count": len(capped_rows),
+        "truncated": truncated,
+        "rows": rows,
+    }
+
+
+class AutoUpBaseResetIn(BaseModel):
+    entity_id: str
+    reason: str
+    actor: str | None = None
+
+
+@router.post("/auto-up-base/reset")
+def auto_up_base_reset(body: AutoUpBaseResetIn, db: Session = Depends(get_db)):
+    """자동 상향 기준점을 **사람이 명시적으로** 지금 입찰가로 재설정한다(D-NAO-287).
+
+    ★네이버에 쓰지 않는다 — 읽기(get_ad_bid) 1회 + 우리 원장 1행 append뿐이다.
+    ★사유는 필수다(400). 이 입구의 존재 이유가 감사 기록이고, 사유 없는 리셋은
+      「누가·언제·왜」 중 하나가 영구히 빈 행을 남긴다.
+    ★새 기준점은 **라이브 실측 입찰가**다. 사람이 리셋으로 말하는 것은 「지금 이 값을 내가
+      받아들인다」이고, DB 최종행은 외부(대행사) 변경 뒤 낡아 있을 수 있다.
+      **조회가 실패하면 추측하지 않고 502로 거부한다** — 틀린 기준점은 상한을 조용히 푼다.
+    """
+    entity_id = (body.entity_id or "").strip()
+    reason = (body.reason or "").strip()
+    actor = (body.actor or "console").strip() or "console"
+    if not entity_id:
+        raise HTTPException(400, "entity_id는 필수입니다")
+    if not reason:
+        raise HTTPException(400, "사유(reason)는 필수입니다 — 이 입구의 목적이 감사 기록입니다")
+
+    now = kst_now()
+    before_base = naver_execution_harness.auto_up_base_bid(db, "ad", entity_id, now)
+    try:
+        live_bid = naver_sa_writer.get_ad_bid(entity_id)
+    except Exception as e:  # noqa: BLE001 — 조회 실패는 '모른다'이지 '괜찮다'가 아니다
+        log.warning("auto_up_base_reset: 라이브 입찰 조회 실패 entity_id=%s: %s", entity_id, e)
+        raise HTTPException(
+            502, f"라이브 입찰가 조회 실패 — 기준점을 추측하지 않습니다({type(e).__name__})",
+        ) from e
+    if live_bid is None:
+        raise HTTPException(
+            502, "라이브 입찰가가 비어 있습니다(그룹입찰 소재이거나 조회 불가) — 리셋하지 않습니다",
+        )
+
+    campaign_id = (
+        db.query(NaverChangeLog.campaign_id)
+        .filter(
+            NaverChangeLog.entity_type == "ad",
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.campaign_id != "",
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .limit(1)
+        .scalar()
+    ) or ""
+
+    db.add(NaverChangeLog(
+        entity_type="ad", entity_id=entity_id, campaign_id=campaign_id,
+        action=_AUTO_UP_RESET_ACTION,
+        before_value=(
+            json.dumps({"bidAmt": before_base}, ensure_ascii=False)
+            if before_base is not None else None
+        ),
+        after_value=json.dumps({"bidAmt": live_bid}, ensure_ascii=False),
+        rationale=(
+            f"자동 상향 기준점 리셋(D-NAO-287) — 주체: {actor} · 사유: {reason} · "
+            f"기준점 {before_base if before_base is not None else '없음'}원 → {live_bid}원"
+        ),
+        # ★changed_at 명시(D-NAO-54): 안 넘기면 models.py의 server_default=func.now()가 먹어
+        #   **UTC**로 박힌다. 이 라우터가 이미 두 번 당한 함정이다.
+        dry_run=False, changed_at=now, executed_at=now,
+    ))
+    db.commit()
+
+    multiple = _auto_up_multiple(db)
+    after_now = kst_now()
+    after_base = naver_execution_harness.auto_up_base_bid(db, "ad", entity_id, after_now)
+    # ★부작용을 응답에 싣는다(계약 §2-1 정정분): 이 행은 change_log의 «확정 쓰기»라
+    #   쿨다운 시계와 일일 변경 건수에 그대로 잡힌다. 화면이 이걸 말하지 않으면 사람은
+    #   「리셋했는데 왜 안 올라가지」를 상한 탓으로 다시 오독한다.
+    _, changes_today = naver_execution_harness.compute_change_cadence(db, "ad", entity_id, after_now)
+    params = guardrail_params.get_params(db)
+    return {
+        "entity_id": entity_id,
+        "actor": actor,
+        "reason": reason,
+        "changed_at": now.isoformat(),
+        "multiple": float(multiple),
+        "base_before": before_base,
+        "base_after": after_base,
+        "ceiling_before": int(Decimal(before_base) * multiple) if before_base else None,
+        "ceiling_after": int(Decimal(after_base) * multiple) if after_base else None,
+        "live_bid": live_bid,
+        "side_effect": {
+            "cooldown_hours": params.get("cooldown_hours"),
+            "changes_today": changes_today,
+        },
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
 # D-NAO-47 — 변경 이력 조회(change_log) · 커맨드 센터 1층 "우리 조작 N회"의 원천
 # ══════════════════════════════════════════════════════════════════
 _MAX_CHANGE_LOG_LIMIT = 500
