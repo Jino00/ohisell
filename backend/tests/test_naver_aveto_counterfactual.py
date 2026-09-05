@@ -408,13 +408,19 @@ def test_summarize_excludes_rows_after_the_deploy_boundary():
     """★배포 «후» 회차는 반사실이 아니다 — 라이브 A-veto가 이미 돈 회차다."""
     from datetime import datetime as _dt
     mod = _load_module()
+    # ★두 행의 `fired`를 **다르게** 준다 — 적대 리뷰 2R P2(변이 MUT-16 생존).
+    #   좌우대칭 픽스처(둘 다 fired=True)로는 경계 «부호»를 뒤집어도 수가 그대로라
+    #   변이가 살아남는다. 부호가 뒤집히면 계수기는 배포 «후»만 세면서 화면엔
+    #   "배포 «전» N행"이라 적는다 — P2-3이 막으려던 오독이 조용히 부활한다.
     rows = [
-        _row(hour=9, day=5, fired=True),    # 배포 전
-        _row(hour=16, day=5, fired=True),   # 배포 후 → 빠져야 한다
+        _row(hour=9, day=5, fired=True),     # 배포 전 · 발동
+        _row(hour=16, day=5, fired=False),   # 배포 후 · 미발동 → 빠져야 한다
     ]
     boundary = _dt(2026, 9, 5, 14, 8)
     s = mod.summarize(rows, deploy_ts=boundary)
     assert (s["pre_deploy"], s["post_deploy"]) == (1, 1)
-    assert s["fired_written"] == 1, "배포 후 회차가 반사실 분자에 섞였다"
-    # 경계를 안 주면 섞인다 — 그게 P2-3이 지적한 그 상태다.
-    assert mod.summarize(rows)["fired_written"] == 2
+    assert (s["up_written"], s["fired_written"]) == (1, 1), "배포 경계가 엉뚱한 쪽을 골랐다"
+    # 부호가 뒤집히면 분모는 같아도 «분자»가 달라진다 — 그게 이 단언이 잡는 것이다.
+    assert mod.summarize(rows, deploy_ts=_dt(2026, 9, 5, 23, 59))["fired_written"] == 1
+    # 경계를 안 주면 배포 후 행이 섞인다 — 그게 P2-3이 지적한 그 상태다.
+    assert mod.summarize(rows)["up_written"] == 2
