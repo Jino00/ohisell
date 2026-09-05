@@ -691,6 +691,17 @@ _EDIT_TM_SCAN = 20  # 우리 쓰기 editTm 스캔 폭
 
 _HUMAN_ANCHOR_SCAN = 20  # 사람 기준점 후보 스캔 폭(최신 파싱 가능한 행을 찾는다)
 
+# D-NAO-287 — 사람이 기준점을 «명시적으로» 재설정한 사건(`reset_auto_up_base`)도 사람 쓰기와
+#   같은 급으로 센다. 이것이 없으면 리셋 입구는 **API·화면·기록까지만 살고 기준점은 안 움직인다**
+#   (계약 CONTRACT_auto_up_base_reset.md §6-4).
+#   ★왜 `update_bid`로 남기지 않았나: ①`count_auto_bid_down_today`는 제안 조인이라 이 행을
+#     안 센다 — 사람의 기준점 리셋이 그날의 **손실 하향 여력**을 잡아먹지 않는다 ②원장이
+#     「입찰을 바꿨다」고 거짓말하지 않는다(네이버 값은 그대로다).
+#   ★단, `compute_change_cadence`(아래)는 action을 보지 않으므로 **쿨다운은 그대로 걸린다** —
+#     이름을 갈라도 피할 수 없다(계약 §2-부록, 2026-09-05 테스트가 이 사실을 잡았다).
+#     회피 대신 라우터가 응답 `side_effect`로 그 사실을 말한다.
+_HUMAN_ANCHOR_ACTIONS = ("update_bid", "reset_auto_up_base")
+
 
 def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetime) -> int | None:
     """자동 상향 누적 상한의 **기준점**(anchor) — 사람이 마지막으로 정한 입찰가.
@@ -724,7 +735,7 @@ def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetim
             NaverChangeLog.entity_id == entity_id,
             NaverChangeLog.dry_run.is_(False),
             NaverChangeLog.after_value.isnot(None),
-            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.action.in_(_HUMAN_ANCHOR_ACTIONS),
             or_(
                 NaverChangeLog.proposal_id.is_(None),
                 NaverProposal.approval_source.is_(None),
