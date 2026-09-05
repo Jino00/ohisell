@@ -20,6 +20,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
+from typing import Callable
 
 from sqlalchemy import and_, exists, func as sqlfunc, or_, select, update
 from sqlalchemy.orm import Session
@@ -35,7 +36,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import adgroup_scope, bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, hierarchical_pooling, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import account_diagnosis, adgroup_scope, bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, hierarchical_pooling, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling, encode_loss_defense
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -2785,7 +2786,9 @@ _ADGROUP_DAILY_LOSS_BOARDS = ("shopping_group_bep", "shopping_pause_candidates")
 
 
 def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date,
-                                   now: datetime | None = None) -> str | None:
+                                   now: datetime | None = None,
+                                   effective_bid_getter: Callable[[], int | None] | None = None,
+                                   ) -> str | None:
     """탐색 후보 그룹이 **활성 daily 손실 상태**면 제외 사유(문자열), 아니면 None(PLAN §1 가드5,
     GATE P2-risk6). DL이 읽는 것과 **동일 보드/신선도**를 재사용한다:
     - shopping_group_bep + asof 신선도 = 일 레인 bid_up 게이트(_bleeding_hold_reason, D-NAO-48 조건④)
@@ -2793,11 +2796,51 @@ def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date,
     - shopping_pause_candidates(스톱로스/floored 보드, _stop_loss_proposal 원료)에 이 그룹이 있으면
       제외(같은 최신 asof — group_bep 통과 시 신선함이 보장됨).
     ★탐색은 표본-기반 UP인데 daily 손실 조치는 비용-기반 백스톱이라, 후자가 조인 그룹을 전자가
-      역전하면 어제 조치가 무의미해진다(가드5: 손실 조치 그룹 UP 금지)."""
+      역전하면 어제 조치가 무의미해진다(가드5: 손실 조치 그룹 UP 금지).
+
+    D-NAO-289 «표본 부족» 예외: `_bleeding_hold_reason`이 정확히 「④최신 소급채점에서 bleeding으로
+    판정됨」을 돌려준 «그 경우에 한해» — stale·부재·grain 불명 등 다른 fail-closed 사유는 예외 없이
+    그대로 제외 — 같은 최신 asof·`shopping_group_bep`·target_id 행의 `cost_asof`(보드가 본 그 14일
+    비용)를 읽어 `effective_bid_getter() × account_diagnosis.LOW_CLICK_THRESHOLD`(스톱로스 보드
+    자신이 이미 쓰는 «표본 부족» 정의, `account_diagnosis.py:819`)와 비교한다. 미만이면 손실 확정이
+    아니라 판정 불가이므로 통과(None) — 단 두 번째 조건(스톱로스 보드)은 그 뒤에도 그대로 검사한다.
+
+    ★적대리뷰 P2-1·P2-2 채택(2026-09-05): 실효입찰은 **호출 가능한 것**(getter)으로 받아 «이
+    bleeding 예외 판정이 실제로 필요할 때만» 호출한다 — 그 밖의 모든 제외 경로(stale·부재·grain
+    불명·스톱로스 보드 단독)는 라이브 재조회를 아예 안 한다(호출부가 손실검사를 다시 원래 자리로
+    옮기고, 실효입찰 파생을 이 getter 뒤로 지연시킨다 — §6-2). getter가 None을 돌려주거나 예외를
+    던지면(재조회 실패) 예외 없음 — 종전대로 제외(fail-closed 불변)."""
     bep_reason = _bleeding_hold_reason(db, "adgroup", adgroup_id, today, now)
     if bep_reason is not None:
-        return bep_reason  # shopping_group_bep bleeding OR asof stale/missing(fail-closed)
-    # group_bep 통과 = 신선 asof 확정 → 같은 최신 asof에서 스톱로스 보드도 확인.
+        exempted = False
+        if bep_reason == "④최신 소급채점에서 bleeding으로 판정됨" and effective_bid_getter is not None:
+            latest_asof_bl = db.query(sqlfunc.max(NaverRetroSignal.asof_date)).scalar()
+            bep_row = db.query(NaverRetroSignal.cost_asof).filter(
+                NaverRetroSignal.asof_date == latest_asof_bl,
+                NaverRetroSignal.board == "shopping_group_bep",
+                NaverRetroSignal.target_id == adgroup_id,
+            ).first()
+            cost_asof = bep_row[0] if bep_row is not None else None
+            if cost_asof is not None:
+                try:
+                    effective_bid_value = effective_bid_getter()
+                except Exception as e:  # noqa: BLE001 — getter 실패는 fail-closed(예외 미해당)
+                    log.warning(
+                        "auto_operator: 탐색 가드5 표본부족 예외용 실효입찰 파생 실패 "
+                        "adgroup=%s: %s", adgroup_id, e)
+                    effective_bid_value = None
+                if effective_bid_value is not None:
+                    stop_loss_amount = effective_bid_value * account_diagnosis.LOW_CLICK_THRESHOLD
+                    if cost_asof < stop_loss_amount:
+                        exempted = True
+                    else:
+                        return (
+                            f"④최신 소급채점에서 bleeding으로 판정됨 — 14일 비용 {cost_asof}원 "
+                            f"≥ 스톱로스 {stop_loss_amount}원(D-NAO-289)"
+                        )
+        if not exempted:
+            return bep_reason  # shopping_group_bep bleeding(예외 미해당) OR asof stale/missing(fail-closed)
+    # group_bep 통과(신선 asof 확정) 또는 표본 부족 예외 — 같은 최신 asof에서 스톱로스 보드도 확인.
     latest_asof = db.query(sqlfunc.max(NaverRetroSignal.asof_date)).scalar()
     on_stoploss = db.query(NaverRetroSignal.id).filter(
         NaverRetroSignal.asof_date == latest_asof,
@@ -3132,9 +3175,38 @@ def _run_exploration_for_campaign(
                             action="bid_up")
             continue
 
+        # ★적대리뷰 P2-1·P2-2 채택(2026-09-05, D-NAO-289 2R): 손실검사를 «원래 자리»(라이브
+        # 재조회보다 앞)로 되돌린다. 실효입찰은 가드5가 bleeding «표본 부족» 예외 판정에
+        # 실제로 필요할 때만 이 getter로 지연 파생한다 — 그 밖의 모든 제외 경로(stale·부재·
+        # grain 불명·스톱로스 보드 단독)는 라이브 GET을 아예 안 한다(P2-2). 또한 라이브 재조회
+        # 실패로 인한 조기 continue가 손실검사보다 앞서 일어나지 않으므로 bleeding 차단 일기가
+        # 다시 남는다(P2-1). 캐시는 손실검사와 아래 레버 라우팅 둘 다에서 재사용해 값을 두 번
+        # 계산하지 않는다(D-NAO-265 재발 방지).
+        _eff_cache: dict = {}
+
+        def _get_effective_bid_for_loss_check() -> int | None:
+            if "effective_bid" not in _eff_cache:
+                live_bid = _live_current_bid("adgroup", adgroup_id)
+                _eff_cache["current_group_bid"] = live_bid
+                if live_bid is None:
+                    _eff_cache["eff"] = None
+                    _eff_cache["effective_bid"] = None
+                else:
+                    try:
+                        eff_local = effective_bid.adgroup_effective_bid(db, adgroup_id, live_bid)
+                    except Exception as e:  # noqa: BLE001 — 파생 실패는 그룹입찰 폴백(fail-safe)
+                        log.warning(
+                            "auto_operator: 탐색 실효입찰 파생 실패 adgroup=%s: %s", adgroup_id, e)
+                        eff_local = None
+                    _eff_cache["eff"] = eff_local
+                    _eff_cache["effective_bid"] = (
+                        eff_local["effective_bid"] if eff_local is not None else None)
+            return _eff_cache["effective_bid"]
+
         # GATE P2-risk6(가드5 완성): 활성 daily 손실 상태(스톱로스/floored/바닥손실) 그룹 제외 —
         # 어제 daily 고삐가 조인 그룹을 오늘 탐색 UP으로 역전하지 않는다(DL과 동일 보드·신선도).
-        loss_reason = _exploration_daily_loss_reason(db, adgroup_id, today, now)
+        loss_reason = _exploration_daily_loss_reason(
+            db, adgroup_id, today, now, effective_bid_getter=_get_effective_bid_for_loss_check)
         if loss_reason is not None:
             result["held"].append({"target_id": adgroup_id, "reason": f"[탐색] daily 손실상태 제외 — {loss_reason}"})
             _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
@@ -3143,6 +3215,23 @@ def _run_exploration_for_campaign(
                             action="bid_up")
             continue
 
+        # 손실검사 통과 — 레버 라우팅에 실효입찰이 필요하다. getter가 이미 호출됐으면(=bleeding
+        # 표본부족 예외 판정이 있었으면) 그 캐시를 재사용하고, 아니면(대다수 그룹은 bleeding이
+        # 아니므로 손실검사가 getter를 안 불렀다) 지금 처음 파생한다.
+        if "effective_bid" in _eff_cache:
+            current_group_bid = _eff_cache["current_group_bid"]
+            eff = _eff_cache["eff"]
+        else:
+            current_group_bid = _live_current_bid("adgroup", adgroup_id)
+            if current_group_bid is None:
+                result["held"].append({"target_id": adgroup_id, "reason": "탐색: 라이브 현재가 재조회 실패"})
+                continue
+            try:
+                eff = effective_bid.adgroup_effective_bid(db, adgroup_id, current_group_bid)
+            except Exception as e:  # noqa: BLE001 — 파생 실패는 그룹입찰 폴백(fail-safe)
+                log.warning("auto_operator: 탐색 실효입찰 파생 실패 adgroup=%s: %s", adgroup_id, e)
+                eff = None
+
         try:
             curve = fetch_intraday(adgroup_id, today)
         except Exception as e:  # noqa: BLE001 — intraday 실패 skip(핫셋 레인과 동형)
@@ -3150,17 +3239,7 @@ def _run_exploration_for_campaign(
             log.warning("auto_operator: 탐색 레인 intraday 조회 실패 target=%s: %s", adgroup_id, e)
             continue
 
-        current_group_bid = _live_current_bid("adgroup", adgroup_id)
-        if current_group_bid is None:
-            result["held"].append({"target_id": adgroup_id, "reason": "탐색: 라이브 현재가 재조회 실패"})
-            continue
-
         # 레버 맞춤 라우팅(effective_bid) — source='ad'면 소재입찰, 'group'이면 그룹입찰을 스텝한다.
-        try:
-            eff = effective_bid.adgroup_effective_bid(db, adgroup_id, current_group_bid)
-        except Exception as e:  # noqa: BLE001 — 파생 실패는 그룹입찰 폴백(fail-safe)
-            log.warning("auto_operator: 탐색 실효입찰 파생 실패 adgroup=%s: %s", adgroup_id, e)
-            eff = None
         exec_target_type, exec_target_id, step_base = "adgroup", adgroup_id, current_group_bid
         if eff is not None and eff["source"] == "ad" and eff.get("max_ad_id"):
             try:

@@ -116,6 +116,11 @@ _REASON_CENSUS = (
     "④소급채점 stale — latest_asof=2026-08-20 < 기대 2026-08-25(당일 retro 미완주)",
     "④소급채점 데이터 없음 — bleeding 검증 불가(fail-closed)",
     "④최신 소급채점에서 bleeding으로 판정됨",
+    # D-NAO-289 적대리뷰 P1-1 수리(2026-09-05): 「표본 부족」 예외 판정 후에도 손실이 확정인
+    # 경우의 사유문 — 안정 어구(needle "소급채점에서 bleeding")를 앞에, 비교값을 뒤에 둬야
+    # classify_hold_reason이 "daily_loss"가 아니라 "bleeding"으로 잡는다(리뷰어가 실행으로
+    # 확정한 회귀: 값이 needle 앞에 오면 버킷이 조용히 옮겨간다).
+    "④최신 소급채점에서 bleeding으로 판정됨 — 14일 비용 17617원 ≥ 스톱로스 4600원(D-NAO-289)",
     "④grain='keyword' 판정 불가(bleeding 보드 매핑 없음, fail-closed)",
     "②rationale 창 클릭 부족(clk=3)",
     "EX 멤버십 재검증 실패 — 배분 목록에 없음(target=g1, clk=12)",
@@ -144,6 +149,23 @@ def test_every_known_reason_is_classified(reason):
     """★인구조사 전건이 분류돼야 한다. other가 나오면 «사유는 늘렸는데 분류표를 안 고쳤다»는 뜻."""
     got = auto_operator.classify_hold_reason(reason)
     assert got not in {"other", "unknown"}, f"미분류: {reason!r} → {got}"
+
+
+def test_d_nao_289_confirmed_loss_reason_stays_in_bleeding_bucket():
+    """★적대리뷰 P1-1 재발 방지: 인구조사에 «있다»만으로는 부족하다 — «칸이 옮겨진 것»은
+    other/unknown 검사로는 안 잡히고 여전히 daily_loss로 조용히 통과한다(2026-09-05 리뷰가
+    실행으로 확정한 회귀). 그러니 이 사유는 반드시 "bleeding"으로 분류돼야 한다고 못 박는다 —
+    비교값(14일 비용·스톱로스 금액)이 달라도 버킷은 흔들리지 않는다."""
+    reason_a = (
+        "④최신 소급채점에서 bleeding으로 판정됨 — 14일 비용 17617원 "
+        "≥ 스톱로스 4600원(D-NAO-289)"
+    )
+    reason_b = (
+        "④최신 소급채점에서 bleeding으로 판정됨 — 14일 비용 9370원 "
+        "≥ 스톱로스 1500원(D-NAO-289)"
+    )
+    assert auto_operator.classify_hold_reason(reason_a) == "bleeding"
+    assert auto_operator.classify_hold_reason(reason_b) == "bleeding"
 
 
 def test_spend_stale_is_not_confused_with_retro_stale():

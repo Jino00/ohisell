@@ -65,11 +65,18 @@ def _hour(h, *, imp, clk, cost, avg_rank=None, conv_cnt=0):
 ASOF_FRESH = date(2026, 7, 20)  # 기대 asof = today-1 = NOW.date()-1 (일 레인 신선도 계약)
 
 
-def _retro(db, *, target_id, board="shopping_group_bep", asof=ASOF_FRESH, direction="down"):
-    """소급채점 신호 1행(retro_snapshotter._BOARDS 스냅 형태) — daily 손실 보드 상태 시드."""
+def _retro(db, *, target_id, board="shopping_group_bep", asof=ASOF_FRESH, direction="down",
+           cost_asof=0):
+    """소급채점 신호 1행(retro_snapshotter._BOARDS 스냅 형태) — daily 손실 보드 상태 시드.
+
+    ★D-NAO-289: `cost_asof`가 가드5 판정에 실제로 쓰인다(그 전엔 무관해서 0 고정이었다).
+    기본값 0은 종전 호출부의 행위를 바꾸지 않으려고 유지하되, `shopping_group_bep` 보드에서
+    「확정 손실」을 재려는 테스트는 «실효입찰×LOW_CLICK_THRESHOLD 이상»을 명시해야 한다 —
+    0은 prod에서 나올 수 없는 상태다(보드 진입 자체가 cost>0, `account_diagnosis.py:207`;
+    2026-09-05 prod 실측 4,850행 중 cost_asof NULL·0 각 0건)."""
     db.add(NaverRetroSignal(
         created_at=NOW, asof_date=asof, board=board, direction=direction, grain="adgroup",
-        target_id=target_id, campaign_id=CAMP, cf_asof=1.0, bep_asof=1.5, target_asof=2.0, cost_asof=0,
+        target_id=target_id, campaign_id=CAMP, cf_asof=1.0, bep_asof=1.5, target_asof=2.0, cost_asof=cost_asof,
     ))
     db.commit()
 
@@ -548,7 +555,9 @@ def test_observe_excludes_step_hour_bucket(db):
 def test_lane_daily_bleeding_group_skipped(db):
     """어제 daily 바닥손실(shopping_group_bep) 보드에 오른 그룹 → 오늘 탐색 UP 제외(역전 금지)."""
     _setup(db)
-    _retro(db, target_id=GRP, board="shopping_group_bep")  # 우리 그룹이 손실 보드에
+    # D-NAO-289: 「확정 손실」이려면 14일 비용이 스톱로스(실효입찰 1000 × LOW_CLICK_THRESHOLD
+    # 10 = 10,000원) 이상이어야 한다 — 그 미만은 «표본 부족»이라 이제 탐색이 허용된다.
+    _retro(db, target_id=GRP, board="shopping_group_bep", cost_asof=15000)  # 우리 그룹이 손실 보드에
     curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
              _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0)]
     result, mock_exec = _run(db, curve)
