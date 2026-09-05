@@ -3,7 +3,9 @@
 > 저장일시: 2026-09-04 (KST)
 > 새 대화 시작 시 이 파일을 먼저 읽을 것
 > 체인: **`pao-논의` n=85** (세션 `deb55836`, 계정 dgfrty00@gmail.com)
-> 검증 명령: `ssh -o BatchMode=yes sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python - < /tmp/floor_gate_check.py"` — 먼저 `scp scripts/floor_gate_check.py sellc.ohitech.co.kr:/tmp/floor_gate_check.py`. 기대: **배포 상태 줄이 «⛔미배포»면 아직 안 올라간 것**(SPECS 9종), «★배포됨»이면 SPECS 11종 + 소재 3개가 전부 차단으로 뜬다. 어느 쪽이든 그 줄이 정본이다.
+> 검증 명령(**어느 폴더에서든 돈다** — 로컬 체크아웃이 낡아도 무관):
+> `git fetch -q origin main && git show origin/main:scripts/floor_gate_check.py | ssh -o BatchMode=yes sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && .venv/bin/python -"`
+> ★★초판은 `scp scripts/floor_gate_check.py …`였는데 **공유 메인 폴더에서 실패한다**(2026-09-05 11:12 Jino 실행 실측: `scp: stat local "scripts/floor_gate_check.py": No such file or directory`). 그 폴더가 `origin/main`보다 **1,250커밋+ stale**이라 파일 자체가 없기 때문이다. **인계의 검증 명령은 «받는 쪽이 앉아 있는 위치»에서 돌아야 한다** — 내 작업 클론 기준으로 쓰면 안 된다. 기대: **배포 상태 줄이 «⛔미배포»면 아직 안 올라간 것**(SPECS 9종), «★배포됨»이면 SPECS 11종 + 소재 3개가 전부 차단으로 뜬다. 어느 쪽이든 그 줄이 정본이다.
 
 ---
 
