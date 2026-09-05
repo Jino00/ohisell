@@ -227,9 +227,10 @@ def test_parse_ledger_est_roas_none_when_absent():
 
 # ══════════════ E. fetch_rows — join·기본 필터(스텁 DB, 앱 미개입) ══════════════
 
-def _mk_db(tmp_path, changelog_rows, proposal_rows):
+def _mk_db(tmp_path, changelog_rows, proposal_rows, *, keyword_hourly_rows=()):
     """changelog_rows = (id, changed_at, entity_type, entity_id, action, dry_run, rationale,
-    before_value, proposal_id). proposal_rows = (id, adgroup_id)."""
+    before_value, proposal_id). proposal_rows = (id, adgroup_id).
+    keyword_hourly_rows = (entity_type, entity_id, ad_date, hour, imp, clk, cost, conv_cnt, avg_rank)."""
     path = tmp_path / "aveto_test.db"
     con = sqlite3.connect(path)
     con.execute(
@@ -238,6 +239,20 @@ def _mk_db(tmp_path, changelog_rows, proposal_rows):
         "proposal_id integer)"
     )
     con.execute("create table naver_proposals (id integer, adgroup_id text)")
+    # D-NAO-291 — 곡선 적재 표 둘. prod엔 항상 있으므로 스텁에도 «있게» 만든다(비어 있을 뿐).
+    # 표가 없으면 stored_curve는 조용히 API로 새지 않고 **터진다** — 그게 의도다(표 이름 오타가
+    # 「API 폴백」으로 위장되면 네이버 7일 창이 닫힌 날에야 알게 된다).
+    con.execute(
+        "create table naver_keyword_hourly (entity_type text, entity_id text, ad_date text, "
+        "hour integer, imp integer, clk integer, cost integer, conv_cnt integer, avg_rank real)"
+    )
+    con.execute(
+        "create table naver_adgroup_hourly_today (adgroup_id text, ad_date text, hour integer, "
+        "imp integer, clk integer, cost integer, conv_cnt integer, avg_rank real)"
+    )
+    con.executemany(
+        "insert into naver_keyword_hourly values (?,?,?,?,?,?,?,?,?)", keyword_hourly_rows,
+    )
     con.executemany(
         "insert into naver_change_log values (?,?,?,?,?,?,?,?,?)", changelog_rows,
     )
@@ -362,6 +377,8 @@ def test_main_end_to_end_counts_a_veto_fire_and_reconciles(tmp_path, capsys, mon
     assert "검산 일치/전체: 1/1" in out
     # 배포 경계를 안 넘겼으면 그 사실을 «자백»해야 한다(P2-3) — 조용히 섞이면 안 된다.
     assert "배포 경계 미지정" in out
+    # D-NAO-291 — 적재가 비어 있으면 auto는 API로 간다. 그 사실이 «출력»에 있어야 한다.
+    assert "[곡선 출처] --curve-source=auto → 네이버 /stats 3건" in out
 
 
 # ══════════ 적대 리뷰 1R P2-2·P2-3 처분 — 분모 둘 · 배포 경계 ══════════
@@ -424,3 +441,138 @@ def test_summarize_excludes_rows_after_the_deploy_boundary():
     assert mod.summarize(rows, deploy_ts=_dt(2026, 9, 5, 23, 59))["fired_written"] == 1
     # 경계를 안 주면 배포 후 행이 섞인다 — 그게 P2-3이 지적한 그 상태다.
     assert mod.summarize(rows)["up_written"] == 2
+
+
+# ══════════════ F. stored_curve — 적재 곡선 배선(D-NAO-291) ══════════════
+#
+# ★이 절이 지키는 문장: **「곡선은 적재에서 먼저 온다 — 네이버 7일 창이 닫혀도 재현이 산다」**
+#   ref 135 §7 이월은 「적재가 없으니 09-09에 축이 닫힌다」고 적었으나 적재는 이미 있었고
+#   배선만 없었다(prod 실측 574/574 슬롯 일치). 아래는 그 배선의 계약을 고정한다.
+
+def _mk_curve_db(tmp_path, *, keyword_rows=(), today_rows=()):
+    """keyword_rows = (entity_type, entity_id, ad_date, hour, imp, clk, cost, conv_cnt, avg_rank)
+    today_rows    = (adgroup_id, ad_date, hour, imp, clk, cost, conv_cnt, avg_rank)"""
+    path = tmp_path / "curve_test.db"
+    con = sqlite3.connect(path)
+    con.execute(
+        "create table naver_keyword_hourly (entity_type text, entity_id text, ad_date text, "
+        "hour integer, imp integer, clk integer, cost integer, conv_cnt integer, avg_rank real)"
+    )
+    con.execute(
+        "create table naver_adgroup_hourly_today (adgroup_id text, ad_date text, hour integer, "
+        "imp integer, clk integer, cost integer, conv_cnt integer, avg_rank real)"
+    )
+    con.executemany("insert into naver_keyword_hourly values (?,?,?,?,?,?,?,?,?)", keyword_rows)
+    con.executemany("insert into naver_adgroup_hourly_today values (?,?,?,?,?,?,?,?)", today_rows)
+    con.commit()
+    con.close()
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def test_stored_curve_reads_keyword_hourly_in_fetch_shape(tmp_path):
+    """★고정 — 반환형이 fetch_entity_hh24와 «동형»이다(키 이름·타입까지)."""
+    from datetime import date
+    con = _mk_curve_db(tmp_path, keyword_rows=[
+        ("adgroup", "ncg-1", "2026-09-02", 5, 100, 7, 4200, 1, 2.5),
+        ("adgroup", "ncg-1", "2026-09-02", 3, 10, 1, 600, 0, None),
+    ])
+    curve, source = mod.stored_curve(con, "ncg-1", date(2026, 9, 2))
+    assert source == "naver_keyword_hourly"
+    assert [h["hour"] for h in curve] == [3, 5], "hour 오름차순이어야 한다(가시 절단이 이 순서를 쓴다)"
+    assert curve[1] == {"hour": 5, "imp": 100, "clk": 7, "cost": 4200, "conv_cnt": 1, "avg_rank": 2.5}
+    assert curve[0]["avg_rank"] is None
+    assert all(isinstance(h[f], int) for h in curve for f in ("hour", "imp", "clk", "cost", "conv_cnt"))
+
+
+def test_stored_curve_ignores_other_grains_and_other_days(tmp_path):
+    """★고정 — keyword grain 행이나 다른 날 행을 섞으면 재현이 조용히 틀린다."""
+    from datetime import date
+    con = _mk_curve_db(tmp_path, keyword_rows=[
+        ("keyword", "ncg-1", "2026-09-02", 5, 999, 99, 99999, 9, 1.0),   # grain 다름
+        ("adgroup", "ncg-1", "2026-09-03", 5, 888, 88, 88888, 8, 1.0),   # 날짜 다름
+        ("adgroup", "ncg-2", "2026-09-02", 5, 777, 77, 77777, 7, 1.0),   # 그룹 다름
+        ("adgroup", "ncg-1", "2026-09-02", 5, 100, 7, 4200, 1, 2.5),
+    ])
+    curve, _ = mod.stored_curve(con, "ncg-1", date(2026, 9, 2))
+    assert [h["imp"] for h in curve] == [100]
+
+
+def test_stored_curve_falls_back_to_today_table_only_when_swept_table_empty(tmp_path):
+    """★고정 — 완전한 쪽(24시간)이 먼저다. today 표는 hour 23이 원리적으로 없다."""
+    from datetime import date
+    con = _mk_curve_db(
+        tmp_path,
+        keyword_rows=[("adgroup", "ncg-1", "2026-09-02", 5, 100, 7, 4200, 1, 2.5)],
+        today_rows=[("ncg-1", "2026-09-02", 5, 1, 1, 1, 0, None),
+                    ("ncg-1", "2026-09-05", 6, 50, 3, 1500, 2, 3.0)],
+    )
+    curve, source = mod.stored_curve(con, "ncg-1", date(2026, 9, 2))
+    assert (source, curve[0]["imp"]) == ("naver_keyword_hourly", 100), "스윕 표가 있으면 그게 이긴다"
+
+    curve, source = mod.stored_curve(con, "ncg-1", date(2026, 9, 5))
+    assert source == "naver_adgroup_hourly_today"
+    assert curve == [{"hour": 6, "imp": 50, "clk": 3, "cost": 1500, "conv_cnt": 2, "avg_rank": 3.0}]
+
+
+def test_stored_curve_reports_absence_as_none_source_not_empty_curve(tmp_path):
+    """★★고정 — 「적재가 없다」와 「적재가 0이다」는 다른 사실이다.
+
+    출처를 안 돌려주면 호출측이 둘을 못 가르고, 그 순간 «없는 것»이 «0인 것»으로 둔갑한다
+    (이 저장소 상습 실패 모드 — 발견 0건과 실행 안 됨이 같은 숫자로 보인다, 교훈 #123)."""
+    from datetime import date
+    con = _mk_curve_db(tmp_path, keyword_rows=[
+        ("adgroup", "ncg-1", "2026-09-02", 5, 0, 0, 0, 0, None),  # 적재는 있고 값이 0
+    ])
+    curve, source = mod.stored_curve(con, "ncg-1", date(2026, 9, 2))
+    assert (source, len(curve)) == ("naver_keyword_hourly", 1), "값 0인 행은 «있는» 것이다"
+
+    curve, source = mod.stored_curve(con, "ncg-9", date(2026, 9, 2))
+    assert (curve, source) == ([], None), "행이 없으면 출처가 None이어야 한다"
+
+
+def test_main_with_curve_source_db_reproduces_without_touching_the_naver_api(tmp_path, capsys, monkeypatch):
+    """★★이 파일의 핵심 계약 — **네이버 7일 창이 닫혀도 반사실이 산다.**
+
+    ref 135 §7은 「적재를 안 하면 이 축은 09-09에 닫힌다」고 이월했다. 적재는 이미 있었고
+    배선만 없었다. 여기서는 `--curve-source db`로 돌렸을 때 ①API를 **한 번도 안 부르고**
+    ②API로 돌렸을 때와 **같은 판정**을 내는지를 고정한다. API 스텁은 «부르면 터지게» 둔다 —
+    호출 0을 세는 것보다 강한 단언이다(세는 방식은 계수 실수를 못 잡는다)."""
+    db_path = _mk_db(
+        tmp_path,
+        [
+            (1, "2026-09-04 12:20:00", "ad", "nad-fire", "update_bid", 0,
+             _up_rationale(True), '{"adAttr":{"bidAmt":1330}}', 100),
+            (2, "2026-09-04 12:20:00", "ad", "nad-nofire", "update_bid", 0,
+             _up_rationale(True), '{"adAttr":{"bidAmt":1330}}', 200),
+        ],
+        [(100, "ncg-fire"), (200, "ncg-nofire")],
+        keyword_hourly_rows=[
+            # e2e(API판)의 fake_fetch와 «같은 곡선»을 적재 쪽에 심는다 — 판정이 같아야 한다.
+            ("adgroup", "ncg-fire", "2026-09-04", 9, 100, 5, 5000, 1, None),
+            ("adgroup", "ncg-fire", "2026-09-04", 10, 100, 5, 5000, 2, None),
+            ("adgroup", "ncg-fire", "2026-09-04", 11, 999, 999, 999999, 999, None),
+            ("adgroup", "ncg-nofire", "2026-09-04", 10, 100, 5, 5000, 1, None),
+        ],
+    )
+
+    def boom(adgroup_id, d):  # pragma: no cover - 불리면 실패다
+        raise AssertionError(f"--curve-source db인데 네이버 API를 불렀다: {adgroup_id} {d}")
+
+    def fake_price(db, adgroup_id):
+        return {"price": Decimal("1000"), "margin": None, "bep_roas": Decimal("2.0"),
+                "source": "product_bep"}
+
+    monkeypatch.setattr(mod, "fetch_entity_hh24", boom)
+    monkeypatch.setattr(mod.intraday_roas, "adgroup_unit_price", fake_price)
+    monkeypatch.setattr("sys.argv", [
+        "aveto_counterfactual.py", "--db", str(db_path),
+        "--since", "2026-09-01", "--until", "2026-09-05", "--curve-source", "db",
+    ])
+
+    rc = mod.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "네이버 /stats 읽기 콜 0건" in out
+    assert "[곡선 출처] --curve-source=db → naver_keyword_hourly 2건" in out
+    # API판(위 e2e)과 같은 판정 — 전환 하한을 넘는 ncg-fire만 발동한다.
+    assert "★A-veto가 발동했을 행 수: ①1/2건" in out

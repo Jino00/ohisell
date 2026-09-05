@@ -18,11 +18,19 @@ A-veto가 이미 있었다면 몇 건이 막혔을까"**를 소급 재현한다.
   환경) 없이는 못 돈다. `README.md`의 `measure_*.py`류와 같은 성질(앱 임포트 + 외부 API 호출)
   이지 `latch_reason_census.py`류가 아니다.
 
-★쓰기 0건. DB는 `mode=ro`로만 연다(raw sqlite3 조회 1개 + `intraday_roas.adgroup_unit_price`용
-  읽기전용 SQLAlchemy 세션 1개 — 둘 다 같은 파일을 읽기 전용으로 열 뿐 서로 다른 접속이다).
-  네이버 SA `/stats` **읽기** 콜이 있다 — `fetch_entity_hh24`를 **(광고그룹, 날짜) 조합당 1회**
-  캐시로 부른다(같은 그룹·같은 날짜의 여러 change_log 행이 API를 중복 호출하지 않게). 쓰기 API는
-  0콜.
+★쓰기 0건. DB는 `mode=ro`로만 연다(raw sqlite3 조회 2개 — 원장용·곡선용 + `intraday_roas.
+  adgroup_unit_price`용 읽기전용 SQLAlchemy 세션 1개. 전부 같은 파일을 읽기 전용으로 열 뿐이다).
+  네이버 SA `/stats` **읽기** 콜이 있을 수 있다 — `fetch_entity_hh24`를 **(광고그룹, 날짜) 조합당
+  1회** 캐시로 부른다(같은 그룹·같은 날짜의 여러 change_log 행이 API를 중복 호출하지 않게).
+  쓰기 API는 0콜.
+
+★★곡선 출처는 «적재 먼저»다 (D-NAO-291, 2026-09-06 — `--curve-source`, 기본 `auto`).
+  초판은 곡선을 API로만 받았고, 그래서 ref 135 §7이 *"적재하지 않으면 이 축은 09-09에 닫힌다"*고
+  이월했다. **적재는 이미 있었다** — `naver_keyword_hourly`(entity_type='adgroup', 보존 365일)와
+  `naver_adgroup_hourly_today`가 같은 곡선을 담고 있고, prod 실측에서 API와 **574/574 슬롯 전필드
+  일치**했다(2026-09-06 07:2x KST · 광고그룹×날짜 24건 · imp·clk·cost·conv_cnt·avg_rank).
+  ⇒ 네이버 7일 보존 창 «밖»의 날짜도 `--curve-source db`로 재현할 수 있다. 자세한 규약과
+  hour 23 결손 주의는 `stored_curve()` docstring에 있다.
 
 ★순서 규약 — 이 파일의 다른 모든 `app.*` import보다 먼저 **①cwd를 sys.path에 얹고 ②dotenv를
   읽는다.** 반드시 `backend/`를 cwd로 두고 실행할 것(`cd .../backend && ./.venv/bin/python
@@ -262,6 +270,54 @@ def fetch_rows(
     return rows
 
 
+def stored_curve(con: sqlite3.Connection, adgroup_id: str, d: date) -> tuple[list[dict], str | None]:
+    """이미 적재된 hh24 곡선을 읽는다 — `fetch_entity_hh24`와 «동형»으로 돌려준다.
+
+    (D-NAO-291, 2026-09-06) ref 135 §7 이월은 *"hh24 곡선을 적재하지 않으면 이 축은
+    09-09에 닫힌다"*고 적었다. **그 전제는 반쪽이다** — 적재는 이미 있고 배선만 없었다.
+    prod 실측(2026-09-06 07:2x KST, 읽기 전용): 반사실이 훑는 (광고그룹, 날짜) 24건에서
+    API 곡선과 적재 곡선이 **시간 슬롯 574/574 전필드 일치**(imp·clk·cost·conv_cnt·avg_rank).
+
+    출처는 둘이고 **완전한 쪽을 먼저 본다**:
+      ① `naver_keyword_hourly`(entity_type='adgroup') — D-1 스윕(09:10 KST)이 넣는다.
+         보존 365일(`keyword_hourly_sweep._RETAIN_DAYS`) ⇒ 네이버 7일 창과 무관하다. 24시간 완전.
+      ② `naver_adgroup_hourly_today` — 매시 :57 스윕. ①이 아직 안 채운 날(오늘·오늘 09:10 이전의
+         어제)을 메운다. ★**hour 23이 원리적으로 없다**(실측 2026-09-05: 상위 10개 그룹 전건 h23
+         결손, 최근 8일 전건 maxh=22). 이 계수기에는 무해하다 — 가시 지연 L=2라 판정 시각 H에
+         보이는 건 `hour <= H-2`뿐이고 h23은 H=25에서만 보일 값이라 **애초에 판정에 안 들어간다.**
+         다른 용도로 이 함수를 재사용한다면 그 결손을 먼저 확인할 것.
+
+    Returns: ([{"hour","imp","clk","cost","conv_cnt","avg_rank"}, ...], 출처 테이블명 | None)
+             행이 없으면 ([], None) — 「적재가 없다」와 「적재가 0이다」를 호출측이 가를 수 있게
+             출처를 값과 같이 준다.
+    """
+    d_iso = d.isoformat()
+    for table, where, args in (
+        ("naver_keyword_hourly", "entity_type='adgroup' and entity_id=? and ad_date=?", (adgroup_id, d_iso)),
+        ("naver_adgroup_hourly_today", "adgroup_id=? and ad_date=?", (adgroup_id, d_iso)),
+    ):
+        rows = con.execute(
+            f"select hour, imp, clk, cost, conv_cnt, avg_rank from {table} where {where} order by hour",
+            args,
+        ).fetchall()
+        if rows:
+            return (
+                [
+                    {
+                        "hour": int(r[0]),
+                        "imp": int(r[1] or 0),
+                        "clk": int(r[2] or 0),
+                        "cost": int(r[3] or 0),
+                        "conv_cnt": int(r[4] or 0),
+                        "avg_rank": None if r[5] is None else float(r[5]),
+                    }
+                    for r in rows
+                ],
+                table,
+            )
+    return [], None
+
+
 def summarize(results: list[dict], *, deploy_ts: datetime | None = None) -> dict:
     """행 목록 → 요약 수. **순수 함수**(I/O 없음) — 테스트가 여기를 때린다.
 
@@ -310,6 +366,11 @@ def main() -> int:
     ap.add_argument("--until", help="KST 날짜(YYYY-MM-DD). 기본 = 오늘(KST)")
     ap.add_argument("--lag", type=int, default=DEFAULT_LAG_HOURS, help=f"가시 지연(시간). 기본 {DEFAULT_LAG_HOURS}")
     ap.add_argument(
+        "--curve-source", choices=("auto", "db", "api"), default="auto",
+        help=("hh24 곡선을 어디서 얻는가. auto(기본)=적재 먼저·없으면 API / db=적재만(네이버 7일 창 "
+              "밖에서도 돈다·API 콜 0) / api=옛 동작(적재 무시). 출처별 건수는 실행 헤더에 찍힌다."),
+    )
+    ap.add_argument(
         "--deploy-ts",
         help=("배포 경계(KST, 'YYYY-MM-DD HH:MM'). 넘기면 배포 «후» 행을 반사실 계산에서 뺀다 — "
               "그 회차는 라이브 A-veto가 이미 돈 회차라 「걸렸더라면」이 성립하지 않는다. "
@@ -334,9 +395,13 @@ def main() -> int:
     SessionFactory = sessionmaker(bind=ro_engine)
     db = SessionFactory()
 
+    # 적재 곡선 읽기 전용 접속 — fetch_rows와 같은 관례(mode=ro), 쓰기 0.
+    curve_con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+
     price_cache: dict[str, dict] = {}
     curve_cache: dict[tuple[str, str], list[dict]] = {}
     api_calls = 0
+    source_counts: dict[str, int] = {}
 
     def get_price_bep(adgroup_id: str) -> dict:
         if adgroup_id not in price_cache:
@@ -344,12 +409,24 @@ def main() -> int:
         return price_cache[adgroup_id]
 
     def get_curve(adgroup_id: str, d: date) -> list[dict]:
+        """적재 → API 순서(기본 auto). 출처는 «곡선 하나당 한 번» 센다(캐시 적중은 안 센다)."""
         nonlocal api_calls
         key = (adgroup_id, d.isoformat())
-        if key not in curve_cache:
-            curve_cache[key] = fetch_entity_hh24(adgroup_id, d)
+        if key in curve_cache:
+            return curve_cache[key]
+        curve: list[dict] = []
+        source: str | None = None
+        if args.curve_source in ("auto", "db"):
+            curve, source = stored_curve(curve_con, adgroup_id, d)
+        if not curve and args.curve_source in ("auto", "api"):
+            curve = fetch_entity_hh24(adgroup_id, d)
             api_calls += 1
-        return curve_cache[key]
+            # 빈 응답을 「API에서 왔다」로 세면 «없다»가 «0이다»로 둔갑한다 — 비었으면 출처를 안 붙인다.
+            source = "네이버 /stats" if curve else None
+        label = source or "곡선 없음"
+        source_counts[label] = source_counts.get(label, 0) + 1
+        curve_cache[key] = curve
+        return curve
 
     results = []
     for row in rows:
@@ -381,13 +458,19 @@ def main() -> int:
         results.append(entry)
 
     db.close()
+    curve_con.close()
 
     observed = kst_now().strftime("%Y-%m-%d %H:%M:%S KST")
     print(
         f"=== A-veto 소급 재현 — 창 {since_d.isoformat()}~{until_d.isoformat()}(KST) · "
         f"{entity_scope} · lag={args.lag}시간 · 관측 {observed} ==="
     )
-    print(f"(sqlite 읽기 전용 1접속 + SQLAlchemy 읽기전용 세션 1개 · 네이버 /stats 읽기 콜 {api_calls}건 · 쓰기 0건)")
+    print(f"(sqlite 읽기 전용 2접속 + SQLAlchemy 읽기전용 세션 1개 · 네이버 /stats 읽기 콜 {api_calls}건 · 쓰기 0건)")
+    if source_counts:
+        detail = " · ".join(f"{k} {v}건" for k, v in sorted(source_counts.items()))
+        print(f"[곡선 출처] --curve-source={args.curve_source} → {detail} (곡선 단위, 캐시 적중 제외)")
+    else:
+        print(f"[곡선 출처] --curve-source={args.curve_source} → 곡선 조회 0건")
 
     # ── 검산 먼저 — 불일치가 있으면 표보다 위에 경고 ──
     checked = [r for r in results if r["judge"] and r["judge"]["reconcile_checked"]]
