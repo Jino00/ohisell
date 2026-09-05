@@ -170,6 +170,20 @@ describe("자동 상향 여력 판 — 표면", () => {
     expect(await screen.findByText(/목록을 잘랐습니다/)).toBeTruthy();
   });
 
+  it("★판 최상단 배지도 «근거»를 말한다 — 적대 리뷰 1R P1-1 (변이 #8 표적)", async () => {
+    // 리뷰어 실증: 배지 문구를 「상한 도달」로 되돌려도 표면 테스트 8/8이 전건 통과했다.
+    // 행 단위 라벨과 관측 나이는 고정돼 있었는데, **사람이 표를 다 읽기 전에 먼저 보는
+    // 자리**만 무보호였다 — 이 PR이 고치려던 결함(「이름은 정직한데 판단은 단언형」)이
+    // 정확히 그 자리로 되돌아올 수 있었다.
+    h.ceiling = {
+      as_of: "2026-09-05T13:00:00", multiple: 2.0, counted: 9,
+      cap_applies_count: 9, capped_by_last_known_count: 9, truncated: false,
+      rows: [{ ...cappedRow, current_bid_age_days: 37 }],
+    };
+    renderPage();
+    expect(await screen.findByText(/«마지막으로 아는 값» 기준 상한 도달/)).toBeTruthy();
+  });
+
   it("★관측 나이를 화면이 말한다 — 낡은 값으로 「닿았다」를 단언하지 않는다", async () => {
     h.ceiling = {
       as_of: "2026-09-05T13:00:00", multiple: 2.0, counted: 1,
