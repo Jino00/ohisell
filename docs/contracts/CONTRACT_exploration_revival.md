@@ -1,6 +1,7 @@
-# CONTRACT — bleeding 판정이 «표본 부족»인 그룹은 탐색으로 되살린다 (승인 대기 · D-NAO-289)
+# CONTRACT — bleeding 판정이 «표본 부족»인 그룹은 탐색으로 되살린다 (✅승인됨 · D-NAO-289)
 
-> **목표이름(제안): 「탐색소생 목표」** — 승인 직후 확정해 트랙·앵커에 복사한다.
+> **목표이름: 「탐색소생 목표」** (확정 2026-09-05 16:42 KST)
+> **✅Jino 승인 원문**: *"그대로 승인. 구현 들어가"* (2026-09-05 16:42 KST) — 직전 반문 *"이거 지금 카나리 적용이지?"*로 §2-7·§4-C ⓜ·§10 부채가 보강된 «뒤»의 승인이다.
 > 브랜치 `feat/pao-n89` · 초안 2026-09-05 16:3x KST · 기획 파트너(Fable 5.1) 초안 → Jino 승인 대기
 > 발단: Jino 질문(2026-09-05 15:51 KST) → 처방 A/B/C 제시 → Jino *"A안으로 가자"*(16:21 KST)
 > 파일 독점(구현 시): `backend/app/services/naver_ad/auto_operator.py` · `backend/tests/test_naver_exploration_revival.py`(신설)
