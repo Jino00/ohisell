@@ -108,6 +108,12 @@ def test_b_bleeding_confirmed_loss_stays_excluded(db):
     assert "17617" in reason
     assert "4600" in reason
     assert "D-NAO-289" in reason
+    # ★적대 리뷰 2R: 재발 방지는 «코드가 실제로 만든» 문자열로 잰다 — 손으로 지어낸
+    # 문자열로 분류를 단언하면 코드가 바뀌어도 초록이다(같은 함정을
+    # test_naver_hold_reasons_and_inday_catchup.py:70이 이미 적어 두었다).
+    # 값이 앞으로 오면 needle "소급채점에서 bleeding"을 잃어 버킷이 daily_loss로 옮겨진다.
+    assert auto_operator.classify_hold_reason(
+        "[탐색] daily 손실상태 제외 — " + reason) == "bleeding"
 
 
 def test_c1_missing_retro_data_fail_closed(db):
