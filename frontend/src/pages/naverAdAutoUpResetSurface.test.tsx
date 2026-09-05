@@ -159,6 +159,16 @@ describe("자동 상향 여력 판 — 표면", () => {
     expect(screen.getByText("+42.9%")).toBeTruthy();
   });
 
+  it("★목록이 잘렸으면 「전체가 아니다」라고 말한다 (절단된 컬렉션으로 0건을 말하지 않는다)", async () => {
+    h.ceiling = {
+      as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 200,
+      cap_applies_count: 200, capped_count: 0, truncated: true,
+      rows: [{ ...cappedRow, current_bid: 1400, capped: false, headroom_pct: 42.9 }],
+    };
+    renderPage();
+    expect(await screen.findByText(/목록을 잘랐습니다/)).toBeTruthy();
+  });
+
   it("상한이 적용되는 소재 자체가 없으면 그것도 «대상 없음»으로 구분해 말한다", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 3,

@@ -1379,6 +1379,14 @@ export default function NaverAdOptimizationConsole() {
                   ))}
                 </tbody>
               </table>
+              {/* ★적대 리뷰 1R P2 채택: `truncated`가 계산만 되고 화면에 없었다 —
+                  절단된 목록으로 「상한 도달 0개」를 말하면 이 판이 막으려던 함정을
+                  이 판이 재현한다(D-NAO-264 「게이트 판정에 절단된 컬렉션 금지」). */}
+              {autoUp.truncated && (
+                <div className="text-xs text-amber-700 mt-2">
+                  대상이 많아 목록을 잘랐습니다 — 위 「상한 도달」 수는 전체가 아닙니다.
+                </div>
+              )}
               <p className="text-[11px] text-gray-400 mt-2">
                 리셋은 네이버에 쓰지 않습니다 — 지금 입찰가를 새 기준점으로 받아들이고 그 사실을
                 변경 이력에 남깁니다. 리셋 직후에는 쿨다운이 새로 걸립니다.

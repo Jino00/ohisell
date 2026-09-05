@@ -188,8 +188,10 @@ def test_reset_arms_the_cooldown_and_says_so(client, db, monkeypatch):
 def test_reset_does_not_count_as_an_auto_bid_down(client, db, monkeypatch):
     """자동 하향 일일 상한은 제안 조인으로 세므로 `proposal_id=NULL`인 리셋 행을 안 센다.
 
-    ★변이 표적: 리셋 행에 제안을 매달거나 하향 타입으로 위장하면 이 테스트가 죽는다 —
-    그러면 사람의 기준점 리셋이 그날의 **손실 하향 여력**을 잡아먹는다.
+    ★적대 리뷰 1R P2 정정: 이 불변을 지키는 것은 **action 이름이 아니라 `proposal_id`
+    부재**다(리뷰어가 재현: action을 `update_bid`로 위장해도 이 테스트는 살아남는다).
+    초판 독스트링은 「action을 위장하면 죽는다」고 과장했다 — 실제 변이 표적은 리셋 행에
+    제안을 매다는 것이고, 그러면 사람의 기준점 리셋이 그날의 **손실 하향 여력**을 먹는다.
     """
     now = kst_now()
     _auto_up(db, 1240, 1420, now - timedelta(hours=6))
@@ -233,6 +235,22 @@ def test_ceiling_board_flags_a_capped_row(client, db):
     row = body["rows"][0]
     assert row["base_bid"] == 1000 and row["ceiling"] == 2000 and row["current_bid"] == 2100
     assert row["capped"] is True
+
+
+def test_ceiling_board_capped_is_inclusive_at_the_ceiling(client, db):
+    """★적대 리뷰 1R P2 채택: 천장에 **정확히 닿은** 값도 상한 도달이다.
+
+    초판 테스트는 current 2,100 > ceiling 2,000만 써서 `>=`를 `>`로 바꿔도 10/10 초록이었다
+    (리뷰어 변이 #11 생존). 경계값 한 칸이 판정을 뒤집는 자리는 테스트가 눌러 둔다.
+    """
+    now = kst_now()
+    _auto_up(db, 1000, 1500, now - timedelta(hours=4))
+    _auto_up(db, 1500, 2000, now - timedelta(hours=2))  # 1000×2.0 = 2000 — 정확히 천장
+
+    body = client.get(CEILING_URL).json()
+    assert body["rows"][0]["current_bid"] == 2000 and body["rows"][0]["ceiling"] == 2000
+    assert body["rows"][0]["capped"] is True
+    assert body["capped_count"] == 1
 
 
 def test_ceiling_board_marks_cap_not_applicable_when_no_anchor(client, db):
