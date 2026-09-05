@@ -660,3 +660,106 @@ def test_a_veto_yields_to_the_budget_gate_so_its_count_means_prevented_ups(db):
     assert verdict["direction"] == "hold"
     assert verdict.get("veto") is None, "예산 게이트가 먼저 잡아야 ⓙ의 계수가 「막은 상향」이 된다"
     assert "예산 여력 없음" in verdict["reason"]
+
+
+# ══════════════════ D-NAO-290 — 거부권이 CD2 클릭탐침에 되돌려지지 않는다 ══════════════════
+#
+# 왜 생겼나 (2026-09-05 17:4x, 레인 실행으로 재현 — 교훈 #395):
+# `run_hourly_lane`은 **모든** hold를 CD2 클릭탐침 후보로 다시 집어 올려 up으로 치환한다.
+# `_probe_trigger`는 순수 SA라 거부권을 모른다(clk·imp·rank만 본다). 그래서 D-NAO-288 배포분에서
+#   ① A-veto가 「UP 보류」 일기를 쓴 **같은 회차에** 탐침이 bid_up 1000→1150을 집행했고,
+#   ② B-veto가 CPC급등 DOWN을 억제한 자리에 탐침이 **새 UP**을 만들었다(배포 전이면 DOWN이었다).
+# 아래 셋은 그 셋을 한 벌로 고정한다 — 두 거부권은 탐침을 이기고, **평범한 hold의 탐침은 그대로 산다.**
+
+_PROBE_BLIND_CURVE_TAIL = [           # 직전 완료 2시간 [10,12): clk=0 · imp≥30 · rank 3.0 ≥ 2.5
+    _hour(10, imp=40, clk=0, cost=0, avg_rank=3.0),
+    _hour(11, imp=40, clk=0, cost=0, avg_rank=3.0),
+]
+
+
+def _lane_proposals(db):
+    return db.query(NaverProposal).all()
+
+
+def test_a_veto_hold_is_not_reopened_by_the_click_probe(db):
+    """★A-veto가 멈춘 상향을 탐침이 되살리지 않는다.
+
+    수리 전 실측: 일기 「UP 보류(오늘 증거 거부권)」 1행 + `bid_up 1000→1150 approved` 동시 발생.
+    일기가 «막았다»고 말하는데 상향이 나갔다 — 계약 §4-C ⓖ가 ⓙ를 「유일한 정확한 계수」로
+    지정한 그 행이 거짓이 되는 자리다."""
+    _seed_unit(db, target_id="nkw-veto-probe", bep_roas=Decimal("2.0"))
+    _seed_settlement(db, keyword_id="nkw-veto-probe", clk=20, cost=21000, conv_amt=63000)
+    curve = [_hour(8, imp=40, clk=4, cost=1600, conv_cnt=2)] + _PROBE_BLIND_CURVE_TAIL
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    assert _lane_proposals(db) == [], "거부권이 만든 hold에서 탐침 제안이 나왔다"
+    mock_exec.assert_not_called()
+    rows = _blocked_rows(db, "bid_up")
+    assert len(rows) == 1 and "오늘 증거 거부권" in rows[0].rationale
+    # 매시 로그 한 줄에서 보여야 한다 — `other`에 섞이면 사람은 발동을 못 본다.
+    assert result["held_by_reason"].get("veto_accel") == 1, result["held_by_reason"]
+
+
+def test_b_veto_suppression_does_not_create_a_new_up_via_probe(db):
+    """★B-veto가 억제한 DOWN 자리에 **새 UP**이 생기지 않는다.
+
+    계약 §4-A S2 원문: *"둘 다 hold만 만들고 **새 액션을 만들지 않는다**"*.
+    수리 전에는 그 자리에 `bid_up 1000→1150`이 났다 — 브레이크 자리에 액셀이 들어서는 것이라
+    북극성 §7 대칭이 액셀 쪽으로 기운다."""
+    _seed_unit(db, target_id="nkw-bveto-probe", bep_roas=None)   # 원가 없음 → 고삐 판정 불가
+    _seed_settlement(db, keyword_id="nkw-bveto-probe", clk=10, cost=7947)
+    _seed_own_bid_writes(db, target_id="nkw-bveto-probe", steps=[(1320, 1510), (1730, 1980)])
+    curve = [_hour(8, imp=40, clk=2, cost=3367)] + _PROBE_BLIND_CURVE_TAIL   # 당일 CPC 1683.5
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    assert [p.proposal_type for p in _lane_proposals(db)] == [], "억제한 하향 자리에 새 상향이 생겼다"
+    mock_exec.assert_not_called()
+    assert any("자기유발분" in r.rationale for r in _blocked_rows(db, "bid_down"))
+    # ★브레이크 거부권은 자기 사유가 verdict["reason"]에 안 실린다 — 레인이 앞에 붙여야
+    #   로그에서 보인다. 그 배선을 여기서 고정한다(안 그러면 `other`로 흡수된다).
+    assert result["held_by_reason"].get("veto_brake") == 1, result["held_by_reason"]
+
+
+def test_ordinary_hold_still_gets_the_click_probe(db):
+    """★회귀 0 증명 — 거부권이 **아닌** hold에서는 CD2 탐침이 종전 그대로 상향을 낸다.
+
+    이게 없으면 위 두 고정은 「탐침을 통째로 껐다」와 구별되지 않는다(D-NAO-58 기능 삭제)."""
+    _seed_unit(db, target_id="nkw-plain-hold", bep_roas=None)    # 원가 없음 → 고삐·A-veto 불가
+    # 정착창 실적은 있되 ROAS 미달 → UP 게이트가 hold(거부권 아님).
+    # ★실적 자체는 있어야 한다 — 없으면 유닛이 핫셋 후보에 안 들어가 탐침까지 가지도 못하고,
+    #   그러면 이 테스트는 「탐침이 살아 있다」가 아니라 「후보가 없다」를 고정하게 된다.
+    _seed_settlement(db, keyword_id="nkw-plain-hold", clk=20, cost=21000, conv_amt=0)
+    curve = [_hour(8, imp=40, clk=1, cost=400)] + _PROBE_BLIND_CURVE_TAIL
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute"):
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    kinds = [p.proposal_type for p in _lane_proposals(db)]
+    assert kinds == ["bid_up"], f"평범한 hold의 탐침이 죽었다(D-NAO-58 회귀): {kinds}"
+    assert "클릭탐침" in _lane_proposals(db)[0].rationale
+
+
+def test_hold_reason_classification_names_the_two_vetoes(db):
+    """★거부권 hold가 로그 집계에서 `other`에 섞이지 않는다(D-NAO-290 규칙 신설).
+
+    ⓙ는 운영 일기를 정확한 계수로 쓰지만, **매시 도는 사람 표면은 이 로그 한 줄**이다.
+    규칙이 없으면 거부권 1건은 `other`(최근 3회차 8·14·13건) 안에서 안 보인다."""
+    a_veto = ("UP 보류(오늘 증거 거부권, D-NAO-288 A-veto) — 정착창(정착창 보정ROAS 3.0000 "
+              ">= 목표 2.0)인데 오늘 실측이 BEP 하회(전환 2건, …)")
+    b_veto = ("CPC급등 보류(자기유발분) — 당일 1683.5원 ≤ 정착창 794.7원×2×자기상향 1.50배 "
+              "· 이후 UP 보류(예산 여력 없음/미확보) — …")
+    assert auto_operator.classify_hold_reason(a_veto) == "veto_accel"
+    assert auto_operator.classify_hold_reason(b_veto) == "veto_brake"
+    # 좁은 규칙이 넓은 규칙보다 위에 있어야 한다 — 아래로 내려가면 `roas_below`로 흡수된다.
+    counts = auto_operator.summarize_held_by_reason([{"reason": a_veto}, {"reason": b_veto}])
+    assert counts == {"veto_accel": 1, "veto_brake": 1}, counts

@@ -814,6 +814,14 @@ def _entity_status_hold_reason(db: Session, target_type: str, target_id: str) ->
 # 위, 넓은 규칙이 아래다(예: "소급채점 stale"이 "소급채점"보다 위). 못 맞추면 "other"이고,
 # other가 커지는 것 자체가 「분류가 낡았다」는 신호라 그 값을 일부러 남긴다(0으로 감추지 않는다).
 _HOLD_REASON_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ── D-NAO-288 미러 거부권 2개 (규칙 신설 D-NAO-290) ──
+    # ★맨 위에 둔다: 거부권 사유문은 정착창·BEP 문구를 함께 싣기 때문에 아래 넓은 규칙
+    #   (`roas_below` 등)에 먼저 걸리면 «거부권이 걸렸다»는 사실이 집계에서 사라진다.
+    # ★왜 필요한가: 계약 §4-C ⓖ가 ⓙ(운영 일기)를 A-veto의 정확한 계수로 지정했는데,
+    #   매시 도는 이 로그 집계에는 두 거부권을 가리키는 키가 **없어서 `other`로 들어갔다**.
+    #   최근 3회차의 `other`는 8·14·13건이라 거부권 1건은 그 안에서 보이지 않는다.
+    ("veto_accel", ("오늘 증거 거부권",)),
+    ("veto_brake", ("CPC급등 보류(자기유발분)",)),
     # ── 조건④ 소급채점(retro) 계열 — 탐색 차단의 최대 지분 ──
     ("retro_stale", ("소급채점 stale",)),
     ("retro_missing", ("소급채점 데이터 없음",)),
@@ -3902,6 +3910,34 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     target_id=target_id, action="bid_down",
                 )
             if verdict["direction"] == "hold":
+                # ★★D-NAO-290: **거부권이 만든 hold는 탐침으로 되돌리지 않는다.**
+                # 아래 CD2 탐침은 「hold = 액션 없음 = 사각지대일 수 있다」를 전제로 모든 hold를
+                # up-의도 탐침 후보로 다시 집어 올린다. 그런데 `_probe_trigger`는 순수 SA라
+                # 거부권을 **모른다**(clk·imp·rank만 본다) — 그래서 D-NAO-288 배포분이 둘 다 깨졌다
+                # (2026-09-05 17:4x 레인 실행으로 재현, 교훈 #395):
+                #   ① A-veto: 「UP 보류」 일기를 쓴 **같은 회차에** 탐침이 bid_up 1000→1150을 집행했다.
+                #      계약 §4-A는 이 거부권을 *"UP을 금지하고 hold한다"*로 정의했는데 hold가 안 남았다.
+                #      더 나쁜 건 일기다 — `_record_blocked`가 여기 **위**에서 이미 돌아, §4-C ⓖ가
+                #      *"A-veto의 유일한 정확한 계수"*라 선언한 그 행이 **막지 못한 것을 막았다고 센다.**
+                #   ② B-veto: CPC급등 DOWN을 억제하니 판정이 hold로 떨어졌고 탐침이 그 자리에
+                #      **새 UP**을 만들었다. 배포 전이라면 그 회차는 DOWN이었다. 계약 §4-A S2의
+                #      *"둘 다 hold만 만들고 **새 액션을 만들지 않는다**"*와 정반대이고,
+                #      북극성 §7 대칭이 액셀 쪽으로 기운다(브레이크 자리에 액셀이 들어섰다).
+                # ⇒ 거부권 표식이 있으면 여기서 끝낸다. 거부권은 「올릴 근거가 오염됐다」는 판정이고
+                #   탐침은 「올려 볼 자리다」라는 **다른 질문의 답**이다 — 후자가 전자를 이기면
+                #   거부권은 이름만 남는다. hold는 종전과 같은 자리(`result["held"]`)에 그대로 쌓인다.
+                veto_hold = verdict.get("veto") or (
+                    "brake" if verdict.get("cpc_spike_self_caused") else None
+                )
+                if veto_hold:
+                    # 브레이크 거부권은 자기 사유가 `verdict["reason"]`에 안 실린다 — 억제 후에도
+                    # 판정이 계속 진행돼 «마지막 게이트»의 사유가 남기 때문이다. 로그 집계
+                    # (`held_by_reason`)에서 보이도록 앞에 붙인다. 안 붙이면 이 hold는 `other`다.
+                    hold_reason = verdict["reason"]
+                    if veto_hold == "brake":
+                        hold_reason = f"{verdict['cpc_spike_self_caused']} · 이후 {hold_reason}"
+                    result["held"].append({"target_id": target_id, "reason": hold_reason})
+                    continue
                 # D-NAO-58 CD2 클릭 탐침: 밴드 판정이 hold(액션 없음)일 때만 사각지대 평가
                 # (up/down이면 이미 액션 — 이중 발동 금지). 트리거 참이면 up-의도 탐침으로 치환.
                 # _probe_trigger는 clk/imp/rank를 모두 자기 2시간 창에서 산출(R1 P3-1 자기완결).
