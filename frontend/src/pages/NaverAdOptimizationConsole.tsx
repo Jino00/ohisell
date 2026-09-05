@@ -1313,10 +1313,11 @@ export default function NaverAdOptimizationConsole() {
           <span className="text-sm font-medium text-gray-700">자동 상향 여력</span>
           {autoUp && (
             <span className="text-[11px] text-gray-500">
-              누적 상한 {autoUp.multiple}배 · 대상 {autoUp.cap_applies_count}개 중 상한 도달{" "}
-              <span className={autoUp.capped_count > 0 ? "text-red-600 font-medium" : "text-gray-500"}>
-                {autoUp.capped_count}개
+              누적 상한 {autoUp.multiple}배 · 대상 {autoUp.cap_applies_count}개 중{" "}
+              <span className={autoUp.capped_by_last_known_count > 0 ? "text-amber-700 font-medium" : "text-gray-500"}>
+                {autoUp.capped_by_last_known_count}개
               </span>
+              가 «마지막으로 아는 값» 기준 상한 도달
             </span>
           )}
         </div>
@@ -1332,9 +1333,9 @@ export default function NaverAdOptimizationConsole() {
             </div>
           ) : (
             <>
-              {autoUp.capped_count === 0 && (
+              {autoUp.capped_by_last_known_count === 0 && (
                 <div className="text-sm text-gray-500 mt-3">
-                  지금 상한에 닿은 소재는 0개입니다 — 아래는 여력 현황입니다. 재계산 {autoUp.as_of}
+                  마지막으로 아는 값 기준 상한에 닿은 소재는 0개입니다 — 아래는 여력 현황입니다. 재계산 {autoUp.as_of}
                 </div>
               )}
               <table className="w-full text-sm mt-3">
@@ -1343,7 +1344,7 @@ export default function NaverAdOptimizationConsole() {
                     <th className="py-2 pr-3">소재</th>
                     <th className="py-2 pr-3">기준점</th>
                     <th className="py-2 pr-3">천장</th>
-                    <th className="py-2 pr-3">마지막으로 아는 입찰</th>
+                    <th className="py-2 pr-3">마지막으로 아는 입찰 (관측 나이)</th>
                     <th className="py-2 pr-3">여력</th>
                     <th className="py-2 pr-3"></th>
                   </tr>
@@ -1358,12 +1359,16 @@ export default function NaverAdOptimizationConsole() {
                       <td className="py-2 pr-3">{r.ceiling ?? "-"}원</td>
                       <td className="py-2 pr-3">
                         {r.current_bid ?? "-"}원
-                        {/* ★라이브 재조회가 아니다 — 이름표를 단다(목록에서 대상 수만큼
-                            네이버를 때리지 않는다). 리셋 시점에만 라이브를 읽는다. */}
-                        <span className="text-[11px] text-gray-400 ml-1">최종 관측</span>
+                        {/* ★라이브 재조회가 아니다 — 이름표와 «나이»를 같이 단다. 낡은 관측으로
+                            「닿았다」를 단언했던 것이 배포 당일 라이브에서 잡힌 결함이다. */}
+                        <span className="text-[11px] text-gray-400 ml-1">
+                          최종 관측{r.current_bid_age_days == null ? "" : ` ${r.current_bid_age_days}일 전`}
+                        </span>
                       </td>
-                      <td className={`py-2 pr-3 ${r.capped ? "text-red-600 font-medium" : ""}`}>
-                        {r.capped ? "상한 도달" : r.headroom_pct == null ? "-" : `+${r.headroom_pct}%`}
+                      <td className={`py-2 pr-3 ${r.capped_by_last_known ? "text-amber-700 font-medium" : ""}`}>
+                        {r.capped_by_last_known
+                          ? "상한 도달(최종 관측 기준)"
+                          : r.headroom_pct == null ? "-" : `+${r.headroom_pct}%`}
                       </td>
                       <td className="py-2 pr-3">
                         <button
@@ -1388,8 +1393,10 @@ export default function NaverAdOptimizationConsole() {
                 </div>
               )}
               <p className="text-[11px] text-gray-400 mt-2">
-                리셋은 네이버에 쓰지 않습니다 — 지금 입찰가를 새 기준점으로 받아들이고 그 사실을
-                변경 이력에 남깁니다. 리셋 직후에는 쿨다운이 새로 걸립니다.
+                이 표의 「현재 입찰」은 라이브 재조회가 아니라 <b>우리가 마지막으로 아는 값</b>입니다 —
+                그래서 「상한 도달」도 그 값 기준의 판단이고, 관측이 오래됐으면 실제와 다를 수 있습니다.
+                <b>라이브 입찰가는 리셋을 누르는 그 순간에만 조회</b>합니다. 리셋은 네이버에 쓰지 않고,
+                그때 읽은 값을 새 기준점으로 받아들여 변경 이력에 남깁니다. 리셋 직후에는 쿨다운이 새로 걸립니다.
               </p>
             </>
           )}
