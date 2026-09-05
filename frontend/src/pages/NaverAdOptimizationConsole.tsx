@@ -450,8 +450,8 @@ export default function NaverAdOptimizationConsole() {
     setAutoUpError(null);
     try {
       setAutoUp(await getNaverAutoUpCeiling());
-    } catch (e: any) {
-      setAutoUpError(e.message);
+    } catch (e) {
+      setAutoUpError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -482,8 +482,8 @@ export default function NaverAdOptimizationConsole() {
         `쿨다운 ${res.side_effect.cooldown_hours ?? "?"}시간이 새로 걸렸고 오늘 변경 ${res.side_effect.changes_today}건입니다.`,
       );
       await loadAutoUp();
-    } catch (e: any) {
-      setAutoUpError(e.message);
+    } catch (e) {
+      setAutoUpError(e instanceof Error ? e.message : String(e));
     } finally {
       setAutoUpBusy(null);
     }
