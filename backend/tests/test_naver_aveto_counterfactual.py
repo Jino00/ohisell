@@ -354,7 +354,67 @@ def test_main_end_to_end_counts_a_veto_fire_and_reconciles(tmp_path, capsys, mon
     rc = mod.main()
     out = capsys.readouterr().out
     assert rc == 0
-    assert "UP 판정 수" in out
-    assert "판정대상 2건" in out  # UP 방향은 nad-fire·nad-nofire 둘뿐(nad-leash는 「고삐」)
-    assert "★A-veto가 발동했을 행 수: 1/2건" in out
+    # 요약 문언은 적대 리뷰 1R P2-2에서 «분모 둘»로 바뀌었다 — 둘 다 출력에 있어야 한다.
+    assert "UP 판정 — ①실쓰기만: 2건(판정대상 2)" in out
+    assert "②재발화 포함 전건: 2건(판정대상 2)" in out
+    assert "★A-veto가 발동했을 행 수: ①1/2건" in out
+    assert "②1/2건" in out
     assert "검산 일치/전체: 1/1" in out
+    # 배포 경계를 안 넘겼으면 그 사실을 «자백»해야 한다(P2-3) — 조용히 섞이면 안 된다.
+    assert "배포 경계 미지정" in out
+
+
+# ══════════ 적대 리뷰 1R P2-2·P2-3 처분 — 분모 둘 · 배포 경계 ══════════
+# P2-2(변이 M14 생존): `before_value` 필터가 무보호였고, 더 중요하게 **그 필터로 자른 수는
+#   계약 §4-C ⓙ가 세려는 인구가 아니다**. A-veto는 `_judge_hourly`에서 서므로 쿨다운·일일상한에
+#   어차피 막혔을 회차에도 일기를 쓴다 ⇒ 분모를 «둘» 내고 둘 다 고정한다.
+# P2-3: 창에 배포 «후» 회차가 섞이면 라이브 A-veto가 이미 돈 회차를 「반사실」로 세게 된다.
+
+def _row(*, hour, direction="UP", has_write=True, fired=False, judged=True, day=4):
+    from datetime import datetime as _dt
+    return {
+        "id": hour, "changed_at": _dt(2026, 9, day, hour, 20), "entity_type": "ad",
+        "entity_id": "nad-x", "adgroup_id": "grp-x", "direction": direction,
+        "has_write": has_write,
+        "judge": {"a_veto_fired": fired} if judged else None,
+    }
+
+
+def test_summarize_reports_both_denominators():
+    """★실쓰기만 센 수와 재발화 포함 전건은 **다른 질문의 답**이다 — 둘 다 나와야 한다."""
+    mod = _load_module()
+    rows = [
+        _row(hour=9, has_write=True, fired=True),     # 실쓰기 · 발동
+        _row(hour=10, has_write=False, fired=True),   # 무쓰기 · 발동 → ②에만 들어간다
+        _row(hour=11, has_write=True, fired=False),
+        _row(hour=12, direction="고삐", has_write=True),
+    ]
+    s = mod.summarize(rows)
+    assert (s["up_written"], s["fired_written"]) == (2, 1)
+    assert (s["up_all"], s["fired_all"]) == (3, 2), "재발화 포함 분모가 실쓰기 분모와 같아졌다"
+
+
+def test_summarize_does_not_count_unjudged_rows_as_not_fired():
+    """★「모른다」를 「미발동」으로 세지 않는다 — 분모·분자 양쪽에서 뺀다."""
+    mod = _load_module()
+    rows = [_row(hour=9, fired=True), _row(hour=10, judged=False)]
+    s = mod.summarize(rows)
+    assert s["up_written"] == 2 and s["up_written_judged"] == 1
+    assert s["unresolvable_written"] == 1
+    assert s["fired_written"] == 1
+
+
+def test_summarize_excludes_rows_after_the_deploy_boundary():
+    """★배포 «후» 회차는 반사실이 아니다 — 라이브 A-veto가 이미 돈 회차다."""
+    from datetime import datetime as _dt
+    mod = _load_module()
+    rows = [
+        _row(hour=9, day=5, fired=True),    # 배포 전
+        _row(hour=16, day=5, fired=True),   # 배포 후 → 빠져야 한다
+    ]
+    boundary = _dt(2026, 9, 5, 14, 8)
+    s = mod.summarize(rows, deploy_ts=boundary)
+    assert (s["pre_deploy"], s["post_deploy"]) == (1, 1)
+    assert s["fired_written"] == 1, "배포 후 회차가 반사실 분자에 섞였다"
+    # 경계를 안 주면 섞인다 — 그게 P2-3이 지적한 그 상태다.
+    assert mod.summarize(rows)["fired_written"] == 2

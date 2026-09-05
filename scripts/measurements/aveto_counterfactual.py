@@ -262,6 +262,39 @@ def fetch_rows(
     return rows
 
 
+def summarize(results: list[dict], *, deploy_ts: datetime | None = None) -> dict:
+    """행 목록 → 요약 수. **순수 함수**(I/O 없음) — 테스트가 여기를 때린다.
+
+    ★분모가 둘인 이유(적대 리뷰 1R P2-2): `has_write`(실쓰기)로 자른 수는 «막았을 실쓰기
+    상향»을 세고, 자르지 않은 수는 «계약 §4-C ⓙ의 일기가 남았을 회차»를 센다. A-veto는
+    `_judge_hourly`에서 서므로 쿨다운·일일상한에 어차피 막혔을 회차에도 일기를 쓴다 —
+    즉 ⓙ의 인구는 ②다. 하나만 내면 두 수를 같은 것으로 읽게 된다.
+
+    ★`deploy_ts`가 오면 배포 «후» 행은 반사실 계산에서 뺀다 — 그 회차는 라이브 A-veto가
+    이미 돈 회차라 「걸렸더라면」이 성립하지 않는다(적대 리뷰 1R P2-3).
+    """
+    rows = results
+    if deploy_ts is not None:
+        rows = [r for r in results if r["changed_at"] < deploy_ts]
+
+    def _slice(only_written: bool) -> tuple[int, int, int, int]:
+        ups = [r for r in rows if r["direction"] == "UP" and (r["has_write"] or not only_written)]
+        judged = [r for r in ups if r["judge"] is not None]
+        fired = [r for r in judged if r["judge"]["a_veto_fired"]]
+        return len(ups), len(judged), len(fired), len(ups) - len(judged)
+
+    up_w, up_wj, fired_w, unres_w = _slice(True)
+    up_a, up_aj, fired_a, unres_a = _slice(False)
+    return {
+        "up_written": up_w, "up_written_judged": up_wj, "fired_written": fired_w,
+        "unresolvable_written": unres_w,
+        "up_all": up_a, "up_all_judged": up_aj, "fired_all": fired_a,
+        "unresolvable_all": unres_a,
+        "pre_deploy": len(rows),
+        "post_deploy": len(results) - len(rows),
+    }
+
+
 def _fmt_decimal(v: Decimal | None) -> str:
     return f"{v:.4f}" if v is not None else "[미상]"
 
@@ -276,7 +309,16 @@ def main() -> int:
     ap.add_argument("--since", help="KST 날짜(YYYY-MM-DD). 기본 = until - (DEFAULT_WINDOW_DAYS-1)")
     ap.add_argument("--until", help="KST 날짜(YYYY-MM-DD). 기본 = 오늘(KST)")
     ap.add_argument("--lag", type=int, default=DEFAULT_LAG_HOURS, help=f"가시 지연(시간). 기본 {DEFAULT_LAG_HOURS}")
+    ap.add_argument(
+        "--deploy-ts",
+        help=("배포 경계(KST, 'YYYY-MM-DD HH:MM'). 넘기면 배포 «후» 행을 반사실 계산에서 뺀다 — "
+              "그 회차는 라이브 A-veto가 이미 돈 회차라 「걸렸더라면」이 성립하지 않는다. "
+              "D-NAO-288 배포 = 2026-09-05 14:08(deploy-manifest.jsonl)"),
+    )
     args = ap.parse_args()
+    deploy_ts = None
+    if args.deploy_ts:
+        deploy_ts = datetime.strptime(args.deploy_ts, "%Y-%m-%d %H:%M")
 
     until_d = date.fromisoformat(args.until) if args.until else kst_today()
     since_d = (
@@ -384,26 +426,39 @@ def main() -> int:
             f"{str(j['a_veto_fired']):<10}"
         )
 
-    up_rows_written = [
-        r for r in results if r["direction"] == "UP" and r["has_write"]
-    ]
-    up_rows_written_judged = [r for r in up_rows_written if r["judge"] is not None]
-    up_rows_unresolvable = [r for r in up_rows_written if r["judge"] is None]
-    a_veto_would_fire = [r for r in up_rows_written_judged if r["judge"]["a_veto_fired"]]
+    summary = summarize(results, deploy_ts=deploy_ts)
 
     print(
         f"\n--- 요약(창: {since_d.isoformat()}~{until_d.isoformat()} KST · {entity_scope}) ---"
     )
     print(f"전체 판정 행수(update_bid, dry_run=0): {len(results)}")
+    # ★분모를 «둘» 낸다 — 적대 리뷰 1R P2-2. 이 둘은 다른 질문의 답이고, 하나만 내면
+    #   계약 §4-C ⓙ가 세려는 인구와 조용히 어긋난다(A-veto는 `_judge_hourly`에서 서므로
+    #   쿨다운·일일상한에 어차피 막혔을 회차에도 일기를 쓴다).
     print(
-        f"UP 판정 수(rationale에 'ROAS-UP' ∧ 실제 값 변경): {len(up_rows_written)}건 "
-        f"(그중 adgroup 판정불가 {len(up_rows_unresolvable)}건 제외 → 판정대상 {len(up_rows_written_judged)}건)"
+        f"UP 판정 — ①실쓰기만: {summary['up_written']}건(판정대상 {summary['up_written_judged']}) / "
+        f"②재발화 포함 전건: {summary['up_all']}건(판정대상 {summary['up_all_judged']})"
     )
     print(
-        f"★A-veto가 발동했을 행 수: {len(a_veto_would_fire)}/{len(up_rows_written_judged)}건 "
-        f"(판정대상 기준. adgroup 판정불가 {len(up_rows_unresolvable)}건은 분모·분자 모두에서 제외 — "
-        "「모른다」를 「미발동」으로 세지 않는다)"
+        f"★A-veto가 발동했을 행 수: ①{summary['fired_written']}/{summary['up_written_judged']}건 "
+        f"(«막았을 실쓰기 상향») · ②{summary['fired_all']}/{summary['up_all_judged']}건 "
+        f"(«ⓙ 일기가 남았을 회차» — 이쪽이 §4-C ⓙ의 인구다)"
     )
+    print(
+        f"   (adgroup 판정불가 ①{summary['unresolvable_written']}건 ②{summary['unresolvable_all']}건은 "
+        "분모·분자 모두에서 제외 — 「모른다」를 「미발동」으로 세지 않는다)"
+    )
+    if deploy_ts is not None:
+        print(
+            f"배포 경계 {deploy_ts.strftime('%Y-%m-%d %H:%M KST')} — 배포 «전» {summary['pre_deploy']}행 / "
+            f"«후» {summary['post_deploy']}행. **위 반사실 수는 배포 «전» 행만 센다** "
+            "(배포 후 회차는 라이브 A-veto가 이미 돈 회차라 반사실이 아니다)"
+        )
+    else:
+        print(
+            "⚠️ 배포 경계 미지정(`--deploy-ts` 없음) — 창에 배포 «후» 회차가 섞여 있으면 "
+            "라이브 A-veto가 이미 돈 회차를 «반사실»로 세게 된다. 배포 후 창을 훑을 땐 반드시 넘길 것"
+        )
     print(f"검산 일치/전체: {len(checked) - len(mismatched)}/{len(checked)}")
     return 0
 

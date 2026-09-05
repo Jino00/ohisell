@@ -723,8 +723,8 @@ def test_b_veto_suppression_does_not_create_a_new_up_via_probe(db):
     assert [p.proposal_type for p in _lane_proposals(db)] == [], "억제한 하향 자리에 새 상향이 생겼다"
     mock_exec.assert_not_called()
     assert any("자기유발분" in r.rationale for r in _blocked_rows(db, "bid_down"))
-    # ★브레이크 거부권은 자기 사유가 verdict["reason"]에 안 실린다 — 레인이 앞에 붙여야
-    #   로그에서 보인다. 그 배선을 여기서 고정한다(안 그러면 `other`로 흡수된다).
+    # ★상향을 실제로 막았을 때만 `veto_brake`로 센다 — 표식만 보고 세면 B-veto가 만들지도
+    #   않은 hold까지 이 키로 흡수돼 종전 사유 시계열이 끊긴다(1R P1-2).
     assert result["held_by_reason"].get("veto_brake") == 1, result["held_by_reason"]
 
 
@@ -760,6 +760,83 @@ def test_hold_reason_classification_names_the_two_vetoes(db):
               "· 이후 UP 보류(예산 여력 없음/미확보) — …")
     assert auto_operator.classify_hold_reason(a_veto) == "veto_accel"
     assert auto_operator.classify_hold_reason(b_veto) == "veto_brake"
-    # 좁은 규칙이 넓은 규칙보다 위에 있어야 한다 — 아래로 내려가면 `roas_below`로 흡수된다.
     counts = auto_operator.summarize_held_by_reason([{"reason": a_veto}, {"reason": b_veto}])
     assert counts == {"veto_accel": 1, "veto_brake": 1}, counts
+
+    # ★적대 리뷰 1R P2-1(변이 M4b 생존)의 처분 — **초판 주석이 과장이었다.**
+    #   초판은 「좁은 규칙이 위에 있어서 맞는다」고 적었는데, 실제로는 두 거부권 사유문 **어디에도**
+    #   넓은 규칙의 니들이 없다(문구가 `정착창 보정ROAS`·`BEP 하회`이지 `정착 ROAS`·`BEP 미달`이 아니다).
+    #   즉 M4b(규칙을 아래로 내려도 초록)는 결함이 아니라 **순서가 애초에 하중을 안 받는다**는 사실이다.
+    #   그래서 「순서」 대신 **그보다 강한 불변식**을 고정한다: 두 사유문은 «어느 순서에서도» 모호하지 않다.
+    #   이 단언이 깨지는 날 = 사유문이나 규칙표가 바뀌어 **순서가 하중을 받기 시작한 날**이고,
+    #   그때는 규칙 위치가 조용한 시한폭탄이 되므로 여기서 먼저 죽는다.
+    for label, sample in (("veto_accel", a_veto), ("veto_brake", b_veto)):
+        colliding = [
+            key for key, needles in auto_operator._HOLD_REASON_RULES
+            if key != label and any(n in sample for n in needles)
+        ]
+        assert colliding == [], (
+            f"{label} 사유문이 다른 규칙과 겹친다({colliding}) — 이제 규칙 «순서»가 하중을 받는다. "
+            "규칙 위치를 확인하고 이 테스트를 순서 단언으로 바꿀 것")
+    # 그리고 그 불변식이 진짜인지 «역순»으로 확인한다 — 규칙표를 통째로 뒤집어도 결과가 같아야 한다.
+    with patch.object(auto_operator, "_HOLD_REASON_RULES", tuple(reversed(auto_operator._HOLD_REASON_RULES))):
+        assert auto_operator.classify_hold_reason(a_veto) == "veto_accel"
+        assert auto_operator.classify_hold_reason(b_veto) == "veto_brake"
+
+
+# ── 적대 리뷰 1R P1 두 건의 회귀 고정 (D-NAO-290 2R) ──────────────────────────────
+# P1-1: 초판은 hold 분기 «안»에만 가드를 둬서 **탐침 경로만** 막았다. 평범한 ROAS-UP·순위직행은
+#       그대로 나갔다(리뷰어 재현: `bid_up_rank 1150`). 두 경로가 합류하는 자리로 가드를 옮겼다.
+# P1-2: 초판은 «표식이 있으면» hold를 가로챘다. B-veto는 hold를 만들지 않으므로(판정이 계속
+#       진행된다) 그건 **거부권이 만들지도 않은 hold의 탐침까지 죽이고**, 그 hold를 `veto_brake`로
+#       오분류해 종전 사유 시계열을 끊었다. 이제 A-veto만 hold를 가로채고 B-veto는 «상향»만 막는다.
+
+def test_b_veto_also_blocks_the_plain_up_not_only_the_probe(db):
+    """★P1-1 — 탐침을 «안 거치는» 상향도 막혀야 한다.
+
+    B-veto가 서면 종전 코드에선 그 회차가 `CPC급등` DOWN이었다. 그 자리에 어떤 경로로든
+    상향이 나가면 「브레이크를 접었다」가 아니라 **「브레이크 자리에 액셀을 넣었다」**다."""
+    _seed_unit(db, target_id="nkw-plainup", bep_roas=None)      # 원가 없음 → 고삐 판정 불가
+    # ★두 조건을 «동시에» 세워야 한다: 정착 ROAS 3.0(= UP이 나갈 자격) ∧ 기준 CPC 794.7
+    #   (= 당일 1683.5가 ×2 문턱 1589.4를 넘어 CPC급등 갈래가 서고, 거기서 B-veto가 접는다).
+    #   `cost`를 올려 ROAS를 맞추면 기준 CPC도 같이 올라 급등이 «안» 선다 — conv_amt로 맞춘다.
+    _seed_settlement(db, keyword_id="nkw-plainup", clk=10, cost=7947, conv_amt=23841)
+    _seed_own_bid_writes(db, target_id="nkw-plainup", steps=[(1320, 1510), (1730, 1980)])
+    # 클릭이 살아 있어 탐침은 «안» 뜬다 — 그런데도 상향이 나가면 안 된다.
+    curve = [_hour(h, imp=40, clk=2, cost=3367) for h in (9, 10, 11)]   # 당일 CPC 1683.5
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    kinds = [p.proposal_type for p in _lane_proposals(db)]
+    assert kinds == [], f"자기유발 억제 회차에 상향이 나갔다(탐침 아님): {kinds}"
+    mock_exec.assert_not_called()
+    assert result["held_by_reason"].get("veto_brake") == 1, result["held_by_reason"]
+    # 억제 사유는 일기에 그대로 남는다 — 「왜 안 내렸나」와 「왜 안 올렸나」 둘 다 필요하다.
+    assert any("자기유발분" in r.rationale for r in _blocked_rows(db, "bid_down"))
+
+
+def test_b_veto_marker_does_not_hijack_a_hold_it_did_not_cause(db):
+    """★P1-2 — B-veto 표식이 붙어 있어도, **그 거부권이 만들지 않은 hold**는 종전 그대로다.
+
+    초판은 표식만 보고 hold를 가로채 ①CD2 탐침을 죽이고 ②`held_by_reason`을 `veto_brake`로
+    오분류했다. 계약이 A-veto에 대해 경계한 바로 그 병(「종전 사유 시계열이 끊긴다」)을
+    브레이크 쪽에 새로 만든 것이다. 여기선 상향이 «애초에 없으므로» 막을 것도 없다."""
+    _seed_unit(db, target_id="nkw-notmine", bep_roas=None)
+    # 정착창 ROAS 0 → UP 게이트가 «자기 사유로» hold. B-veto와 무관하다.
+    # ★기준 CPC는 794.7로 낮춰야 한다 — 안 그러면 당일 1683.5가 ×2 문턱을 못 넘어
+    #   **B-veto 표식이 아예 안 서고**, 이 테스트는 「가로채지 않았다」가 아니라
+    #   「가로챌 게 없었다」를 고정하는 공허한 초록이 된다(초판이 실제로 그랬다).
+    _seed_settlement(db, keyword_id="nkw-notmine", clk=10, cost=7947, conv_amt=0)
+    _seed_own_bid_writes(db, target_id="nkw-notmine", steps=[(1320, 1510), (1730, 1980)])
+    curve = [_hour(h, imp=40, clk=2, cost=3367) for h in (9, 10, 11)]   # 표식은 선다(CPC 1683.5)
+
+    with patch.object(auto_operator.diagnosis, "correction_factor", return_value=_FACTOR_OK), \
+         patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute"):
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    assert "veto_brake" not in result["held_by_reason"], (
+        f"B-veto가 만들지 않은 hold를 자기 것으로 셌다: {result['held_by_reason']}")

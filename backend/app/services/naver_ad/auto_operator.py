@@ -3903,10 +3903,13 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     reason=verdict["reason"], now=now, target_type=target_type,
                     target_id=target_id, action="bid_up",
                 )
-            if verdict.get("cpc_spike_self_caused"):
+            # ★D-NAO-290: 표식을 **판정 직후에** 잡아 둔다. 아래 CD2 탐침이 `verdict`를 통째로
+            #   새 dict로 갈아치우므로, 그 뒤에 `verdict.get(...)`을 보면 탐침 경로에선 사라진다.
+            cpc_spike_self_caused = verdict.get("cpc_spike_self_caused")
+            if cpc_spike_self_caused:
                 _record_blocked(
                     db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
-                    reason=verdict["cpc_spike_self_caused"], now=now, target_type=target_type,
+                    reason=cpc_spike_self_caused, now=now, target_type=target_type,
                     target_id=target_id, action="bid_down",
                 )
             if verdict["direction"] == "hold":
@@ -3926,17 +3929,15 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 # ⇒ 거부권 표식이 있으면 여기서 끝낸다. 거부권은 「올릴 근거가 오염됐다」는 판정이고
                 #   탐침은 「올려 볼 자리다」라는 **다른 질문의 답**이다 — 후자가 전자를 이기면
                 #   거부권은 이름만 남는다. hold는 종전과 같은 자리(`result["held"]`)에 그대로 쌓인다.
-                veto_hold = verdict.get("veto") or (
-                    "brake" if verdict.get("cpc_spike_self_caused") else None
-                )
-                if veto_hold:
-                    # 브레이크 거부권은 자기 사유가 `verdict["reason"]`에 안 실린다 — 억제 후에도
-                    # 판정이 계속 진행돼 «마지막 게이트»의 사유가 남기 때문이다. 로그 집계
-                    # (`held_by_reason`)에서 보이도록 앞에 붙인다. 안 붙이면 이 hold는 `other`다.
-                    hold_reason = verdict["reason"]
-                    if veto_hold == "brake":
-                        hold_reason = f"{verdict['cpc_spike_self_caused']} · 이후 {hold_reason}"
-                    result["held"].append({"target_id": target_id, "reason": hold_reason})
+                # ★A-veto만 여기서 끝낸다 — **이 거부권이 이 hold를 «만들었기»** 때문이다.
+                #   B-veto는 hold를 만들지 않는다(CPC급등 갈래만 막고 판정은 계속 진행된다,
+                #   `_judge_hourly` :2385). 그래서 「표식이 있으면 hold를 가로챈다」로 쓰면
+                #   **거부권이 만들지도 않은 hold의 탐침까지 죽이고**(D-NAO-58 축소) 그 hold를
+                #   `veto_brake`로 오분류해 종전 사유(`roas_below` 등) 시계열을 끊는다 —
+                #   계약이 A-veto에 대해 :2495에서 경계한 그 병을 브레이크 쪽에 새로 만드는 것이다.
+                #   (적대 리뷰 1R P1-2. B-veto 몫은 아래 «상향 금지» 게이트가 진다.)
+                if verdict.get("veto") == "accel":
+                    result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
                     continue
                 # D-NAO-58 CD2 클릭 탐침: 밴드 판정이 hold(액션 없음)일 때만 사각지대 평가
                 # (up/down이면 이미 액션 — 이중 발동 금지). 트리거 참이면 up-의도 탐침으로 치환.
@@ -3986,6 +3987,27 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # 결과). 밴드=탐침 프라이어, ROAS-UP 캡 아님(D-NAO-66). _learned_optimal_skip은 위
             # 탐침(probe) 분기 전용으로 남는다(과열 상단으로의 무근거 탐침 상향만 억제). 오버슛
             # 비용은 스텝 1개 분량 + 쿨다운 2h로 자연 캡되고, BEP 하한·loss 고삐가 최종 방어선.
+
+            # ★★D-NAO-290 B-veto 몫 — **자기유발분을 벗겨 브레이크를 접은 회차엔 상향을 안 낸다.**
+            # 계약 §4-A S2: *"둘 다 `hold`만 만들고 **새 액션을 만들지 않는다**"*.
+            # B-veto가 섰다는 것은 **종전 코드였으면 그 회차가 `CPC급등` DOWN이었다**는 뜻이다.
+            # 그 자리에 상향이 나가면 「브레이크를 접었다」가 아니라 **「브레이크 자리에 액셀을 넣었다」**가
+            # 되고, 북극성 §7 대칭이 액셀 쪽으로 기운다(이 트랙 상습 실패 모드와 «반대 방향»이라
+            # §7 검사표에 안 걸린다 — 그래서 여기 명시적으로 둔다).
+            # ★여기 두는 이유: 상향은 **두 경로**로 온다 — 평범한 ROAS-UP/순위직행(위 `_judge_hourly`)과
+            #   CD2 탐침(바로 위 분기). 초판은 hold 분기 «안»에만 가드를 둬서 탐침 경로만 막고
+            #   평범한 상향은 그대로 나갔다(적대 리뷰 1R P1-1이 `bid_up_rank 1150`으로 재현).
+            #   두 경로가 합류하는 **여기**가 유일하게 둘 다 덮는 자리다.
+            # ★하향은 막지 않는다 — 고삐(`순위고삐`)는 다른 근거로 서는 별개 브레이크다.
+            #   그래서 이 게이트는 **브레이크를 늘리지도 줄이지도 않고 액셀만 되돌린다.**
+            if verdict["direction"] == "up" and cpc_spike_self_caused:
+                # 탐침이 verdict를 통째로 갈아치우므로(`{"direction":"up", ...}`) 표식은 판정
+                # 직후에 따로 잡아 뒀다 — 여기서 `verdict.get(...)`을 보면 탐침 경로에선 비어 있다.
+                result["held"].append({
+                    "target_id": target_id,
+                    "reason": f"{cpc_spike_self_caused} · 상향 보류(자기유발 억제 회차 — 새 액션 금지)",
+                })
+                continue
 
             # 여기부터는 verdict가 up/down = 액션 의도 확정 — 이후의 hold는 "의도된 액션이
             # 차단된 것"이므로 일기(blocked) 기록 대상(위의 판정 hold·imp 없음은 관찰 소음이라 제외).
