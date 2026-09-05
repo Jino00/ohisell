@@ -1,4 +1,4 @@
-# test_naver_oscillation_damping.py — D-NAO-287 「진동차단 목표」 회귀 고정
+# test_naver_oscillation_damping.py — D-NAO-288 「진동차단 목표」 회귀 고정
 #
 # 무엇을 고정하나: 액셀(정착창=과거)과 브레이크(당일 누적)가 서로 다른 창을 보다가 생긴
 # 되먹임 진동. prod 4일 실측(2026-09-02~05, 소재 nad-…554755092)에서 이 유닛은 54회 발화·

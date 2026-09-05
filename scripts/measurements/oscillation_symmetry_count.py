@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""oscillation_symmetry_count.py — D-NAO-287 §4-C ⓖ 「액셀·브레이크 대칭」 계수기 (읽기 전용).
+"""oscillation_symmetry_count.py — D-NAO-288 §4-C ⓖ 「액셀·브레이크 대칭」 계수기 (읽기 전용).
 
 D-NAO-234 §9-2가 한 방식 그대로다 — 새 로직이 **어느 쪽을 몇 건 움직이는지**를 수로 낸다
 (그때 형식: 「하한을 내리면 UP 296→225건, DOWN 531→531건 불변」). 한쪽만 움직이면 그게
