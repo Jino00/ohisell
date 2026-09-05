@@ -1711,6 +1711,9 @@ def retro_scorecard(
 #   ★2026-09-05 prod 실측: 이 게이트는 **전 기간 발화 0건**이다(change_log에 「누적 상한」
 #     0행). 그래서 이 판은 **「0건이면 0건이라고 말하는」 것이 첫째 임무**다 — 빈 표는
 #     「닿은 게 없다」와 「안 재고 있다」를 같은 그림으로 만든다(교훈 #123).
+#   ★그리고 배포 당일 라이브가 그 원칙의 **시간축 판**을 가르쳤다: 초판은 낡은 관측으로
+#     「닿았다」를 단언해, 이 판이 막으려던 혼동(「닿았다」 vs 「닿았는지 모른다」)을 스스로
+#     재현했다. 지금은 판정 이름에 근거를 박고(`capped_by_last_known`) 관측 나이를 함께 낸다.
 #
 # ★리셋을 «별도 action»으로 남기는 이유(계약 §2-1, 2026-09-05 실측으로 근거 정정):
 #   초판 근거는 「별도 action이면 쿨다운에 안 잡힌다」였는데 **테스트가 그걸 반증했다**.
@@ -1800,7 +1803,19 @@ def auto_up_ceiling(db: Session = Depends(get_db)):
         base = naver_execution_harness.auto_up_base_bid(db, "ad", entity_id, now)
         current, current_at = _auto_up_last_known_bid(db, entity_id)
         ceiling = int(Decimal(base) * multiple) if base else None
-        capped = bool(ceiling is not None and current is not None and current >= ceiling)
+        # ★2026-09-05 라이브가 초판의 결함을 드러냈다(D-NAO-287 배포 후 첫 실행):
+        #   초판은 이 값을 `capped`라 부르며 «상한에 닿았다»고 단언했는데, 재료인
+        #   `current`는 change_log 최종 관측이라 **37~43일 낡아 있을 수 있다**. 실제로
+        #   `nad-…558104404`의 최종 관측은 1,870원이었으나 라이브 실측은 **590원**이었다
+        #   — 판정 9건 중 최소 1건이 유령이었고 나머지 8건도 관측 나이가 37~43일이다.
+        #   ⇒ 이름과 판정을 «아는 만큼»으로 되돌린다: 이건 「닿았다」가 아니라
+        #     **「마지막으로 아는 값 기준으로는 닿아 있다」**이다. 라이브 확인은 리셋
+        #     시점(POST)에서만 이뤄진다.
+        #   ★새 문턱을 만들지 않았다 — 「며칠부터 낡았다」를 발명하는 대신 **나이를 그대로
+        #     싣는다**. 문턱은 보는 사람이 정한다.
+        capped_by_last_known = bool(
+            ceiling is not None and current is not None and current >= ceiling
+        )
         headroom_pct = (
             round((ceiling / current - 1) * 100, 1)
             if ceiling is not None and current else None
@@ -1813,19 +1828,19 @@ def auto_up_ceiling(db: Session = Depends(get_db)):
             "current_bid": current,
             "current_bid_as_of": current_at.isoformat() if current_at else None,
             "current_bid_source": "last_known",  # 라이브 재조회가 아니다 — 이름표를 단다
+            "current_bid_age_days": (now - current_at).days if current_at else None,
             "headroom_pct": headroom_pct,
-            "capped": capped,
+            "capped_by_last_known": capped_by_last_known,
             # 기준점이 없으면 상한이 «적용되지 않는다» — 「여력 무한」이 아니라 「게이트 밖」이다
             "cap_applies": base is not None,
         })
 
-    capped_rows = [r for r in rows if r["capped"]]
     return {
         "as_of": now.isoformat(),
         "multiple": float(multiple),
         "counted": len(rows),
         "cap_applies_count": sum(1 for r in rows if r["cap_applies"]),
-        "capped_count": len(capped_rows),
+        "capped_by_last_known_count": sum(1 for r in rows if r["capped_by_last_known"]),
         "truncated": truncated,
         "rows": rows,
     }

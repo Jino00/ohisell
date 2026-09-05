@@ -214,13 +214,13 @@ def test_ceiling_board_says_zero_when_nothing_is_capped(client, db):
     body = client.get(CEILING_URL).json()
     assert body["counted"] == 1
     assert body["cap_applies_count"] == 1
-    assert body["capped_count"] == 0          # ★0건임을 «숫자로» 말한다
+    assert body["capped_by_last_known_count"] == 0   # ★0건임을 «숫자로» 말한다
     assert body["multiple"] == pytest.approx(2.0)
     row = body["rows"][0]
     assert row["entity_id"] == AD
     assert row["base_bid"] == 1240 and row["ceiling"] == 2480
     assert row["current_bid"] == 1420 and row["current_bid_source"] == "last_known"
-    assert row["capped"] is False
+    assert row["capped_by_last_known"] is False
     assert row["headroom_pct"] == pytest.approx(74.6, abs=0.2)
 
 
@@ -231,10 +231,10 @@ def test_ceiling_board_flags_a_capped_row(client, db):
     _auto_up(db, 1500, 2100, now - timedelta(hours=2))  # 1000×2.0=2000 천장을 넘긴 상태
 
     body = client.get(CEILING_URL).json()
-    assert body["capped_count"] == 1
+    assert body["capped_by_last_known_count"] == 1
     row = body["rows"][0]
     assert row["base_bid"] == 1000 and row["ceiling"] == 2000 and row["current_bid"] == 2100
-    assert row["capped"] is True
+    assert row["capped_by_last_known"] is True
 
 
 def test_ceiling_board_capped_is_inclusive_at_the_ceiling(client, db):
@@ -249,8 +249,8 @@ def test_ceiling_board_capped_is_inclusive_at_the_ceiling(client, db):
 
     body = client.get(CEILING_URL).json()
     assert body["rows"][0]["current_bid"] == 2000 and body["rows"][0]["ceiling"] == 2000
-    assert body["rows"][0]["capped"] is True
-    assert body["capped_count"] == 1
+    assert body["rows"][0]["capped_by_last_known"] is True
+    assert body["capped_by_last_known_count"] == 1
 
 
 def test_ceiling_board_marks_cap_not_applicable_when_no_anchor(client, db):
@@ -271,6 +271,29 @@ def test_ceiling_board_marks_cap_not_applicable_when_no_anchor(client, db):
     body = client.get(CEILING_URL).json()
     assert body["counted"] == 1
     assert body["cap_applies_count"] == 0
-    assert body["capped_count"] == 0
+    assert body["capped_by_last_known_count"] == 0
     row = body["rows"][0]
     assert row["cap_applies"] is False and row["base_bid"] is None and row["ceiling"] is None
+
+
+# ── 2026-09-05 라이브가 가르친 것: 판정은 «아는 만큼»만 말한다 ─────────────
+def test_board_reports_how_old_its_observation_is(client, db):
+    """★배포 당일 라이브 교정(D-NAO-287): 초판은 낡은 관측으로 「닿았다」를 단언했다.
+
+    prod 실측 — `nad-…558104404`의 최종 관측은 1,870원인데 **라이브 실측은 590원**이었고,
+    「상한 도달」 9건 중 나머지 8건도 관측 나이가 **37~43일**이었다. 판정 이름에 근거를
+    박고(`capped_by_last_known`) **나이를 그대로 싣는다** — 「며칠부터 낡았다」는 문턱은
+    발명하지 않는다(문턱은 보는 사람이 정한다).
+
+    ★변이 표적: `current_bid_age_days`를 응답에서 빼거나 판정 키를 `capped`로 되돌리면 죽는다.
+    """
+    now = kst_now()
+    _auto_up(db, 1000, 2100, now - timedelta(days=40))  # 40일 전 관측 하나뿐
+
+    body = client.get(CEILING_URL).json()
+    row = body["rows"][0]
+    assert row["current_bid_age_days"] == 40           # 나이를 «그대로» 말한다
+    assert row["current_bid_source"] == "last_known"
+    assert row["capped_by_last_known"] is True         # 이름이 근거를 품는다
+    assert "capped" not in row                         # 단언형 키는 남지 않는다
+    assert "capped_count" not in body

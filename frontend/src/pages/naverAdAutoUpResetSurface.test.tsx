@@ -66,8 +66,9 @@ const cappedRow = {
   current_bid: 2100,
   current_bid_as_of: "2026-09-05T10:00:00",
   current_bid_source: "last_known",
+  current_bid_age_days: 0,
   headroom_pct: null,
-  capped: true,
+  capped_by_last_known: true,
   cap_applies: true,
 };
 
@@ -86,19 +87,19 @@ describe("자동 상향 여력 판 — 표면", () => {
   it("상한 도달 소재가 있으면 그 행과 「기준점 리셋」 버튼이 보인다", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 1,
-      cap_applies_count: 1, capped_count: 1, truncated: false, rows: [cappedRow],
+      cap_applies_count: 1, capped_by_last_known_count: 1, truncated: false, rows: [cappedRow],
     };
     renderPage();
     expect(await screen.findByText("자동 상향 여력")).toBeTruthy();
     expect(await screen.findByText(AD)).toBeTruthy();
-    expect(screen.getByText("상한 도달")).toBeTruthy();
+    expect(screen.getByText("상한 도달(최종 관측 기준)")).toBeTruthy();
     expect(screen.getByRole("button", { name: "기준점 리셋" })).toBeTruthy();
   });
 
   it("★버튼 클릭이 resetNaverAutoUpBase에 «사유와 함께» 닿는다 (onClick 절단 변이 표적)", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 1,
-      cap_applies_count: 1, capped_count: 1, truncated: false, rows: [cappedRow],
+      cap_applies_count: 1, capped_by_last_known_count: 1, truncated: false, rows: [cappedRow],
     };
     h.resetResult = {
       entity_id: AD, actor: "console", reason: "굳은 소재 복귀", changed_at: "2026-09-05T11:30:00",
@@ -118,7 +119,7 @@ describe("자동 상향 여력 판 — 표면", () => {
   it("★리셋 결과가 «부작용까지» 화면에 뜬다 — 쿨다운을 말하지 않으면 다시 상한 탓으로 오독된다", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 1,
-      cap_applies_count: 1, capped_count: 1, truncated: false, rows: [cappedRow],
+      cap_applies_count: 1, capped_by_last_known_count: 1, truncated: false, rows: [cappedRow],
     };
     h.resetResult = {
       entity_id: AD, actor: "console", reason: "복귀", changed_at: "2026-09-05T11:30:00",
@@ -139,7 +140,7 @@ describe("자동 상향 여력 판 — 표면", () => {
   it("사유를 비우면 부르지 않는다 — 이 입구의 목적이 감사 기록이다", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 1,
-      cap_applies_count: 1, capped_count: 1, truncated: false, rows: [cappedRow],
+      cap_applies_count: 1, capped_by_last_known_count: 1, truncated: false, rows: [cappedRow],
     };
     vi.spyOn(window, "prompt").mockReturnValue("   ");
     renderPage();
@@ -151,28 +152,39 @@ describe("자동 상향 여력 판 — 표면", () => {
   it("★상한에 닿은 소재가 0개면 «0개»라고 말한다 — 빈 표로 두지 않는다", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 1,
-      cap_applies_count: 1, capped_count: 0, truncated: false,
-      rows: [{ ...cappedRow, current_bid: 1400, capped: false, headroom_pct: 42.9 }],
+      cap_applies_count: 1, capped_by_last_known_count: 0, truncated: false,
+      rows: [{ ...cappedRow, current_bid: 1400, capped_by_last_known: false, headroom_pct: 42.9 }],
     };
     renderPage();
-    expect(await screen.findByText(/지금 상한에 닿은 소재는 0개입니다/)).toBeTruthy();
+    expect(await screen.findByText(/마지막으로 아는 값 기준 상한에 닿은 소재는 0개입니다/)).toBeTruthy();
     expect(screen.getByText("+42.9%")).toBeTruthy();
   });
 
   it("★목록이 잘렸으면 「전체가 아니다」라고 말한다 (절단된 컬렉션으로 0건을 말하지 않는다)", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 200,
-      cap_applies_count: 200, capped_count: 0, truncated: true,
-      rows: [{ ...cappedRow, current_bid: 1400, capped: false, headroom_pct: 42.9 }],
+      cap_applies_count: 200, capped_by_last_known_count: 0, truncated: true,
+      rows: [{ ...cappedRow, current_bid: 1400, capped_by_last_known: false, headroom_pct: 42.9 }],
     };
     renderPage();
     expect(await screen.findByText(/목록을 잘랐습니다/)).toBeTruthy();
   });
 
+  it("★관측 나이를 화면이 말한다 — 낡은 값으로 「닿았다」를 단언하지 않는다", async () => {
+    h.ceiling = {
+      as_of: "2026-09-05T13:00:00", multiple: 2.0, counted: 1,
+      cap_applies_count: 1, capped_by_last_known_count: 1, truncated: false,
+      rows: [{ ...cappedRow, current_bid_age_days: 40 }],
+    };
+    renderPage();
+    expect(await screen.findByText(/최종 관측 40일 전/)).toBeTruthy();
+    expect(screen.getByText("상한 도달(최종 관측 기준)")).toBeTruthy();
+  });
+
   it("상한이 적용되는 소재 자체가 없으면 그것도 «대상 없음»으로 구분해 말한다", async () => {
     h.ceiling = {
       as_of: "2026-09-05T11:00:00", multiple: 2.0, counted: 3,
-      cap_applies_count: 0, capped_count: 0, truncated: false, rows: [],
+      cap_applies_count: 0, capped_by_last_known_count: 0, truncated: false, rows: [],
     };
     renderPage();
     expect(await screen.findByText(/누적 상한이 적용되는 소재가 없습니다/)).toBeTruthy();

@@ -4661,8 +4661,13 @@ export interface NaverAutoUpCeilingRow {
   current_bid: number | null;
   current_bid_as_of: string | null;
   current_bid_source: string;
+  // ★관측 나이를 «그대로» 싣는다 — 「며칠부터 낡았다」는 문턱을 발명하지 않는다(D-NAO-287
+  //   배포 당일 라이브 교정: 판정 9건의 재료가 37~43일 낡은 관측이었다).
+  current_bid_age_days: number | null;
   headroom_pct: number | null;
-  capped: boolean;
+  // 「닿았다」가 아니라 **「마지막으로 아는 값 기준으로는 닿아 있다」**이다. 라이브 확인은
+  // 리셋(POST) 시점에만 이뤄진다 — 이름에 근거를 박아 둔다.
+  capped_by_last_known: boolean;
   // 기준점이 없으면 상한이 «적용되지 않는다» — 「여력 무한」이 아니라 게이트 밖이다.
   cap_applies: boolean;
 }
@@ -4671,7 +4676,7 @@ export interface NaverAutoUpCeilingResponse {
   multiple: number;
   counted: number;
   cap_applies_count: number;
-  capped_count: number;
+  capped_by_last_known_count: number;
   truncated: boolean;
   rows: NaverAutoUpCeilingRow[];
 }
