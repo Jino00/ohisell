@@ -9,7 +9,7 @@
 
 ## 이 계수기가 «구조로» 지키는 것 셋 — 전부 앞선 세션이 실제로 밟은 함정이다
 
-1. ★**배포일은 양쪽 창에서 제외한다**(D-NAO-292 — n=3이 §4-C ⓗ 부기에 제안하고 채택을 다음
+1. ★**배포일은 양쪽 창에서 제외한다**(D-NAO-293 — n=3이 §4-C ⓗ 부기에 제안하고 채택을 다음
    세션에 넘긴 규칙). 배포 = 2026-09-05 14:08:42 KST인데 그날 UP 3건은 전부 배포 «전», DOWN은
    배포 «후»에 났다. 그날은 두 코드가 반씩 만든 날이라 **어느 창에 넣어도 그 창의 코드가
    «안 한 일»을 그 창에 귀속시킨다.** 제외하되 **제외 사실과 그 날의 수를 항상 병기**한다 —
@@ -165,7 +165,7 @@ def main() -> int:
     print("=== ⓗ 진동 일수 계수 — 「같은 소재·같은 날 UP∧DOWN이 함께 난 날」 (읽기 전용·쓰기 0건) ===")
     print(f"관측 {now_kst:%Y-%m-%d %H:%M:%S} KST · 원장 naver_change_log(KST 단독) · grain={args.entity_type}")
     print(f"분자 기준(--basis) = {args.basis} " + ("(실쓰기만 — ⓗ 기준선과 같은 자)" if args.basis == "write" else "(무쓰기 재발화 포함)"))
-    print(f"배포 경계 {args.deploy_ts} KST → ★배포일 {deploy_day}는 **양쪽 창에서 제외**(D-NAO-292)")
+    print(f"배포 경계 {args.deploy_ts} KST → ★배포일 {deploy_day}는 **양쪽 창에서 제외**(D-NAO-293)")
 
     def report(label: str, start: date, end: date) -> None:
         print(f"\n--- {label} 창 {_fmt(start)} ~ {_fmt(end)} ---")

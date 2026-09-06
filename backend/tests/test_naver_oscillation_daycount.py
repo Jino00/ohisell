@@ -1,4 +1,4 @@
-# test_naver_oscillation_daycount.py — D-NAO-292 · 계약 §4-C ⓗ 계수기의 드리프트/의미 가드
+# test_naver_oscillation_daycount.py — D-NAO-293 · 계약 §4-C ⓗ 계수기의 드리프트/의미 가드
 # 계수기: scripts/measurements/oscillation_daycount.py (읽기 전용·앱 임포트 없음)
 #
 # ★이 파일이 지키는 문장 셋 — 전부 앞선 세션이 실제로 밟은 함정이다:

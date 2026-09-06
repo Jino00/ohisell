@@ -256,7 +256,7 @@ where action='update_bid' and dry_run=0 and entity_type='ad'
       항상 병기**한다. 이유 — 그날은 두 코드가 반씩 만든 날이라 어느 창에 넣어도 그 창의 코드가
       «안 한 일»을 그 창에 귀속시킨다. 정본: `ref 135` §6.
 
-      ⚠️**2026-09-06 09:4x 부기(D-NAO-292 · n=5) — 위 제안 규칙을 «채택»한다. 체크는 안 찍는다.**
+      ⚠️**2026-09-06 09:4x 부기(D-NAO-293 · n=5) — 위 제안 규칙을 «채택»한다. 체크는 안 찍는다.**
       **원문은 그대로 둔다.** 채택된 규칙은 이제 문서가 아니라 **계수기가 집행**한다
       (`scripts/measurements/oscillation_daycount.py` · 가드 `backend/tests/test_naver_oscillation_daycount.py`)
       — 배포일은 양쪽 창에서 빠지고 **그 날의 수와 배포 시각 기준 전/후 분해가 «항상» 출력에 남는다**
@@ -275,7 +275,7 @@ where action='update_bid' and dry_run=0 and entity_type='ad'
       같은 소재에서 UP과 DOWN이 함께 났다.** 그 날은 창에서 빠져 판정엔 안 들어가지만,
       「거부권이 진동을 멈췄다」가 **아직 아무 데서도 관측되지 않았다**는 사실은 남는다. 정본: `ref 138`.
 
-      ⚠️⚠️**2026-09-06 10:2x 정정(D-NAO-292 · n=5 · 적대 리뷰 1R P1-1) — 바로 위 부기의 마지막 문장은 «틀렸다». 원문은 그대로 둔다.**
+      ⚠️⚠️**2026-09-06 10:2x 정정(D-NAO-293 · n=5 · 적대 리뷰 1R P1-1) — 바로 위 부기의 마지막 문장은 «틀렸다». 원문은 그대로 둔다.**
       위 부기가 *"배포 «후» 구간에도 **같은 소재에서** UP과 DOWN이 함께 났다"*고 적었는데, 그 근거로 든
       「배포 후 UP 2 · DOWN 2」는 **전 소재 «합계»**이고 바로 위 소재별 표와 **축이 다르다.**
       소재별 실측(prod 읽기 전용 · 09-05 · 실쓰기 기준):
@@ -335,7 +335,7 @@ where action='update_bid' and dry_run=0 and entity_type='ad'
       ⚠️**킬스위치는 이 계수기가 못 재는 범주다**(P2-6) — `auto_operator`의 `hold_reason`이라
       change_log에 행 자체가 안 남는다. 위 「0건」 목록에서 뺐다.
 
-      ⚠️⚠️**2026-09-06 09:4x 부기(D-NAO-292 · n=5) — 체크는 안 찍는다. 원문은 그대로 둔다.**
+      ⚠️⚠️**2026-09-06 09:4x 부기(D-NAO-293 · n=5) — 체크는 안 찍는다. 원문은 그대로 둔다.**
       **①위 원문이 「다음 세션은 여기서 시작한다」고 지목한 자리를 열었다** — 계수기에
       `--entity-id` · `--since/--until` · `--as-of` 를 붙였다. 이제 **그 창과 그 소재와 그 순간을
       다시 세울 수 있다**(드리프트 가드: `test_naver_latch_reason_census.py` D절).
@@ -354,7 +354,7 @@ where action='update_bid' and dry_run=0 and entity_type='ad'
       ★**09-12에 옛 27/54와 «직접» 비교하지 말 것** — 같은 자로 양쪽을 다시 재고 비교한다.
       정본: `ref 138` §1.
 
-      ⚠️⚠️**2026-09-06 10:2x 정정(D-NAO-292 · n=5 · 적대 리뷰 1R P1-2) — 바로 위 부기의 «원인 귀속»이 틀렸다. 원문은 그대로 둔다.**
+      ⚠️⚠️**2026-09-06 10:2x 정정(D-NAO-293 · n=5 · 적대 리뷰 1R P1-2) — 바로 위 부기의 «원인 귀속»이 틀렸다. 원문은 그대로 둔다.**
       위 표는 40/27과 54/35의 차이를 **소재(grain)** 탓으로 못 박았는데, 같은 컷오프에서 좌표를
       하나씩 움직여 보면 그렇지 않다(prod 읽기 전용 · 전부 `--as-of '2026-09-05 12:30'`):
 
@@ -408,7 +408,7 @@ where action='update_bid' and dry_run=0 and entity_type='ad'
       합류하는 자리에서 «상향만»** 막는다(하향은 안 막는다 — 고삐는 별개 브레이크다).
       ⇒ **이 수리가 prod에 올라간 뒤라야 ⓙ의 계수가 비로소 「정확한 계수」가 된다.** 정본: `ref 135` §4·§5.
 
-      ⚠️**2026-09-06 09:4x 재관측(D-NAO-292 · n=5) — 여전히 0건. 체크는 안 찍는다.**
+      ⚠️**2026-09-06 09:4x 재관측(D-NAO-293 · n=5) — 여전히 0건. 체크는 안 찍는다.**
       `naver_proposals` 배포 후 **426건** → A-veto **0** · B-veto **0** /
       `ops_diary_entries` 배포 후 **457건** → **0** · **0** (prod 읽기 전용).
       n=4의 08:16 재관측(250·280) 대비 **분모만 커졌다.** 규약대로 **「안 걸렸다」**로 적는다 —
@@ -436,7 +436,7 @@ scp scripts/measurements/oscillation_symmetry_count.py sellc.ohitech.co.kr:/tmp/
 ⚠️초판 §5는 `--window 7d`라 적었는데 **존재하지 않는 인자**였다(실제는 `--db` 필수 + `--days`).
 적대 리뷰 P2-1 채택 — 계약의 `실행:` 명령은 «돌리면 결과가 보여야» 의미가 있다.
 
-ⓗ 진동 일수 · ⓘ 래치 사유 (D-NAO-292 · **09-12에 이 둘로 판정한다** · prod 읽기 전용 · 쓰기 0):
+ⓗ 진동 일수 · ⓘ 래치 사유 (D-NAO-293 · **09-12에 이 둘로 판정한다** · prod 읽기 전용 · 쓰기 0):
 ```bash
 scp scripts/measurements/oscillation_daycount.py sellc.ohitech.co.kr:/tmp/osc_day.py && \
   ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && python3 /tmp/osc_day.py --db ohisell.db --before-days 7 --after-days 7"
