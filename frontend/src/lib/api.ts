@@ -2584,20 +2584,48 @@ export interface RocketMappingItem {
   barcode: string | null;
   note: string | null;
   cost_price: number | null;
-  created_at: string;
-  updated_at: string;
+  /** ★라이브 응답에 **없는** 경우가 있다(적대 리뷰 P2-6) — required로 두면 타입이 또 거짓말을 한다. */
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
+/** `/rocket/cost-map/unmapped`의 **실제** 응답 모양. 서버는 배열이 아니라 이 봉투를 준다. */
+export interface RocketUnmappedEnvelope {
+  vendor_id: string | null;
+  /** limit 전의 **총수**. `items.length`와 다르다 — 화면이 절단을 숨기지 않게 이걸 쓴다. */
+  total_unmapped: number;
+  returned: number;
+  items: RocketUnmappedItem[];
+}
+
+/** `/rocket/cost-map`의 **실제** 응답 모양. */
+export interface RocketMappingEnvelope {
+  count: number;
+  mappings: RocketMappingItem[];
+}
+
+/**
+ * ★★2026-09-06 적대 리뷰 P1-2 — 이 두 함수가 **도입 이래 한 번도 동작한 적이 없었다.**
+ *   서버는 첫 커밋(`c3dcd24a`, 2026-06-18)부터 `{total_unmapped, items}` / `{count, mappings}`
+ *   **dict**를 줬는데 여기 반환 타입이 **배열**로 선언돼 있었다. 화면에서 `unmapped.length === 0`은
+ *   `undefined === 0`이라 false로 통과하고 다음 줄 `unmapped.map(...)`이 던져서
+ *   **「원가 매핑 관리」를 누르면 페이지가 통째로 백지가 됐다**(2개월 반 동안).
+ *
+ *   ★`fetchApi<T>`는 런타임 검증 없는 **캐스팅**이라 `tsc`가 초록이었다 — 타입이 거짓말을 해도
+ *     컴파일러는 못 잡는다. 그래서 여기서 **봉투를 벗겨** 화면에 배열만 넘긴다.
+ *     서버 모양을 아는 곳을 이 한 곳으로 모으는 것이 요점이다(화면이 `.items`를 알면
+ *     같은 지식이 두 층에 산다).
+ */
 export function fetchRocketCostMapUnmapped(
   limit = 200, suggest = true,
-): Promise<RocketUnmappedItem[]> {
-  return fetchApi<RocketUnmappedItem[]>(
+): Promise<RocketUnmappedEnvelope> {
+  return fetchApi<RocketUnmappedEnvelope>(
     `/api/coupang/ops/rocket/cost-map/unmapped?limit=${limit}&suggest=${suggest}`,
   );
 }
 
-export function fetchRocketCostMap(): Promise<RocketMappingItem[]> {
-  return fetchApi<RocketMappingItem[]>("/api/coupang/ops/rocket/cost-map");
+export function fetchRocketCostMap(): Promise<RocketMappingEnvelope> {
+  return fetchApi<RocketMappingEnvelope>("/api/coupang/ops/rocket/cost-map");
 }
 
 /** 「연결 안 함」으로 정한다 — **사유 필수**.
