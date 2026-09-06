@@ -2925,6 +2925,18 @@ class NaverProposal(Base):
     target_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # X1b: pause/resume 제안의 목표 userLock(true=정지, false=재개)
     target_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # P1(D-NAO-42-f): budget_up/budget_down의 목표 일예산(원, dailyBudget) — 실행자는 이 컬럼만 읽는다(rationale 텍스트 파싱 금지)
     budget_auto_eligible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # P1(D-NAO-42-f): 라운드 봉투 분류(Jino "넣어" 2026-07-13) — True=자율(위임 시 자동)/False=회당 라운드 캡 초과분(승인대기)/None=예산제안 아님
+    # D-NAO-297(M2 T3, 계약 §4-C S2-③ · ref 65 §6 S2-ⓒ) — GAVE 사전 기대점수
+    # `S = min{(ROAS/BEP)^γ, 1} × 매출`. 출처는 proposal_pipeline._apply_gave_priority가
+    # 후보에 실어 두는 값이고, **그 함수가 이 컬럼명 그대로 후보에 넣는다**.
+    # ★적대 리뷰 1R P1-1(2R P2-1)의 자리 — 초판은 `proposal_writer.persist`가 임시키
+    # `_gave_expected_score`를 옮겨 담게 썼는데, 파이프라인의 `finally`가 그 키를 persist
+    # «전»에 지운다. 즉 **층을 잘못 지목한 수정**이었고 컬럼은 영구 NULL이 될 뻔했다.
+    # 주석이 틀린 층을 가리키면 다음 사람이 같은 자리를 다시 밟는다 — 그래서 여기 적어 둔다.
+    # ★**정렬 축은 이 컬럼이다 — rationale 문자열을 파싱하지 않는다**(위 target_bid·
+    # target_budget 주석과 같은 규율. 서식이 바뀌면 조용히 죽는 정렬이 된다).
+    # ⚠️NULL의 뜻 둘을 이 컬럼 혼자서는 못 가른다 — ⓐGAVE 채점 보드가 아닌 유형
+    # ⓑ컬럼 신설(2026-09-07) 이전에 만들어진 행. ⓑ는 백필하지 않는다(마이그 docstring).
+    gave_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
     # D-NAO-248 §4-A — 다음 단계(「승인=적용」 사슬)가 쓸 자리만 먼저 둔다. 이번 스프린트는
     # 컬럼·모델만 추가하고 쓰기 로직은 만들지 않는다(전부 nullable, 기존 행 무영향).
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 승인/반려 확정 시각

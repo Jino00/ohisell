@@ -620,6 +620,15 @@ def _apply_gave_priority(db: Session, diag: dict, candidates: list[dict]) -> Non
             )
             for s in scored:
                 s["item"]["_gave_expected_score"] = s["score"]
+                # ★D-NAO-297(M2 T3) 적대 리뷰 1R P1-1의 처방 — **여기가 옳은 층이다.**
+                # 초판은 `proposal_writer.persist`에서 `_gave_expected_score`를 컬럼으로
+                # 옮기려 했는데, 아래 `finally`가 그 임시키를 **persist보다 먼저** 지운다
+                # (:1009 _apply_gave_priority → :1013 persist 순서). 그래서 그 코드는
+                # 항상 False인 죽은 가지였고 컬럼은 prod에서 영구 NULL이 될 뻔했다.
+                # `gave_score`는 `_gave_` 접두사가 아니라 **실제 컬럼명**이라 finally가
+                # 안 지우고 persist의 `clean`이 그대로 ORM에 넘긴다 — 임시키(정렬용)와
+                # 영속값(컬럼)을 «같은 자리에서» 갈라 둔다.
+                s["item"]["gave_score"] = s["score"]
 
         boards_present = {candidates[i]["_gave_board"] for i in scored_positions}
         perf_by_board = {

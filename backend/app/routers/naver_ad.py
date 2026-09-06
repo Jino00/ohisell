@@ -272,6 +272,28 @@ def diagnosis(
 # failed/executing은 X1a T3에서 추가된 상태(harness의 클레임·재승인 재시도 경로) — GET
 # /proposals의 status 필터도 이 값들을 받아야 콘솔에서 "실패한 제안" 등을 조회할 수 있다(T4).
 _PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired", "failed", "executing"}
+# D-NAO-297(M2 T3 · 계약 §4-C S2-③) — 허용 정렬 축. 화이트리스트인 이유: 이 값이 그대로
+# order_by 컬럼으로 가면 임의 컬럼 정렬을 열어 주는 입구가 된다. 축을 늘릴 땐 여기부터.
+_PROPOSAL_SORTS = {"created_at", "gave_score"}
+
+
+def _proposal_order_by(sort: str) -> tuple:
+    """제안 목록 정렬 절 — 라우터 밖으로 뺀 이유는 **테스트가 닿게 하려고**다(적대 리뷰 1R
+    변이 M3의 처방). NULL을 뒤로 보내는 첫 키를 지워도 **SQLite에선 우연히 통과**한다
+    (DESC의 NULL을 끝에 두므로). 그런데 PostgreSQL은 DESC 기본이 NULLS FIRST라 같은 코드가
+    거기선 미채점을 맨 앞에 세운다 — 이 저장소는 SQLite→PostgreSQL 전제라 «지금 초록»이
+    증거가 못 된다. 그래서 순서 결과가 아니라 **절의 «구조»**를 단언한다.
+
+    2차 키 created_at DESC: 동점(특히 0.0000이 여럿)일 때 순서가 흔들리면 같은 질의가
+    페이지마다 다른 카드를 준다.
+    """
+    if sort == "gave_score":
+        return (
+            NaverProposal.gave_score.is_(None),   # ★NULL 뒤로 — 엔진 기본값에 안 맡긴다
+            NaverProposal.gave_score.desc(),
+            NaverProposal.created_at.desc(),
+        )
+    return (NaverProposal.created_at.desc(),)
 _MAX_PROPOSAL_RANGE_DAYS = 90
 
 # D-NAO-54 P4(결정 전용): 승인해도 harness.execute를 부르지 않는 유형 — 승인=결정 기록만
@@ -325,6 +347,11 @@ def _serialize_proposal(
         "rationale": p.rationale,
         # GATE R2 P2-1: rank-step TOCTOU 마커([[servo_base_bid=N]])는 기계 원료 — 사람 화면엔 제거.
         "expected_effect": bid_step_types.strip_base_bid_marker(p.expected_effect),
+        # D-NAO-297(M2 T3 · 계약 §4-C S2-③): GAVE 사전 기대점수를 «필드»로 준다.
+        # 여태 이 값은 rationale 문자열 안에만 있어서 화면도 기계도 정렬 축으로 못 썼다.
+        # None의 뜻은 「GAVE 채점 보드가 아니거나, 컬럼 신설(2026-09-07) 이전 행」이다 —
+        # 「점수 0」이 아니다(0.0은 실제로 나오는 값이다: 무전환 스톱로스 후보가 0.0000).
+        "gave_score": float(p.gave_score) if p.gave_score is not None else None,
         "status": p.status,
         "slack_ts": p.slack_ts,
         "executed_change_log_id": p.executed_change_log_id,
@@ -377,6 +404,10 @@ def proposals(
         description="true=정보성만 / false=실행형만 / 생략=전부. 실행형을 확실히 받으려면 false",
     ),
     limit: int = Query(200, ge=1, le=1000),
+    sort: str = Query(
+        "created_at",
+        description="created_at(기본, 최신순) | gave_score(GAVE 기대점수 내림차순·미채점 뒤로)",
+    ),
     db: Session = Depends(get_db),
 ):
     """제안 카드 목록(콘솔) — naver_proposals 단순 read, 최신순. expert_verdict는 최근 완료
@@ -392,6 +423,8 @@ def proposals(
     (단일 진실 — 프론트가 유형 문자열로 재분류하면 드리프트한다)."""
     if status is not None and status not in _PROPOSAL_STATUSES:
         raise HTTPException(400, f"status는 {sorted(_PROPOSAL_STATUSES)} 중 하나여야 합니다")
+    if sort not in _PROPOSAL_SORTS:
+        raise HTTPException(400, f"sort는 {sorted(_PROPOSAL_SORTS)} 중 하나여야 합니다")
     if date_from and date_to and date_from > date_to:
         raise HTTPException(400, "date_from은 date_to보다 이후일 수 없습니다")
     if date_from and date_to and (date_to - date_from).days > _MAX_PROPOSAL_RANGE_DAYS:
@@ -413,7 +446,8 @@ def proposals(
     # D-NAO-47: total은 limit과 무관한 전체 건수. 페이지 길이를 건수로 쓰면 limit에 따라
     # 달라지는 틀린 숫자가 된다(정보성 "N건 집계됨" 등). rows는 additive라 기존 소비자 불변.
     total = q.count()
-    rows = q.order_by(NaverProposal.created_at.desc()).limit(limit).all()
+    # D-NAO-297(M2 T3 · 계약 §4-C S2-③) — 정렬 축. 기본값은 종전 그대로라 기존 소비자 불변.
+    rows = q.order_by(*_proposal_order_by(sort)).limit(limit).all()
     verdicts = _latest_ok_verdicts_by_proposal(db, [p.id for p in rows])
     # 대상 사람 이름 배치 해석(D-NAO-54, Jino 2026-07-18) — 키워드ID로는 못 알아본다.
     ent_names, camp_names = _batch_entity_names(

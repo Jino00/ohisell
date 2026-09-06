@@ -1284,6 +1284,11 @@ def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
         ).first()
         if exists:
             continue
+        # `_gave_*`는 정렬용 임시키라 버린다(위 docstring). ★단 **`gave_score`는 버리지
+        # 않는다** — 접두사가 없는 «실제 컬럼»이고, `proposal_pipeline._apply_gave_priority`가
+        # 그 자리에서 채운다(D-NAO-297 M2 T3). 여기서 `_gave_expected_score`를 옮겨 담으려던
+        # 초판은 적대 리뷰 1R P1-1에 걸렸다 — 그 임시키는 이 함수에 닿기 «전에» 파이프라인의
+        # finally가 이미 지운다. 이음매를 건너뛴 테스트만 초록이었다.
         clean = {k: v for k, v in p.items() if not k.startswith("_gave_")}
         obj = NaverProposal(**clean)
         db.add(obj)
