@@ -1285,6 +1285,13 @@ def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
         if exists:
             continue
         clean = {k: v for k, v in p.items() if not k.startswith("_gave_")}
+        # D-NAO-297(M2 T3): 임시키를 버리기 «전에» 기대점수 하나만 컬럼으로 옮겨 담는다.
+        # 여태 이 값은 rationale 문자열에만 남아 기계가 정렬 축으로 못 썼다(2026-09-07 prod
+        # 실측: 제안 API 응답 키 24개에 gave_score 부재). 나머지 `_gave_*`(보드·매출·비용)는
+        # 종전대로 버린다 — 컬럼이 없고, 이 슬라이스가 여는 것은 «정렬 축» 하나다.
+        # 키가 없으면 넣지 않는다 → 컬럼은 NULL(GAVE 채점 보드가 아닌 유형이 그렇다).
+        if "_gave_expected_score" in p and p["_gave_expected_score"] is not None:
+            clean["gave_score"] = p["_gave_expected_score"]
         obj = NaverProposal(**clean)
         db.add(obj)
         saved.append(obj)
