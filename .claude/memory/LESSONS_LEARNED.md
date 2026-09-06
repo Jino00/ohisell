@@ -8264,3 +8264,28 @@ return None
 **집행 지점**: `scripts/measurements/aveto_counterfactual.py::stored_curve`(적재 우선 배선) · `backend/tests/test_naver_aveto_counterfactual.py::test_auto_prefers_the_store_over_the_api_without_any_flag`(적재 우선을 «플래그 없이» 고정) · `::test_missing_curve_is_unresolvable_not_a_silent_non_fire`(곡선 부재 = 판정불가) · `::test_curve_connection_literal_is_read_only`(쓰기 0건 드리프트 가드).
 
 **관련**: 교훈 #396(보존기한이 곧 판정 가능 창 — 이번 것은 그 짝: **적재가 곧 판정 가능 창**) · #397(픽스처가 조건을 안 세우면 테스트가 거짓말한다) · #123(0건과 실행 안 됨) · `ref 136` · PR #745
+
+---
+
+## 교훈 #399 — 비율은 창·grain·컷오프를 떼는 순간 «두 질문의 답»을 하나로 붙일 수 있다 (2026-09-06, 체인 `pao-진동차단` n=5 · D-NAO-292)
+
+**사건.** 계약 `CONTRACT_oscillation_damping.md` §0이 진동의 규모를 *"`·->·` 행 **27건**(전체 **54** 중)"* 이라 적었고, 그 수는 §4-C ⓘ의 **배포 전 기준선**이 되어 「배포 후 이 비율이 어떻게 변했나」로 판정될 예정이었다. 세 세션(n=2·n=3·n=4)이 이 줄을 인용하며 지나갔다.
+
+**실측(prod 읽기 전용 · `--as-of '2026-09-05 12:30'` · 2026-09-06 09:4x KST).**
+
+| | 전체 | 무쓰기 | 비율 |
+|---|---|---|---|
+| **소재 1개**(`nad-…554755092`) · 창 09-02~09-05 | **40** | **27** | 67.5% |
+| **전 소재**(ad) · 창 09-01~09-05 | **54** | 35 | 64.8% |
+
+**27은 왼쪽 행, 54는 오른쪽 행이다.** 두 수 다 실재하고 각각 옳지만 **같은 질문의 답이 아니다.** 그리고 n=2가 붙인 정정 *"원 기준선 27/54는 소재 1개 4일 수치"* 는 **분자에만 맞다** — 정정조차 같은 착시를 물려받았다.
+
+**★일반형.** 비율은 두 수를 붙여 **하나의 사실처럼 보이게 만드는 포장**이다. 창·grain·컷오프가 안 적히면 분자와 분모가 다른 곳에서 왔는지 **원리적으로 확인할 수 없고**, 그 상태로도 문장은 완벽히 자연스럽게 읽힌다. 이번 것은 우연이 아니다 — 두 수를 같은 화면에서 «따로» 뽑아 한 줄에 적으면 이 일이 난다.
+
+**★틀린 것은 계산이 아니라 «출력»이다.** 계수기 `latch_reason_census.py`는 값을 정확히 계산했지만 **창·소재·컷오프를 찍지 않았다.** 그래서 되짚을 좌표가 없었고, 세 세션이 인용만 하며 지나갔다. 수리도 계산이 아니라 출력에 했다: 세 필터(`--entity-id` · `--since/--until` · `--as-of`)를 붙이고 **셋을 항상 헤더에 인쇄**한다. 「다시 셀 수 있음」이 곧 「섞였는지 물을 수 있음」이다.
+
+**★짝이 되는 두 번째 함정 — 분모는 «희석»으로도 거짓말한다.** 같은 날 세운 ⓗ 계수기에서: 엔진이 한 번도 안 깨어난 날을 「진동 없던 날」로 세면 **창을 늘릴수록 비율이 좋아진다**(실측: 완결 7일 기준 28.6% vs 발화가 있었던 4일 기준 **50.0%** — 같은 분자 2일). 그리고 **진행 중인 오늘**을 완결된 날과 같은 분모에 넣으면 「UP만 났고 DOWN은 아직」이라 **배포 후 창이 구조적으로 좋아 보인다.** 그래서 계수기는 **분모를 둘 내고**, 진행 중인 날을 분모에서 빼고 참고로만 찍는다.
+
+**집행 지점**: `scripts/measurements/latch_reason_census.py`(세 필터 + 헤더 인쇄) · `backend/tests/test_naver_latch_reason_census.py::test_grain_of_the_ratio_is_always_printed`·`::test_as_of_cutoff_rewinds_the_instant` · `scripts/measurements/oscillation_daycount.py`(분모 둘 · 진행 중인 날 제외 · 배포일 양쪽 제외) · `backend/tests/test_naver_oscillation_daycount.py::test_two_denominators_are_reported`·`::test_in_progress_day_is_not_counted_as_a_clean_day` · `scripts/measurements/README.md`(「비율을 적을 땐 창·grain·컷오프를 떼지 않는다」).
+
+**관련**: 교훈 #398(인계의 「없다」는 그 세션의 탐색 범위) · #123(0건과 실행 안 됨은 같은 숫자로 보인다 — 이번 것은 그 사촌: **다른 분모의 두 수도 한 비율로 보인다**) · 북극성 §7 「표본이 준 결정을 전수로 굳히지 않는다 — 창·분모를 다시 세고 쓴다」 · `ref 138` §1 · PR(이 세션)
