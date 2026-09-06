@@ -388,6 +388,60 @@ describe("확인요청함 탭", () => {
         .toBeTruthy();
     });
 
+    // ★적대 리뷰 P2-4(변이 F4 SURVIVED): 가르는 자를 `invoices.length`로 바꿔도 종전
+    //   프론트 테스트 50건이 전부 통과했다. 백엔드엔 같은 자를 못 박은 테스트가 있는데
+    //   프론트엔 없어서, 「같은 규칙이 두 곳에 살고 한쪽만 고쳐지는」 위험이 열려 있었다.
+    it("정산행을 못 받아온 건은 「계산서 없음」으로 새지 않는다", async () => {
+      h.riQueue = {
+        rows: [
+          // 계산서 번호는 붙었는데 정산행이 아직 없다 → 「발행된 쪽」이다(원칙22)
+          riRow({ purchase_order_seq: 141477039, received_amount: "688620",
+            invoices: [], invoice_rows_missing: [31012484] }),
+          riRow({ purchase_order_seq: 141005728, received_amount: "51300",
+            invoice_seqs: [], has_invoice: false, invoices: [] }),
+        ],
+        live_count: 2, live_amount: "739920",
+        live_no_invoice_count: 1, live_no_invoice_amount: "51300",
+        live_invoiced_count: 1, live_invoiced_amount: "688620",
+        stale_count: 0, stale_amount: "0",
+        last_collection_date_kst: "2026-09-06", note: "",
+      };
+      render(<RiQueueTab />);
+      // 붙여넣기 줄이 곧 «어느 쪽으로 갈렸나»의 표면이다
+      expect((await screen.findByTestId("po-seq-copy-live")).textContent).toBe("141005728");
+      expect((await screen.findByTestId("po-seq-copy-invoiced")).textContent).toBe("141477039");
+    });
+
+    // ★적대 리뷰 P2-5(변이 F10 SURVIVED): 상단 배너를 옛 «전건 단정» 문장으로 통째 되돌려도
+    //   50건이 전부 통과했다 — 유일한 단언이 신·구 문장에 공통인 부분문자열이었다.
+    it("상단 배너가 「RI는 전부 계산서가 나갔다」고 단정하지 않는다", async () => {
+      render(<RiQueueTab />);
+      // ★문구가 <b>로 쪼개져 있어 findByText로는 못 잡는다 — 배너 «전체 텍스트»를 본다.
+      const banner = await screen.findByTestId("ri-queue-banner");
+      expect(banner.textContent).toMatch(/계산서가 이미 발행된 1건은 아래/);
+      expect(banner.textContent).toMatch(/빼고 별도 구역에 모아 뒀습니다/);
+      // 옛 전건 단정이 되살아나면 여기서 걸린다
+      expect(banner.textContent).not.toMatch(/이 건들은 계산서가 이미 나가/);
+    });
+
+    // ★적대 리뷰 P2-6: 검산은 「계산서 이미 발행」 카드가 없어도 떠야 한다 —
+    //   갈림이 무너지는 회귀에서 카드와 함께 사라지면 아무도 못 본다.
+    it("발행분이 0건이어도 검산 줄은 남는다", async () => {
+      h.riQueue = {
+        rows: [riRow({ purchase_order_seq: 141005728, received_amount: "51300",
+          invoice_seqs: [], has_invoice: false, invoices: [] })],
+        live_count: 1, live_amount: "51300",
+        live_no_invoice_count: 1, live_no_invoice_amount: "51300",
+        live_invoiced_count: 0, live_invoiced_amount: "0",
+        stale_count: 0, stale_amount: "0",
+        last_collection_date_kst: "2026-09-06", note: "",
+      };
+      render(<RiQueueTab />);
+      expect(screen.queryByText(/계산서 이미 발행 —/)).toBeNull();
+      const ck = await screen.findByTestId("ri-live-split-checksum");
+      expect(ck.textContent).toMatch(/계산서 없음 1건 \+ 이미 발행 0건 = 오늘 본 확인요청 1건/);
+    });
+
     it("계산서 없는 건이 0이어도 「할 일 없음」으로 위장하지 않는다", async () => {
       h.riQueue = {
         rows: [riRow({ purchase_order_seq: 141475041, received_amount: "861600" })],

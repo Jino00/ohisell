@@ -758,13 +758,29 @@ export function RiQueueTab() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs leading-snug text-gray-600">
-        「거래명세서확인요청」은 <b>파이프라인의 칸이 아니라 우리가 눌러야 할 일 목록</b>입니다.
-        이 중 <b>계산서가 이미 발행된 건</b>은 그 돈이 <b>④지급 대기</b>에 들어 있어서
-        아래 제목의 금액에서 빼고 <b>별도 구역</b>에 모아 뒀습니다 — 더하면 같은 돈을 두 번 셉니다.
+      <div
+        data-testid="ri-queue-banner"
+        className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs leading-snug text-gray-600"
+      >
         {/* ★「RI = 계산서가 이미 나갔다」로 단정하지 않는다. 2026-08-27엔 RI 전건이 계산서를
             갖고 있었지만 2026-09-06 라이브가 반증했다(12건 중 4건뿐) — 그때 이 문장이
-            «아직 계산서가 안 나간 돈»까지 무시하라는 뜻으로 읽혔다. */}
+            «아직 계산서가 안 나간 돈»까지 무시하라는 뜻으로 읽혔다.
+            ★그리고 «발행분이 실제로 있을 때»만 그 구역을 안내한다(적대 리뷰 P2-7):
+            0건인데 「별도 구역에 모아 뒀습니다」라고 쓰면 없는 구역을 찾게 된다. */}
+        「거래명세서확인요청」은 <b>파이프라인의 칸이 아니라 우리가 눌러야 할 일 목록</b>입니다.
+        {liveInvoiced.length > 0 ? (
+          <>
+            {" "}이 중 <b>계산서가 이미 발행된 {cnt(data.live_invoiced_count)}건</b>은 아래
+            제목의 금액에서 <b>빼고 별도 구역</b>에 모아 뒀습니다 — 그 돈은 계산서 축에서 이미
+            세고 있어 여기 더하면 같은 돈을 두 번 셉니다.
+          </>
+        ) : (
+          <>
+            {" "}지금은 계산서가 발행된 건이 <b>없어서</b> 아래 금액이 곧 전부입니다 —
+            발행된 건이 생기면 별도 구역으로 내려갑니다(파이프라인 합계에 더하면
+            같은 돈을 두 번 셉니다).
+          </>
+        )}
         <div className="mt-1">{data.note}</div>
       </div>
 
@@ -805,11 +821,21 @@ export function RiQueueTab() {
           title={`계산서 이미 발행 — ${cnt(data.live_invoiced_count)}건 · ${won(data.live_invoiced_amount)}`}
           right={<Badge tone="alert">위 금액에서 빠져 있음</Badge>}
         >
+          {/* ★여기서 「전부 ④지급 대기에 있다」고 단정하면 이 PR이 고치려던 병을 축소판으로
+              되살리는 것이다(적대 리뷰 P2-1). ④지급 대기는 **정산행이 있고 지급일이 아직 안 지난**
+              계산서만 센다 — 정산행을 아직 못 받아온 건(「정산행 미수집」)이나 지급일이 이미
+              지난 건은 ④에도 안 잡힌다. 우리가 아는 것은 「계산서 번호가 붙었다」까지다.
+              어느 쪽인지는 행마다 「연결 계산서」 칸이 말한다. */}
           <div className="border-b border-gray-200 bg-gray-50 px-4 py-2 text-xs leading-snug text-gray-600">
-            이 건들은 <b>계산서가 이미 나가 ④지급 대기에 들어 있습니다</b> — 그래서 위
+            이 건들은 <b>계산서 번호가 이미 붙었습니다</b> — 그 돈은 계산서 축에서 세므로 위
             「지금 확인이 필요한 건」 금액에 더하지 않습니다(더하면 같은 돈을 두 번 셉니다).
             <div className="mt-1">
-              다만 <b>거래명세서확인은 아직 남은 일</b>입니다 — 상태가 여전히
+              ※ <b>「④지급 대기」에 있다는 뜻은 아닙니다</b> — ④는 정산행이 있고 지급일이 아직
+              안 지난 계산서만 셉니다. 정산행을 못 받아왔거나 지급일이 지난 건은 ④에도 없습니다.
+              행마다 <b>「연결 계산서」</b> 칸이 어느 쪽인지 말합니다.
+            </div>
+            <div className="mt-1">
+              그리고 <b>거래명세서확인은 아직 남은 일</b>입니다 — 상태가 여전히
               「거래명세서확인요청」이라 확인 버튼은 그대로 살아 있습니다.
             </div>
           </div>
@@ -826,15 +852,22 @@ export function RiQueueTab() {
               <RiRow key={r.purchase_order_seq} r={r} onConfirm={() => setModal(r)} />
             ))}
           </Table>
-          {/* ★검산을 화면이 스스로 낸다 — 두 덩어리가 라이브 전체와 안 맞으면 한쪽이 새고 있다. */}
-          <div className="border-t border-gray-100 px-4 py-2 text-xs text-gray-500">
-            검산: 계산서 없음 {cnt(data.live_no_invoice_count)}건 + 이미 발행{" "}
-            {cnt(data.live_invoiced_count)}건 = 오늘 본 확인요청 {cnt(data.live_count)}건
-            {" · "}{won(data.live_no_invoice_amount)} + {won(data.live_invoiced_amount)} ={" "}
-            {won(data.live_amount)}
-          </div>
         </Card>
       )}
+
+      {/* ★검산은 두 카드 «밖»에 둔다(적대 리뷰 P2-6). 카드 «안»에 두면, 갈림이 통째로 무너져
+          전량이 「계산서 없음」으로 새는 회귀 — 즉 이 변경이 막으려는 바로 그 모양 — 에서
+          `liveInvoiced=0`이 되어 **검산까지 같이 사라지고** 제목만 조용히 옛 숫자를 보여준다.
+          검산이 살아 있으려면 「깨지는 그 상황」에도 렌더돼야 한다. */}
+      <div
+        data-testid="ri-live-split-checksum"
+        className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500"
+      >
+        검산: 계산서 없음 {cnt(data.live_no_invoice_count)}건 + 이미 발행{" "}
+        {cnt(data.live_invoiced_count)}건 = 오늘 본 확인요청 {cnt(data.live_count)}건
+        {" · "}{won(data.live_no_invoice_amount)} + {won(data.live_invoiced_amount)} ={" "}
+        {won(data.live_amount)}
+      </div>
 
       {/* ★신선도가 떨어진 것은 섹션 자체를 나눈다 — 같은 표에 두면 색만으로는 안 갈린다.
           실측(2026-08-27): 이 섹션의 8건은 전부 계산서 확정·전송에 지급일까지 지난 건이었다. */}
