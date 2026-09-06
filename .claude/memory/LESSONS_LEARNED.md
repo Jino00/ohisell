@@ -8289,3 +8289,17 @@ return None
 **집행 지점**: `scripts/measurements/latch_reason_census.py`(세 필터 + 헤더 인쇄) · `backend/tests/test_naver_latch_reason_census.py::test_grain_of_the_ratio_is_always_printed`·`::test_as_of_cutoff_rewinds_the_instant` · `scripts/measurements/oscillation_daycount.py`(분모 둘 · 진행 중인 날 제외 · 배포일 양쪽 제외) · `backend/tests/test_naver_oscillation_daycount.py::test_two_denominators_are_reported`·`::test_in_progress_day_is_not_counted_as_a_clean_day` · `scripts/measurements/README.md`(「비율을 적을 땐 창·grain·컷오프를 떼지 않는다」).
 
 **관련**: 교훈 #398(인계의 「없다」는 그 세션의 탐색 범위) · #123(0건과 실행 안 됨은 같은 숫자로 보인다 — 이번 것은 그 사촌: **다른 분모의 두 수도 한 비율로 보인다**) · 북극성 §7 「표본이 준 결정을 전수로 굳히지 않는다 — 창·분모를 다시 세고 쓴다」 · `ref 138` §1 · PR(이 세션)
+
+### ⚠️ #399 정정·증보 (2026-09-06 10:2x · 적대 리뷰 1R FAIL, P1 2건) — 원문은 그대로 둔다
+
+**①원인 귀속이 틀렸다.** 위 표는 40/27과 54/35의 차이를 **소재(grain)** 탓으로 못 박았는데, 좌표를 하나씩 움직여 재측정하니 **같은 창(09-02~09-05)에서 소재 필터는 no-op**(전 소재도 40/27)이었다. 40 → 54를 만든 것은 **창에 09-01을 넣은 것**이고(40+14=54 · 27+8=35), 그 소재는 09-01에 0건이라 **소재와 창이 교락(confounded)** 돼 있어 어느 쪽 탓인지 분리할 수 없다.
+- 살아남는 결론: **27과 54는 한 비율이 아니다**(27은 4일 창의 무쓰기, 54는 **5일 창**의 전체 — §0이 그 54에 「4일」이라 붙인 것이 어긋난 자리).
+- 철회하는 결론: *"grain이 다르다"* · *"n=2의 정정은 분자에만 맞다"*. **「grain이 다르다」 → 「좌표(창·소재·컷오프)가 다르다」**로 낮춘다.
+
+**②그리고 같은 세션이 «같은 병»을 한 번 더 저질렀다.** 새로 만든 ⓗ 계수기의 배포일 「배포 전/후 분해」는 **전 소재 합계**인데, 바로 위 소재별 표와 나란히 찍혀 있어 그 합계의 「배포 후 UP 2·DOWN 2」를 **한 소재의 사실로** 읽었다. 그리고 *"배포 «후» 구간에도 **같은 소재에서** UP과 DOWN이 함께 났다"*를 계약·ref·트랙 **세 곳**에 적었다. 소재별 실측은 정반대다 — **배포 후 양방향을 낸 소재는 0개**(`554755092`는 UP 전부 배포 전·DOWN 전부 배포 후).
+
+**★★그래서 이 교훈의 진짜 형태는 이것이다 — 「좌표를 적어라」는 규율로는 부족하다.**
+나는 이 병을 **진단하는 문장을 쓰면서** 같은 병을 두 번 저질렀다. 규율을 알고 있었고, 그 규율을 문서에 적고 있었고, 그러면서 틀렸다. 문서가 못 막는다. 막은 것은 **다른 기의 재현**이었다.
+⇒ 집행은 **출력의 «모양»**으로 간다: ①합계와 소재별을 나란히 찍을 땐 합계에 **「이 줄만으로는 …를 말할 수 없다」**를 박고 ②**계수기가 스스로 세어 말한다**(「배포 후 구간에 양방향을 낸 소재: N개」) ③원인 귀속을 쓰기 전에 **좌표를 하나씩만 움직여** 재보는 것을 관례로 둔다(이번 P1-2를 잡은 방법이 정확히 그것이다).
+
+**추가 집행 지점**: `scripts/measurements/oscillation_daycount.py`(소재별 분해 + 양방향 소재 수 자백 + 합계 경고줄) · `backend/tests/test_naver_oscillation_daycount.py::test_aggregate_split_never_claims_same_creative`(합계는 양방향인데 소재는 0개인 픽스처로 고정) · `::test_now_fallback_is_kst_not_utc` · `::test_dry_run_and_other_grain_rows_are_excluded` · `::test_iso_t_separator_does_not_flip_the_split`.

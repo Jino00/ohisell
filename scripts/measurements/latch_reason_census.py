@@ -185,6 +185,15 @@ def main() -> int:
         params.append(args.as_of)
     cur.execute("\n".join(sql), params)
     rows = cur.fetchall()
+    # ★적대 리뷰 P2-8 — 자매 계수기(`oscillation_daycount.py`)와 계약 §4-C 정본 SQL은 `dry_run = 0`인데
+    #   여기엔 그 필터가 없다. **필터를 «더하지» 않는다**: 이 계수기가 낸 ⓘ 기준선(37/57 등)의 인구를
+    #   소급으로 바꾸게 되고, 실측(2026-09-06)상 이 창의 `update_bid` 행은 **전건 `dry_run=0`**이라
+    #   오늘 차이가 0이다. 대신 **차이가 생기면 시끄럽게** 만든다 — 09-12에 두 계수기를 나란히 놓고
+    #   판정하므로, 조용히 갈라지는 것만 막으면 된다.
+    dry_run_rows = None
+    if any(r[1] == "dry_run" for r in cur.execute("pragma table_info(naver_change_log)")):
+        cur.execute("select count(*) from naver_change_log where action='update_bid' and dry_run <> 0")
+        dry_run_rows = cur.fetchone()[0]
     con.close()
 
     total_by_day: Counter = Counter()
@@ -237,6 +246,11 @@ def main() -> int:
         )
     if by_lane.get(UNCLASSIFIED, 0):
         print(f"⚠️ 레인 미분류 {by_lane[UNCLASSIFIED]}건 — LANE_RULES 갱신 필요.")
+    if dry_run_rows:
+        print(
+            f"\n⚠️ `dry_run <> 0`인 `update_bid` 행이 저장소에 {dry_run_rows}건 있다 — **이 계수기는 그것도 센다**"
+            "(자매 계수기 `oscillation_daycount.py`는 `dry_run = 0`만 센다). 두 수를 나란히 놓을 땐 이 차이를 밝힐 것."
+        )
     if unmarked:
         print(
             f"ℹ️ 무쓰기 {nowrite}건 중 {unmarked}건은 «막힌 것»이 아니라 「모름」이다 "

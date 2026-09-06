@@ -89,6 +89,10 @@ def main() -> int:
     args = ap.parse_args()
 
     deploy_dt = datetime.fromisoformat(args.deploy_ts)
+    # ★적대 리뷰 P2-7 — `changed_at`은 공백 구분('2026-09-05 14:08:42')이고 분해는 **문자열 비교**다.
+    #   `--deploy-ts '2026-09-05T14:08:42'`를 주면 `' '(0x20) < 'T'(0x54)`라 **모든 행이 「배포 전」**이 된다.
+    #   파서는 둘 다 받으므로 조용히 뒤집힌다 ⇒ 비교에 쓸 문자열은 여기서 한 번 정규화한다.
+    deploy_ts = deploy_dt.strftime("%Y-%m-%d %H:%M:%S")
     deploy_day = deploy_dt.date()
     now_kst = datetime.fromisoformat(args.now_kst) if args.now_kst else None
 
@@ -130,13 +134,21 @@ def main() -> int:
     # (날짜, 소재) → {'up': n, 'down': n}. basis=write면 무쓰기 행은 분자에서 뺀다.
     cells: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: {"up": 0, "down": 0})
     nowrite_cells: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: {"up": 0, "down": 0})
-    deploy_split = {"before": {"up": 0, "down": 0}, "after": {"up": 0, "down": 0}}
+    # ★★적대 리뷰 P1-1 — 초판은 이걸 «전 소재 합계» 하나로 뒀다. 그 합계줄을 바로 위 «소재별» 표와
+    #   나란히 찍어 놓으니, 합계의 「배포 후 UP 2 · DOWN 2」를 **한 소재의 사실로** 읽게 됐고
+    #   실제로 이 세션이 계약·ref·트랙 세 곳에 *"배포 «후» 구간에도 같은 소재에서 UP과 DOWN이 함께 났다"*
+    #   는 **거짓 문장**을 남겼다(실측: 배포 후 양방향을 낸 소재는 **0개**). 이 계수기가 잡겠다고 한 바로
+    #   그 병 — «다른 축의 두 수를 한 사실로 읽는 것» — 이 이 계수기 자신의 출력에서 재발한 것이다.
+    #   ⇒ 키를 (소재, 전/후)로 넓혀 **소재별로 찍고**, 합계는 「합계」라고 못 박아 병기한다.
+    deploy_split: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: {"up": 0, "down": 0})
     unknown: dict[str, int] = defaultdict(int)
+    unknown_days: set[str] = set()
 
     for r in rows:
         direction = _dir_of(r["ptype"])
         if direction is None:
             unknown[r["ptype"] or "(빈 문자열)"] += 1
+            unknown_days.add(r["changed_at"][:10])
             continue
         day = r["changed_at"][:10]
         counted = (not r["nowrite"]) or args.basis == "all"
@@ -145,8 +157,10 @@ def main() -> int:
         else:
             nowrite_cells[(day, r["entity_id"])][direction] += 1
         if day == _fmt(deploy_day) and counted:
-            side = "before" if r["changed_at"] < args.deploy_ts else "after"
-            deploy_split[side][direction] += 1
+            # ★`counted`를 지키는 것이 중요하다(적대 리뷰 P2-2) — 안 지키면 바로 위 소재별 표는
+            #   write 기준인데 이 분해만 all 기준이 되어 **인접한 두 줄이 다른 자**가 된다.
+            side = "before" if r["changed_at"] < deploy_ts else "after"
+            deploy_split[(r["entity_id"], side)][direction] += 1
 
     print("=== ⓗ 진동 일수 계수 — 「같은 소재·같은 날 UP∧DOWN이 함께 난 날」 (읽기 전용·쓰기 0건) ===")
     print(f"관측 {now_kst:%Y-%m-%d %H:%M:%S} KST · 원장 naver_change_log(KST 단독) · grain={args.entity_type}")
@@ -166,7 +180,13 @@ def main() -> int:
         )
         # ★분모를 «둘» 낸다 — 엔진이 한 번도 안 깨어난 날을 「진동 없던 날」로 세면 창을 늘릴수록
         #   비율이 좋아진다. 그건 개선이 아니라 분모 희석이다(북극성 §7 「창·분모를 다시 세고 쓴다」).
-        fired_days = sorted({day for (day, _e) in cells if day in complete_keys})
+        # ★P2-9 — 분류 못 한 타입만 난 날도 «엔진이 깨어난 날»이다. `cells`만 보면 그 날이
+        #   발화일 분모에서 빠져, 분모 희석을 막겠다는 이 분모의 취지가 거꾸로 깨진다.
+        fired_days = sorted(
+            {day for (day, _e) in cells if day in complete_keys}
+            | {day for (day, _e) in nowrite_cells if day in complete_keys}
+            | (unknown_days & complete_keys)
+        )
         n_c, n_f = len(complete), len(fired_days)
         pct_c = (len(osc_days) / n_c * 100) if n_c else 0.0
         pct_f = (len(osc_days) / n_f * 100) if n_f else 0.0
@@ -211,15 +231,41 @@ def main() -> int:
             print(f"  {eid}  UP {c['up']} · DOWN {c['down']}{mark}")
     else:
         print("  (발화 없음)")
+    # ★배포 시각 기준 «소재별» 분해 — 「같은 소재에서」를 말하려면 이 표를 봐야 한다.
+    split_ids = sorted({eid for (eid, _s) in deploy_split})
+    print(f"  ★배포 시각({deploy_ts}) 기준 **소재별** 분해:")
+    both_after = []
+    for eid in split_ids:
+        b, a = deploy_split[(eid, "before")], deploy_split[(eid, "after")]
+        two_way = bool(a["up"] and a["down"])
+        if two_way:
+            both_after.append(eid)
+        print(
+            f"    {eid}  배포 전 UP {b['up']}·DOWN {b['down']}  |  배포 후 UP {a['up']}·DOWN {a['down']}"
+            f"  |  배포 후 양방향: {'★예' if two_way else '아니오'}"
+        )
+    if not split_ids:
+        print("    (없음)")
+    tot = {s: {d: sum(v[d] for (_e, ss), v in deploy_split.items() if ss == s) for d in ("up", "down")}
+           for s in ("before", "after")}
     print(
-        f"  배포 시각 기준 분해: 배포 «전» UP {deploy_split['before']['up']} · DOWN {deploy_split['before']['down']}"
-        f"  /  배포 «후» UP {deploy_split['after']['up']} · DOWN {deploy_split['after']['down']}"
+        f"  합계(전 소재): 배포 «전» UP {tot['before']['up']} · DOWN {tot['before']['down']}"
+        f"  /  배포 «후» UP {tot['after']['up']} · DOWN {tot['after']['down']}"
+    )
+    print(
+        f"  ⚠️ 위 **합계** 줄만으로는 「같은 소재에서 UP과 DOWN이 함께 났다」를 말할 수 없다 — 축이 다르다"
+        f"(합계는 전 소재, 진동은 소재별). **배포 후 구간에 양방향을 낸 소재: {len(both_after)}개**"
+        + (f" — {', '.join(both_after)}" if both_after else "")
     )
     print("  ⇒ 그날은 두 코드가 반씩 만든 날이라 어느 창에 넣어도 그 창의 코드가 «안 한 일»을 그 창에 귀속시킨다.")
 
     if args.basis == "write":
-        nw = sum(c["up"] + c["down"] for c in nowrite_cells.values())
+        nw = sum(c["up"] + c["down"] for c in nowrite_cells.values())   # ★셀 수가 아니라 «행 수»다(P2-5)
         print(f"\nℹ️ 분자에서 뺀 무쓰기 재발화 {nw}건 — 「같은 판정이 다시 났지만 가드레일이 쓰기를 막은」 행이다(ⓘ의 인구). `--basis all`로 보면 함께 센다.")
+    else:
+        # ★P2-6 — `all` 출력만 본 사람이 「그 수의 몇 %가 무쓰기였나」를 알 수 없으면 같은 병이다.
+        nw = sum(1 for r in rows if r["nowrite"] and _dir_of(r["ptype"]) is not None)
+        print(f"\nℹ️ `--basis all` — 위 수에 무쓰기 재발화 {nw}건이 «포함»돼 있다(기본 `write`는 이걸 뺀다).")
     if dropped:
         print(
             f"\n⚠️ 제안이 없어 조인에서 빠진 change_log 행 {dropped}건 — 이 계수기가 «못 본» 행이다. "

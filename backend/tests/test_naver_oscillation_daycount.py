@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import itertools
 import sqlite3
 import subprocess
 import sys
@@ -62,8 +63,13 @@ def _mk_db(path: Path, rows) -> None:
     con.close()
 
 
+_RUN_SEQ = itertools.count()
+
+
 def _run(tmp_path, rows, *extra, now="2026-09-06 09:00:00"):
-    db = tmp_path / "t.db"
+    # ★한 테스트가 _run을 두 번 부르면(같은 픽스처를 basis만 바꿔 돌리는 경우) 같은 파일에
+    #   테이블을 다시 만들다 죽는다 — 호출마다 새 파일을 쓴다.
+    db = tmp_path / f"t{next(_RUN_SEQ)}.db"
     _mk_db(db, rows)
     out = subprocess.run(
         [sys.executable, str(SCRIPT), "--db", str(db), "--deploy-ts", DEPLOY_TS,
@@ -99,8 +105,18 @@ def test_unknown_type_is_none_not_down():
 DEPLOY_DAY_OSC = [
     ("2026-09-05 10:20:00", "nad-1", "bid_up", True),
     ("2026-09-05 17:20:00", "nad-1", "bid_down", True),
+    # ★적대 리뷰 P2-2 — 배포일 무쓰기 행이 픽스처에 «없어서» 분해가 `--basis`를 지키는지가
+    #   무테스트였다(그 변이가 생존했다). 이 한 행이 그 문을 닫는다.
+    ("2026-09-05 18:20:00", "nad-1", "bid_down", False),
     ("2026-09-03 10:20:00", "nad-1", "bid_up", True),
     ("2026-09-03 20:20:00", "nad-1", "bid_down", True),
+]
+
+# ★★P1-1 픽스처 — **소재 둘 다 배포 후 한 방향씩만** 낸다. 어느 소재도 진동하지 않는데
+#   «전 소재 합계»는 배포 후 UP 1 · DOWN 1이 된다. 이것이 이 세션이 실제로 오독한 모양이다.
+DEPLOY_DAY_AGGREGATE_TRAP = [
+    ("2026-09-05 17:20:00", "nad-1", "bid_up", True),
+    ("2026-09-05 18:20:00", "nad-2", "bid_down", True),
 ]
 
 
@@ -120,8 +136,80 @@ def test_deploy_day_numbers_are_always_printed(tmp_path):
     out = _run(tmp_path, DEPLOY_DAY_OSC, "--before-days", "4", "--after-days", "4")
     block = out.split("★제외한 배포일")[1]
     assert "nad-1  UP 1 · DOWN 1" in block
-    assert "배포 «전» UP 1 · DOWN 0" in block
-    assert "배포 «후» UP 0 · DOWN 1" in block
+    assert "배포 전 UP 1·DOWN 0" in block
+    assert "배포 후 UP 0·DOWN 1" in block
+    assert "합계(전 소재): 배포 «전» UP 1 · DOWN 0  /  배포 «후» UP 0 · DOWN 1" in block
+
+
+def test_deploy_split_respects_basis(tmp_path):
+    """★P2-2 — 소재별 표는 write 기준인데 분해만 all 기준이면 인접한 두 줄이 다른 자가 된다."""
+    out = _run(tmp_path, DEPLOY_DAY_OSC, "--before-days", "4", "--after-days", "4")
+    block = out.split("★제외한 배포일")[1]
+    assert "배포 후 UP 0·DOWN 1" in block          # 무쓰기 18:20 DOWN은 빠져 1건
+    out_all = _run(tmp_path, DEPLOY_DAY_OSC, "--before-days", "4", "--after-days", "4",
+                   "--basis", "all")
+    assert "배포 후 UP 0·DOWN 2" in out_all.split("★제외한 배포일")[1]
+
+
+def test_aggregate_split_never_claims_same_creative(tmp_path):
+    """★★P1-1 — 합계가 배포 후 UP·DOWN을 둘 다 보여도, 어느 «소재»도 양방향이 아닐 수 있다.
+
+    이 세션이 실제로 그 합계를 「같은 소재에서 함께 났다」로 읽어 계약·ref·트랙 세 곳에
+    거짓 문장을 남겼다. 그래서 출력이 **양방향 소재 수를 스스로 세어 말한다.**
+    """
+    out = _run(tmp_path, DEPLOY_DAY_AGGREGATE_TRAP, "--before-days", "4", "--after-days", "4")
+    block = out.split("★제외한 배포일")[1]
+    assert "합계(전 소재): 배포 «전» UP 0 · DOWN 0  /  배포 «후» UP 1 · DOWN 1" in block
+    assert "**배포 후 구간에 양방향을 낸 소재: 0개**" in block
+    assert "nad-1  배포 전 UP 0·DOWN 0  |  배포 후 UP 1·DOWN 0  |  배포 후 양방향: 아니오" in block
+    assert "nad-2  배포 전 UP 0·DOWN 0  |  배포 후 UP 0·DOWN 1  |  배포 후 양방향: 아니오" in block
+    assert "합계만으로는" in block or "**합계** 줄만으로는" in block
+
+
+def test_aggregate_split_reports_a_real_two_way_creative(tmp_path):
+    """거울 — 실제로 한 소재가 배포 후 양방향이면 그 소재를 이름으로 지목한다."""
+    rows = [
+        ("2026-09-05 17:20:00", "nad-1", "bid_up", True),
+        ("2026-09-05 18:20:00", "nad-1", "bid_down", True),
+    ]
+    block = _run(tmp_path, rows, "--before-days", "4", "--after-days", "4").split("★제외한 배포일")[1]
+    assert "배포 후 양방향: ★예" in block
+    assert "**배포 후 구간에 양방향을 낸 소재: 1개** — nad-1" in block
+
+
+def test_iso_t_separator_does_not_flip_the_split(tmp_path):
+    """★P2-7 — `fromisoformat`은 'T'를 받지만 분해는 `changed_at`(공백)과의 문자열 비교다.
+    정규화가 없으면 `' ' < 'T'`라 **모든 행이 「배포 전」**이 된다."""
+    db = tmp_path / "t.db"
+    _mk_db(db, DEPLOY_DAY_AGGREGATE_TRAP)
+    out = subprocess.run(
+        [sys.executable, str(SCRIPT), "--db", str(db),
+         "--deploy-ts", "2026-09-05T14:08:42", "--now-kst", "2026-09-06 09:00:00",
+         "--before-days", "4", "--after-days", "4"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "합계(전 소재): 배포 «전» UP 0 · DOWN 0  /  배포 «후» UP 1 · DOWN 1" in out
+
+
+def test_now_fallback_is_kst_not_utc(tmp_path):
+    """★P2-1 — `--now-kst`를 안 주는 «계약 §5의 실제 실행 경로»가 커버리지 0이었다.
+    UTC로 회귀하면 00:00~09:00 KST에 「오늘」이 하루 이르게 잡혀 어제가 진행 중으로 빠진다.
+    자매 스크립트에는 같은 지적으로 붙인 가드가 이미 있었는데 새 파일로 안 옮겨왔다."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    db = tmp_path / "n.db"
+    _mk_db(db, [("2026-09-03 10:20:00", "nad-1", "bid_up", True)])
+    out = subprocess.run(
+        [sys.executable, str(SCRIPT), "--db", str(db), "--deploy-ts", DEPLOY_TS,
+         "--before-days", "4", "--after-days", "4"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    stamp = out.split("관측 ")[1].split(" KST")[0]
+    observed = _dt.fromisoformat(stamp)
+    expected = _dt.now(_tz.utc).replace(tzinfo=None) + _td(hours=9)
+    assert abs((observed - expected).total_seconds()) < 300, (
+        f"관측 시각 {observed} 이 KST(UTC+9)가 아니다 — 기대 {expected} 부근"
+    )
 
 
 # ══════════════ C. 진행 중인 날은 분모에 안 들어간다 ══════════════
@@ -162,7 +250,7 @@ def test_two_denominators_are_reported(tmp_path):
     out = _run(tmp_path, DEPLOY_DAY_OSC, "--before-days", "4", "--after-days", "4")
     before = out.split("--- 배포 후")[0]
     assert "완결된 날 4일 기준 25.0%" in before      # 09-01~09-04 중 1일
-    assert "발화가 있었던 날 1일** 기준 100.0%" in before
+    assert "발화가 있었던 날 1일** 기준 100.0%" in before   # 배포일 무쓰기 행은 창 밖이라 무영향
 
 
 # ══════════════ E. 진동의 정의 — «같은 소재·같은 날» ══════════════
@@ -263,3 +351,30 @@ def test_rows_without_a_proposal_are_confessed_not_swallowed(tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout
     assert "조인에서 빠진 change_log 행 1건" in out
+
+
+def test_dry_run_and_other_grain_rows_are_excluded(tmp_path):
+    """★적대 리뷰 M19·M20 생존 — 두 필터가 픽스처의 «단일 인구» 탓에 무테스트였다.
+
+    오늘 prod는 전건 `dry_run=0`·`entity_type='ad'`라 무해하지만, 그래서 회귀해도 조용하다.
+    dry_run 행은 «실제로 안 나간 쓰기»이고 adgroup grain은 «다른 자»다 — 둘 다 진동이 아니다.
+    """
+    db = tmp_path / "f.db"
+    _mk_db(db, [("2026-09-03 10:20:00", "nad-1", "bid_up", True)])
+    con = sqlite3.connect(db)
+    con.execute("insert into naver_proposals values (50,'bid_down')")
+    con.execute("insert into naver_proposals values (51,'bid_down')")
+    # dry_run=1 (모의 쓰기) — 같은 소재·같은 날 DOWN이지만 실제로 나가지 않았다
+    con.execute("insert into naver_change_log values (50,50,'update_bid',1,'ad','nad-1',"
+                "'2026-09-03 20:20:00','{}','{}')")
+    # 다른 grain(adgroup) — 소재 진동의 자가 아니다
+    con.execute("insert into naver_change_log values (51,51,'update_bid',0,'adgroup','nad-1',"
+                "'2026-09-03 21:20:00','{}','{}')")
+    con.commit()
+    con.close()
+    out = subprocess.run(
+        [sys.executable, str(SCRIPT), "--db", str(db), "--deploy-ts", DEPLOY_TS,
+         "--now-kst", "2026-09-06 09:00:00", "--before-days", "4", "--after-days", "4"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "진동일 **0일**" in out.split("--- 배포 후")[0]

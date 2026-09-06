@@ -386,14 +386,22 @@ CENSUS_ROWS = [
     ("2026-09-02 10:20:00", "nad-1", True),
     ("2026-09-03 10:20:00", "nad-1", False),
     ("2026-09-03 11:20:00", "nad-1", False),
+    # ★P2-4 — 컷오프와 «정확히 같은» 시각. `--as-of`는 배타(`<`)이므로 이 행은 빠져야 한다.
+    ("2026-09-03 12:00:00", "nad-1", False),
     ("2026-09-03 23:20:00", "nad-1", False),   # as-of 12:00 컷오프 밖
     ("2026-09-03 10:20:00", "nad-2", False),   # 다른 소재
+    # ★P2-3 — `--until` 당일 행. 포함 경계(`<=`)가 아니면 헤드라인 수가 조용히 줄어든다.
+    ("2026-09-05 10:20:00", "nad-1", False),
     ("2026-09-09 10:20:00", "nad-1", False),   # 창 밖
 ]
 
 
+_grain_seq = itertools.count()
+
+
 def _run_grain(tmp_path, *extra):
-    db = tmp_path / "c.db"
+    # 한 테스트가 두 번 부를 수 있다(경계 비교) — 호출마다 새 파일.
+    db = tmp_path / f"c{next(_grain_seq)}.db"
     _mk_grain_db(db, CENSUS_ROWS)
     out = subprocess.run(
         [sys.executable, str(CENSUS_PATH), "--db", str(db),
@@ -406,19 +414,26 @@ def _run_grain(tmp_path, *extra):
 def test_window_filter_excludes_rows_outside(tmp_path):
     out = _run_grain(tmp_path)
     assert "창 2026-09-02 ~ 2026-09-05" in out
-    assert "전체 5건" in out          # 09-09 행은 빠진다
+    assert "전체 7건" in out          # 09-09 행만 빠진다
 
 
 def test_entity_filter_narrows_to_one_creative(tmp_path):
     out = _run_grain(tmp_path, "--entity-id", "nad-1")
-    assert "전체 4건" in out
+    assert "전체 6건" in out
     assert "소재 필터 = nad-1" in out
 
 
 def test_as_of_cutoff_rewinds_the_instant(tmp_path):
     out = _run_grain(tmp_path, "--entity-id", "nad-1", "--as-of", "2026-09-03 12:00")
+    # ★배타 경계 — 12:00:00 «정확히» 그 시각의 행은 빠진다(P2-4).
     assert "전체 3건 · 무쓰기 재발화 2건" in out
     assert "컷오프(--as-of) = 2026-09-03 12:00" in out
+
+
+def test_until_boundary_is_inclusive(tmp_path):
+    """★P2-3 — `--until` 당일 행이 빠지면 헤드라인 수가 조용히 줄어든다(prod 실측: 36/25 vs 40/27)."""
+    assert "전체 7건" in _run_grain(tmp_path)                      # --until 2026-09-05 (기본)
+    assert "전체 6건" in _run_grain(tmp_path, "--until", "2026-09-04")
 
 
 def test_grain_of_the_ratio_is_always_printed(tmp_path):
