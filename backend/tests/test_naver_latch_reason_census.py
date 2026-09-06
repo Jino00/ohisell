@@ -341,3 +341,144 @@ def test_window_is_kst_not_utc(tmp_path, capsys, monkeypatch):
            else (Path(__file__).resolve().parents[2] / "scripts" / "measurements"
                  / "latch_reason_census.py").read_text())
     assert "'+9 hours'" in src, "KST 보정이 사라졌다"
+
+
+# ══════════════ D. 그레인 — 창·소재·컷오프를 다시 세울 수 있다 (D-NAO-293 · n=5) ══════════════
+#
+# ★계약 §4-C ⓘ 원문이 남긴 지시가 이 절이다: *"계수기에는 `entity_id` 필터가 없다 — 일주일 뒤에
+#   돌려도 이 도구로는 그 전후 비교를 낼 수 없다. **다음 세션은 여기서 시작한다.**"*
+#   그리고 세 필터를 붙여 다시 세어 보니 **27/54는 분자와 분모의 grain이 다른 비율이었다** —
+#   27은 소재 1개 무쓰기, 54는 전 소재 전체다. 여기서 고정하는 것은 **그 두 수가 서로 다른
+#   질문의 답이라는 것**이고, 그래서 세 필터가 «항상 출력에 찍혀야» 한다.
+
+import sqlite3
+import subprocess
+import sys
+
+CENSUS_PATH = (
+    Path(__file__).resolve().parents[2] / "scripts" / "measurements" / "latch_reason_census.py"
+)
+
+
+def _mk_grain_db(path, rows):
+    """rows: (changed_at, entity_id, wrote)"""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        create table naver_change_log (
+            id integer primary key, action text, entity_type text, entity_id text,
+            changed_at text, before_value text, rationale text
+        );
+        """
+    )
+    for i, (changed_at, eid, wrote) in enumerate(rows, start=1):
+        con.execute(
+            "insert into naver_change_log values (?,?,?,?,?,?,?)",
+            (i, "update_bid", "ad", eid, changed_at,
+             '{"adAttr":{"bidAmt":1000}}' if wrote else None,
+             "[실행 불가] 가드레일 차단 — 쿨다운 중 — 2시간"),
+        )
+    con.commit()
+    con.close()
+
+
+CENSUS_ROWS = [
+    ("2026-09-02 10:20:00", "nad-1", True),
+    ("2026-09-03 10:20:00", "nad-1", False),
+    ("2026-09-03 11:20:00", "nad-1", False),
+    # ★P2-4 — 컷오프와 «정확히 같은» 시각. `--as-of`는 배타(`<`)이므로 이 행은 빠져야 한다.
+    ("2026-09-03 12:00:00", "nad-1", False),
+    ("2026-09-03 23:20:00", "nad-1", False),   # as-of 12:00 컷오프 밖
+    ("2026-09-03 10:20:00", "nad-2", False),   # 다른 소재
+    # ★P2-3 — `--until` 당일 행. 포함 경계(`<=`)가 아니면 헤드라인 수가 조용히 줄어든다.
+    ("2026-09-05 10:20:00", "nad-1", False),
+    ("2026-09-09 10:20:00", "nad-1", False),   # 창 밖
+]
+
+
+_grain_seq = itertools.count()
+
+
+def _run_grain(tmp_path, *extra):
+    # 한 테스트가 두 번 부를 수 있다(경계 비교) — 호출마다 새 파일.
+    db = tmp_path / f"c{next(_grain_seq)}.db"
+    _mk_grain_db(db, CENSUS_ROWS)
+    out = subprocess.run(
+        [sys.executable, str(CENSUS_PATH), "--db", str(db),
+         "--since", "2026-09-02", "--until", "2026-09-05", *extra],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
+
+
+def test_window_filter_excludes_rows_outside(tmp_path):
+    out = _run_grain(tmp_path)
+    assert "창 2026-09-02 ~ 2026-09-05" in out
+    assert "전체 7건" in out          # 09-09 행만 빠진다
+
+
+def test_entity_filter_narrows_to_one_creative(tmp_path):
+    out = _run_grain(tmp_path, "--entity-id", "nad-1")
+    assert "전체 6건" in out
+    assert "소재 필터 = nad-1" in out
+
+
+def test_as_of_cutoff_rewinds_the_instant(tmp_path):
+    out = _run_grain(tmp_path, "--entity-id", "nad-1", "--as-of", "2026-09-03 12:00")
+    # ★배타 경계 — 12:00:00 «정확히» 그 시각의 행은 빠진다(P2-4).
+    assert "전체 3건 · 무쓰기 재발화 2건" in out
+    assert "컷오프(--as-of) = 2026-09-03 12:00" in out
+
+
+def test_as_of_boundary_is_exclusive_at_second_precision(tmp_path):
+    """★2R 신규 — 기존 픽스처는 `--as-of '…12:00'`(초 없음)과 행 `'…12:00:00'`의 **문자열 길이**로
+    빠졌다. 그래서 `<`를 `<=`로 바꿔도 결과가 같았다 — 주석이 설명하는 메커니즘(배타 경계)과
+    실제로 작동한 메커니즘(길이)이 달랐다. 초까지 준 케이스가 진짜 경계를 세운다.
+    """
+    out = _run_grain(tmp_path, "--entity-id", "nad-1", "--as-of", "2026-09-03 12:00:00")
+    assert "전체 3건 · 무쓰기 재발화 2건" in out   # 12:00:00 행은 배타 경계라 빠진다
+
+
+def test_until_boundary_is_inclusive(tmp_path):
+    """★P2-3 — `--until` 당일 행이 빠지면 헤드라인 수가 조용히 줄어든다(prod 실측: 36/25 vs 40/27)."""
+    assert "전체 7건" in _run_grain(tmp_path)                      # --until 2026-09-05 (기본)
+    assert "전체 6건" in _run_grain(tmp_path, "--until", "2026-09-04")
+
+
+def test_grain_of_the_ratio_is_always_printed(tmp_path):
+    """★27/54가 굳은 이유가 이것이다 — 창·소재·컷오프가 출력에 없으면 두 수의 grain이 안 보인다."""
+    out = _run_grain(tmp_path)
+    assert "소재 필터 = (전 소재)" in out
+    assert "컷오프(--as-of) = (없음 — 현재까지)" in out
+
+
+def test_days_and_explicit_window_conflict_is_confessed(tmp_path):
+    db = tmp_path / "c2.db"
+    _mk_grain_db(db, CENSUS_ROWS)
+    out = subprocess.run(
+        [sys.executable, str(CENSUS_PATH), "--db", str(db),
+         "--since", "2026-09-02", "--days", "30"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "--days 는 무시한다" in out
+
+
+def test_census_connect_is_read_only_ast():
+    """교훈 #397 — 리터럴 존재가 아니라 «호출»을 본다(주석에 심어도 통과하지 않게)."""
+    import ast
+
+    tree = ast.parse(CENSUS_PATH.read_text())
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "connect"
+        and isinstance(n.func.value, ast.Name) and n.func.value.id == "sqlite3"
+    ]
+    assert calls
+    for call in calls:
+        kw = {k.arg: k.value for k in call.keywords}
+        assert isinstance(kw.get("uri"), ast.Constant) and kw["uri"].value is True
+        arg = call.args[0]
+        assert isinstance(arg, ast.JoinedStr)
+        tail = arg.values[-1]
+        assert isinstance(tail, ast.Constant) and tail.value.endswith("?mode=ro")

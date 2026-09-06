@@ -19,8 +19,18 @@ D-NAO-288 계약 §4-C ⓘ 의 집행 지점이다. 그 계약은 §10에 *"`·-
   harness에 닿기 전에 걸러진 판정은 운영 일기(`ops_diary_entries`)에만 있고 여기 안 들어온다 —
   두 수를 나란히 놓으면 grain이 달라 오독된다(7일 창 실측: 일기 blocked 4,640 vs 여기 37).
 
+★그레인 — 2026-09-06(n=5) 추가. 계약 §4-C ⓘ 원문이 남긴 지시가 이것이다:
+  *"원 기준선 27/54는 소재 1개 4일 수치인데 **계수기에는 `entity_id` 필터가 없다** — 일주일 뒤에
+  돌려도 이 도구로는 그 전후 비교를 낼 수 없다. **다음 세션은 여기서 시작한다.**"*
+  ⇒ `--entity-id` · `--since/--until` · `--as-of` 셋을 붙여 **그 창과 그 소재를 다시 세울 수 있게** 했다.
+  ★★그리고 그렇게 세워 보니 **27/54는 분자와 분모의 grain이 다른 비율이었다**(2026-09-06 09:4x KST 실측):
+  `--as-of '2026-09-05 12:30'` 에서 **소재 1개 무쓰기 = 27**, **전 소재 전체 = 54**다. 같은 자를
+  양쪽에 대면 그 순간 값은 **소재 1개 27/40(67.5%)** · **전 소재 35/54(64.8%)**다. 원문은 고치지
+  않는다(계약 소급 수정 금지) — 다시 셀 수 있게 만들고 어긋남을 적는다. 정본 `ref 137`.
+
 사용:
     python3 scripts/measurements/latch_reason_census.py --db <sqlite경로> [--days 7] [--entity-type ad]
+        [--entity-id nad-…] [--since 2026-09-02] [--until 2026-09-05] [--as-of '2026-09-05 12:30']
 """
 from __future__ import annotations
 
@@ -132,21 +142,58 @@ def main() -> int:
     # ★기본 7 — 계약 §4-C가 실은 수의 창이다(적대 리뷰 P2-4: 기본값이 무테스트였다).
     ap.add_argument("--days", type=int, default=DEFAULT_DAYS, help=f"창(일). 기본 {DEFAULT_DAYS}")
     ap.add_argument("--entity-type", default="ad", help="grain. 기본 ad")
+    # ★아래 셋이 계약 §4-C ⓘ가 「다음 세션은 여기서 시작한다」고 지목한 자리다(위 docstring).
+    ap.add_argument("--entity-id", default=None, help="소재 1개로 좁힌다(기본: 전 소재)")
+    ap.add_argument("--since", default=None, help="창 시작일 KST 'YYYY-MM-DD'(주면 --days를 무시한다)")
+    ap.add_argument("--until", default=None, help="창 끝일 KST 'YYYY-MM-DD'(포함)")
+    ap.add_argument("--as-of", default=None, help="이 KST 시각 «전»의 행만 센다 — 과거 한 순간을 다시 세울 때")
     args = ap.parse_args()
+
+    if (args.since or args.until) and args.days != DEFAULT_DAYS:
+        # 두 창 지정이 동시에 오면 어느 것이 이겼는지가 출력에서 안 보인다 — 조용히 이기게 두지 않는다.
+        print("⚠️ --since/--until 과 --days 가 함께 왔다. --since/--until 을 쓰고 --days 는 무시한다.")
 
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     cur = con.cursor()
-    cur.execute(
-        """
-        select date(changed_at), coalesce(rationale, ''),
-               case when before_value is null then 1 else 0 end
-        from naver_change_log
-        where action = 'update_bid' and entity_type = ?
-          and changed_at >= datetime('now', '+9 hours', ?)
-        """,
-        (args.entity_type, f"-{args.days} days"),
-    )
+    sql = [
+        "select date(changed_at), coalesce(rationale, ''),",
+        "       case when before_value is null then 1 else 0 end",
+        "from naver_change_log",
+        "where action = 'update_bid' and entity_type = ?",
+    ]
+    params: list[object] = [args.entity_type]
+    if args.since or args.until:
+        # 명시 창 — 날짜 경계는 KST 문자열 그대로다(changed_at이 KST-naive).
+        if args.since:
+            sql.append("  and date(changed_at) >= ?")
+            params.append(args.since)
+        if args.until:
+            sql.append("  and date(changed_at) <= ?")
+            params.append(args.until)
+        window_label = f"{args.since or '(처음)'} ~ {args.until or '(끝)'}"
+    else:
+        # ★`changed_at`은 KST-naive인데 sqlite `now`는 UTC라 `+9 hours` 보정 없이 자르면
+        #   창이 실제로 7일 9시간이 된다(적대 리뷰 P2-5).
+        sql.append("  and changed_at >= datetime('now', '+9 hours', ?)")
+        params.append(f"-{args.days} days")
+        window_label = f"최근 {args.days}일"
+    if args.entity_id:
+        sql.append("  and entity_id = ?")
+        params.append(args.entity_id)
+    if args.as_of:
+        sql.append("  and changed_at < ?")
+        params.append(args.as_of)
+    cur.execute("\n".join(sql), params)
     rows = cur.fetchall()
+    # ★적대 리뷰 P2-8 — 자매 계수기(`oscillation_daycount.py`)와 계약 §4-C 정본 SQL은 `dry_run = 0`인데
+    #   여기엔 그 필터가 없다. **필터를 «더하지» 않는다**: 이 계수기가 낸 ⓘ 기준선(37/57 등)의 인구를
+    #   소급으로 바꾸게 되고, 실측(2026-09-06)상 이 창의 `update_bid` 행은 **전건 `dry_run=0`**이라
+    #   오늘 차이가 0이다. 대신 **차이가 생기면 시끄럽게** 만든다 — 09-12에 두 계수기를 나란히 놓고
+    #   판정하므로, 조용히 갈라지는 것만 막으면 된다.
+    dry_run_rows = None
+    if any(r[1] == "dry_run" for r in cur.execute("pragma table_info(naver_change_log)")):
+        cur.execute("select count(*) from naver_change_log where action='update_bid' and dry_run <> 0")
+        dry_run_rows = cur.fetchone()[0]
     con.close()
 
     total_by_day: Counter = Counter()
@@ -176,7 +223,9 @@ def main() -> int:
     nowrite = sum(nowrite_by_day.values())
     pct = (nowrite / total * 100) if total else 0.0
 
-    print(f"=== ⓘ 래치 사유 계수 — 최근 {args.days}일 · entity_type={args.entity_type} ===")
+    print(f"=== ⓘ 래치 사유 계수 — 창 {window_label} · entity_type={args.entity_type} ===")
+    # ★창·소재·컷오프를 «항상» 찍는다 — 이 세 가지가 안 찍혀서 27/54의 grain이 섞인 채 굳었다.
+    print(f"소재 필터 = {args.entity_id or '(전 소재)'} · 컷오프(--as-of) = {args.as_of or '(없음 — 현재까지)'}")
     print(f"전체 {total}건 · 무쓰기 재발화 {nowrite}건 ({pct:.1f}%)")
     print("\n--- 날짜별 무쓰기/전체 ---")
     for day in sorted(total_by_day):
@@ -197,6 +246,11 @@ def main() -> int:
         )
     if by_lane.get(UNCLASSIFIED, 0):
         print(f"⚠️ 레인 미분류 {by_lane[UNCLASSIFIED]}건 — LANE_RULES 갱신 필요.")
+    if dry_run_rows:
+        print(
+            f"\n⚠️ `dry_run <> 0`인 `update_bid` 행이 저장소에 {dry_run_rows}건 있다 — **이 계수기는 그것도 센다**"
+            "(자매 계수기 `oscillation_daycount.py`는 `dry_run = 0`만 센다). 두 수를 나란히 놓을 땐 이 차이를 밝힐 것."
+        )
     if unmarked:
         print(
             f"ℹ️ 무쓰기 {nowrite}건 중 {unmarked}건은 «막힌 것»이 아니라 「모름」이다 "
