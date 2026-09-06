@@ -430,6 +430,15 @@ def test_as_of_cutoff_rewinds_the_instant(tmp_path):
     assert "컷오프(--as-of) = 2026-09-03 12:00" in out
 
 
+def test_as_of_boundary_is_exclusive_at_second_precision(tmp_path):
+    """★2R 신규 — 기존 픽스처는 `--as-of '…12:00'`(초 없음)과 행 `'…12:00:00'`의 **문자열 길이**로
+    빠졌다. 그래서 `<`를 `<=`로 바꿔도 결과가 같았다 — 주석이 설명하는 메커니즘(배타 경계)과
+    실제로 작동한 메커니즘(길이)이 달랐다. 초까지 준 케이스가 진짜 경계를 세운다.
+    """
+    out = _run_grain(tmp_path, "--entity-id", "nad-1", "--as-of", "2026-09-03 12:00:00")
+    assert "전체 3건 · 무쓰기 재발화 2건" in out   # 12:00:00 행은 배타 경계라 빠진다
+
+
 def test_until_boundary_is_inclusive(tmp_path):
     """★P2-3 — `--until` 당일 행이 빠지면 헤드라인 수가 조용히 줄어든다(prod 실측: 36/25 vs 40/27)."""
     assert "전체 7건" in _run_grain(tmp_path)                      # --until 2026-09-05 (기본)

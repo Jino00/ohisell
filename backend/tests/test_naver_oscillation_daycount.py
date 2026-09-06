@@ -378,3 +378,35 @@ def test_dry_run_and_other_grain_rows_are_excluded(tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout
     assert "진동일 **0일**" in out.split("--- 배포 후")[0]
+
+
+# ══════════════ I. 2R 신규 — 회귀하면 1R P1-1의 거짓 문장이 «정확히» 부활하는 자리 ══════════════
+
+def test_two_way_means_after_deploy_only(tmp_path):
+    """★2R 신규 N4 — prod의 실제 모양이 어느 픽스처에도 없었다.
+
+    `554755092`는 **배포 전 UP 3 · 배포 후 DOWN 2**다. `two_way` 조건을 창 무관으로 넓히면
+    이 소재가 「★예」로 뒤집혀 계수기가 「양방향 1개」라 말하고, **1R P1-1의 거짓 문장이 부활한다.**
+    함정용 픽스처는 배포 «전» 행이 0건, 거울용은 배포 후에 둘 다 있어 이 모양을 안 만들었다.
+    """
+    rows = [
+        ("2026-09-05 03:20:00", "nad-P", "bid_up", True),
+        ("2026-09-05 10:20:00", "nad-P", "bid_up", True),
+        ("2026-09-05 13:20:00", "nad-P", "bid_up", True),
+        ("2026-09-05 17:20:00", "nad-P", "bid_down", True),
+        ("2026-09-05 22:20:00", "nad-P", "bid_down", True),
+    ]
+    block = _run(tmp_path, rows, "--before-days", "4", "--after-days", "4").split("★제외한 배포일")[1]
+    assert "nad-P  배포 전 UP 3·DOWN 0  |  배포 후 UP 0·DOWN 2  |  배포 후 양방향: 아니오" in block
+    assert "**배포 후 구간에 양방향을 낸 소재: 0개**" in block
+
+
+def test_nowrite_confession_counts_rows_not_cells(tmp_path):
+    """★2R 신규(P2-5가 「채택」으로 적혔으나 실제로는 주석만 달렸다) — 셀 수로 바뀌면 조용히 줄어든다."""
+    rows = [
+        ("2026-09-03 10:20:00", "nad-1", "bid_up", False),
+        ("2026-09-03 11:20:00", "nad-1", "bid_up", False),   # 같은 (날짜, 소재) = 같은 셀
+        ("2026-09-03 12:20:00", "nad-1", "bid_down", False),
+    ]
+    out = _run(tmp_path, rows, "--before-days", "4", "--after-days", "4")
+    assert "분자에서 뺀 무쓰기 재발화 3건" in out       # 셀 수로 세면 1
