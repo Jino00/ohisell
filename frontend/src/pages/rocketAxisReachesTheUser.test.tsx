@@ -192,6 +192,22 @@ describe("🚀 로켓배송(1P) 축 — 사람에게 닿는가", () => {
     const badge = screen.getByText(/원가 커버리지 모름/).closest("div")?.parentElement;
     expect(badge?.className ?? "").toContain("amber");
     expect(badge?.className ?? "").not.toContain("emerald");
+    // 「모름」이라는 낱말만 남고 «그래서 어떻다»가 사라지면 사람은 그냥 지나친다(변이 M7b).
+    expect(badge?.textContent ?? "").toContain("순이익이 완전한 값인지 판단할 수 없습니다");
+    // ★★배지만 막으면 절반이다(2R 지적, 변이 M7c가 여기를 뚫었다) — **카드 표면**에도
+    //   같은 병이 산다. 「모름」인데 순이익 sub가 `매출−광고−원가`라고 쓰면, 이 화면이 앓던
+    //   바로 그 병(부분·미상 원가로 계산된 순이익이 «완전한 값»으로 읽힌다)이 그대로다.
+    expect(await screen.findByText(/커버리지 모름 — 원가 반영 정도 미상/)).toBeTruthy();
+    expect(screen.queryByText("매출−광고−원가")).toBeNull();
+    // 원가 카드도 「모른다」고 말한다(빈칸으로 두지 않는다)
+    expect(await screen.findByText(/커버리지 모름 — 원가 반영 정도를 알 수 없음/)).toBeTruthy();
+  });
+
+  it("has_cost=false여도 순이익 카드가 「매출−광고−원가」라 단정하지 않는다", async () => {
+    h.overview = overview({ has_cost: false, cost: null, cost_coverage: null });
+    await openRocketAxis();
+    expect(await screen.findByText("매출−광고(원가 미반영)")).toBeTruthy();
+    expect(screen.queryByText("매출−광고−원가")).toBeNull();
   });
 
   // ══════════════════════════════════════════════════════════════
@@ -214,6 +230,52 @@ describe("🚀 로켓배송(1P) 축 — 사람에게 닿는가", () => {
       await screen.findByText("P-TEST-001");
       const body = document.body.textContent ?? "";
       expect(body).toMatch(/105/);
+    });
+
+    it("「연결 안 함」으로 정해도 위쪽 돈 숫자를 다시 읽는다", async () => {
+      // ★2R 지적: 이 경로를 아무도 안 눌러서 `onCostMapChanged()` 제거 변이가 생존했다.
+      //   코드는 맞았지만 «다음에 누가 지워도 아무도 안 잡는» 자리였다.
+      const prompt = vi.spyOn(window, "prompt").mockReturnValue("공용 원가라 연결 안 함");
+      try {
+        await openRocketAxis();
+        fireEvent.click(await screen.findByText(/🔗 원가 매핑 관리/));
+        await screen.findByText("P-TEST-001");
+        const before = h.overviewCalls;
+        fireEvent.click(screen.getByRole("button", { name: "연결 안 함" }));
+        await waitFor(() => expect(h.overviewCalls).toBeGreaterThan(before));
+      } finally { prompt.mockRestore(); }
+    });
+
+    it("삭제는 확인을 묻고, 확인하면 위쪽 돈 숫자를 다시 읽는다", async () => {
+      // ★삭제는 클릭 한 번에 확정 매핑이 사라지고 **순이익이 바뀐다** — 바로 옆 「연결 안 함」은
+      //   사유까지 묻는데 삭제만 무방비였다(1R P2-2).
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      try {
+        await openRocketAxis();
+        fireEvent.click(await screen.findByText(/🔗 원가 매핑 관리/));
+        await screen.findByText("P-TEST-001");
+        fireEvent.click(screen.getByText(/확정\/연결안함/));
+        await screen.findByText("P-DONE-001");
+        const before = h.overviewCalls;
+        fireEvent.click(screen.getByRole("button", { name: "삭제" }));
+        expect(confirm).toHaveBeenCalled();
+        await waitFor(() => expect(h.overviewCalls).toBeGreaterThan(before));
+      } finally { confirm.mockRestore(); }
+    });
+
+    it("삭제 확인을 취소하면 아무 일도 일어나지 않는다", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      try {
+        await openRocketAxis();
+        fireEvent.click(await screen.findByText(/🔗 원가 매핑 관리/));
+        await screen.findByText("P-TEST-001");
+        fireEvent.click(screen.getByText(/확정\/연결안함/));
+        await screen.findByText("P-DONE-001");
+        const before = h.overviewCalls;
+        fireEvent.click(screen.getByRole("button", { name: "삭제" }));
+        await new Promise((r) => setTimeout(r, 20));
+        expect(h.overviewCalls).toBe(before);   // 되돌릴 수 없는 것은 «묻고 나서» 한다
+      } finally { confirm.mockRestore(); }
     });
 
     it("확정하면 위쪽 돈 숫자를 다시 읽는다", async () => {
