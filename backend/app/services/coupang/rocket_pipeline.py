@@ -19,8 +19,11 @@
 #   ⑥ compute_rocket_ri_queue     : 「확인요청함」 — RI 상태 PO + 살아있음/굳음 판정
 #
 # ★★칸은 서로 겹치지 않는다 (계약 §2). 겹치는 것은 칸이 아니라 «액션 목록»으로 낸다 —
-#   RI 5,351,520원은 이미 계산서가 나가 ④지급대기에 포함돼 있으므로 칸으로 더하면 **중복**이다.
-#   그래서 RI는 `compute_rocket_ri_queue`가 따로 내고 파이프라인 합계에 안 들어간다.
+#   RI는 `compute_rocket_ri_queue`가 따로 내고 파이프라인 합계에 안 들어간다.
+#   ★2026-09-06 정정: 초판은 여기에 *"RI 5,351,520원은 이미 계산서가 나가 ④지급대기에 포함돼
+#     있으므로"*라고 적어 **RI 전건이 계산서를 갖고 있다고 단정**했다. 라이브가 반증했다 —
+#     그날 라이브 RI 12건 중 계산서 보유는 4건뿐이었다. 겹칠 «수» 있어서 칸에서 빼는 것이지,
+#     전건이 겹쳐서가 아니다. 겹치는 쪽·안 겹치는 쪽은 `compute_rocket_ri_queue`가 가른다.
 #
 # ★★미종결과 종결단계를 가른다. `rocket_recon.SETTLED_STAGE_STATUSES`({CI,RI})가 이미
 #   「입고가 끝난 단계」를 전수 실측으로 정의해 뒀다. 그 자를 그대로 쓴다:
@@ -672,8 +675,24 @@ def stale_open_po_dates(db: Session, vendor_id: str | None, limit_days: int = 40
 def compute_rocket_ri_queue(db: Session, vendor_id: str | None) -> dict:
     """거래명세서확인요청(RI) 상태 PO — 우리가 눌러야 할 일 목록.
 
-    ★파이프라인 칸이 아니다. RI PO의 입고금액은 이미 계산서가 나가 ④지급대기에 포함돼 있으므로
-      합계에 더하면 중복이다(계약 §2).
+    ★파이프라인 칸이 아니다.
+
+    ★★그런데 「RI = 계산서가 이미 나갔다」는 **참이 아니다**(2026-09-06 실측이 반증). 초판은
+      관측 표본이 「RI 12건 전건 계산서 보유」였던 2026-08-27 하루라 그 우연을 규칙으로 굳혔고,
+      그래서 화면 제목의 금액이 **아직 계산서가 안 나간 돈까지 「중복이니 무시하라」**는 뜻으로
+      읽혔다. 2026-09-06 라이브: 12건 4,536,216원 중 계산서 보유는 **4건 3,038,131원**뿐이고
+      나머지 8건 1,498,085원은 계산서가 아직 없다.
+      ⇒ 라이브를 두 덩어리로 **가른다**:
+        `live_no_invoice_*` — 계산서 없음. 이것이 「지금 확인이 필요한 건」의 금액이다.
+        `live_invoiced_*`   — 계산서 이미 발행. ④지급대기에 이미 들어 있어 더하면 중복이다.
+      둘 다 `rows`에는 남는다 — 상태가 RI인 이상 **누르는 일은 4건에도 남아 있기 때문**이다
+      (Jino 지시 2026-09-06: 「금액·건수는 빼고, 목록엔 따로 표시」).
+
+    ★가르는 자는 `has_invoice`(= `invoice_seqs`가 비어 있지 않다) **하나뿐**이고 그건 이미
+      `_pipeline_rows`가 내는 필드다. 여기서 규칙을 다시 정의하면 같은 판정이 두 곳에 살고
+      한쪽만 고쳐지는 날이 온다(교훈 #319 계열, 이 파일 P2-1이 이미 한 번 겪은 자리).
+      번호는 있는데 정산행을 못 받은 건(`invoice_rows_missing`)도 **발행된 쪽**이다 —
+      「미수집」이지 「미발행」이 아니다(원칙22). 그래서 자는 `invoices`가 아니라 `invoice_seqs`다.
 
     ★★살아 있는 것과 굳은 것을 가른다. 2026-08-27 실측: RI 12건 중 8건이 2026-08-05에 굳었고
       그 8건의 계산서는 확정·전송에 **지급일까지 지났다** — 이미 닫힌 건이다. 상태만 보고
@@ -717,10 +736,22 @@ def compute_rocket_ri_queue(db: Session, vendor_id: str | None) -> dict:
 
     live = [r for r in out if not r["is_stale"]]
     stale = [r for r in out if r["is_stale"]]
+    # ★계산서 유무로 라이브를 가른다. `has_invoice`는 _pipeline_rows가 낸 값을 그대로 쓴다.
+    live_invoiced = [r for r in live if r["has_invoice"]]
+    live_no_invoice = [r for r in live if not r["has_invoice"]]
     return {
         "rows": out,
+        # ★라이브 «전체» — 아래 두 덩어리의 합이다. 화면은 이걸 제목에 쓰지 않지만 남긴다:
+        #   `live_count == live_no_invoice_count + live_invoiced_count`가 성립하는지
+        #   화면·테스트가 볼 수 있어야 «조용히 한쪽이 새는» 일을 잡을 수 있다.
         "live_count": len(live),
         "live_amount": sum((r["received_amount"] for r in live), _Z),
+        # 계산서가 아직 없는 건 — 이것이 「지금 확인이 필요한 건」의 건수·금액이다.
+        "live_no_invoice_count": len(live_no_invoice),
+        "live_no_invoice_amount": sum((r["received_amount"] for r in live_no_invoice), _Z),
+        # 계산서가 이미 발행된 건 — 목록에는 남되 위 금액에는 안 들어간다(④지급대기와 중복).
+        "live_invoiced_count": len(live_invoiced),
+        "live_invoiced_amount": sum((r["received_amount"] for r in live_invoiced), _Z),
         "stale_count": len(stale),
         "stale_amount": sum((r["received_amount"] for r in stale), _Z),
         "last_collection_date_kst": last_day,
