@@ -54,10 +54,16 @@ function riRow(seq: number, isStale = false) {
 function queueWith(rows: ReturnType<typeof riRow>[]) {
   const live = rows.filter((r) => !r.is_stale);
   const stale = rows.filter((r) => r.is_stale);
+  // 이 파일의 행은 전부 계산서 미보유(has_invoice 없음) — 라이브 전체가 그대로 「계산서 없음」이다.
+  const invoiced = live.filter((r) => (r as { has_invoice?: boolean }).has_invoice);
   return {
     rows,
     live_count: live.length,
     live_amount: "4870435",
+    live_no_invoice_count: live.length - invoiced.length,
+    live_no_invoice_amount: "4870435",
+    live_invoiced_count: invoiced.length,
+    live_invoiced_amount: "0",
     stale_count: stale.length,
     stale_amount: "0",
     last_collection_date_kst: "2026-08-28",

@@ -371,6 +371,78 @@ def test_정산행_미수집은_미발행이_아니라_모름이다(db):
     assert row["invoice_rows_missing"] == [999999]
 
 
+def test_라이브는_계산서_유무로_갈린다(db):
+    """★「지금 확인이 필요한 건」 금액은 **계산서가 아직 없는 것**만 센다(Jino 지시 2026-09-06).
+
+    2026-09-06 라이브가 「RI = 계산서가 이미 나갔다」를 반증했다 — 12건 4,536,216원 중 계산서
+    보유는 4건 3,038,131원뿐이었다. 안 가르면 이미 ④지급대기에 있는 돈이 제목에 섞여
+    **같은 돈을 두 번 보게 된다**. 갈라도 목록에서 지우지는 않는다(누르는 일은 남아 있다).
+    """
+    # 계산서 있음 2건(하나는 정산행 미수집 — 「미수집」은 「미발행」이 아니다)
+    _po(db, 1, "RI", conf=861600, recv=861600, conf_qty=8, recv_qty=8,
+        synced=LAST_SYNC, pay_seqs=[31012484])
+    _line(db, 1, "P1", 8, 107700)
+    _po(db, 2, "RI", conf=178711, recv=178711, conf_qty=3, recv_qty=3,
+        synced=LAST_SYNC, pay_seqs=[999999])   # 정산행 없음 = 모름, 그래도 발행된 쪽
+    _line(db, 2, "P2", 3, 59570.33)
+    # 계산서 없음 2건
+    _po(db, 3, "RI", conf=51300, recv=51300, conf_qty=2, recv_qty=2, synced=LAST_SYNC)
+    _line(db, 3, "P3", 2, 25650)
+    _po(db, 4, "RI", conf=27300, recv=27300, conf_qty=1, recv_qty=1, synced=LAST_SYNC)
+    _line(db, 4, "P4", 1, 27300)
+    db.add(CoupangRocketSettlement(
+        invoice_seq=31012484, vendor_id=VID, supply_amount=Decimal("2499301"),
+        vat=Decimal("249930"), payment_amount=Decimal("2749231"),
+        issue_date=date(2026, 9, 5), payment_date=date(2026, 11, 4),
+        tax_invoice_confirmed_date=date(2026, 9, 6), tax_invoice_transmitted=True,
+    ))
+    db.commit()
+    q = compute_rocket_ri_queue(db, VID)
+
+    assert q["live_no_invoice_count"] == 2
+    assert q["live_no_invoice_amount"] == Decimal("78600")     # 51,300 + 27,300
+    assert q["live_invoiced_count"] == 2
+    assert q["live_invoiced_amount"] == Decimal("1040311")     # 861,600 + 178,711
+    # ★검산 — 두 덩어리는 라이브 전체와 정확히 맞아야 한다(한쪽이 새면 여기서 걸린다)
+    assert q["live_count"] == q["live_no_invoice_count"] + q["live_invoiced_count"]
+    assert q["live_amount"] == q["live_no_invoice_amount"] + q["live_invoiced_amount"]
+    # ★갈랐다고 목록에서 지우지 않는다 — 상태가 RI인 이상 누르는 일은 4건에도 남아 있다
+    assert {r["purchase_order_seq"] for r in q["rows"]} == {1, 2, 3, 4}
+
+
+def test_정산행_미수집은_계산서_없음으로_새지_않는다(db):
+    """★번호는 있는데 정산행을 못 받은 건은 **발행된 쪽**이다(원칙22).
+
+    가르는 자를 `invoices`(정산행)로 쓰면 이 건이 「계산서 없음」으로 넘어와 제목 금액이
+    부푼다 — 그래서 자는 `has_invoice`(= invoice_seqs)여야 한다. 이 테스트가 그 자를 고정한다.
+    """
+    _po(db, 1, "RI", conf=1000, recv=1000, conf_qty=1, recv_qty=1,
+        synced=LAST_SYNC, pay_seqs=[999999])
+    _line(db, 1, "P1", 1, 1000)
+    db.commit()
+    q = compute_rocket_ri_queue(db, VID)
+    assert q["rows"][0]["invoices"] == []          # 정산행은 없지만
+    assert q["live_invoiced_count"] == 1           # 「발행됨」 쪽에 선다
+    assert q["live_no_invoice_count"] == 0
+    assert q["live_no_invoice_amount"] == Decimal("0")
+
+
+def test_굳은_건은_계산서_갈림에_안_들어간다(db):
+    """갈림은 **라이브만** 나눈다 — 굳은 건은 「지금 상태를 모르는 건」이 따로 센다."""
+    _po(db, 1, "RI", conf=75430, recv=75430, conf_qty=10, recv_qty=10,
+        synced=OLD_SYNC, pay_seqs=[27442270])
+    _line(db, 1, "P1", 10, 7543)
+    _po(db, 2, "RI", conf=1000, recv=1000, conf_qty=1, recv_qty=1, synced=OLD_SYNC)
+    _line(db, 2, "P2", 1, 1000)
+    _po(db, 3, "RI", conf=5000, recv=5000, conf_qty=1, recv_qty=1, synced=LAST_SYNC)
+    _line(db, 3, "P3", 1, 5000)
+    db.commit()
+    q = compute_rocket_ri_queue(db, VID)
+    assert q["stale_count"] == 2 and q["stale_amount"] == Decimal("76430")
+    assert q["live_no_invoice_count"] == 1 and q["live_no_invoice_amount"] == Decimal("5000")
+    assert q["live_invoiced_count"] == 0 and q["live_invoiced_amount"] == Decimal("0")
+
+
 # ══════════════════════════════════════════════════════════════
 # ⑦ 지급 대기 (계산서 그레인)
 # ══════════════════════════════════════════════════════════════

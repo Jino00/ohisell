@@ -261,7 +261,10 @@ describe("확인요청함 탭", () => {
   beforeEach(() => {
     h.riQueue = {
       rows: [
-        riRow(),
+        // ★라이브 행은 «계산서 없음»으로 둔다 — 2026-09-06부터 「지금 확인이 필요한 건」의
+        //   금액은 계산서가 아직 안 나간 것만 센다(Jino 지시). 계산서 붙은 라이브 행은
+        //   아래 「계산서 이미 발행」 구역으로 내려간다.
+        riRow({ invoice_seqs: [], has_invoice: false, invoices: [] }),
         riRow({
           purchase_order_seq: 115340779, po_date: "2025-10-15", received_amount: "75430",
           synced_date: "2026-08-05", is_stale: true, invoice_seqs: [27442270],
@@ -272,7 +275,10 @@ describe("확인요청함 탭", () => {
           }],
         }),
       ],
-      live_count: 1, live_amount: "230235", stale_count: 1, stale_amount: "75430",
+      live_count: 1, live_amount: "230235",
+      live_no_invoice_count: 1, live_no_invoice_amount: "230235",
+      live_invoiced_count: 0, live_invoiced_amount: "0",
+      stale_count: 1, stale_amount: "75430",
       last_collection_date_kst: "2026-08-27",
       note: "「지금 상태를 모르는 건」은 최근 수집에서 다시 보지 못한 발주입니다.",
     };
@@ -316,11 +322,86 @@ describe("확인요청함 탭", () => {
   it("정산행 미수집은 「미발행」이 아니라 「모름」으로 쓴다", async () => {
     h.riQueue = {
       rows: [riRow({ invoices: [], invoice_rows_missing: [999999] })],
-      live_count: 1, live_amount: "230235", stale_count: 0, stale_amount: "0",
+      live_count: 1, live_amount: "230235",
+      // ★번호는 있으니 «발행된 쪽»이다 — 「미수집」을 「미발행」으로 넘기지 않는다(원칙22)
+      live_no_invoice_count: 0, live_no_invoice_amount: "0",
+      live_invoiced_count: 1, live_invoiced_amount: "230235",
+      stale_count: 0, stale_amount: "0",
       last_collection_date_kst: "2026-08-27", note: "",
     };
     render(<RiQueueTab />);
     expect(await screen.findByText(/정산행 미수집 999999 — 「미발행」이 아니라 「모름」/)).toBeTruthy();
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // ★계산서 발행분을 제목 금액에서 뺀다 (Jino 지시 2026-09-06)
+  //   실측이 만든 요구다: 라이브 12건 4,536,216원 중 계산서 보유는 4건 3,038,131원뿐이었고,
+  //   섞인 제목은 이미 ④지급대기에 있는 돈까지 「지금 확인이 필요한 돈」으로 보이게 했다.
+  // ══════════════════════════════════════════════════════════════
+  describe("계산서 발행분 분리", () => {
+    beforeEach(() => {
+      h.riQueue = {
+        rows: [
+          riRow({ purchase_order_seq: 141005728, received_amount: "51300",
+            invoice_seqs: [], has_invoice: false, invoices: [] }),
+          riRow({ purchase_order_seq: 141004734, received_amount: "309515",
+            invoice_seqs: [], has_invoice: false, invoices: [] }),
+          riRow({ purchase_order_seq: 141475041, received_amount: "861600" }),
+        ],
+        live_count: 3, live_amount: "1222415",
+        live_no_invoice_count: 2, live_no_invoice_amount: "360815",
+        live_invoiced_count: 1, live_invoiced_amount: "861600",
+        stale_count: 0, stale_amount: "0",
+        last_collection_date_kst: "2026-09-06", note: "",
+      };
+    });
+
+    it("제목의 금액·건수가 계산서 발행분을 뺀 값이다", async () => {
+      render(<RiQueueTab />);
+      expect(await screen.findByText(/지금 확인이 필요한 건 — 2건 · 360,815원/)).toBeTruthy();
+      // ★섞인 옛 값이 남아 있으면 안 된다 — 이 부정 단언이 이번 변경의 핵심 표면이다
+      expect(screen.queryByText(/지금 확인이 필요한 건 — 3건 · 1,222,415원/)).toBeNull();
+    });
+
+    it("붙여넣기 줄에 계산서 발행분이 안 섞인다", async () => {
+      render(<RiQueueTab />);
+      const line = await screen.findByTestId("po-seq-copy-live");
+      expect(line.textContent).toBe("141005728, 141004734");
+      // 발행분은 «지워지지» 않고 자기 줄을 갖는다 — 누르는 일은 여전히 남아 있다
+      expect((await screen.findByTestId("po-seq-copy-invoiced")).textContent).toBe("141475041");
+    });
+
+    it("계산서 발행분은 «지워지지» 않고 별도 구역으로 내려간다", async () => {
+      render(<RiQueueTab />);
+      expect(await screen.findByText(/계산서 이미 발행 — 1건 · 861,600원/)).toBeTruthy();
+      // ★「목록엔 따로 표시」(Jino 지시) — 금액에서 뺐다고 행까지 사라지면 그 건이 영영
+      //   RI로 남아도 화면이 아무 말도 안 하게 된다.
+      const inTables = (seq: string) =>
+        screen.getAllByText(seq).filter((el) => el.closest("table") !== null);
+      expect(inTables("141475041").length).toBe(1);
+      expect(await screen.findByText(/거래명세서확인은 아직 남은 일/)).toBeTruthy();
+    });
+
+    it("두 덩어리의 합이 라이브 전체와 맞는지 화면이 스스로 검산한다", async () => {
+      render(<RiQueueTab />);
+      expect(await screen.findByText(/검산: 계산서 없음 2건 \+ 이미 발행 1건 = 오늘 본 확인요청 3건/))
+        .toBeTruthy();
+    });
+
+    it("계산서 없는 건이 0이어도 「할 일 없음」으로 위장하지 않는다", async () => {
+      h.riQueue = {
+        rows: [riRow({ purchase_order_seq: 141475041, received_amount: "861600" })],
+        live_count: 1, live_amount: "861600",
+        live_no_invoice_count: 0, live_no_invoice_amount: "0",
+        live_invoiced_count: 1, live_invoiced_amount: "861600",
+        stale_count: 0, stale_amount: "0",
+        last_collection_date_kst: "2026-09-06", note: "",
+      };
+      render(<RiQueueTab />);
+      // ★0건을 「누를 것 없음」이라고 쓰면 남은 1건이 화면에서 조용히 사라진다
+      expect(await screen.findByText(/아래 「계산서 이미 발행」 구역은 여전히 눌러야 할 건/))
+        .toBeTruthy();
+    });
   });
 
   it("조회 실패를 「확인할 것 없음」으로 위장하지 않는다", async () => {

@@ -1844,8 +1844,19 @@ export interface RocketConfirmHistory {
 
 export interface RocketRiQueue {
   rows: RocketRiRow[];
+  /** 라이브 «전체» — 아래 두 덩어리의 합. 제목에는 안 쓴다(검산용). */
   live_count: number;
   live_amount: string;
+  /**
+   * 계산서가 **아직 없는** 건 — 이것이 「지금 확인이 필요한 건」의 건수·금액이다.
+   * ★2026-09-06 Jino 지시로 갈라졌다: 이전엔 `live_*`가 제목이었는데, 그 안에 이미
+   *   계산서가 나가 ④지급대기에 들어 있는 돈이 섞여 같은 돈을 두 번 보게 했다.
+   */
+  live_no_invoice_count: number;
+  live_no_invoice_amount: string;
+  /** 계산서가 이미 발행된 건 — 목록엔 남되 위 금액에는 안 들어간다(④지급대기와 중복). */
+  live_invoiced_count: number;
+  live_invoiced_amount: string;
   stale_count: number;
   stale_amount: string;
   last_collection_date_kst: string | null;

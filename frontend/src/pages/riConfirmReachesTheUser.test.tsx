@@ -86,6 +86,11 @@ function queueWith(rows: unknown[]) {
     rows,
     live_count: live.length,
     live_amount: "230235",
+    // 이 파일의 행은 계산서 미보유 — 라이브 전체가 그대로 「계산서 없음」이다.
+    live_no_invoice_count: live.filter((r) => !(r as { has_invoice?: boolean }).has_invoice).length,
+    live_no_invoice_amount: "230235",
+    live_invoiced_count: live.filter((r) => (r as { has_invoice?: boolean }).has_invoice).length,
+    live_invoiced_amount: "0",
     stale_count: stale.length,
     stale_amount: "0",
     last_collection_date_kst: "2026-08-28",
