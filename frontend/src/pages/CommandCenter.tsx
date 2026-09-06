@@ -202,6 +202,16 @@ export default function CommandCenter() {
 
   // "로켓 갱신" — Mac 로켓 페처(com.ohisell.rocket poll 데몬)를 깨워 발주/정산을 즉시 가져온다.
   // Wing 판매분석 갱신과 동일 패턴.
+  /** 원가 매핑이 바뀌면 **위쪽 돈 숫자**(원가·순이익·커버리지)를 다시 읽는다(적대 리뷰 P1-3).
+   *
+   *  ★`doFetch`를 그대로 props로 넘기면 안 된다 — 인자 없이 불려 from/to/account가 undefined가
+   *    된다. `refreshRocketNow`가 이미 쓰는 관용구(`selRef.current` = «최신 선택»)를 그대로 쓴다.
+   *    조회 인자를 콜백에 담지 않는 이유는 이 파일 위쪽 주석과 같다(사이에 기간이 바뀔 수 있다). */
+  function refetchAfterCostMapChange() {
+    const sel = selRef.current;
+    doFetch(sel.from, sel.to, sel.account);
+  }
+
   async function refreshRocketNow() {
     setRocketRefreshing(true);
     setRocketRefreshMsg("Mac에서 로켓배송 발주/정산 가져오는 중… (~30초)");
@@ -400,6 +410,7 @@ export default function CommandCenter() {
               onRefresh={refreshRocketNow}
               refreshing={rocketRefreshing}
               refreshMsg={rocketRefreshMsg}
+              onCostMapChanged={refetchAfterCostMapChange}
               onRefreshAd={refreshOhitechAdNow}
               adRefreshing={ohitechAdRefreshing}
               adRefreshMsg={ohitechAdRefreshMsg}
@@ -1087,6 +1098,7 @@ function RocketView({
   onRefreshAd,
   adRefreshing,
   adRefreshMsg,
+  onCostMapChanged,
 }: {
   data: RocketOverview | null;
   from: string;
@@ -1097,6 +1109,11 @@ function RocketView({
   onRefreshAd: () => void;
   adRefreshing: boolean;
   adRefreshMsg: string | null;
+  /** ★매핑을 바꾸면 **위쪽 돈 숫자(원가·순이익·커버리지)가 달라진다** — 그 재조회를 부모가 한다.
+   *  적대 리뷰 P1-3: 종전엔 이 콜백이 아예 없어서 확정/제외/삭제 뒤 목록만 새로 읽고
+   *  원가·순이익·커버리지는 **그대로**였다. 사람은 「✅ 확정」을 보고 위를 봤다가 커버리지가
+   *  안 변하니 **같은 걸 또 누르거나 반영이 안 됐다고 판단**한다. */
+  onCostMapChanged: () => void;
 }) {
   const [unmapped, setUnmapped] = useState<RocketUnmappedItem[] | null>(null);
   const [mappings, setMappings] = useState<RocketMappingItem[] | null>(null);
@@ -1104,6 +1121,7 @@ function RocketView({
   const [mapTab, setMapTab] = useState<"unmapped" | "confirmed">("unmapped");
   const [mapMsg, setMapMsg] = useState<string | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
+  const [totalUnmapped, setTotalUnmapped] = useState<number | null>(null);
 
   function loadCostMap() {
     setMapLoading(true);
@@ -1111,9 +1129,13 @@ function RocketView({
       fetchRocketCostMapUnmapped(200, true),
       fetchRocketCostMap(),
     ]).then(([u, m]) => {
-      setUnmapped(u);
-      setMappings(m);
-    }).catch((e) => setMapMsg("매핑 로드 실패: " + e.message))
+      // ★봉투를 벗긴다(적대 리뷰 P1-2). 배열로 착각하면 `.map`이 던져 페이지가 백지가 된다.
+      setUnmapped(u.items ?? []);
+      setMappings(m.mappings ?? []);
+      // ★절단 전 «총수»는 서버가 이미 준다 — `.length`만 쓰면 limit 200을 넘는 순간
+      //   탭 라벨이 거짓이 된다(적대 리뷰 P2-7). 라이브 실측 total_unmapped=105.
+      setTotalUnmapped(typeof u.total_unmapped === "number" ? u.total_unmapped : (u.items ?? []).length);
+    }).catch((e) => setMapMsg("매핑 로드 실패: " + (e instanceof Error ? e.message : String(e))))
       .finally(() => setMapLoading(false));
   }
 
@@ -1125,8 +1147,9 @@ function RocketView({
     setMapMsg(null);
     try {
       await upsertRocketCostMap({ product_number: item.product_number, internal_sku: sku, status: "confirmed", match_method: "suggested" });
-      setMapMsg(`✅ ${item.product_number} → ${sku} 확정`);
+      setMapMsg(`✅ ${item.product_number} → ${sku} 확정 — 위 원가·순이익·커버리지도 다시 읽습니다`);
       loadCostMap();
+      onCostMapChanged();   // ★돈 숫자까지 따라오게 한다(P1-3)
     } catch (e: any) {
       setMapMsg("❌ 확정 실패: " + (e?.message || ""));
     }
@@ -1157,6 +1180,7 @@ function RocketView({
       await excludeRocketCostMap(productNumber, reason);
       setMapMsg(`⏭ ${productNumber} 「연결 안 함」 처리 — 사유: ${reason.trim()}`);
       loadCostMap();
+      onCostMapChanged();   // ★(P1-3)
     } catch (e: any) {
       setMapMsg("❌ 제외 실패: " + (e?.message || ""));
     }
@@ -1164,17 +1188,36 @@ function RocketView({
 
   async function doDelete(productNumber: string) {
     setMapMsg(null);
+    // ★적대 리뷰 P2-2: 클릭 한 번에 확정 매핑이 사라지고 **순이익이 바뀐다**. 바로 옆
+    //   `doExclude`는 사유까지 묻는데 삭제만 무방비였다. 되돌리는 법도 같이 말한다.
+    if (!window.confirm(
+      `${productNumber}의 원가 매핑을 삭제합니다.\n` +
+      "· 이 상품이 다시 「미매핑」으로 돌아가 커버리지가 내려가고 순이익이 바뀝니다\n" +
+      "· 되돌리려면 미매핑 탭에서 같은 상품을 다시 확정하면 됩니다\n\n계속할까요?",
+    )) return;
     try {
       await deleteRocketCostMap(productNumber);
-      setMapMsg(`🗑 ${productNumber} 매핑 삭제`);
+      setMapMsg(`🗑 ${productNumber} 매핑 삭제 — 위 원가·순이익·커버리지도 다시 읽습니다`);
       loadCostMap();
+      onCostMapChanged();   // ★(P1-3)
     } catch (e: any) {
       setMapMsg("❌ 삭제 실패: " + (e?.message || ""));
     }
   }
 
   const cov = data?.cost_coverage;
-  const covPct = cov ? Math.round(cov.coverage_pct * 100) : null;
+  // ★★적대 리뷰 P1-1 — 이 한 줄이 **순이익 화면의 유일한 자백 장치를 꺼 두고 있었다.**
+  //   `Math.round(0.9982 * 100)`은 **100**이고 `covPct < 100`이 false가 되어, 커버리지
+  //   99.5~99.99% 구간 전체가 「100% 완전」 **초록**으로 떴다(라이브 실측 0.9982 = 99.82%,
+  //   미매핑 20,160원·SKU 2건이 배지 본문에 적혀 있는데도 제목은 100%였다).
+  //   ⇒ 판정은 **원본 비율**로 하고(반올림하지 않는다), 표시는 **내림**한다 —
+  //     올림은 「덜 덮인 것을 더 덮인 것처럼」 보이게 하는 방향이라 이 화면에서 금지다.
+  //   `coverage_pct`는 서버가 **문자열**로 주기도 한다(라이브 `"0.9982"`) → Number()로 받는다.
+  const covRatio = cov != null && cov.coverage_pct != null ? Number(cov.coverage_pct) : null;
+  const covComplete = covRatio != null && covRatio >= 1;
+  const covPct = covRatio != null && Number.isFinite(covRatio)
+    ? Math.floor(covRatio * 1000) / 10   // 99.82 — 소수 한 자리까지 내림
+    : null;
 
   return (
     <div>
@@ -1229,26 +1272,43 @@ function RocketView({
               value={data.has_cost ? won(data.cost) : "—"}
               sub={
                 data.has_cost
-                  ? covPct !== null ? `커버리지 ${covPct}%${covPct < 100 ? " ⚠ 부분반영" : ""}` : undefined
+                  ? covPct !== null
+                    ? `커버리지 ${covPct}%${covComplete ? "" : " ⚠ 부분반영"}`
+                    : "커버리지 모름 — 원가 반영 정도를 알 수 없음"
                   : "원가 미반영(has_cost=false)"
               }
             />
             <Card
               label="순이익"
               value={won(data.net_profit)}
-              sub={data.has_cost && covPct !== null && covPct < 100
-                ? `⚠ 원가 ${covPct}% 반영 — 과대 가능(원칙22)`
-                : data.has_cost ? "매출−광고−원가" : "매출−광고(원가 미반영)"}
+              /* ★판정은 `covComplete`(원본 비율 ≥ 1) 하나로 모은다 — 표시용 `covPct`로 비교하면
+                 반올림·자릿수 규칙이 바뀔 때마다 판정이 같이 흔들린다(P1-1이 그렇게 났다). */
+              sub={!data.has_cost
+                ? "매출−광고(원가 미반영)"
+                : covPct === null
+                  ? "⚠ 커버리지 모름 — 원가 반영 정도 미상(원칙22)"
+                  : covComplete
+                    ? "매출−광고−원가"
+                    : `⚠ 원가 ${covPct}% 반영 — 과대 가능(원칙22)`}
             />
           </div>
 
-          {/* 커버리지 배지 */}
-          {data.has_cost && cov && (
-            <div className={`rounded-lg border p-3 mb-4 text-xs ${covPct !== null && covPct < 100 ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-emerald-50 border-emerald-200 text-emerald-800"}`}>
+          {/* ★커버리지 배지 — 이 화면의 «자백 장치»다.
+              ★적대 리뷰 P2-3·P2-4: 종전엔 `data.has_cost && cov`로 게이팅돼 있어
+                **자백 강도가 커버리지와 반비례**했다 — 커버리지 0%(has_cost=false)나
+                「모름」(cov 없음/coverage_pct null)처럼 **가장 나쁜 경우에 배지가 통째로 사라졌다.**
+                이제 원가 축이 화면에 있는 한 항상 뜨고, 모를 때는 「모른다」고 말한다. */}
+          {(
+            <div className={`rounded-lg border p-3 mb-4 text-xs ${covComplete ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"}`}>
               <div className="font-semibold mb-1">
-                📊 원가 커버리지 {covPct !== null ? `${covPct}%` : "—"}
-                {covPct !== null && covPct < 100 && " — ⚠ net_profit 원가 과소반영(순이익 과대 가능, 원칙22)"}
+                📊 원가 커버리지 {covPct !== null ? `${covPct}%` : "모름"}
+                {!data.has_cost
+                  ? " — ⚠ 원가가 하나도 반영되지 않았습니다(has_cost=false). 순이익은 «매출−광고»입니다"
+                  : covPct === null
+                    ? " — ⚠ 커버리지를 알 수 없습니다. 순이익이 완전한 값인지 판단할 수 없습니다"
+                    : covComplete ? "" : " — ⚠ net_profit 원가 과소반영(순이익 과대 가능, 원칙22)"}
               </div>
+              {cov && (
               <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-0.5 text-gray-700">
                 <span>발주상세 수집금액: <b>{won(cov.detail_order_amount)}</b></span>
                 <span>미매핑 금액: <b>{won(cov.unmapped_order_amount)}</b></span>
@@ -1259,7 +1319,8 @@ function RocketView({
                 </span>
                 <span>미매핑 SKU: <b>{num(cov.unmapped_sku_count)}</b></span>
               </div>
-              {covPct !== null && covPct < 100 && (
+              )}
+              {!covComplete && (
                 <p className="mt-1 text-amber-700">아래 '원가 매핑 관리'에서 미매핑 상품번호를 확정하면 커버리지가 올라갑니다.</p>
               )}
             </div>
@@ -1444,7 +1505,12 @@ function RocketView({
                     onClick={() => setMapTab("unmapped")}
                     className={`px-3 py-1 text-xs rounded-md border ${mapTab === "unmapped" ? "bg-amber-600 text-white border-amber-600" : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}`}
                   >
-                    미매핑 {unmapped ? `(${unmapped.length})` : ""}
+                    {/* ★적대 리뷰 P2-7: `.length`는 limit 200에 절단된 «보여준 수»다. 서버가 주는
+                        `total_unmapped`(라이브 105)를 쓰고, 절단됐으면 그 사실도 말한다 —
+                        200을 넘는 순간 종전 라벨은 조용히 거짓이 됐다. */}
+                    미매핑 {totalUnmapped !== null
+                      ? `(${num(totalUnmapped)}${unmapped && unmapped.length < totalUnmapped ? `, ${num(unmapped.length)}건만 표시` : ""})`
+                      : unmapped ? `(${num(unmapped.length)})` : ""}
                   </button>
                   <button
                     onClick={() => setMapTab("confirmed")}
