@@ -1,6 +1,6 @@
 # HANDOFF — 계수기가 자기 병을 잡았다 · 좌표를 잃은 인용이 한 세션에 세 번 (2026-09-06)
 
-> 체인 **`pao-진동차단` n=5** · 세션 `531204ca` · 결정 **D-NAO-293**(292에서 재번호) · 교훈 **#399**
+> 체인 **`pao-진동차단` n=5** · 세션 `531204ca` · 결정 **D-NAO-293**(292에서 재번호) · 교훈 **#400**
 > 계약 `docs/contracts/CONTRACT_oscillation_damping.md`(D-NAO-288) §4-C ⓗ·ⓘ · 정본 `docs/references/138_oscillation_daycount_and_grain_20260906.md`
 > 트랙 `docs/tracks/active/track_naver-ad-optimization.md` · **진행률 2/7 불변**
 > 적대 리뷰 **1R FAIL(P1 2건) → 2R PASS(P1=0)** · PR **#751** · CI **3/3 pass**
