@@ -9,6 +9,11 @@
 #
 # ★표면 절단 변이 대비(계약 §4-C 공통): 직렬화 한 줄이나 order_by 분기를 지우면
 #   ②·③이 죽어야 한다. 그래서 «키 존재»와 «순서»를 각각 따로 단언한다.
+#
+# ★★적대 리뷰 1R P1-1이 드러낸 것: 초판 테스트는 `persist`에 **손으로 만든 dict**를 넣어
+#   «파이프라인 → persist» 이음매를 건너뛰었다. 그 이음매에 `finally`가 임시키를 지우는
+#   단계가 있어서 실제 경로에선 컬럼이 **영구 NULL**이 되는데도 8종이 전부 초록이었다.
+#   ⇒ 아래 `test_seam_*`가 그 이음매를 실제로 밟는다. **층을 건너뛴 테스트는 증거가 아니다.**
 from __future__ import annotations
 
 from decimal import Decimal
@@ -22,7 +27,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import NaverProposal
-from app.services.naver_ad import proposal_writer
+from app.services.naver_ad import proposal_pipeline, proposal_writer
 
 
 @pytest.fixture
@@ -58,20 +63,42 @@ def _candidate(target_id: str, **extra) -> dict:
     return base
 
 
-# ── ① 컬럼 적재 ────────────────────────────────────────────────────────────
-def test_persist_moves_gave_expected_score_into_column(client_and_session):
-    _, db = client_and_session
-    saved = proposal_writer.persist(db, [
-        _candidate(
-            "kw-scored",
-            _gave_expected_score=Decimal("143327.5200"),
-            _gave_board="shopping_group_growth",   # 다른 임시키는 버려져야 한다
-            _gave_revenue=Decimal("1000"),
-        ),
-    ])
+# ── ① 컬럼 적재 (★이음매를 실제로 밟는다 — 1R P1-1의 자리) ──────────────────
+def _apply_then_persist(db, candidates):
+    """실제 prod 경로와 같은 순서: _apply_gave_priority → persist.
+
+    ★이 순서가 핵심이다 — 전자의 `finally`가 `_gave_*` 임시키를 지운 «뒤»에 후자가 돈다.
+    영속되는 값은 접두사 없는 실제 컬럼 `gave_score`여야만 살아남는다."""
+    proposal_pipeline._apply_gave_priority(db, {"account_bep_roas": "1.711"}, candidates)
+    saved = proposal_writer.persist(db, candidates)
     db.commit()
+    return saved
+
+
+def test_seam_pipeline_scoring_survives_into_column(client_and_session):
+    _, db = client_and_session
+    saved = _apply_then_persist(db, [
+        _candidate("kw-scored", _gave_board="shopping_group_growth",
+                   _gave_revenue=Decimal("100000"), _gave_cost=Decimal("10000")),
+    ])
     assert len(saved) == 1
-    assert saved[0].gave_score == Decimal("143327.5200")
+    # 점수가 rationale «에도» 실리고(기존 동작) 컬럼«에도» 남는다(이 슬라이스).
+    assert "[GAVE사전: 기대점수" in saved[0].rationale
+    assert saved[0].gave_score is not None, "이음매가 끊기면 여기가 None이 된다(1R P1-1)"
+    assert saved[0].gave_score > 0
+
+
+def test_seam_zero_score_persists_as_zero_not_null(client_and_session):
+    """★변이 M5의 자리 — `0.0000`은 실제로 나오는 점수(무전환 방어 보드: revenue=0)다.
+
+    truthy 검사로 거르면 0이 NULL로 떨어져 «미채점»과 구분이 사라진다."""
+    _, db = client_and_session
+    saved = _apply_then_persist(db, [
+        _candidate("kw-zero", _gave_board="shopping_pause_candidates",
+                   _gave_revenue=Decimal("0"), _gave_cost=Decimal("16079")),
+    ])
+    assert saved[0].gave_score is not None, "0점이 NULL로 떨어지면 미채점과 구분이 사라진다"
+    assert saved[0].gave_score == Decimal("0.0000")
 
 
 def test_persist_leaves_null_when_board_is_not_gave_scored(client_and_session):
@@ -164,3 +191,26 @@ def test_unknown_sort_is_rejected(client_and_session):
     r = client.get("/api/naver/ad/proposals?sort=rationale")
     assert r.status_code == 400
     assert "sort" in r.json()["detail"]
+
+
+# ── ④ 정렬 «절»의 구조 (★SQLite에선 결과로 못 잡는 자리) ─────────────────────
+def test_order_by_puts_nulls_last_structurally():
+    """NULL을 뒤로 보내는 첫 키를 지워도 SQLite는 우연히 통과한다(DESC에서 NULL이 끝).
+    PostgreSQL은 DESC 기본이 NULLS FIRST라 같은 코드가 거기선 미채점을 맨 앞에 세운다.
+    ⇒ 순서 «결과»가 아니라 절의 «구조»를 단언한다."""
+    from app.routers.naver_ad import _proposal_order_by
+
+    order = _proposal_order_by("gave_score")
+    assert len(order) == 3, "NULL 키·점수 키·동점 tiebreak 셋"
+    first = str(order[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "IS NULL" in first.upper(), f"첫 정렬 키가 NULL 판별이 아니다: {first}"
+    assert "DESC" in str(order[1]).upper()
+    assert "created_at" in str(order[2])
+
+
+def test_default_order_by_is_single_created_at_clause():
+    from app.routers.naver_ad import _proposal_order_by
+
+    order = _proposal_order_by("created_at")
+    assert len(order) == 1
+    assert "created_at" in str(order[0]) and "DESC" in str(order[0]).upper()

@@ -275,6 +275,25 @@ _PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired", "failed", "e
 # D-NAO-297(M2 T3 · 계약 §4-C S2-③) — 허용 정렬 축. 화이트리스트인 이유: 이 값이 그대로
 # order_by 컬럼으로 가면 임의 컬럼 정렬을 열어 주는 입구가 된다. 축을 늘릴 땐 여기부터.
 _PROPOSAL_SORTS = {"created_at", "gave_score"}
+
+
+def _proposal_order_by(sort: str) -> tuple:
+    """제안 목록 정렬 절 — 라우터 밖으로 뺀 이유는 **테스트가 닿게 하려고**다(적대 리뷰 1R
+    변이 M3의 처방). NULL을 뒤로 보내는 첫 키를 지워도 **SQLite에선 우연히 통과**한다
+    (DESC의 NULL을 끝에 두므로). 그런데 PostgreSQL은 DESC 기본이 NULLS FIRST라 같은 코드가
+    거기선 미채점을 맨 앞에 세운다 — 이 저장소는 SQLite→PostgreSQL 전제라 «지금 초록»이
+    증거가 못 된다. 그래서 순서 결과가 아니라 **절의 «구조»**를 단언한다.
+
+    2차 키 created_at DESC: 동점(특히 0.0000이 여럿)일 때 순서가 흔들리면 같은 질의가
+    페이지마다 다른 카드를 준다.
+    """
+    if sort == "gave_score":
+        return (
+            NaverProposal.gave_score.is_(None),   # ★NULL 뒤로 — 엔진 기본값에 안 맡긴다
+            NaverProposal.gave_score.desc(),
+            NaverProposal.created_at.desc(),
+        )
+    return (NaverProposal.created_at.desc(),)
 _MAX_PROPOSAL_RANGE_DAYS = 90
 
 # D-NAO-54 P4(결정 전용): 승인해도 harness.execute를 부르지 않는 유형 — 승인=결정 기록만
@@ -428,20 +447,7 @@ def proposals(
     # 달라지는 틀린 숫자가 된다(정보성 "N건 집계됨" 등). rows는 additive라 기존 소비자 불변.
     total = q.count()
     # D-NAO-297(M2 T3 · 계약 §4-C S2-③) — 정렬 축. 기본값은 종전 그대로라 기존 소비자 불변.
-    # ★미채점(NULL)을 «뒤로» 보내는 것을 DB 기본 정렬에 맡기지 않는다 — SQLite는 DESC에서
-    #   NULL을 끝에 두지만 PostgreSQL은 앞에 둔다(이 저장소는 SQLite→PostgreSQL 전제다).
-    #   `is_(None)`을 첫 키로 두면 두 엔진에서 같은 순서가 나온다.
-    # ★2차 키로 created_at DESC를 둔다 — 동점(특히 0.0000이 여럿)일 때 순서가 흔들리면
-    #   같은 질의가 페이지마다 다른 카드를 준다.
-    if sort == "gave_score":
-        order = (
-            NaverProposal.gave_score.is_(None),
-            NaverProposal.gave_score.desc(),
-            NaverProposal.created_at.desc(),
-        )
-    else:
-        order = (NaverProposal.created_at.desc(),)
-    rows = q.order_by(*order).limit(limit).all()
+    rows = q.order_by(*_proposal_order_by(sort)).limit(limit).all()
     verdicts = _latest_ok_verdicts_by_proposal(db, [p.id for p in rows])
     # 대상 사람 이름 배치 해석(D-NAO-54, Jino 2026-07-18) — 키워드ID로는 못 알아본다.
     ent_names, camp_names = _batch_entity_names(
