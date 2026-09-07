@@ -100,6 +100,7 @@ from app.models import (
     NaverSearchTermDaily,
     NaverSearchTermExclusion,
 )
+from app.services.naver_ad import action_env_cells
 from app.services.naver_ad import adgroup_scope
 from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
@@ -2691,6 +2692,30 @@ def get_bm_agency_ops(
             for r in rows
         ],
     }
+
+
+@router.get("/bm/action-env-cells")
+def get_action_env_cells(
+    days: int = Query(action_env_cells.DEFAULT_WINDOW_DAYS, ge=1, le=730,
+                      description="조치일 기준 최근 N일(성숙 컷 D−8 적용 후)"),
+    date_to: date | None = Query(None, description="조치일 상한(KST). 성숙 컷보다 최근이면 컷이 이긴다"),
+    campaign_id: str | None = Query(None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """조치 × 환경 채점 1라운드 — 조치 유형 5종 × 환경 2층의 `ad_profit` 셀 표(D-NAO-299).
+
+    계약 D-NAO-266 §4-A **T5**(= ref 65 S2-ⓔ)의 산출 표면이다. 각 셀에 **(n, raw, shrunk,
+    확정도)**를 병기한다 — 이 넷이 계약 §4-C S2-⑤가 지목한 그 넷이다.
+
+    ★**기술통계이지 인과가 아니다.** 응답에 `causal: false`를 싣는다 — 대조군 없는 전후
+    비교는 평균 회귀를 걸러내지 못한다(ref 63 §12-3). 인과 판정의 정본 설계는 매칭 DiD이고
+    설계 문서는 `docs/references/142_did_matching_design_20260907.md`(ref 59 ⑦-3 3변수 사전 고정).
+
+    ★읽기 전용이다 — 테이블 신설 0 · 마이그 0 · 네이버 API 0콜 · 광고계정 쓰기 0.
+    """
+    return action_env_cells.build_cells(
+        db, days=days, date_to=date_to, campaign_id=campaign_id,
+    )
 
 
 @router.get("/bm/snapshot")
