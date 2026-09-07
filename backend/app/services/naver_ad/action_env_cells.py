@@ -126,17 +126,21 @@ def _profit_by_campaign_day(db: Session, start: date, end: date,
 
 
 def _agency_action_days(db: Session, start: date, end: date, campaign_id: str | None) -> tuple[dict, dict]:
-    """(조치-일 집합, 5종 밖 op_type 인구조사).
+    """(조치-일 집합, 5종 밖 op_type 인구조사, 조치 유형별 entity grain 인구조사).
 
     반환 1: {action_type: {(op_date, campaign_id): ops_count}}
     반환 2: {op_type: 건수} — **5종 밖으로 «버린» 것을 세어 함께 돌려준다.** 안 세면 「5종이
       전부」로 읽히는데, 09-07 실측에서 5종 밖이 이미 다수다(ad_edit 76·bid_mode_flip 24 등).
+    반환 3: {action_type: {entity_type: 건수}} — ★**grain이 섞여 있다는 사실 자체를 센다.**
+      09-07 실측(90일·성숙컷): bid_change = ad 410 / adgroup 12 · status_flip = adgroup 15 /
+      campaign 4 · budget_change = campaign 2 / adgroup 1 · extended_toggle = adgroup 55.
 
     피드 재적용(`feed_verdict='feed'`)은 사람의 조치가 아니라 네이버가 상품 피드를 재적용한
     잡음이라 뺀다(D-NAO-139) — ref 65 §5-c-1이 「이미 걸러져 있다」고 적은 그 260건.
     """
     q = db.query(
         NaverAgencyOp.op_type, NaverAgencyOp.op_date, NaverAgencyOp.campaign_id,
+        NaverAgencyOp.entity_type,
     ).filter(
         NaverAgencyOp.op_date >= start,
         NaverAgencyOp.op_date <= end,
@@ -146,8 +150,9 @@ def _agency_action_days(db: Session, start: date, end: date, campaign_id: str | 
         q = q.filter(NaverAgencyOp.campaign_id == campaign_id)
 
     days: dict[str, dict] = {a: {} for a in _AGENCY_OP_TYPES}
+    entity_census: dict[str, dict] = {a: {} for a in _AGENCY_OP_TYPES}
     outside: dict[str, int] = {}
-    for op_type, op_date, cid in q.all():
+    for op_type, op_date, cid, ent in q.all():
         if op_type not in days:
             outside[op_type] = outside.get(op_type, 0) + 1
             continue
@@ -158,7 +163,8 @@ def _agency_action_days(db: Session, start: date, end: date, campaign_id: str | 
         d = date.fromisoformat(op_date) if isinstance(op_date, str) else op_date
         key = (d, cid)
         days[op_type][key] = days[op_type].get(key, 0) + 1
-    return days, outside
+        entity_census[op_type][ent] = entity_census[op_type].get(ent, 0) + 1
+    return days, outside, entity_census
 
 
 def _exclusion_action_days(db: Session, start: date, end: date, campaign_id: str | None) -> dict:
@@ -266,7 +272,7 @@ def build_cells(db: Session, *, days: int = DEFAULT_WINDOW_DAYS,
                 "caveats": ["계정 기본 BEP ROAS를 해석하지 못해 산출을 중단했다(0으로 채우지 않는다)."]}
 
     profit = _profit_by_campaign_day(db, start, end, bep, campaign_id)
-    agency_days, outside = _agency_action_days(db, start, end, campaign_id)
+    agency_days, outside, entity_census = _agency_action_days(db, start, end, campaign_id)
     action_days: dict[str, dict] = dict(agency_days)
     action_days["exclusion"] = _exclusion_action_days(db, start, end, campaign_id)
 
@@ -289,6 +295,12 @@ def build_cells(db: Session, *, days: int = DEFAULT_WINDOW_DAYS,
             "ad_profit_sum": int(s["ad_profit_sum"].quantize(Decimal("1"), ROUND_HALF_UP)),
             "raw": _q4(s["raw"]), "shrunk": _q4(a_shrunk), "prior": _q4(root_prior),
             "certainty": cert, "certainty_reason": cert_why,
+            # ★grain 인구조사 — 이 조치들이 어느 층에서 일어났는가. 「전부 광고그룹 조치」로
+            #   읽히면 소재 단위 조치(bid_change의 대다수)가 캠페인-일에 귀속됐다는 사실이
+            #   숨는다. 숫자를 보여주고 판단은 읽는 쪽이 하게 둔다.
+            "entity_grain": (
+                {"search_term": s["ops"]} if a == "exclusion" else entity_census.get(a, {})
+            ),
         }
         for env in ENV_LAYERS:
             cell_entries = [(k, c) for k, c in entries if env_layer_of_date(k[0]) == env]
@@ -321,6 +333,14 @@ def build_cells(db: Session, *, days: int = DEFAULT_WINDOW_DAYS,
             "unit": "조치-일 = (조치일 × 캠페인) distinct",
             "note": "셀 «안»에서는 중복이 없다. 셀 «사이»는 같은 캠페인-일이 여러 조치 유형에 "
                     "들어갈 수 있어 셀 합은 전체와 같지 않다 — 셀 간 합산 금지.",
+            # ★★조치는 소재·광고그룹·캠페인 세 층에서 일어나는데 성과 귀속은 **캠페인-일**
+            #   하나뿐이다. `naver_agency_op`에 `adgroup_id` 컬럼이 «없어서»다 —
+            #   `ad_external_change.py:277`이 그 값을 계산해 놓고 `:354`의 persist에 안 싣는다
+            #   (모델에 자리가 없다). 그래서 소재 조치를 광고그룹으로 내리는 경로가 원리적으로
+            #   막혀 있고, 첫 라운드는 그 사실을 «희석»으로 안고 간다. 층별 건수는
+            #   `by_action[*].entity_grain`이 그대로 보여준다 — 뭉갠 것을 숨기지 않는다.
+            "entity_note": "조치 grain은 ad/adgroup/campaign 혼재 · 성과 귀속은 캠페인-일 단일. "
+                           "naver_agency_op에 adgroup_id 컬럼이 없어 소재→광고그룹 강하가 불가.",
             "shrink_k": int(SHRINK_K),
             "chain": "전체 → 조치 유형 → 조치 유형×환경 (prior는 부모의 수축값)",
         },

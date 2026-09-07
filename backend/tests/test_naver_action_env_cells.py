@@ -331,6 +331,28 @@ def test_op_types_outside_the_five_are_counted_not_silently_dropped(client_and_s
     assert payload["overall"]["n"] == 0
 
 
+def test_entity_grain_census_reaches_the_response(client_and_session):
+    """★grain이 섞여 있다는 사실 자체가 응답에 실린다.
+
+    `naver_agency_op`에 `adgroup_id` 컬럼이 없어 소재 조치를 광고그룹으로 못 내린다
+    (`ad_external_change.py:277`이 계산해 놓고 `:354` persist에 안 싣는다). 그래서 소재·
+    광고그룹·캠페인 조치가 전부 **캠페인-일** 하나에 귀속된다 — 그 희석을 숨기지 않고
+    층별 건수로 보여준다. 이 키를 지우면 「전부 광고그룹 조치」로 읽힌다."""
+    client, db = client_and_session
+    _seed_bep(db)
+    d = _pick(env="weekday", clean=True)
+    _seed_perf(db, d, cost=10_000, conv_amt=60_000)
+    _seed_op(db, d, "bid_change", n=3, entity_type="ad")
+    _seed_op(db, d, "bid_change", n=1, entity_type="adgroup")
+    db.commit()
+
+    payload = client.get(URL).json()
+    assert payload["by_action"]["bid_change"]["entity_grain"] == {"ad": 3, "adgroup": 1}
+    assert "adgroup_id" in payload["grain"]["entity_note"]
+    # 조치-일은 여전히 하나다 — grain이 섞여도 성과 귀속 단위는 캠페인-일이다.
+    assert _cell(payload, "bid_change", "weekday")["n"] == 1
+
+
 def test_feed_reapply_noise_is_excluded(client_and_session):
     """피드 재적용은 사람의 조치가 아니다(D-NAO-139) — 셀에도 인구조사에도 안 들어간다."""
     client, db = client_and_session
